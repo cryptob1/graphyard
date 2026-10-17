@@ -919,6 +919,15 @@ async function pausedGhRead<T>(dependencies: { run?: ChildRun; now?: () => Date 
  * own attempts of one unknown profile five minutes apart until the profiles change.
  */
 
+/**
+ * A review launch refused because no configured reviewer profile carries the name it asks for: a
+ * configuration wait, never a failure counted against the request (auto-dispatch.ts), so a fault
+ * that outlasts the dispatcher's attempt limit still resumes the same request once the profiles change.
+ */
+export class UnknownReviewerProfileError extends Error {
+  constructor(readonly profile: string, message: string) { super(message); }
+}
+
 /** How many consecutive review launches one unknown reviewer profile refuses before master status raises one configuration attention. */
 export const reviewerProfileRefusalLimit = 3;
 /** How far apart the launch boundary makes its attempts of one unknown profile once it has refused `reviewerProfileRefusalLimit` in a row: a launch inside the window is refused before the review ledger is read. */
@@ -1039,10 +1048,11 @@ export async function launchReview(root: string, work: Work, profileName: string
       const at = now().getTime(), known = await readReviewerProfileRefusal(config);
       if (known && known.profile === profileName && known.profiles === configuredProfileFingerprint(config)
         && known.refusals >= reviewerProfileRefusalLimit && at - Date.parse(known.at) < reviewerProfileRetryMs)
-        throw new Error(`Unknown reviewer profile ${profileName}: refused ${known.refusals} launches in a row (last at ${known.at}); backing off to one attempt every ${reviewerProfileRetryMs / 60_000} minutes until the profiles change — write them with graphyard master environments --apply`);
+        throw new UnknownReviewerProfileError(profileName, `Unknown reviewer profile ${profileName}: refused ${known.refusals} launches in a row (last at ${known.at}); backing off to one attempt every ${reviewerProfileRetryMs / 60_000} minutes until the profiles change — write them with graphyard master environments --apply`);
       await recordReviewerProfileRefusal(config, profileName, at);
     }
-    throw new Error(profileName ? `Unknown reviewer profile ${profileName}` : config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
+    if (profileName) throw new UnknownReviewerProfileError(profileName, `Unknown reviewer profile ${profileName}`);
+    throw new Error(config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
   }
   // A launch got past the profile lookup: whichever profile it found, the loop launches reviews again
   // (the missing name written, or a replacement one the dispatcher now selects), so the fault is over.

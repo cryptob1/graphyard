@@ -7,7 +7,7 @@ import { loadMasterConfig } from '../src/master.js';
 import { workerLaunchStatus } from '../src/master/dispatch.js';
 import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.js';
 import { type ReviewRecord, readReviewLedger, readReviewerProfileRefusal, reviewerProfileRefusalLimit, reviewerProfileRetryMs, saveReviewerProfile } from '../src/reviewer.js';
-import { emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
+import { dispatchFailureLimit, dispatchRetryMaxMs, emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
 import { fleet, requested, starts } from './helpers/review-fleet.js';
 import { clock, minute } from './helpers/soak-world.js';
 
@@ -17,12 +17,15 @@ import { clock, minute } from './helpers/soak-world.js';
  * for (setup never wrote it). The launch boundary refuses each launch, spaces its real attempts of
  * the unknown profile five minutes apart once three in a row were refused, and master status raises
  * one configuration attention; once the profile is written, the next launch clears the record and
- * every item's reviews run. The system invariants hold after every cycle.
+ * every item's reviews run. The broken window outlasts the dispatcher's own attempt limit
+ * (dispatchFailureLimit launches at up to dispatchRetryMaxMs apart): a refusal for the unknown
+ * profile is a wait never counted against the request, so the first request, pending the whole
+ * window, is still the one reviewed once the profile is written. The system invariants hold after every cycle.
  */
 test('unit:soak-invariants-hold — review launches refused for an unknown reviewer profile over hours of dispatch ticks, items and heads: real attempts stay bounded to one per five minutes past the third, master status holds one configuration attention, and once the profile is written every review launches and the attention clears', { timeout: 180_000 }, async () => {
   clock.install(Date.now());
   const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
-  const tickMs = 30_000, reviewMs = 2 * minute, brokenMs = 45 * minute;
+  const tickMs = 30_000, reviewMs = 2 * minute, brokenMs = 3 * 60 * minute;
   try {
     // The loop's view names claude-reviewer as its one reviewer profile; master.json on disk, which every launch reads, does not hold it.
     const loaded = await loadMasterConfig(host.root);
@@ -33,6 +36,7 @@ test('unit:soak-invariants-hold — review launches refused for an unknown revie
     await writeFile(file, JSON.stringify(stored, null, 2), { mode: 0o600 });
     const disk = () => loadMasterConfig(host.root);
 
+    assert.ok(brokenMs > dispatchFailureLimit * dispatchRetryMaxMs, 'the fault outlasts the attempts the dispatcher would spend on a counted refusal');
     const cursor = emptyDispatchCursor(config);
     const total = 6, dayStart = clock.now();
     // Items enter over the broken window and after it; each goes through two heads (changes requested, then approved).
@@ -47,13 +51,17 @@ test('unit:soak-invariants-hold — review launches refused for an unknown revie
     // Every real attempt of the unknown profile, as the refusal record dates it.
     const attempts: number[] = [];
     let lastAt: string | null = null, fixedAt: number | null = null, attentionFrom: number | null = null, refusedTicks = 0, cycle = 0;
+    let firstRequest: string | null = null;
     const record = emptyInvariantRecord();
     for (; cycle < 1000; cycle++) {
       for (const [n, entry] of items) if (!entry.work && entry.deliveredAt === null && entry.enterAt <= clock.now()) entry.work = requested(n, entry.head);
+      firstRequest ??= items.get(1)!.work?.autoDispatch?.review?.id ?? null;
       // The setup step that writes the profile runs once the broken window ends: the profiles change.
       if (fixedAt === null && clock.now() - dayStart >= brokenMs) { await saveReviewerProfile(host.root, { name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }); fixedAt = clock.now(); }
       const tick = await runDispatchTick(config, cursor, effects, Date.now);
-      if (tick.refused.some(entry => /Unknown reviewer profile claude-reviewer/.test(entry.reason))) refusedTicks++;
+      if (tick.waiting.some(entry => /Unknown reviewer profile claude-reviewer/.test(entry.reason))) refusedTicks++;
+      assert.deepEqual(tick.refused.filter(entry => /Unknown reviewer profile/.test(entry.reason)), [], `cycle ${cycle}: an unknown-profile refusal is a wait, never a counted launch failure`);
+      assert.deepEqual(Object.values(cursor.failures).filter(failure => failure.kind === 'review'), [], `cycle ${cycle}: no review request carries a counted failure`);
       const refusal = await readReviewerProfileRefusal(config);
       if (refusal && refusal.at !== lastAt) { attempts.push(Date.parse(refusal.at)); lastAt = refusal.at; }
 
@@ -100,6 +108,7 @@ test('unit:soak-invariants-hold — review launches refused for an unknown revie
     const ledger = (await readReviewLedger(host.root)).reviews;
     assert.equal(ledger.filter(entry => entry.state === 'completed').length, 2 * total, 'every head of every item was reviewed');
     assert.ok(ledger.every(entry => Date.parse(entry.requestedAt) >= fixedAt!), 'no review session started before the profile was written');
+    assert.ok(firstRequest && ledger.some(entry => entry.requestId === firstRequest && entry.state === 'completed'), 'the request pending through the whole fault is the one reviewed once the profile is written');
     assert.equal(await readReviewerProfileRefusal(config), null);
   } finally { await host.cleanup(); clock.uninstall(); }
 });
