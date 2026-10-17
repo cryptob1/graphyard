@@ -88,12 +88,4 @@ commit, and the external cause; the delivery stays pending until the release ser
 An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
-
-A runtime's own settings-suggestion dialog — Claude Code's 'We recommend compacting
-earlier' — never stalls the master session: the loop's wake answers it before prompting,
-with the single `esc` key the dialog's own footer offers ('Not now (settings unchanged)'),
-re-reads the pane, and only then delivers the wake text; a dialog no rule answers (a
-credential, a payment) holds the wake and records it until the pane clears. Worker,
-reviewer, approver and producer launches answer the same dialog through the consent
-path.
 <!-- /graphyard -->
