@@ -54,7 +54,10 @@ export interface FleetLaunchAccount { name: string; kind: string; home: string |
   key?: AccountKey | null; fleet: { runtime: string; contract: LaunchContract; model: string; modelId: string | null; session: string; reason: string;
   role?: FleetRoleName; policy?: RolePolicy; revision?: number } }
 
-export class FleetUnreachableError extends Error {}
+export class FleetUnreachableError extends Error {
+  /** The status and parsed body of the answer that came back, when one did (GY-1895): planeWideRefusal reads them structurally, the way it reads a RefusedResponse — a bare `answered 502` wording matches no plane-wide pattern. */
+  constructor(message: string, public status?: number, public body?: unknown) { super(message); }
+}
 /**
  * Whether `error` is the registry's definitive answer that it does not know a session (GY-1504): it
  * keeps only its last `sessionHistoryLimit` ended sessions, so one that aged out answers 404 Unknown
@@ -176,7 +179,7 @@ export async function fleetRequest(config: Required<Pick<FleetConfig, 'url'>> & 
   } catch (error) { throw new FleetUnreachableError(`The agent registry at ${config.url} is unreachable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
   const text = await response.text();
   let parsed: any = null; try { parsed = JSON.parse(text); } catch { /* a proxy page, not the control plane */ }
-  if (!response.ok || parsed === null) throw new FleetUnreachableError(`The agent registry at ${config.url} answered ${response.status}${parsed?.error ? `: ${parsed.error}` : ''}`);
+  if (!response.ok || parsed === null) throw new FleetUnreachableError(`The agent registry at ${config.url} answered ${response.status}${parsed?.error ? `: ${parsed.error}` : typeof parsed?.message === 'string' ? `: ${parsed.message}` : ''}`, response.status, parsed);
   return parsed;
 }
 

@@ -11,6 +11,7 @@ import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { holdCycleBase } from '../master/worktrees.js';
 import { standingEscalations } from '../model/escalation.js';
 import { coordinateAttempts, coordinateRetryMs, registeredLaunch } from '../model/session-state.js';
+import { coordinateOwed } from '../model/launch-sentinel.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { type DaemonAction, message } from './state.js';
 import { decisionKey, dispatchKey } from './reconcile.js';
@@ -28,8 +29,16 @@ import { judgeHostMemory } from '../master-resources.js';
 import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
 import { closeStanding, closingItems } from './stale-closes.js';
 import { guardCarried, settleCarriedWrites } from './carried-writes.js';
-import { carriedCall, owedWrite, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+import { carriedCall, launchWrite, owedWrite, recordCarried, stepCallCarried, supersedeOwed, unboundedEffects, withinStepBudget } from './step-budget.js';
 
+/**
+ * A move that landed — or one owed, whose destination carries everything the guessed write did —
+ * retires any coordinate the launch still owes under the guessed id: a late retry of it, landing
+ * after the move, would reopen the record the move closed (GY-1895).
+ */
+export async function retireGuessedCoordinate(cycle: Parameters<typeof supersedeOwed>[0], item: Pick<Work, 'id'>, guessedId: string, rekey: SessionRekey) {
+  if (rekey.outcome === 'moved' || rekey.outcome === 'owed') await supersedeOwed(cycle, `handle:${item.id}:${guessedId}`, `the launch's record ${rekey.outcome === 'moved' ? 'moved' : 'owed its move'} to ${rekey.to}`);
+}
 /**
  * Move a launched session's record onto the epoch its launch actually claimed (GY-1791).
  *
@@ -53,7 +62,7 @@ import { carriedCall, owedWrite, recordCarried, stepCallCarried, unboundedEffect
  * attempt failed — the guessed record then still stands untouched, and the dispatch names the
  * failure so the attempt is not reported addressable when it is not.
  */
-export type SessionRekey = { outcome: 'unchanged' } | { outcome: 'moved'; from: string; to: string } | { outcome: 'failed'; from: string; to: string; reason: string };
+export type SessionRekey = { outcome: 'unchanged' } | { outcome: 'moved'; from: string; to: string } | { outcome: 'owed'; from: string; to: string } | { outcome: 'failed'; from: string; to: string; reason: string };
 export async function rekeyLaunchedSession(record: ((handle: SessionHandleInput) => Promise<unknown>) | undefined, handle: SessionHandleInput,
   expectedEpoch: number, launched: { epoch?: number; pane?: string | null; agentName?: string | null } | undefined,
   attach?: (pane: string) => string, retryMs = coordinateRetryMs): Promise<SessionRekey> {
@@ -67,7 +76,11 @@ export async function rekeyLaunchedSession(record: ((handle: SessionHandleInput)
   let reason = 'the control plane did not answer';
   for (let attempt = 1; attempt <= coordinateAttempts; attempt++) {
     try {
-      const written = await record(destination) as { sessions?: { id: string; state: string }[] } | undefined;
+      // GY-1895: a write the plane did not answer is already stashed owed with this destination by
+      // the launch's record callback, which resolves the sentinel — the move is owed, not failed,
+      // and the next cycle's owed-write retry lands it.
+      const written = await record(destination) as { sessions?: { id: string; state: string }[] } | typeof coordinateOwed | undefined;
+      if (written === coordinateOwed) return { outcome: 'owed', from: handle.id, to: moved };
       // The document the write returns is the verification: the session stands running under the
       // claimed id and the guessed record no longer runs. A write that returns no document landed
       // too — the control plane refuses rather than half-applies — so it counts as moved.
@@ -424,26 +437,33 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
         // The session is registered before its runtime starts (GY-172), where every Graphyard reader
         // looks, and its pane written once it has: watching this specific agent never means asking
         // this loop to relay its pane id, and the session report observes it from its first tick.
-        const launched = await registeredLaunch(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
+        // GY-1895: the launch's own coordinate writes — the registration, the pane this launch's
+        // runtime returned, the move onto the claimed epoch — go through the owed-write ledger: a
+        // write the plane's outage refused stays stashed with this exact payload and is sent again
+        // at the next step that bounds the call, which is what puts the session's pane back on its
+        // handle after an outage window. The resume fence is never handed a pane to write: the only
+        // pane a retry carries is the one this launch's own runtime returned, never one the fence
+        // refused and the agent-name lookup resolved.
+        const launchRecord = effects.recordSession ? (handle: SessionHandleInput) => launchWrite(cycle, `handle:${item.id}:${handle.id}`, { kind: 'session', work: item.key, principal: handle.principal ?? null, epoch: null },
+          `Recording ${handle.id}'s coordinates on ${item.key}`, item, handle) : undefined;
+        const guessed: SessionHandleInput = {
           id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
           ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
           subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-        }, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[]; closedAgent?: string; epoch?: number } | undefined,
+        };
+        const launched = await registeredLaunch(launchRecord, guessed, async () => await effects.dispatch(item, current.profile, free, snapshot) as { pane?: string | null; agentName?: string; principal?: string; reclaimed?: string[]; closedAgent?: string; epoch?: number } | undefined,
         launched => launched, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
         // The registration guessed the epoch as the snapshot's `+ 1`; the launch names the one it
         // claimed. When a first runtime refused the prompt and the dispatch claimed again, they
         // differ, and the record moves onto the claimed epoch's id (GY-1791) — the resume fence,
         // the watcher and the blocker probes all key this attempt by that id.
-        const rekey = await rekeyLaunchedSession(effects.recordSession ? handle => effects.recordSession!(item, handle) : undefined, {
-          id: `${current.profile.principal}:${item.epoch + 1}`, kind: 'implementation', principal: current.profile.principal, runtime: current.profile.kind ?? current.profile.mode, host: config.hostId,
-          ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-          subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running',
-        }, item.epoch + 1, launched as { epoch?: number; pane?: string | null; agentName?: string | null }, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
+        const rekey = await rekeyLaunchedSession(launchRecord, guessed, item.epoch + 1, launched as { epoch?: number; pane?: string | null; agentName?: string | null }, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
+        await retireGuessedCoordinate(cycle, item, guessed.id, rekey);
         clearProfileFailure(state, current.profile);
         delete state.dispatchFailures[item.id];
         // The file comes before the claimant keys, so the 2000-character detail bound trims a long
         // key list and never the file it contends on; a cold dispatch records nothing new here.
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}${launched?.reclaimed?.length ? `; freed its branch by reclaiming ${launched.reclaimed.join('; ')}` : ''}${launched?.closedAgent ? `; closed finished session ${launched.closedAgent} that held the profile's name` : ''}${rekey.outcome === 'moved' ? `; the launch claimed epoch ${launched?.epoch}, so its session record moved from ${rekey.from} to ${rekey.to}` : rekey.outcome === 'failed' ? `; the launch claimed epoch ${launched?.epoch} but its session record could not be moved from ${rekey.from} to ${rekey.to} (${rekey.reason}): the attempt's own handle is not on the record, so the loop reclaims it on the bound unless a later write lands` : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}${launched?.reclaimed?.length ? `; freed its branch by reclaiming ${launched.reclaimed.join('; ')}` : ''}${launched?.closedAgent ? `; closed finished session ${launched.closedAgent} that held the profile's name` : ''}${rekey.outcome === 'moved' ? `; the launch claimed epoch ${launched?.epoch}, so its session record moved from ${rekey.from} to ${rekey.to}` : rekey.outcome === 'failed' ? `; the launch claimed epoch ${launched?.epoch} but its session record could not be moved from ${rekey.from} to ${rekey.to} (${rekey.reason}): the attempt's own handle is not on the record, so the loop reclaims it on the bound unless a later write lands` : rekey.outcome === 'owed' ? `; the launch claimed epoch ${launched?.epoch} and its session record's move from ${rekey.from} to ${rekey.to} is owed to the next cycle (the control plane did not answer), so the pane stays on the guessed record until the retry lands` : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       } catch (error) {
         // Another dispatcher — an executor, or a hand dispatch — holds the profile or the item

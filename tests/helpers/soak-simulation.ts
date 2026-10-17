@@ -31,7 +31,7 @@ import { headlessConfinementWrapper, sessionConfinement } from '../../src/master
 import { type DaemonEffects, type DaemonState, answeringWidening, emptyDaemonState, runCycle } from '../../src/master-daemon.js';
 import { type HostMemoryReading, owedUpgrade, readReclaimReports, selfUpgradeBoundMs, readResources, reclaimResources, resourceAttention, settleTmpReclaim } from '../../src/master-resources.js';
 import { type DoctorFile } from '../../src/daemon/doctor.js';
-import { approvalWatchSchema, retainedActions } from '../../src/daemon/state.js';
+import { approvalWatchSchema, daemonStateSchema, retainedActions } from '../../src/daemon/state.js';
 import { adoptHeadlessRuns, coordinatorCheckoutGuard, noteWatchdog } from '../../src/daemon/run.js';
 import { holdBoundWait } from '../../src/daemon/cycle-decisions.js';
 import { type ExhaustedProof, handWatchPrefix } from '../../src/daemon/decisions.js';
@@ -212,6 +212,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   readiness?: { from: number; to: number };
   /** GY-1751: with `acceptance`, the plane answers the acceptance role's draft post the startup-readiness 503 in this window (ms from the day's start), then answers. */
   acceptanceOutage?: { from: number; to: number };
+  /** GY-1895: in this window (ms from the day's start) the plane answers Railway's 502 to every session-coordinate write that carries a pane — a launch's own registration coordinate, a record move, a re-prompt's handle record — for every item and epoch the window covers, then answers; the reports, which carry no pane, still land. Past its midpoint, with a launch coordinate owed, the loop restarts from its cursor. */
+  coordinateOutage?: { from: number; to: number };
   /** GY-1758: in this window (ms from the day's start) the plane times out the loop's blocker-probe record and every dispatch is refused as an item parked on a human-only decision, cycle after cycle; both are waits, then they resolve. */
   waits?: { from: number; to: number };
   /**
@@ -1315,6 +1317,18 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const decided: string[] = [], misreads: string[] = [], prompts: { key: string; epoch: number; pane: string; text: string }[] = [], exitedLive: string[] = [], exitedClosed: string[] = [];
   const panes = new Map<string, string>();
   const recordSession: DaemonEffects['recordSession'] = async (work, handle) => {
+    // GY-1895: inside the outage window the plane refuses the session-coordinate writes that carry a
+    // pane — a launch's own coordinate, a record move, a re-prompt's handle record — with Railway's
+    // 502, exactly the window of 2026-10-17 that left four sessions' handles pane-less and their
+    // attempts faulted; the session report's writes, which carry no pane, still land.
+    if (options.coordinateOutage && handle.kind === 'implementation' && handle.state === 'running' && handle.pane) {
+      const at = clock.now() - dayStart;
+      if (at >= options.coordinateOutage.from && at < options.coordinateOutage.to) {
+        coordinateOutageDay.refused.push({ key: work.key, id: handle.id, pane: handle.pane, at });
+        throw new RefusedResponse(`Graphyard refused work/${work.id}/session (502): Application failed to respond`, 502, { status: 'error', code: 502, message: 'Application failed to respond' });
+      }
+      coordinateOutageDay.landed.push({ key: work.key, id: handle.id, pane: handle.pane, at });
+    }
     if (handle.pane) panes.set(`${work.id}:${handle.id}`, handle.pane);
     if (handle.kind === 'implementation' && handle.state === 'finished' && /the agent has exited/.test(handle.outcome ?? '')) {
       const pane = panes.get(`${work.id}:${handle.id}`), listed = pane ? herdr.agents.get(pane) : undefined;
@@ -2302,6 +2316,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     };
   }
   const outageDay = { refused: 0, answered: 0 };
+  // GY-1895: the coordinate writes the outage window refused, pane-carrying and one per send, and the ones that landed beside and after it.
+  const coordinateOutageDay = { refused: [] as { key: string; id: string; pane: string; at: number }[], landed: [] as { key: string; id: string; pane: string; at: number }[], restartedAt: null as number | null, owedAtRestart: [] as string[] };
   if (options.acceptanceOutage && effects.acceptance) {
     const window = options.acceptanceOutage, draft = effects.acceptance.draft;
     effects.acceptance.draft = async (goal, input) => {
@@ -3133,6 +3149,13 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       state = emptyDaemonState(config);
       restarted = true;
     }
+    // GY-1895: past the outage's midpoint, while a launch's coordinate stands owed, the loop restarts:
+    // its cursor is read back from disk and nothing it held in memory survives, so the owed coordinate
+    // is resent only from what its row carries.
+    if (options.coordinateOutage && coordinateOutageDay.restartedAt === null && elapsed >= (options.coordinateOutage.from + options.coordinateOutage.to) / 2 && elapsed < options.coordinateOutage.to) {
+      const owed = Object.entries(state.actions).filter(([key, row]) => key.startsWith('owed:') && row.state === 'waiting' && row.owed).map(([key]) => key);
+      if (owed.length) { state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state))); coordinateOutageDay.restartedAt = elapsed; coordinateOutageDay.owedAtRestart = owed; }
+    }
     const deploying = deploys < plan.deploys.length && elapsed >= plan.deploys[deploys];
     if (options.releaseLag) releaseLagDay.tips.push({ at: now, tip: github.tip });
     // GY-1585: a lagging promotion serves the tip as it stood `cutAgoMs` ago, not the tip now.
@@ -3668,7 +3691,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { observationWindowDay: windowDay, readingDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { observationWindowDay: windowDay, readingDay, blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, coordinateOutageDay, panes, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
