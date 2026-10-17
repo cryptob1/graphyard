@@ -1,11 +1,11 @@
 <!-- page: Build integrations | 2 | cases, runners. -->
 # E2E validation
 
-An `e2e:` proof passes from pinned candidate, bundle, separate [collector](runner-setup.md). `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`: `admin` defines test cases (**Settings → Test cases**, `graphyard scenario scenario.json`); runners (`worker`) poll/ack/heartbeat; builders and collectors (`producer`) attest, publish, never both per build; `e2e:ID` pins latest immutable revision; only trusted attempts append **Tests** runs.
+An `e2e:` proof passes from pinned candidate, bundle, separate [collector](runner-setup.md). `graphyard validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`: `admin` defines test cases (**Settings → Test cases**, `graphyard scenario scenario.json`); runners (`worker`) poll/ack/heartbeat; builders/collectors (`producer`) attest/publish, never both per build; `e2e:ID` pins latest immutable revision; only trusted attempts append **Tests** runs.
 
 ## E2E case repository
 
-`e2e/cases/ID.json`, code-reviewed: `id` (file name), `title`, optional `description`, `tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`:
+`e2e/cases/ID.json`, code-reviewed: `id` (file name)/`title`, optional `description`/`tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`:
 
 - `http`: `method`, `path`, optional `body`, expected `status`; `expect` checks dotted JSON `path` (`equals`/`exists`/`type`/`includes`); `save` keeps values.
 - `browser` (Playwright Chromium): `open` `path`, `fill` `label` with `value`, `click`/`expectText` `text`, optionally by `role`; `exact: false` matches substrings.
@@ -18,13 +18,13 @@ Both: `timeoutSeconds` (600). Case `secrets: ["NAME"]` from `~/.config/graphyard
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at same SHA; `RUN:attempt-1`/`-2`); **unrun** (stopped by a failed required case; listed apart; never in a managed repository); **blocked** (imported, couldn't run: `reason`); **pending** (required case whose outcome no done item serves, `rc/ID` `pendingOutcomes`, plane-read in `uat`: never blocks unless a delivered outcome shares it; an unreadable plane warns, records none). Only failed or unaccepted flaky required cases block (imported: blocked, unrun, skipped too); optional ones marked on **Tests**.
+One retry: **passed**; **failed** (both); **flaky** (retry passed at same SHA; `RUN:attempt-1`/`-2`); **unrun** (stopped by a failed required case; listed apart; never in a managed repository); **blocked** (imported, couldn't run: `reason`); **pending** (required case whose outcome no done item serves, `rc/ID` `pendingOutcomes`, plane-read in `uat`: never blocks unless a delivered outcome shares it; an unreadable plane warns, records none). Only failed or unaccepted flaky required cases block (imported: blocked/unrun/skipped too); optional ones marked on **Tests**.
 
 Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions; its workflow (`GRAPHYARD_URL`/`GRAPHYARD_TOKEN`) promotes only passing UATs.
 
-`POST /api/validation/import` (`producer`-only, else 403) binds runs to the candidate at `rc/` head `sha` (none: 409), idempotent per `producer`+`runId`, keeping verdicts, `toolVersion`, raw `result`s, ids, `evidence`, `catalogCommitSha` (provenance; `caseVersion` null unless given); `GET /api/validation/import/SHA[?candidate=ID]`: runs, hold (held/unread blocks promotion). `{"format":"graphyard-external-run-v1","producer":"huck","sha":"<40-hex>","runId":"r7","toolVersion":"4.2","cases":[{"id":"login","verdict":"skipped","result":"SKIP","required":true,"attempts":0,"durationMs":0}]}`; unknown fields/non-HTTP(S)/credentialed links refused.
+`POST /api/validation/import` (`producer`-only, else 403) binds runs to the candidate at `rc/` head `sha` (none: 409), idempotent per `producer`+`runId`, keeping verdicts/`toolVersion`/raw `result`s/ids/`evidence`/`catalogCommitSha` (provenance; `caseVersion` null unless given); `GET /api/validation/import/SHA[?candidate=ID]`: runs, hold (held/unread blocks promotion; retried each interval without rerunning UAT, until the UAT window ends or a cut supersedes). `{"format":"graphyard-external-run-v1","producer":"huck","sha":"<40-hex>","runId":"r7","toolVersion":"4.2","cases":[{"id":"login","verdict":"skipped","result":"SKIP","required":true,"attempts":0,"durationMs":0}]}`; unknown fields/non-HTTP(S)/credentialed links refused.
 
-`e2e/contract.json` lists required customer outcomes: `id`/`title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut` when a bound case is missing, invalid, not `uat`-targeted, optional, or proves nothing.
+`e2e/contract.json` lists required customer outcomes: `id`/`title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut` when a bound case is missing/invalid/optional, not `uat`-targeted, or proves nothing.
 
 ## Flake ledger
 
@@ -40,4 +40,4 @@ One hold per failed outcome: item tagged `rc-hold/OUTCOME/CANDIDATE` listing fai
 
 ## Candidates, requests, reports
 
-`kind: bundle` pins `scenario`/`scenarioRevision`/`scenarioHash`, `digest`/`runnerImageDigest`, `reportFormat` (`graphyard-playwright-v1`/`junit-xml-v1`; skips/retries/timeouts/miscounts fail; `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews). Runners `ack` within 30s, heartbeat every 20s; passes need `matched` target, verified artifacts, settled run; recover: `cancel`/`settle`/`retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.
+`kind: bundle` pins `scenario`/`scenarioRevision`/`scenarioHash`, `digest`/`runnerImageDigest`, `reportFormat` (`graphyard-playwright-v1`/`junit-xml-v1`; skips/retries/timeouts/miscounts fail; `graphyard runner verify-report junit-xml-v1 inventory.json report.xml` previews). Runners `ack` ≤30s, heartbeat every 20s; passes need `matched` target, verified artifacts, settled run; recover: `cancel`/`settle`/`retry`; `graphyard validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics) stalls.

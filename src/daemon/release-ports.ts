@@ -76,7 +76,9 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     /** The plane's open goals and each work item's stage, so a cut records the outcomes whose plan is not delivered yet as pending (GY-1802). */
     plane?: { goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined>;
       /** An authenticated `GET /api/PATH`, through which promotion reads the candidate's imported-run hold (GY-1860). */
-      read?: (path: string) => Promise<any> } }): LocalReleasePorts | null {
+      read?: (path: string) => Promise<any> };
+    /** UAT itself, for tests: run only for a candidate with no passing UAT verdict recorded. */
+    validation?: Pick<LocalReleasePorts, 'uat' | 'validate'> }): LocalReleasePorts | null {
   const environment = options.environment ?? process.env;
   const uatUrl = environment[localReleaseVariables.uatUrl], productionUrl = environment[localReleaseVariables.productionUrl], uatStatic = environment[localReleaseVariables.uatStatic];
   if (!uatUrl && !uatStatic) return null;
@@ -140,6 +142,8 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       try { await git(['worktree', 'remove', '--force', checkout]); } catch { rmSync(checkout, { recursive: true, force: true }); }
     }
   };
+  /** The passing UAT verdict already recorded for candidate `id`, which a resumed promotion retry reuses (GY-1860). */
+  const passedUat = async (id: string) => { await syncLedgerAsync(git, base); return (await readLedgerAsync(git)).uat.find(record => record.id === id && record.result === 'passed') ?? null; };
   return {
     settings,
     cut: async due => {
@@ -147,6 +151,12 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       const ledger = await readLedgerAsync(git), newest = ledger.candidates[0];
       // A candidate cut and never judged — a run that crashed between the cut and its record — is resumed, not cut past.
       if (newest && !ledger.uat.some(record => record.id === newest.id) && now() - Date.parse(newest.cutAt) < uatValidationWindowMs) return { cut: false, resume: toCandidate(newest) };
+      // GY-1860: a candidate that passed UAT and is not in production — its promotion refused by an imported hold, or
+      // by a hold the plane could not answer — is resumed while no cut is due, so the cycle retries its promotion
+      // with a fresh hold read once a promotion interval; `uat` and `validate` answer its recorded verdict and never
+      // rerun UAT. A due cut supersedes it, and the UAT window bounds the retries.
+      if (newest && !due && ledger.uat.some(record => record.id === newest.id && record.result === 'passed') && !ledger.production.some(record => record.id >= newest.id)
+        && now() - Date.parse(newest.cutAt) < uatValidationWindowMs) return { cut: false, resume: toCandidate(newest) };
       // The cut rule (candidate-cut.ts) alone decides a cut: not due, nothing is tagged or pushed.
       if (!due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
       const plane = options.plane;
@@ -154,8 +164,16 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges, pendingOutcomes });
       return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: result.reason };
     },
-    uat: async id => { const deployed = await deployToUatAsync(git, id, base, new Date(now())); return { sha: deployed.sha }; },
+    uat: async id => {
+      const passed = await passedUat(id);
+      if (passed) return { sha: passed.sha };
+      if (options.validation) return options.validation.uat(id);
+      const deployed = await deployToUatAsync(git, id, base, new Date(now())); return { sha: deployed.sha };
+    },
     validate: async id => {
+      const passed = await passedUat(id);
+      if (passed) return { record: passed, followUp: passed.followUp ?? null };
+      if (options.validation) return options.validation.validate(id);
       if (!uatUrl || !graphyardCheckout(root)) return validateManaged(id);
       const scratch = mkdtempSync(join(options.base, 'candidate-validate-'));
       try {
