@@ -1,0 +1,154 @@
+import { after, before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Store } from '../src/store.js';
+import { Engine } from '../src/engine.js';
+import { server } from '../src/server.js';
+import type { Principal } from '../src/model.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// GY-1860: a producer imports an external run through POST /api/validation/import. The plane binds
+// it to the release candidate whose head is exactly the run's sha (read from the `rc/` tags through
+// the GitHub adapter), refuses any other credential and any sha no candidate was cut at, keeps every
+// verdict — skipped stays skipped — with the run's provenance, idempotently by run id, and the
+// imports leave the candidate's hold exactly as importedRunVerdict judges them.
+
+const operator: Principal = { id: 'operator', role: 'admin' };
+const worker: Principal = { id: 'implementer', role: 'worker' };
+const reader: Principal = { id: 'auditor', role: 'reader' };
+const producer: Principal = { id: 'huck-producer', role: 'producer' };
+const principals = [operator, worker, reader, producer];
+const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
+
+// Three candidates cut at three heads; `elsewhere` is a commit no candidate holds.
+const boundSha = 'a'.repeat(40), holdSha = 'b'.repeat(40), versionSha = 'c'.repeat(40), elsewhere = 'd'.repeat(40);
+const candidates = [
+  { id: '20261017T010000Z', sha: boundSha }, { id: '20261017T020000Z', sha: holdSha }, { id: '20261017T030000Z', sha: versionSha },
+].map(entry => ({ ...entry, cutAt: `${entry.id.slice(0, 4)}-${entry.id.slice(4, 6)}-${entry.id.slice(6, 8)}T${entry.id.slice(9, 11)}:00:00.000Z`, trigger: 'manual', since: null, items: [] }));
+const tagObject = (index: number) => String(index + 1).repeat(40);
+/** The GitHub reads the import makes: the `rc/` tag refs, and each annotated tag carrying its candidate record. */
+const github = {
+  config: { repository: 'owner/project' },
+  async request(path: string) {
+    if (path.startsWith('/git/matching-refs/tags/rc/')) return /page=1(?:&|$)/.test(path) ? candidates.map((entry, index) => ({ ref: `refs/tags/rc/${entry.id}`, object: { sha: tagObject(index), type: 'tag' } })) : [];
+    const index = candidates.findIndex((_, i) => path === `/git/tags/${tagObject(i)}`);
+    if (index >= 0) return { object: { sha: candidates[index].sha, type: 'commit' }, message: JSON.stringify(candidates[index]) };
+    throw new Error(`unexpected GitHub read ${path}`);
+  },
+};
+
+let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
+
+before(async () => {
+  const port = Number(process.env.GRAPHYARD_VALIDATION_IMPORT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1860);
+  scratch = await temporaryDirectory('validation-import');
+  database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('validation_import_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_import_test`); await store.init();
+  const engine = new Engine(store, [15368], 120, 'owner/project');
+  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), github as any);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  url = `http://127.0.0.1:${(http.address() as any).port}`;
+});
+after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); if (scratch) await rm(scratch, { recursive: true, force: true }); });
+
+async function call(path: string, actor: Principal, data?: unknown) {
+  const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${tokens.get(actor.id)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
+  return { status: response.status, body: await response.json() as any };
+}
+const imported = async (data: unknown) => { const result = await call('validation/import', producer, data); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body; };
+const hold = async (sha: string) => (await call(`validation/import/${sha}`, reader)).body.hold;
+
+const run = (sha: string, runId: string, cases: readonly Record<string, unknown>[], over: Record<string, unknown> = {}) =>
+  ({ format: 'graphyard-external-run-v1', producer: 'huck-engineer', runId, sha, cases, ...over });
+const trace = 'https://huck.example/runs/r-1/checkout-guest/trace';
+
+test('unit:validation-import-route-binds-by-sha — POST /api/validation/import refuses a non-producer credential and a sha no candidate holds, and persists a producer run at a candidate head idempotently with every verdict, skipped kept, and its provenance', async () => {
+  const handIn = run(boundSha, 'huck-run-1', [
+    { id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 4310, required: true, result: 'PASS', evidence: [trace] },
+    { id: 'search-facet', verdict: 'skipped', attempts: 0, durationMs: 0, result: 'SKIPPED_BY_TAG' },
+    { id: 'checkout-card', verdict: 'blocked', attempts: 0, durationMs: 0, reason: 'the payment sandbox was unreachable', result: 'ENV_MISSING' },
+  ], { toolVersion: 'huck-engineer 4.2.1', result: 'PARTIAL', environment: 'uat' });
+
+  for (const actor of [worker, reader, operator]) {
+    const refused = await call('validation/import', actor, handIn);
+    assert.equal(refused.status, 403, `${actor.role} is refused`);
+    assert.match(refused.body.error, /producer credential is required/);
+  }
+  const unbound = await call('validation/import', producer, { ...handIn, sha: elsewhere, runId: 'huck-run-elsewhere' });
+  assert.equal(unbound.status, 409);
+  assert.match(unbound.body.error, new RegExp(`No release candidate was cut at ${elsewhere}`));
+  assert.equal(((await call(`validation/import/${elsewhere}`, reader)).body.runs).length, 0, 'a refused run is never recorded');
+
+  const first = await imported(handIn);
+  assert.equal(first.replayed, false);
+  assert.deepEqual(first.imported.candidate, { id: candidates[0].id, sha: boundSha }, 'the run binds to the candidate cut at its exact head');
+  assert.equal(first.imported.importedBy, producer.id);
+  const record = first.imported.run;
+  assert.equal(record.runId, 'huck-run-1');
+  assert.equal(record.producer, 'huck-engineer');
+  assert.equal(record.toolVersion, 'huck-engineer 4.2.1');
+  assert.equal(record.result, 'PARTIAL');
+  assert.deepEqual(record.cases.map((entry: any) => [entry.id, entry.verdict, entry.result]),
+    [['checkout-guest', 'passed', 'PASS'], ['search-facet', 'skipped', 'SKIPPED_BY_TAG'], ['checkout-card', 'blocked', 'ENV_MISSING']], 'every verdict as given, skipped never flattened to blocked or unrun');
+  assert.deepEqual(record.cases[0].evidence, [trace]);
+  assert.equal(record.cases[2].reason, 'the payment sandbox was unreachable');
+
+  const read = (await call(`validation/import/${boundSha}`, reader)).body;
+  assert.equal(read.runs.length, 1);
+  assert.deepEqual(read.runs[0].run, record, 'the persisted record keeps the run as imported');
+
+  const again = await imported(handIn);
+  assert.equal(again.replayed, true, 'the same run again replays its record');
+  assert.deepEqual(again.imported, first.imported);
+  assert.equal((await call(`validation/import/${boundSha}`, reader)).body.runs.length, 1, 'a replay writes nothing');
+  const changed = await call('validation/import', producer, { ...handIn, cases: handIn.cases.slice(0, 1) });
+  assert.equal(changed.status, 409);
+  assert.match(changed.body.error, /already imported with a different document/);
+});
+
+test('unit:validation-import-feeds-hold — a required failed, blocked or unrun case holds the candidate, an all-passing run releases it, and skipped follows the required-case rule', async () => {
+  const passing = (id: string) => ({ id, verdict: 'passed', attempts: 1, durationMs: 100, required: true });
+  assert.equal((await hold(holdSha)).held, false, 'no import, no hold');
+
+  const held = await imported(run(holdSha, 'hold-1', [
+    passing('login'),
+    { id: 'pay', verdict: 'failed', attempts: 1, durationMs: 100, required: true },
+    { id: 'ship', verdict: 'blocked', attempts: 0, durationMs: 0, required: true, reason: 'no carrier sandbox' },
+    { id: 'refund', verdict: 'unrun', attempts: 0, durationMs: 0, required: true },
+    { id: 'export', verdict: 'skipped', attempts: 0, durationMs: 0, required: true },
+    { id: 'theme', verdict: 'skipped', attempts: 0, durationMs: 0 },
+    { id: 'avatar', verdict: 'failed', attempts: 1, durationMs: 100 },
+  ]));
+  assert.equal(held.verdict.passed, false);
+  assert.equal(held.hold.held, true);
+  assert.deepEqual(held.hold.cases.map((entry: any) => [entry.id, entry.verdict]).sort(),
+    [['export', 'skipped'], ['pay', 'failed'], ['refund', 'unrun'], ['ship', 'blocked']], 'required failed, blocked, unrun and skipped hold; optional skipped and failed do not');
+  assert.equal(held.hold.cases.find((entry: any) => entry.id === 'ship').reason, 'no carrier sandbox');
+  assert.deepEqual(await hold(holdSha), held.hold, 'the read gives the same hold');
+
+  const partly = await imported(run(holdSha, 'hold-2', [passing('pay'), passing('ship')]));
+  assert.deepEqual(partly.hold.cases.map((entry: any) => entry.id).sort(), ['export', 'refund'], 'a later pass releases only the cases it reports');
+
+  const released = await imported(run(holdSha, 'hold-3', ['login', 'pay', 'ship', 'refund', 'export'].map(passing)));
+  assert.equal(released.verdict.passed, true);
+  assert.deepEqual(released.hold, { held: false, cases: [], runs: 3 }, 'an all-passing run releases the candidate');
+  assert.equal((await hold(boundSha)).runs, 1, 'the hold is per candidate: another head counts only its own imports');
+});
+
+test('unit:validation-import-case-version-not-inferred — catalogCommitSha is stored as provenance only and never read into a case version', async () => {
+  const catalog = 'e'.repeat(40);
+  const result = await imported(run(versionSha, 'version-1', [
+    { id: 'login', verdict: 'passed', attempts: 1, durationMs: 100, required: true },
+    { id: 'pay', verdict: 'passed', attempts: 1, durationMs: 100, required: true, caseVersion: 'pay@7' },
+  ], { catalogCommitSha: catalog }));
+  const stored = (await call(`validation/import/${versionSha}`, reader)).body.runs[0].run;
+  for (const record of [result.imported.run, stored]) {
+    assert.equal(record.catalogCommitSha, catalog, 'the catalog commit is kept as provenance');
+    assert.equal(record.cases[0].caseVersion, null, 'no case version given: it stays null, never inferred from the catalog commit');
+    assert.equal(record.cases[1].caseVersion, 'pay@7', 'a given case version is kept as given');
+  }
+});

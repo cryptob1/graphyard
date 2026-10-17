@@ -341,13 +341,16 @@ export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; re
  * required `blocked` case blocks like a failed one: it did not run to a pass, and its missing
  * precondition is the producer's own record of why. A required `unrun` case blocks on its own
  * too: an import has no `stoppedBy` chain, so the run that stopped before reaching it would have
- * carried the required failure it stopped at, and either way the head is not releasable. A case
+ * carried the required failure it stopped at, and either way the head is not releasable. A
+ * `skipped` case (GY-1860) follows the required-case rule the runner's own inventory holds
+ * (`verifyRunnerReport` fails a required inventory that skips): required and skipped blocks,
+ * optional and skipped does not, and the verdict stays skipped on the record either way. A case
  * bound to a still-pending outcome (`pendingCases`, GY-1802) is listed apart and never blocks, as in
  * `releaseVerdict`.
  */
 export function importedRunVerdict(run: ExternalRunResult, acceptances: readonly FlakyAcceptance[] = [], pendingCases: readonly string[] = []) {
   const accepted = (id: string) => !!run.sha && acceptances.some(entry => entry.case === id && entry.runId === run.runId && entry.sha === run.sha);
-  const wouldBlock = (outcome: ExternalRunResult['cases'][number]) => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun'
+  const wouldBlock = (outcome: ExternalRunResult['cases'][number]) => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun' || outcome.verdict === 'skipped'
     || (outcome.verdict === 'flaky' && !accepted(outcome.id)));
   const listed = (outcome: ExternalRunResult['cases'][number]): ImportedBlockingCase => ({ id: outcome.id, verdict: outcome.verdict,
     ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence) });

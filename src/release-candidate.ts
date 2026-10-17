@@ -365,6 +365,14 @@ export const findCandidate = (ledger: Ledger, id: string) => {
   if (!candidate) throw new Error(id === 'latest' ? 'No release candidate has been cut' : `Unknown release candidate ${id}`);
   return candidate;
 };
+/**
+ * The release candidate whose head is exactly `sha` (GY-1860): the newest one, when several were cut
+ * at the same commit, or null when no candidate was cut there. An imported external run binds to a
+ * candidate this way — by the head it tested, never by a candidate id the producer names — so a run
+ * at a commit no candidate holds binds to nothing and is refused.
+ */
+export const candidateAtHead = <T extends Pick<ReleaseCandidate, 'id' | 'sha' | 'cutAt'>>(candidates: readonly T[], sha: string): T | null =>
+  [...candidates].filter(candidate => candidate.sha === sha).sort((a, b) => b.cutAt.localeCompare(a.cutAt))[0] ?? null;
 export const latestPromoted = (ledger: Ledger) => {
   const record = ledger.production[0];
   return record ? ledger.candidates.find(candidate => candidate.id === record.id) ?? null : null;

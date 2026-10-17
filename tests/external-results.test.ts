@@ -48,7 +48,7 @@ test('unit:external-results-imported — an imported run keeps every verdict as 
   assert.equal(imported.environment, 'uat');
   assert.equal(imported.sha, sha);
   assert.equal(imported.digest, digest);
-  assert.deepEqual(imported.cases.find(entry => entry.verdict === 'failed'), { id: 'search-facet', verdict: 'failed', attempts: 2, durationMs: 9180, required: true, evidence: ['https://artifacts.example.test/trace.zip'] });
+  assert.deepEqual(imported.cases.find(entry => entry.verdict === 'failed'), { id: 'search-facet', verdict: 'failed', attempts: 2, durationMs: 9180, required: true, evidence: ['https://artifacts.example.test/trace.zip'], result: null, caseVersion: null });
   // A run that tested a deployment names the digest instead of a head, and both are kept when given.
   const digestOnly = importExternalRun({ ...handIn, sha: undefined, digest });
   assert.equal(digestOnly.digest, digest);
@@ -70,8 +70,8 @@ test('unit:external-results-imported — the import refuses what it does not und
   // A run naming neither a head nor a digest is refused.
   assert.throws(() => importExternalRun({ ...handIn, sha: undefined }));
   assert.throws(() => importExternalRun({ ...handIn, producer: '' }));
-  // An unknown verdict is refused, never read as failed or dropped.
-  assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'skipped', attempts: 1, durationMs: 1 }] }));
+  // An unknown verdict is refused, never read as failed or dropped (`skipped` is a verdict since GY-1860).
+  assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'ignored', attempts: 1, durationMs: 1 }] }));
   // A blocked case without its reason is refused.
   assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'blocked', attempts: 0, durationMs: 0 }] }));
   assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'passed', attempts: -1, durationMs: 1 }] }));
