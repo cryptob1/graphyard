@@ -4,9 +4,10 @@ import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Principal, type Work } from './model.js';
 import { broadScope } from './coordination.js';
 import { isDelivered } from './model/closure.js';
-import { pathScopeContains } from './model/scope.js';
+import { pathScope, pathScopeContains } from './model/scope.js';
 import { settleDelivered } from './model/actions.js';
-import { decompositionPayloadSchema, decompositionSettingsSchema, type DecompositionPayload, type DecompositionSettings } from './runner/payloads.js';
+import { acceptedMergeAt } from './pipeline-speed.js';
+import { decompositionPayloadSchema, decompositionSettingsSchema, estimatedLinesBound, type DecompositionPayload, type DecompositionSettings } from './runner/payloads.js';
 import { save } from './store.js';
 import { lockedWork, workIdByRef } from './store/locked-read.js';
 import type { Services } from './server/routes.js';
@@ -59,20 +60,30 @@ export const decompositionSettings = (run: { decomposition?: unknown } | Record<
   return decompositionSettingsSchema.parse(run);
 };
 
-/** A rough size of the change an item asks for, in lines: per criterion, per root-level directory, per narrower path. */
+/**
+ * A planned path that names a test file, a test helper, a docs page or the timing baseline —
+ * anything under `tests/` or `docs/`: a companion of the source change, which a worker builds
+ * beside the code it proves or documents, never a measure of the source change itself (GY-1858).
+ */
+export const companionScope = (path: string) => /^(tests|docs)(\/|$)/.test(pathScope(path).path);
+
+/** The planned paths that are the source change: every planned path but its companions. */
+export const plannedSourceFiles = (work: Pick<Work, 'plannedFiles'>) => (work.plannedFiles ?? []).filter(path => !companionScope(path));
+
+/** A rough size of the change an item asks for, in lines: per criterion, per root-level source directory, per narrower source path. Companions add nothing. */
 export function estimatedLines(work: Pick<Work, 'criteria' | 'plannedFiles'>) {
-  const planned = work.plannedFiles ?? [];
+  const planned = plannedSourceFiles(work);
   return work.criteria.length * 150 + planned.reduce((sum, path) => sum + (broadScope(path) ? 400 : path.endsWith('/') ? 200 : 60), 0);
 }
 
 /** Every size bound the item exceeds, named; empty when it is within all of them. */
 export function sizeBoundsExceeded(work: Pick<Work, 'criteria' | 'plannedFiles'>, settings: DecompositionSettings): string[] {
-  const planned = work.plannedFiles ?? [], broad = planned.filter(broadScope), lines = estimatedLines(work);
+  const sources = plannedSourceFiles(work), broad = (work.plannedFiles ?? []).filter(broadScope), lines = estimatedLines(work), lineBound = estimatedLinesBound(settings);
   return [
     ...(work.criteria.length > settings.maxCriteria ? [`${work.criteria.length} criteria, over ${settings.maxCriteria}`] : []),
     ...(broad.length > settings.maxBroadScopes ? [`${broad.length} root-level planned directories (${broad.join(', ')}), over ${settings.maxBroadScopes}`] : []),
-    ...(planned.length > settings.maxPlannedFiles ? [`${planned.length} planned paths, over ${settings.maxPlannedFiles}`] : []),
-    ...(lines > settings.maxEstimatedLines ? [`an estimated ${lines} changed lines, over ${settings.maxEstimatedLines}`] : []),
+    ...(sources.length > settings.maxPlannedFiles ? [`${sources.length} planned source files, over ${settings.maxPlannedFiles}`] : []),
+    ...(lines > lineBound ? [`an estimated ${lines} changed lines, over ${lineBound}`] : []),
   ];
 }
 
@@ -348,4 +359,64 @@ export function splitRelation(work: Work) {
 export function splitReport(all: readonly Work[]) {
   return all.filter(work => work.children?.length).map(parent => ({ key: parent.key, title: parent.title, delivered: isDelivered(parent),
     children: parent.children!.map(key => { const child = all.find(entry => entry.key === key); return { key, stage: child?.stage ?? null, delivered: !!child && isDelivered(child) }; }) }));
+}
+
+// ---- The bound, measured: time to merge by item size -----------------------------------------
+
+/** The planned-source-file bands `master status` reports merged items by, so `maxPlannedFiles` can be tuned from data (GY-1858). */
+export const sourceFileBands = ['1-2', '3-5', '6-10', 'over 10'] as const;
+export type SourceFileBand = (typeof sourceFileBands)[number];
+/** The band a planned-source-file count falls in; null for an item that plans no source file at all — it has no size to tune the bound by. */
+export const sourceFileBand = (count: number): SourceFileBand | null =>
+  count <= 0 ? null : count <= 2 ? '1-2' : count <= 5 ? '3-5' : count <= 10 ? '6-10' : 'over 10';
+
+export interface SizeBandSpeed {
+  band: SourceFileBand;
+  /** Deliveries in the window whose planned source files fall in the band. */
+  items: number;
+  /** Those whose timeline records a first claim: the population both medians are over. */
+  measured: number;
+  /** Median minutes from an item's first claim to its merge; null while nothing in the band is measured. */
+  medianMinutesToMerge: number | null;
+  /** Median attempts per merged item, over the same population. */
+  medianAttempts: number | null;
+}
+export interface ItemSizeReport { windowDays: number; bands: SizeBandSpeed[] }
+
+/** The middle value, rounded to a whole reading; null over an empty set. */
+const median = (values: number[]) => {
+  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[middle] : Math.round((sorted[middle - 1] + sorted[middle]) / 2);
+};
+
+/**
+ * Time to merge by item size (GY-1858): over the last `windowDays` days, the deliveries the plane
+ * observed, grouped by planned-source-file band, with the median minutes from an item's first
+ * claim to its merge and the median attempts per band. Deliveries in the window are read on the
+ * repository clock (`mergedAtRepository`, as every speed reading is); an item without a recorded
+ * first claim (its timeline not reconstructed yet) is counted but not measured. This is the data
+ * `run.decomposition.maxPlannedFiles` is tuned from: where the merged minutes or attempts climb,
+ * the bound sits.
+ */
+export function timeToMergeBySize(work: readonly Work[], now: number, windowDays = 7): ItemSizeReport {
+  const from = now - windowDays * 24 * 3_600_000;
+  const buckets = new Map<SourceFileBand, { items: number; minutes: number[]; attempts: number[] }>(
+    sourceFileBands.map(band => [band, { items: 0, minutes: [], attempts: [] }]));
+  for (const item of work) {
+    const merged = acceptedMergeAt(item), at = merged ? Date.parse(merged) : NaN;
+    const band = sourceFileBand(plannedSourceFiles(item).length);
+    if (!band || !Number.isFinite(at) || at < from || at > now) continue;
+    const bucket = buckets.get(band)!, claims = (item.pipeline?.attempts ?? []).map(claim => Date.parse(claim.claimedAt)).filter(Number.isFinite);
+    bucket.items += 1;
+    if (claims.length) {
+      bucket.minutes.push(Math.max(0, Math.round((at - Math.min(...claims)) / 60_000)));
+      bucket.attempts.push(Math.max(1, item.pipeline?.attempts.length ?? claims.length));
+    }
+  }
+  return { windowDays, bands: sourceFileBands.map(band => {
+    const bucket = buckets.get(band)!;
+    return { band, items: bucket.items, measured: bucket.minutes.length, medianMinutesToMerge: median(bucket.minutes), medianAttempts: median(bucket.attempts) };
+  }) };
 }
