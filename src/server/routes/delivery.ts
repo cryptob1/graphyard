@@ -9,7 +9,7 @@ import { defineRoutes, parseJson } from '../routes.js';
 export const deliveryRoutes = defineRoutes('delivery', [
   { method: 'GET', path: '/api/delivery', handle: ({ services }) => services.delivery.status() },
   { method: 'GET', path: '/api/delivery/observations', handle: ({ url, services }) => services.delivery.observations(url.searchParams.get('environment') ?? '', url.searchParams.get('cursor') ?? undefined) },
-  // GY-1861: an observer registration's reading of the commit production serves; containment is GitHub's ancestry when configured, else equality alone.
+  // GY-1861: a producer's reading of the commit production serves; containment is GitHub's ancestry when configured, else equality alone.
   {
     method: 'POST', path: '/api/delivery/observe-sha',
     async handle(context) {

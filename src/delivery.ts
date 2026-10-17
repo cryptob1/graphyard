@@ -38,13 +38,12 @@ export const observationSchema = z.object({ registration: ref, epoch: revision, 
   .refine(o => Date.parse(o.validFrom) <= Date.parse(o.observedAt) && Date.parse(o.observedAt) <= Date.parse(o.validTo), 'observedAt must lie within [validFrom, validTo]');
 type ObservationInput = z.infer<typeof observationSchema>;
 /**
- * GY-1861: an observer's reading of the commit the production environment serves, for a deployment
- * that can be identified only by that commit (a static site, a platform that reports one). It acts
- * through an observer registration and its lease, like the digest path, and covers every service of
- * the environment. Recorded once per environment and commit; every delivered item whose merge it
- * contains is marked deployed.
+ * GY-1861: a producer's reading of the commit the production environment serves, for a deployment
+ * that can be identified only by that commit (a static site, a platform that reports one). It names
+ * the production environment at its current revision and covers every one of its services. Recorded
+ * once per environment and commit; every delivered item whose merge it contains is marked deployed.
  */
-export const shaObservationSchema = z.object({ registration: ref, epoch: revision, environment: ref, sha: z.string().regex(/^[0-9a-f]{40}$/i), services: z.array(name).min(1).max(30).refine(s => new Set(s).size === s.length, 'Services must be unique'), observedAt: z.iso.datetime() }).strict();
+export const shaObservationSchema = z.object({ environment: ref, sha: z.string().regex(/^[0-9a-f]{40}$/i), services: z.array(name).min(1).max(30).refine(s => new Set(s).size === s.length, 'Services must be unique'), observedAt: z.iso.datetime() }).strict();
 export type ShaObservation = z.infer<typeof shaObservationSchema> & { id: string; observer: string; receivedAt: string };
 /** Whether `descendant` contains `ancestor` by ancestry; null when it cannot be told. */
 export type Containment = (ancestor: string, descendant: string) => Promise<boolean | null>;
@@ -585,10 +584,9 @@ export class Delivery {
     });
   }
   /**
-   * GY-1861: record an observer's sha observation and mark deployed every delivered item whose merge
-   * commit it contains (equal, or an ancestor by `contains`). Only the production environment, read
-   * through an observer registration covering its every service under a live lease, moves the
-   * per-item deployment record. Containment is provider I/O, so it is read before the transaction,
+   * GY-1861: record a producer's sha observation and mark deployed every delivered item whose merge
+   * commit it contains (equal, or an ancestor by `contains`). Only the production environment, at its
+   * current revision and read across its every service, moves the per-item deployment record. Containment is provider I/O, so it is read before the transaction,
    * over every page of awaiting items; each item is re-read inside it: one already recorded, or whose
    * merge changed, is left alone. The first observation of an environment and commit stands; a
    * repeat returns it (`duplicate`) and marks only items delivered since. The digest path is untouched.
@@ -599,7 +597,7 @@ export class Delivery {
     const parsed = shaObservationSchema.parse(input);
     const data = { ...parsed, sha: parsed.sha.toLowerCase(), observedAt: new Date(parsed.observedAt).toISOString() };
     const production = await resolvedProductionEnvironment(this.store.pool);
-    await this.store.transaction((db, now) => this.shaObserver(db, actor, data, production, now));
+    await this.store.transaction((db, now) => this.shaEnvironment(db, data, production));
     const candidates: { id: string; mergeSha: string }[] = [], byMerge = new Map<string, boolean | null>();
     for (let after: { mergedAt: string; id: string } | null = null; ;) {
       const rows: { id: string; merge: string; merged_at: string }[] = (await this.store.pool.query(`SELECT id::text AS id, document->'delivery'->>'mergeSha' AS merge, COALESCE(document->'delivery'->>'mergedAt','') AS merged_at FROM work_items
@@ -613,7 +611,7 @@ export class Delivery {
       after = { mergedAt: rows.at(-1)!.merged_at, id: rows.at(-1)!.id };
     }
     return this.withReceipt(actor, 'observe-sha', data, key, async (db, now) => {
-      await this.shaObserver(db, actor, data, production, now);
+      await this.shaEnvironment(db, data, production);
       demand(Date.parse(data.observedAt) <= now.getTime() + 60_000, 'A deployment observation cannot lie in the future', 400);
       const existing = (await db.query(`SELECT payload FROM events WHERE kind='delivery.sha-observed' AND payload->'environment'->>'id'=$1 AND payload->>'sha'=$2 ORDER BY seq LIMIT 1`, [data.environment.id, data.sha])).rows[0]?.payload as ShaObservation | undefined;
       const observation: ShaObservation = existing ?? { ...data, id: randomUUID(), observer: actor.id, receivedAt: now.toISOString() };
@@ -633,20 +631,15 @@ export class Delivery {
     });
   }
   /**
-   * The authority a sha observation acts under: the caller's own enabled observer registration with
-   * a live lease epoch, for the production environment at its current revision, scoped to the services
-   * it reports, which are every service of that environment. A producer credential alone (a proof
-   * collector, a build attestor) carries no deployment authority.
+   * The environment a sha observation reads: the production environment at its current revision,
+   * observed across exactly its services, so neither another environment nor a partial reading moves
+   * an item's production deployment record.
    */
-  private async shaObserver(db: pg.PoolClient, actor: Principal, data: z.infer<typeof shaObservationSchema>, production: string, now: Date) {
-    const registration = await this.validation.registration(db, data.registration, 'observer');
-    demand(registration.principalId === actor.id, 'Wrong observer principal: a deployment observation by commit needs this credential\'s own observer registration', 403);
-    await this.assertLease(db, registration, actor, data.epoch, now, 'Observer lease epoch is expired or superseded; acquire the lease again');
-    demand(data.environment.id === registration.environment.id && data.environment.revision === registration.environment.revision, 'Observer is registered for a different environment', 403);
+  private async shaEnvironment(db: pg.PoolClient, data: z.infer<typeof shaObservationSchema>, production: string) {
     const environment = await this.environment(db, data.environment);
     demand(environment.id === production, `Only the production environment ('${production}') records a deployment by commit; '${environment.id}' is not it`, 400);
-    const outside = data.services.filter(service => !registration.services?.includes(service));
-    demand(!outside.length, `Services outside this observer's scope: ${outside.join(', ')}`, 403);
+    const unknown = data.services.filter(service => !environment.services.includes(service));
+    demand(!unknown.length, `Services that '${environment.id}' does not define: ${unknown.join(', ')}`, 400);
     const missing = environment.services.filter(service => !data.services.includes(service));
     demand(!missing.length, `A deployment observation by commit must cover every service of '${environment.id}'; missing: ${missing.join(', ')}`, 400);
     return environment;
