@@ -23,7 +23,7 @@ import type { GitHubCli } from './install/github.js';
 import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, unitLauncherCheckout, type LoopCodeReading } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, unitLauncherCheckout, executorDeclarationFile, type LoopCodeReading } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 import { mergerModes, type MergerMode } from './merger-mode.js';
 
@@ -1790,6 +1790,39 @@ export function hostTemplateStartsOtherCode(text: string, layout: { home: string
   return !launcher || (trim(launcher) !== trim(layout.graphyard) && trim(launcher) !== trim(layout.checkout));
 }
 
+/**
+ * GY-1859: a host install's executor template re-bound to the host checkout when it starts other
+ * code, and every slot the host's manager knows restarted onto it. The slots are those systemd
+ * lists loaded or enabled (an enabled slot it has not loaded is still the fleet), and the installer
+ * keeps the host's saved declaration (--count only declares a host that saved none): the repair never shrinks the
+ * configured fleet nor disables a slot the operator enabled.
+ */
+export async function alignHostExecutors(host: Pick<HostLoopSession, 'remote' | 'layout' | 'environment' | 'asUser' | 'checkoutAtRef'>, template: string | null): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }> {
+  if (!template) return { wrote: 'none', reason: `no executor template of this install is installed on ${host.remote.description}; graphyard install --apply installs it`, restarted: [] };
+  await host.checkoutAtRef();
+  const units = { executorTemplate: template }, known = new Set<string>();
+  for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
+    const listed = await host.asUser(host.layout.checkout, 'systemctl', ['--user', ...listing]);
+    for (const match of listed.stdout.matchAll(executorInstancePattern(units))) known.add(match[0]);
+  }
+  const instances = [...known].sort();
+  // A template starting another checkout is written again by the executor installer, from the host checkout now at this commit.
+  const current = await host.remote.exec('cat', [`${host.layout.userUnitDirectory}/${template}`], { allowFailure: true, timeout: 60_000 });
+  const rebind = current.code === 0 && hostTemplateStartsOtherCode(current.stdout, host.layout);
+  if (rebind) {
+    // The host's saved declaration is the fleet the installer keeps; only a host that never saved one
+    // is declared from the slots its manager knows, so no enabled slot is disabled by the repair.
+    const declared = (await host.remote.exec('cat', [`${host.layout.checkout}/${executorDeclarationFile}`], { allowFailure: true, timeout: 60_000 })).code === 0;
+    const installed = await host.asUser(host.layout.checkout, 'env', [...host.environment, 'node', `${host.layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', ...(declared ? [] : ['--count', String(Math.max(1, instances.length))])]);
+    if (installed.code !== 0) return { wrote: 'none', reason: `the executor installer on ${host.remote.description} failed: ${(installed.stderr || installed.stdout).trim().split('\n').pop()}`, restarted: [] };
+  }
+  if (instances.length) {
+    const restarted = await host.asUser(host.layout.checkout, 'systemctl', ['--user', 'restart', ...instances]);
+    if (restarted.code !== 0) return { wrote: 'none', reason: `systemctl --user restart ${instances.join(' ')} on ${host.remote.description} failed: ${restarted.stderr.trim()}`, restarted: [] };
+  }
+  return { wrote: rebind ? 'updated' : 'unchanged', reason: null, restarted: instances };
+}
+
 function hostLoopSessions(root: string, cliPath: string) {
   const hostSessions = new Map<string, Promise<HostLoopSession>>();
   return (hostInstall: string[]) => {
@@ -1891,23 +1924,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     },
     alignExecutors: async (options = {}, hostInstall) => {
       if (!hostInstall) return alignExecutorUnits(root, options);
-      const host = await hostLoopSession(hostInstall);
-      if (!options.template) return { wrote: 'none', reason: `no executor template of this install is installed on ${host.remote.description}; graphyard install --apply installs it`, restarted: [] };
-      await host.checkoutAtRef();
-      const listed = await host.asUser(host.layout.checkout, 'systemctl', ['--user', 'list-units', '--all', '--plain', '--no-legend', executorGlob({ executorTemplate: options.template })]);
-      const instances = [...new Set([...listed.stdout.matchAll(executorInstancePattern({ executorTemplate: options.template }))].map(match => match[0]))].sort();
-      // A template starting another checkout is written again by the executor installer, from the host checkout now at this commit.
-      const template = await host.remote.exec('cat', [`${host.layout.userUnitDirectory}/${options.template}`], { allowFailure: true, timeout: 60_000 });
-      const rebind = template.code === 0 && hostTemplateStartsOtherCode(template.stdout, host.layout);
-      if (rebind) {
-        const installed = await host.asUser(host.layout.checkout, 'env', [...host.environment, 'node', `${host.layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(Math.max(1, instances.length))]);
-        if (installed.code !== 0) return { wrote: 'none', reason: `the executor installer on ${host.remote.description} failed: ${(installed.stderr || installed.stdout).trim().split('\n').pop()}`, restarted: [] };
-      }
-      if (instances.length) {
-        const restarted = await host.asUser(host.layout.checkout, 'systemctl', ['--user', 'restart', ...instances]);
-        if (restarted.code !== 0) return { wrote: 'none', reason: `systemctl --user restart ${instances.join(' ')} on ${host.remote.description} failed: ${restarted.stderr.trim()}`, restarted: [] };
-      }
-      return { wrote: rebind ? 'updated' : 'unchanged', reason: null, restarted: instances };
+      return alignHostExecutors(await hostLoopSession(hostInstall), options.template ?? null);
     },
     replaceHostLoop: async (hostInstall, { unit, rewrite }) => {
       const host = await hostLoopSession(hostInstall);

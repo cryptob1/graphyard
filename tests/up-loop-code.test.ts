@@ -336,6 +336,40 @@ test('unit:up-host-template-judged-by-its-launcher — a host executor template 
   assert.equal(hostTemplateStartsOtherCode(unit('/usr/bin/true'), layout), true, 'an ExecStart naming no launcher is not known to start this code');
 });
 
+test('unit:up-host-executor-fleet-preserved — the host repair restarts every slot systemd lists loaded or enabled, and the installer keeps the saved declaration, so an enabled but unloaded slot is never disabled', async () => {
+  const { alignHostExecutors } = await up();
+  const layout = { home: '/home/graphyard', graphyard: '/srv/graphyard/graphyard', cli: '/srv/graphyard/graphyard/bin/graphyard.mjs', checkout: '/srv/graphyard/repo', userUnitDirectory: '/home/graphyard/.config/systemd/user', configDirectory: '/home/graphyard/.config/graphyard' };
+  const template = 'graphyard-executor-acme-shop@.service';
+  const host = (declared: boolean) => {
+    const calls: string[][] = [];
+    return { calls, session: {
+      layout, environment: ['GRAPHYARD_CONFIG_HOME=/home/graphyard/.config/graphyard'],
+      checkoutAtRef: async () => {},
+      remote: { description: 'graphyard@host', exec: async (_program: string, args: string[]) => args[0].endsWith('/.graphyard/executors.json')
+        ? (declared ? { code: 0, stdout: '{"version":1,"count":3}', stderr: '' } : { code: 1, stdout: '', stderr: 'No such file' })
+        : { code: 0, stdout: `[Service]\nWorkingDirectory=${layout.checkout}\nExecStart=/usr/bin/node /srv/graphyard/graphyard-pilot/scripts/graphyard-executor.mjs --slot %i\n`, stderr: '' } },
+      asUser: async (_cwd: string, program: string, args: string[]) => {
+        calls.push([program, ...args]);
+        if (args[1] === 'list-units') return { code: 0, stdout: 'graphyard-executor-acme-shop@1.service loaded active running slot 1\n', stderr: '' };
+        if (args[1] === 'list-unit-files') return { code: 0, stdout: 'graphyard-executor-acme-shop@1.service enabled enabled\ngraphyard-executor-acme-shop@2.service enabled enabled\ngraphyard-executor-acme-shop@3.service enabled enabled\n', stderr: '' };
+        return { code: 0, stdout: '', stderr: '' };
+      },
+    } as any };
+  };
+  const slots = ['graphyard-executor-acme-shop@1.service', 'graphyard-executor-acme-shop@2.service', 'graphyard-executor-acme-shop@3.service'];
+  const saved = host(true);
+  const aligned = await alignHostExecutors(saved.session, template);
+  assert.deepEqual(aligned, { wrote: 'updated', reason: null, restarted: slots });
+  const install = saved.calls.find(call => call.includes('--install'))!;
+  assert.ok(install, 'the template starting another checkout is installed again');
+  assert.equal(install.includes('--count'), false, 'a saved declaration is kept: the installer is never handed a count that could disable a slot');
+  assert.deepEqual(saved.calls.at(-1), ['systemctl', '--user', 'restart', ...slots], 'the enabled but unloaded slots restart with the loaded one');
+  const unsaved = host(false);
+  await alignHostExecutors(unsaved.session, template);
+  const declare = unsaved.calls.find(call => call.includes('--install'))!;
+  assert.deepEqual(declare.slice(declare.indexOf('--count')), ['--count', '3'], 'a host with no saved declaration is declared from every slot its manager knows, loaded or enabled');
+});
+
 test('unit:up-waits-for-the-loop-own-commit — the post-restart wait goes green only on a succeeded reading whose loop reported this CLI\'s commit; a failed or erroring reading, or a cursor with no commit, polls to a failure naming which', async () => {
   const { runUp } = await up();
   const deadline = (label: string, waitReading: LoopCodeReading | null) => resumedRoot(label).then(async root => {
