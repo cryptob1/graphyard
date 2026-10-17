@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: three consecutive same-signature failures stall: remedied once, verified (unknown-profile; 401: issued profile credential/deploy key, never coordinator's; merge-record key-reuse), else master woken; call retries per 5min. Log: `journalctl --user -u graphyard-master`.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: 3 same-signature cycles stall, remedied once, verified (unknown-profile/`review-launch`: profile configured; 401: issued profile credential/deploy key, never coordinator's; merge-record key-reuse), else master woken; retries per 5min. Log: `journalctl --user -u graphyard-master`.
 
 ### Perpetual master loop
 

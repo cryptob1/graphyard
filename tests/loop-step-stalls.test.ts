@@ -58,6 +58,9 @@ test('unit:stall-remedy-registry — the three seen signatures bind their remedi
   const profile = R.stepStallRemedy(S.stallSignature('dispatch', 'launch profile worker-x is not a configured agent environment; run master environments --apply'));
   assert.equal(profile?.kind, 'profile-unknown');
   assert.match(profile!.remedy, /master environments --apply/);
+  // The review launch boundary's own refusal (src/reviewer.ts launchReview, GY-1850), plain and backed off, binds the same remedy.
+  assert.equal(R.stepStallRemedy(S.stallSignature(S.reviewLaunchStep, 'Unknown reviewer profile reviewer-x'))?.kind, 'profile-unknown');
+  assert.equal(R.stepStallRemedy(S.stallSignature(S.reviewLaunchStep, 'Unknown reviewer profile reviewer-x: refused 3 launches in a row (last at 2026-10-17T07:00:00.000Z); backing off to one attempt every 5 minutes until the profiles change — write them with graphyard master environments --apply'))?.kind, 'profile-unknown');
   const credential = R.stepStallRemedy(S.stallSignature('dispatch', 'the control plane answered HTTP 401: credential not valid'));
   assert.equal(credential?.kind, 'credential-401');
   assert.match(credential!.remedy, /credential the install issued for its principal, or the merge writer's deploy key/);
@@ -532,4 +535,41 @@ test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing c
   S.noteCallFailure(loop, 'agents', `${S.stallHoldMarker}: held`, false);
   const empty = S.noteCycleStalls(loop, failed('Session listing failed: '), 14, tick(S.stallBackoffMs + 60_000));
   assert.deepEqual(empty.notes[0].run.calls, [], 'a failure with no text, or a hold, names no call');
+});
+
+test('unit:loop-step-stall-reviewer-profile — the launch boundary\u2019s recorded unknown-reviewer-profile refusal is the review-launch step\u2019s failure, binds the profile remedy, and the remedy verifies only once the named profile is configured', async () => {
+  const { S } = await load();
+  const { recordReviewerProfileRefusal, readReviewerProfileRefusal, clearReviewerProfileRefusal } = await import('../src/reviewer.js');
+  const directory = await temporaryDirectory('gy-1854-reviewer-profile-');
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(directory, 'coordinator.token'), cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main', githubAppId: 1, hostId: 'host', masterAgentName: 'master-test', workers: [] });
+  assert.deepEqual(await S.readReviewerProfileFailures(config), [], 'no refusal recorded, nothing owed');
+  // The real launch boundary's record, written as launchReview writes it.
+  await recordReviewerProfileRefusal(config, 'reviewer-x', clock);
+  const owed = await S.readReviewerProfileFailures(config);
+  assert.deepEqual(owed, [{ kind: S.reviewLaunchStep, state: 'failed', detail: 'Unknown reviewer profile reviewer-x' }]);
+  // Profiles the record no longer matches owe nothing: the missing name was written.
+  assert.deepEqual(S.reviewerProfileFailures(await readReviewerProfileRefusal(config), { workers: [], reviewers: [{ name: 'reviewer-x' } as never] }), []);
+  // Three consecutive cycles of the owed failure are one stall bound to the profile remedy.
+  const loop = state();
+  for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, owed, cycle, clock + cycle * 60_000);
+  const stall = Object.values(loop.stepStalls)[0];
+  assert.equal(stall.step, S.reviewLaunchStep);
+  assert.ok(stall.stalledAt, 'three cycles are one stall');
+  const write = { applied: true, profiles: [{ name: 'claude' }], skipped: [], next: 'wrote the profiles' };
+  const runner = (configured: string[]) => S.stallRemedyRunner(() => config, () => loop, async () => ({ work: [], now: '' }) as never, () => directory, undefined,
+    () => ({ apply: async () => write, configured: async () => ({ reviewers: configured.map(name => ({ name })) as never }) }));
+  // A write that leaves the named profile unconfigured is unverified, whatever else it wrote.
+  const missed = await runner(['claude'])('profile-unknown', stall);
+  assert.equal(missed.verified, false);
+  assert.match(missed.detail, /reviewer profile reviewer-x is still not configured/);
+  // Applied once through the stall step, verified against the configuration it produced.
+  const records = await S.remedyStalledSteps(loop, runner(['reviewer-x']), clock + 4 * 60_000);
+  assert.equal(records.length, 1);
+  assert.equal(records[0].record.kind, 'profile-unknown');
+  assert.equal(records[0].record.verified, true);
+  assert.equal((await S.remedyStalledSteps(loop, runner(['reviewer-x']), clock + 5 * 60_000)).length, 0, 'never applied twice for the run');
+  assert.equal(S.stallNeedsMaster(loop.stepStalls[stall.signature]), false, 'a verified remedy needs no master');
+  // The launch that gets past the lookup clears the record, and the run ends with it.
+  await clearReviewerProfileRefusal(config);
+  assert.deepEqual(await S.readReviewerProfileFailures(config), []);
 });

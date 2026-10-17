@@ -10,6 +10,7 @@ import type { HerdrAgent } from '../src/master/herdr.js';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { clearReviewerProfileRefusal, readReviewerProfileRefusal, recordReviewerProfileRefusal, reviewerProfileRefusalLimit, reviewerProfileRetryMs } from '../src/reviewer.js';
 
 // GY-1854 over simulated days. The real loop (runDaemon, cycling on its own wake, its chosen wait
 // pacing the driver's simulated clock) runs two days whose every cycle repeats the same failing
@@ -83,6 +84,11 @@ interface Day {
   cursorStalls: string;
   cursorMergeWriter: string;
   logs: string[];
+  /** The dispatcher's review launches the launch boundary refused for the unknown profile, and the ones that found it. */
+  reviewRefusals: number[];
+  reviewsLanded: number[];
+  /** Each profile write the remedy made. */
+  profileWrites: number[];
   state: DaemonState;
 }
 
@@ -99,9 +105,30 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
   /** The day's credential read and launch answer by the worker's credential file: refused (401) until it holds the issued token. */
   credentials?: { coordinator: string; worker: string; good: string };
   /** The cycle's own credential read fails this way on every cycle from `after` milliseconds into the day: the cycle fails before its master-session step. */
-  credentialFailure?: { text: string; after: number } }): Promise<Day> {
-  const dayConfig = () => config(options.credentials);
-  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], state: emptyDaemonState(dayConfig()) };
+  credentialFailure?: { text: string; after: number };
+  /** The dispatcher beside the loop launches a review asking for this reviewer profile after every cycle; the profile remedy's write configures it when `writes`. */
+  reviewerProfile?: { name: string; writes: boolean } }): Promise<Day> {
+  const files = options.credentials ?? (options.reviewerProfile ? await (async () => {
+    const directory = await temporaryDirectory('gy-1854-soak-reviewer-');
+    return { coordinator: join(directory, 'coordinator.token'), worker: join(directory, 'worker-a.token') };
+  })() : undefined);
+  const dayConfig = () => config(files);
+  const result: Day = { cycles: 0, launches: [], landed: [], reclaims: [], credentialReads: [], records: [], prompts: [], remedies: [], remedyHistory: [], waits: [], cursorStalls: 'null', cursorMergeWriter: 'null', logs: [], reviewRefusals: [], reviewsLanded: [], profileWrites: [], state: emptyDaemonState(dayConfig()) };
+  // The reviewer profiles the day's configuration carries: the remedy's write adds the asked-for one when the day says it does.
+  const reviewers: string[] = [];
+  /**
+   * One review launch of the dispatcher beside the loop, through the launch boundary's own record
+   * (GY-1850): a configured profile launches and clears the record; an unknown one is refused and
+   * counted — after three refusals in a row the boundary attempts it once per five minutes.
+   */
+  const launchReview = async () => {
+    const profile = options.reviewerProfile!.name, at = now;
+    if (reviewers.includes(profile)) { await clearReviewerProfileRefusal(dayConfig()); result.reviewsLanded.push(at - start); return; }
+    const known = await readReviewerProfileRefusal(dayConfig());
+    if (known && known.refusals >= reviewerProfileRefusalLimit && at - Date.parse(known.at) < reviewerProfileRetryMs) return;
+    await recordReviewerProfileRefusal(dayConfig(), profile, at);
+    result.reviewRefusals.push(at - start);
+  };
   let now = start;
   let stop = () => {};
   const effects: DaemonEffects = {
@@ -156,10 +183,16 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
     // The loop also listens for unhandledRejection and uncaughtException on this host: only the
     // stop signal's handler is the one the day's end calls.
     process: { on: (signal: string, handler: () => void) => { if (signal === 'SIGTERM') stop = handler; }, off: () => {} } as unknown as Pick<NodeJS.Process, 'on' | 'off'>,
+    // The profile remedy writes the day's profiles as master environments --apply would, and the configuration read back is the day's.
+    stallProfiles: () => ({
+      apply: async () => { result.profileWrites.push(now - start); if (options.reviewerProfile?.writes) reviewers.push(options.reviewerProfile.name); return { applied: true, profiles: [{ name: 'worker-a' }], skipped: [], next: 'wrote the worker and reviewer profiles from the logged-in environments' }; },
+      configured: async () => ({ reviewers: reviewers.map(name => ({ name })) as MasterConfig['reviewers'] }),
+    }),
     // A failed cycle's backoff is waited out on the same simulated clock.
     delay: async (wait: number) => { await runOptions.wake.sleep(wait); },
     wake: { sleep: async (wait: number) => {
       result.waits.push(wait);
+      if (options.reviewerProfile) await launchReview();
       judge(`cycle at +${Math.round((now - start) / minute)}min`);
       // The remedy attempt the run carries is written once and never re-written: its record is
       // snapshotted each cycle, so a second application would show here as a change.
@@ -421,4 +454,42 @@ test('unit:soak-step-stalls-coordinator-refused — a day whose coordinator cred
   assert.match(stallWakeSubjects(result.state, 'graphyard').find(entry => entry.key === subject)!.detail, /credential-401 remedy was applied once at .* and refused/);
   assert.equal(result.state.master.adopted, true, 'the listed master session was adopted for the wake, as the step would have adopted it');
   assertReadBounded(result, Date.parse(standing.stalledAt!) - start, 'credential');
+});
+
+test('unit:soak-step-stalls-reviewer-profile — a day whose review launches ask for an unknown reviewer profile: three refused cycles are one stall, the profile remedy is applied once and verified against the configuration it wrote, the next launch finds the profile and the stall ends, the master never woken', { timeout: 600_000 }, async () => {
+  const result = await runDay({ reviewerProfile: { name: 'reviewer-x', writes: true } });
+  const stalled = result.logs.filter(line => /recorded one stall bound to the profile-unknown remedy: review-launch: Unknown reviewer profile reviewer-x/.test(line));
+  assert.equal(stalled.length, 1, 'one stall, recorded once');
+  assert.deepEqual(result.profileWrites.length, 1, 'the profile remedy is applied exactly once over the day');
+  assert.equal(result.logs.filter(line => /the profile-unknown stall remedy applied, verified/.test(line)).length, 1, 'applied once and verified');
+  // The refusals stop at the remedy: the first launch after it finds the profile, and every one after does too.
+  assert.ok(result.reviewRefusals.length >= stallCycleBound && result.reviewRefusals.length <= stallCycleBound + 1, `the launches were refused only until the remedy (${result.reviewRefusals.length})`);
+  assert.ok(result.reviewRefusals.every(at => at <= result.profileWrites[0]), 'no launch is refused after the profile write');
+  assert.ok(result.reviewsLanded.length > result.cycles / 2, 'reviews launch for the rest of the day');
+  assert.deepEqual(result.state.stepStalls, {}, 'the stall ends once the launches find the profile');
+  assert.equal(result.prompts.filter(prompt => /stall:/.test(prompt)).length, 0, 'a verified remedy never wakes the master session');
+});
+
+test('unit:soak-step-stalls-reviewer-profile-unverified — a day whose profile remedy writes no reviewer profile of the asked-for name: one stall, the remedy applied once and recorded unverified, the master woken once, and the refused launch attempted at most once per five minutes all day', { timeout: 600_000 }, async () => {
+  const result = await runDay({ reviewerProfile: { name: 'reviewer-x', writes: false } });
+  const standing = Object.values(result.state.stepStalls).find(run => run.step === 'review-launch');
+  assert.ok(standing?.stalledAt, 'the day recorded the review-launch stall');
+  assert.equal(Object.keys(result.state.stepStalls).length, 1, 'one signature, one run — the record stays bounded');
+  assert.equal(standing.signature, 'review-launch: Unknown reviewer profile reviewer-x');
+  assert.equal(result.profileWrites.length, 1, 'the profile remedy is applied once for the run, never again however long it stands');
+  assert.equal(standing.remedy?.kind, 'profile-unknown');
+  assert.equal(standing.remedy?.verified, false);
+  assert.match(standing.remedy!.detail, /reviewer profile reviewer-x is still not configured/);
+  // Bounded retries: after its three refusals in a row the launch is attempted once per five minutes.
+  const gaps = result.reviewRefusals.slice(reviewerProfileRefusalLimit).map((at, index) => at - result.reviewRefusals[reviewerProfileRefusalLimit - 1 + index]);
+  assert.ok(gaps.length > 10, 'the day runs many windows past the stall');
+  assert.ok(gaps.every(gap => gap >= stallBackoffMs), `every refused launch past the third waits a full five minutes: ${gaps.map(gap => Math.round(gap / minute)).join(', ')} min`);
+  assert.equal(result.reviewsLanded.length, 0);
+  // Bounded wakes: the unverified remedy wakes the master once for the run, naming the remedy's outcome.
+  const subject = stallSubjectKey(standing.signature);
+  const wakes = result.prompts.filter(prompt => prompt.includes(subject));
+  assert.equal(wakes.length, 1, `one wake per run: ${wakes.length} over the day`);
+  const task = stallWakeSubjects(result.state, 'graphyard').find(entry => entry.key === subject)!;
+  assert.match(task.detail, /profile-unknown remedy was applied once .* unverified/);
+  assert.ok(Object.keys(result.state.stepStalls).length <= retainedStepStalls);
 });

@@ -10,7 +10,8 @@ import { applyStepStallRemedy, stepStallRemedy, type BoundStepStallRemedy, type 
 import type { MasterConfig } from '../master.js';
 import type { DaemonEffects } from './effects.js';
 import { mergeRecordKey, pushEnvironment } from '../merge-writer/executor.js';
-import { readCredentialFile } from '../master/config.js';
+import { loadMasterConfig, readCredentialFile } from '../master/config.js';
+import { configuredProfileFingerprint, readReviewerProfileRefusal, type ReviewerProfileRefusal } from '../reviewer.js';
 import { mergeWriterSettings } from '../master/merge-writer-settings.js';
 import { installIdFor } from '../install/types.js';
 import { installDirectory } from '../install/secrets.js';
@@ -311,7 +312,7 @@ export function stallWakeSubjects(state: DaemonState, cliPath: string): Actionab
  * failed nowhere ends the runs it did not fail in. Answers what was counted and how many standing
  * runs the cycle ended, so the caller persists a cursor the bookkeeping moved.
  */
-export function noteCycleStalls(state: DaemonState, actions: Pick<DaemonAction, 'kind' | 'state' | 'detail'>[], cycle: number, now: number): { notes: StepStallNote[]; cleared: number } {
+export function noteCycleStalls(state: DaemonState, actions: readonly (Pick<DaemonAction, 'kind' | 'state' | 'detail'> | StepFailure)[], cycle: number, now: number): { notes: StepStallNote[]; cleared: number } {
   const calls = failedCalls.get(state) ?? [];
   failedCalls.delete(state);
   const notes = actions.filter(action => action.state === 'failed' && !isStallHold(action.detail)).map(action => {
@@ -333,6 +334,35 @@ export function noteCycleStalls(state: DaemonState, actions: Pick<DaemonAction, 
   return { notes, cleared: cleared + noteStepsSucceeded(state, cycle, now) };
 }
 
+/** A failure the cycle owes the stall step beside its recorded actions: a call no action row carries. */
+export interface StepFailure { kind: string; state: 'failed'; detail: string }
+
+/**
+ * The step a review launch refused for an unknown reviewer profile signs as (GY-1854). Reviews are
+ * launched by the dispatcher beside the loop, which answers such a refusal as a configuration wait
+ * and never as a failed action (src/auto-dispatch.ts, GY-1850), so the loop reads the refusal the
+ * launch boundary records instead (src/reviewer.ts readReviewerProfileRefusal).
+ */
+export const reviewLaunchStep = 'review-launch';
+
+/**
+ * The review-launch failure one cycle owes the stall step: the refusal the launch boundary
+ * recorded, while it stands against the profiles this loop has configured, signed exactly as the
+ * boundary throws it — `Unknown reviewer profile NAME` — so every cycle it stands is that cycle's
+ * one failure of the same signature and three are one stall bound to the profile remedy. A record
+ * the profiles moved past (the missing name written) is stale until the next launch clears it, and
+ * owes nothing; the launch that gets past the lookup clears the record, and the run ends with it.
+ */
+export function reviewerProfileFailures(refusal: ReviewerProfileRefusal | null, config: Pick<MasterConfig, 'workers' | 'reviewers'>): StepFailure[] {
+  if (!refusal || refusal.profiles !== configuredProfileFingerprint(config)) return [];
+  return [{ kind: reviewLaunchStep, state: 'failed', detail: `Unknown reviewer profile ${refusal.profile}` }];
+}
+
+/** Reads the launch boundary's unknown-reviewer-profile record and answers the failure it owes; an unreadable record owes nothing. */
+export async function readReviewerProfileFailures(config: Pick<MasterConfig, 'credentialFile' | 'workers' | 'reviewers'>): Promise<StepFailure[]> {
+  return reviewerProfileFailures(await readReviewerProfileRefusal(config).catch(() => null), config);
+}
+
 /**
  * Judges the report the profile write answered with (GY-1854): applied when it wrote at least one
  * profile change, verified when the write landed and no credential was skipped unread.
@@ -344,6 +374,27 @@ export function profileRemedyOutcome(report: { applied?: boolean; profiles?: unk
     verified: report.applied === true && profiles > 0 && skipped === 0,
     detail: `${profiles} profile change(s) written${skipped ? `, ${skipped} credential(s) skipped: ${report.skipped!.map(entry => entry.reason).join('; ')}` : ''}: ${report.next ?? 'no report'}`.slice(0, 2000),
   };
+}
+
+/**
+ * The verification a review-launch stall's profile remedy owes (GY-1854): the write is verified only
+ * when the reviewer profile the refused launches named is configured once it landed — read back from
+ * the configuration the write produced, which the loop and the dispatcher reload — so a write that
+ * changed other profiles, or none, is unverified and the stall wakes the master session. A stall of
+ * any other step keeps the write's own verification.
+ */
+export function profileRemedyVerification(outcome: StepStallRemedyOutcome, stall: StepStall | undefined, configured: Pick<MasterConfig, 'reviewers'>): StepStallRemedyOutcome {
+  if (!stall || stall.step !== reviewLaunchStep) return outcome;
+  const named = /Unknown reviewer profile (\S+)/.exec(stall.lastError)?.[1] ?? null;
+  const present = !!named && configured.reviewers.some(profile => profile.name === named);
+  return { ...outcome, verified: present,
+    detail: `${outcome.detail}; reviewer profile ${named ?? '(unnamed)'} is ${present ? 'configured now, so the next review launch finds it' : 'still not configured after the write, so review launches asking for it are still refused'}`.slice(0, 2000) };
+}
+
+/** The profile remedy's ports: the write `master environments --apply` makes, and the configuration it produced, read back. */
+export interface ProfileRemedyPorts {
+  apply(): Promise<Parameters<typeof profileRemedyOutcome>[0]>;
+  configured(): Promise<Pick<MasterConfig, 'reviewers'>>;
 }
 
 /**
@@ -484,13 +535,18 @@ export function hostCredentialPorts(config: MasterConfig, root: string): Credent
  * (`renewHostCredentials` over `hostCredentialPorts`, or the ports a test hands in), and adopts
  * the server's merge ledger for a refused merge record.
  */
-export function stallRemedyRunner(config: () => MasterConfig, state: () => DaemonState, read: DaemonEffects['snapshot'], root: () => string, credentials?: () => CredentialRenewalPorts): StepStallRemedyRunner {
+export function stallRemedyRunner(config: () => MasterConfig, state: () => DaemonState, read: DaemonEffects['snapshot'], root: () => string, credentials?: () => CredentialRenewalPorts, profiles?: () => ProfileRemedyPorts): StepStallRemedyRunner {
   return async (kind, stall) => {
     if (kind === 'profile-unknown') {
-      return profileRemedyOutcome(await setupAgentEnvironments(root(), { apply: true, verify: async token => {
-        const response = await fetch(`${config().url}/api/status`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5_000) });
-        return response.json();
-      } }));
+      const ports: ProfileRemedyPorts = profiles ? profiles() : {
+        apply: () => setupAgentEnvironments(root(), { apply: true, verify: async token => {
+          const response = await fetch(`${config().url}/api/status`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(5_000) });
+          return response.json();
+        } }),
+        configured: () => loadMasterConfig(root()),
+      };
+      const outcome = profileRemedyOutcome(await ports.apply());
+      return stall?.step === reviewLaunchStep ? profileRemedyVerification(outcome, stall, await ports.configured()) : outcome;
     }
     if (kind === 'merge-record-idempotency') {
       // The refused attempt is the newest failed merge action that carries the refusal — the

@@ -213,9 +213,11 @@ export interface StepStallRemedyOutcome { outcome: 'applied' | 'unchanged' | 're
 export const stepStallRemedyRegistry: readonly { kind: StepStallRemedyKind; bind: (signature: string) => BoundStepStallRemedy | null }[] = [
   {
     // A launch profile no configured agent environment backs refuses this way (src/master/environments.ts
-    // inspectProfileAccounts, src/master/dispatch.ts prepareWorkerLaunch).
+    // inspectProfileAccounts, src/master/dispatch.ts prepareWorkerLaunch), and a review launch naming
+    // a reviewer profile no configured one carries throws "Unknown reviewer profile NAME"
+    // (src/reviewer.ts launchReview, GY-1850), which the loop signs as its review-launch step.
     kind: 'profile-unknown',
-    bind: signature => /is not a configured agent environment|A complete launch profile is required/.test(signature)
+    bind: signature => /is not a configured agent environment|A complete launch profile is required|Unknown reviewer profile \S/.test(signature)
       ? { kind: 'profile-unknown', remedy: 'write the agent profiles as master environments --apply does (setupAgentEnvironments with apply), from the logged-in environments, and let the loop redispatch' }
       : null,
   },
