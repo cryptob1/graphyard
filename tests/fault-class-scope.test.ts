@@ -15,6 +15,7 @@ import { decideScopeRequest, followUpPaths, impliedScopes, namedPaths, plannedCo
 import { machineryOf, faultClassMachinery, noWallClockGatePath, peerModuleGround, importingTestGround } from '../src/model/scope-companions.js';
 import { automaticScopeGrounds, scopeRefusalFault, transientScopeRefusal } from '../src/daemon/cycle-scope.js';
 import { ciCheckRefusal } from '../src/model/ci-refusal.js';
+import { requiredCheckFailure } from '../src/model/required-check-refusal.js';
 import { ChildProcessError } from '../src/child-runner.js';
 import { baseFetchAttempts, refLockContention, successionReader } from '../src/review-scope.js';
 import { faultClassPolicyDefaults } from '../src/model/fault-classes.js';
@@ -788,6 +789,17 @@ test(`manual:fault-class-scope — scope-request|GY-1881|${gy1881At}: the failed
   const source = standing1893(gy1881Fixture);
   source.scopeRequest = { ...source.scopeRequest!, paths: ['src/up.ts'] };
   assert.equal(decideScopeRequest(source, source.scopeRequest).state, 'refused', 'only a test file is granted: the item answers the check, it does not take new source scope');
+  // A protection-bound, path-like check (`ci/unit`) the gate holds as failed: its name survives the
+  // path masking, its bound app's run counts, and another app's failure for it grants nothing.
+  const bound = standing1893(gy1881Fixture);
+  bound.observation = { checks: [{ name: 'ci/unit', result: 'failure', appId: 777, id: 100 }], requiredChecks: [{ name: 'ci/unit', appId: 777 }], candidate: bound.candidate } as Work['observation'];
+  bound.gates = [{ name: 'test', passed: false, reasons: [requiredCheckFailure('ci/unit')], ciAppIds: [15368] }];
+  bound.scopeRequest = { ...bound.scopeRequest!, reason: `The required ci/unit check failed at tests/pi-provider-limit-exhaustion.test.ts:199; stub the clock there.` };
+  const boundVerdict = decideScopeRequest(bound, bound.scopeRequest);
+  assert.equal(boundVerdict.state, 'approved', boundVerdict.reason);
+  const boundOtherApp = standing1893(gy1881Fixture);
+  Object.assign(boundOtherApp, { gates: bound.gates, scopeRequest: bound.scopeRequest, observation: { ...bound.observation, checks: [{ name: 'ci/unit', result: 'failure', appId: 15368, id: 100 }] } });
+  assert.equal(decideScopeRequest(boundOtherApp, boundOtherApp.scopeRequest!).state, 'refused', 'a protection-bound check counts only its bound app\'s run');
 });
 
 test(`manual:fault-class-scope — scope-request|GY-1888|${gy1888At}: a fault-class item's own machinery is implied scope, granted and planned at filing`, () => {

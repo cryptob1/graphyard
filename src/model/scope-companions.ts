@@ -10,6 +10,7 @@
 import { documentationGlobMatches } from './documentation-glob.js';
 import type { FaultClass } from './fault-classes.js';
 import { ciCheckName } from './ci-refusal.js';
+import { requiredCheckFailurePattern } from './required-check-refusal.js';
 import type { WorkOrigin } from './interventions.js';
 import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 
@@ -56,9 +57,9 @@ const newestDecisiveRun = (runs: readonly CheckRun[]) => {
   const pool = runs.filter(run => run.result !== 'cancelled');
   return (pool.length ? pool : runs).reduce<CheckRun | undefined>((a, b) => !a ? b : b.id !== undefined && (a.id === undefined || b.id > a.id) ? b : a.id !== undefined && b.id === undefined ? a : b, undefined);
 };
-/** Trusted counting failure for `name`: test-gate CI apps, newest decisive run (merge-queue `requiredCheckRun`). */
-const trustedRequiredFailure = (name: string, item: FailedCheckSource) => {
-  const apps = item.gates?.find(gate => gate.name === 'test')?.ciAppIds ?? [15368];
+/** Trusted counting failure for `name`: a protection-bound app, else test-gate CI apps; newest decisive run (merge-queue `requiredCheckRun`). */
+const trustedRequiredFailure = (name: string, item: FailedCheckSource, boundApp: number | null) => {
+  const apps = boundApp !== null ? [boundApp] : item.gates?.find(gate => gate.name === 'test')?.ciAppIds ?? [15368];
   const run = newestDecisiveRun((item.observation?.checks ?? []).filter(entry => entry.name === name && apps.includes(entry.appId)));
   return !!run && run.result !== 'cancelled' && failedRequiredConclusions.has(run.result);
 };
@@ -144,7 +145,7 @@ export async function peerModuleGround(path: string, text: string | null, planne
 /** Prose names the check (paths stripped so `.test.ts` never counts as the `test` check). */
 const reasonNamesCheck = (reason: string, name: string) => {
   let prose = reason;
-  for (const path of namedPaths(reason)) prose = prose.split(path).join(' ');
+  for (const path of namedPaths(reason)) if (path !== name) prose = prose.split(path).join(' ');
   prose = prose.replace(/:\d+/g, ' ');
   return new RegExp(`(?:^|[^\\w.-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[^\\w.-]|$)`, 'i').test(prose);
 };
@@ -162,8 +163,10 @@ export function failedCheckTestGround(path: string, item: FailedCheckSource, rea
   if (!observation?.candidate || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const policy = item.policy?.checks ?? [];
   // Membership matches merge-queue requiredChecksOf (policy names plus protection-bound extras).
-  const required = [...policy, ...(observation.requiredChecks ?? []).filter(check => check.name !== 'Graphyard / merge' && check.name !== 'graphyard/landable' && !policy.includes(check.name)).map(check => check.name)];
-  const failed = [...new Set(required.filter(name => (item.gates ?? []).some(gate => !gate.passed && gate.reasons.some(held => ciCheckName(held) === name)) && reasonNamesCheck(reason, name) && trustedRequiredFailure(name, item)))];
+  const required = [...policy.map(name => ({ name, appId: null })), ...(observation.requiredChecks ?? []).filter(check => check.name !== 'Graphyard / merge' && check.name !== 'graphyard/landable' && !policy.includes(check.name))];
+  // The gate holds a policy check as not passed, a protection-only one as failed (GY-430).
+  const heldName = (held: string) => ciCheckName(held) ?? requiredCheckFailurePattern.exec(held)?.[1] ?? null;
+  const failed = [...new Set(required.filter(({ name, appId }) => (item.gates ?? []).some(gate => !gate.passed && gate.reasons.some(held => heldName(held) === name)) && reasonNamesCheck(reason, name) && trustedRequiredFailure(name, item, appId)).map(check => check.name))];
   return failed.length ? `${path} is the test file the failed required check ${failed.join(' and ')} on this item's current candidate names, which the item answers within its attempt` : null;
 }
 /**
