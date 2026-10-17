@@ -9,6 +9,14 @@ import { defineRoutes, parseJson } from '../routes.js';
 export const deliveryRoutes = defineRoutes('delivery', [
   { method: 'GET', path: '/api/delivery', handle: ({ services }) => services.delivery.status() },
   { method: 'GET', path: '/api/delivery/observations', handle: ({ url, services }) => services.delivery.observations(url.searchParams.get('environment') ?? '', url.searchParams.get('cursor') ?? undefined) },
+  // GY-1861: a producer's reading of the commit production serves; containment is GitHub's ancestry when configured, else equality alone.
+  {
+    method: 'POST', path: '/api/delivery/observe-sha',
+    async handle(context) {
+      const { actor, services: { delivery, github } } = context;
+      return delivery.observeSha(actor, await parseJson(context, undefined, '{}'), context.idempotencyKey(), github ? (ancestor, descendant) => github.contains(ancestor, descendant) : undefined);
+    },
+  },
   {
     method: 'POST', path: /^\/api\/delivery\/(build|release|approve|select|lease|observe|notify|sweep|rollback|rollback-claim|rollback-settle|rollback-resolve)$/,
     async handle(context, [command]) {
