@@ -587,6 +587,7 @@
     "tests/observation-rate-pacing.test.ts": 793,
     "tests/observation-throughput.test.ts": 12802,
     "tests/onboard-inventory.test.ts": 500,
+    "tests/onboarding-delivery-uat-fixture.test.ts": 12000,
     "tests/onboarding.test.ts": 2300,
     "tests/one-reviewer-per-request.test.ts": 7821,
     "tests/operator-agent-502-status.test.ts": 1186,

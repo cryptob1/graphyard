@@ -273,6 +273,9 @@ jobs:
         with: { node-version: '24', cache: npm }
       - run: npm ci
       - run: npx playwright install --with-deps chromium
+      # The onboarding fixture's control plane serves the candidate's own dashboard from dist/.
+      - name: Build the candidate's dashboard for the onboarding fixture
+        run: npx vite build --configLoader runner
       - name: Deploy the candidate's exact SHA to UAT
         # Refused while UAT serves another candidate whose validation has no verdict yet, and leased
         # on the tip it observed, so a manual `release uat` never moves UAT under a running validation.
@@ -283,7 +286,9 @@ jobs:
         # reads the board and status through UAT's own API, and `browser` loads the dashboard UAT
         # serves in Chromium, signs in with the UAT token and opens the Work view, and `e2e` runs every
         # repository case under e2e/cases/ targeted at uat (docs/validation.md), writing its report for
-        # the next step. Those four exercise
+        # the next step; onboarding-delivery-defaults runs instead on a fresh project and control plane
+        # normally onboarded from this checkout (scripts/onboarding-delivery-fixture.mjs, GY-1910), since
+        # the shared UAT install keeps its explicit github merger. Those four exercise
         # the UAT deployment itself; the container and chart suites ran on runners at the candidate SHA, so each
         # of those jobs' results above joins the record as a suite of its own. `zero-touch` (GY-1481)
         # runs the zero-touch onboarding scenario on this checkout of the candidate's SHA: `graphyard up
@@ -298,7 +303,7 @@ jobs:
           # shellcheck disable=SC2016
           node bin/graphyard.mjs release validate "${{ needs.candidate.outputs.id }}" --url "$UAT_URL" --wait 1200 --api \
             --suite 'browser=node --import tsx --eval "import(\"./src/release-candidate.ts\").then(m => m.runBrowserSuite())"' \
-            --suite 'e2e=node --import tsx --eval "import(\"./src/e2e/runner.ts\").then(m => m.runE2eSuite())"' \
+            --suite 'e2e=node --import tsx scripts/onboarding-delivery-fixture.mjs' \
             --suite 'container-acceptance=test "$CONTAINER_ACCEPTANCE" = success' \
             --suite 'container-recovery=test "$CONTAINER_RECOVERY" = success' \
             --suite 'chart=test "$CHART" = success' \
