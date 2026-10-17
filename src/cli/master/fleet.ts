@@ -6,7 +6,8 @@ import { parseArgs } from 'node:util';
 import { agentOwner, listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
-import { applyProtection, protectionPlan, protectionRun, readProtection, readWorkflows } from '../../protection.js';
+import { applyProtection, protectionPlan, protectionRun, readProtection, readWorkflows, type ProtectionRun } from '../../protection.js';
+import { demand } from '../../model/refusal.js';
 import { dequeuePullRequestEntry, pullRequestMergeState, withdrawEnqueuedPullRequests, type GraphqlTransport, type WithdrawClient, type WithdrawEntry } from '../../github.js';
 import { cleanupTipRefs } from '../../tip-cleanup.js';
 import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
@@ -75,12 +76,17 @@ export async function masterHarnessDrift(root: string, master: MasterConfig, opt
 /**
  * The merge-queue reads and take-backs of one repository over the operator's `gh` credential — the
  * path `master protection` writes through — as the transport `master withdraw` acts over (GY-1871).
+ * `gh api graphql` prints GraphQL's `{ data, errors }` envelope, so the envelope is unwrapped here
+ * and GitHub's `errors` refuse: `pullRequestMergeState` expects the response `data`, and a refusal
+ * must not read as an empty report.
  */
-export function ghMergeQueueTransport(repository: string, base: string): WithdrawClient {
+export function ghMergeQueueTransport(repository: string, base: string, run: ProtectionRun = protectionRun): WithdrawClient {
   const graphql: GraphqlTransport = async (query, variables) => {
     const args = ['api', 'graphql', '-f', `query=${query}`];
     for (const [name, value] of Object.entries(variables)) args.push(typeof value === 'number' ? '-F' : '-f', `${name}=${String(value)}`);
-    return JSON.parse(protectionRun('gh', args));
+    const response = JSON.parse(run('gh', args));
+    demand(!Array.isArray(response?.errors) || response.errors.length === 0, `GitHub refused the GraphQL read: ${(response.errors as { message?: unknown }[]).map(error => error?.message).filter(Boolean).join('; ') || 'unreported error'}`, 502);
+    return response?.data;
   };
   return {
     mergeQueueState: pr => pullRequestMergeState(graphql, repository, base, pr),
@@ -88,13 +94,17 @@ export function ghMergeQueueTransport(repository: string, base: string): Withdra
   };
 }
 /**
- * Every pull request the control plane's work items hold, deduplicated across candidate and
- * submission and ordered by number: what `master withdraw` reads and takes back (GY-1871). GitHub
- * decides each one's state, so a merged or closed pull request reads as `none` and is left untouched.
+ * Every pull request the control plane's open work items hold, deduplicated across candidate and
+ * submission and ordered by number: what `master withdraw` reads and takes back (GY-1871). A
+ * settled item (`done`: delivered, or closed without delivery) holds no merge intent, so its pull
+ * requests are never read — the snapshot keeps every settled delivery's PR numbers, and re-probing
+ * the whole ledger would spend the operator's GitHub budget on PRs that can never be queued again.
+ * For the open items' PRs GitHub decides each one's state, so a merged or closed pull request
+ * reads as `none` and is left untouched.
  */
-export function withdrawEntries(work: readonly { key?: string; candidate?: { pr?: number } | null; submission?: { pr?: number } | null }[]): WithdrawEntry[] {
+export function withdrawEntries(work: readonly { key?: string; stage?: string; candidate?: { pr?: number } | null; submission?: { pr?: number } | null }[]): WithdrawEntry[] {
   const entries = new Map<number, string | null>();
-  for (const item of work) for (const pr of [item.candidate?.pr, item.submission?.pr]) if (typeof pr === 'number' && Number.isSafeInteger(pr) && pr > 0 && !entries.has(pr)) entries.set(pr, item.key ?? null);
+  for (const item of work) { if (item.stage === 'done') continue; for (const pr of [item.candidate?.pr, item.submission?.pr]) if (typeof pr === 'number' && Number.isSafeInteger(pr) && pr > 0 && !entries.has(pr)) entries.set(pr, item.key ?? null); }
   return [...entries].map(([pr, key]) => ({ key, pr })).sort((a, b) => a.pr - b.pr);
 }
 /** Launch profiles, the master session, reviewer launches, and GitHub administration through the operator. */
@@ -160,7 +170,11 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
     if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error(`${repository} does not name a repository as OWNER/NAME`);
     const actor = (await masterApi('status', await readSecretFromStdin(10_000))).actor;
     const entries = withdrawEntries((await masterApi('work-snapshot')).work);
-    return print({ repository, ...(await withdrawEnqueuedPullRequests(ghMergeQueueTransport(repository, master.baseBranch), entries, actor, !!values.apply)) });
+    const report = await withdrawEnqueuedPullRequests(ghMergeQueueTransport(repository, master.baseBranch), entries, actor, !!values.apply);
+    // An incomplete take-back must not read as done to the operator or a script: `master protection`
+    // sets a failing exit on refusal the same way.
+    if (report.failed > 0) process.exitCode = 1;
+    return print({ repository, ...report });
   }
   if (id === 'harness') {
     const { values, positionals } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: true });

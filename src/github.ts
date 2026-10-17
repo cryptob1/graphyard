@@ -2868,16 +2868,20 @@ export type WithdrawClient = Pick<GitHub, 'mergeQueueState' | 'dequeuePullReques
  * queued and armed ones are taken back through `dequeuePullRequest` and re-read, so the report names
  * each pull request's number, head sha, prior mode and result. A pull request already out of
  * GitHub's hands is `none` and left untouched, so a second run writes nothing and reports the same
- * set. Without `apply` nothing is written: the rows are the plan an apply would carry out. Only the
- * operator's admin identity withdraws; any other identity is refused.
+ * set. A pull request whose take-back GitHub refused, whose re-read failed, or that GitHub still
+ * holds afterwards is a failed row: `failed` counts them, so the caller can fail the command's exit
+ * and a script can tell an incomplete take-back from a done one without parsing the rows. Without
+ * `apply` nothing is written: the rows are the plan an apply would carry out, and none of them
+ * fails. Only the operator's admin identity withdraws; any other identity is refused.
  */
-export async function withdrawEnqueuedPullRequests(client: WithdrawClient, entries: readonly WithdrawEntry[], actor: { id?: string; role?: string }, apply = false): Promise<{ applied: boolean; rows: WithdrawRow[] }> {
+export async function withdrawEnqueuedPullRequests(client: WithdrawClient, entries: readonly WithdrawEntry[], actor: { id?: string; role?: string }, apply = false): Promise<{ applied: boolean; failed: number; rows: WithdrawRow[] }> {
   demand(actor.role === 'admin', `Withdrawing Graphyard's merge intent is operator-only; ${actor.id ?? 'this credential'} is a ${actor.role ?? 'credential of unrecorded role'}`, 403);
   const rows: WithdrawRow[] = [];
+  let failed = 0;
   for (const entry of entries) {
     let state: GitHubMergeQueueState;
     try { state = await client.mergeQueueState(entry.pr); }
-    catch (error) { rows.push({ key: entry.key, pr: entry.pr, head: null, mode: null, action: 'none', result: `GitHub's merge-queue state could not be read: ${error instanceof Error ? error.message : String(error)}` }); continue; }
+    catch (error) { rows.push({ key: entry.key, pr: entry.pr, head: null, mode: null, action: 'none', result: `GitHub's merge-queue state could not be read: ${error instanceof Error ? error.message : String(error)}` }); failed += 1; continue; }
     const action = state.mode === 'queued' ? 'dequeue' as const : state.mode === 'auto-merge' ? 'disable-auto-merge' as const : 'none' as const;
     const row: WithdrawRow = { key: entry.key, pr: entry.pr, head: state.head, mode: state.mode, action, result: 'none' };
     if (action === 'none') { rows.push(row); continue; }
@@ -2886,10 +2890,11 @@ export async function withdrawEnqueuedPullRequests(client: WithdrawClient, entri
       await client.dequeuePullRequest(state);
       const after = await client.mergeQueueState(entry.pr);
       row.result = after.mode === 'none' ? (action === 'dequeue' ? 'dequeued' : 'auto-merge disabled') : `GitHub still reports ${after.mode}`;
-    } catch (error) { row.result = `refused: ${error instanceof Error ? error.message : String(error)}`; }
+      if (after.mode !== 'none') failed += 1;
+    } catch (error) { row.result = `refused: ${error instanceof Error ? error.message : String(error)}`; failed += 1; }
     rows.push(row);
   }
-  return { applied: apply, rows };
+  return { applied: apply, failed, rows };
 }
 /** A file of a GitHub compare or pull request file list, as the main guard compares them. */
 const fileChange = (file: any): FileChange => ({ filename: String(file?.filename ?? ''), status: String(file?.status ?? ''), previousFilename: typeof file?.previous_filename === 'string' ? file.previous_filename : null, patch: typeof file?.patch === 'string' ? file.patch : null });
