@@ -60,6 +60,12 @@ export const releaseFilingIdentity = { id: 'graphyard-release-follow-up', capabi
 /** The reason an operator-agent filing must carry; the create path refuses one without it. */
 export const filingReason = 'A failed release candidate files its follow-up';
 /**
+ * The follow-up's later-candidate UAT pass, declared a post-deploy verification (GY-1957): it can
+ * only exist on a candidate cut after the fix merges, so it must never gate the follow-up's own
+ * merge (GY-188) — `master verify-deployment` reads it on the serving release after delivery.
+ */
+export const followUpUatPassProof = 'manual:post-deploy/release-candidate-uat-pass';
+/**
  * Pure: why the control plane would refuse to create work as `actor`, the principal a release
  * environment's filing credential names (its `/api/status` actor), or null when it is admitted.
  */
@@ -400,6 +406,14 @@ export const failingSuites = (uat: UatRecord) => uat.suites.filter(suite => !sui
  * The one follow-up item a failed candidate files. It names the failing suite and the candidate
  * SHA, and lists the deliveries the candidate carried for context only: they stay delivered, and
  * the fix arrives as new work merged to main and carried by a later candidate.
+ *
+ * Its later-candidate UAT pass is declared a post-deploy verification beside a pre-merge criterion
+ * the head can show (GY-1957): the fix carries a test reproducing the failing suite. Undeclared,
+ * the UAT-pass proof was demanded before merge (GY-188) while it can only exist on a candidate cut
+ * after the fix merges, so the follow-up was born unmergeable and only a two-party requirements
+ * rewrite could free it (GY-1938). Declared, the reviewer judges that criterion on the head's
+ * pre-merge evidence, the merge gate does not require it, and postDeployChecks owes it on the
+ * serving release until a trusted pass is recorded there after the merge.
  */
 export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord, except: readonly string[] = []) {
   const failing = failingSuites(uat).filter(suite => !except.includes(suite.name));
@@ -411,7 +425,10 @@ export function followUpItem(candidate: ReleaseCandidate, uat: UatRecord, except
     description: `Release candidate ${candidate.id} at ${candidate.sha} failed UAT. Failing suite${failing.length > 1 ? 's' : ''}: ${failing.map(suite => `${suite.name} — ${suite.detail}`).join('; ')}. `
       + `It carried ${carried}; those deliveries stay delivered and are not reworked. Fix forward on main; the next candidate cut after the fix carries it to UAT.`,
     type: 'bug', priority: 1, reason: filingReason,
-    criteria: [{ id: 'AC-1', text: `The ${first.name} suite that failed on candidate ${candidate.id} (${candidate.sha}) passes against the UAT deployment of a later candidate`, proofs: ['manual:release-candidate-uat-pass'] }],
+    criteria: [
+      { id: 'AC-1', text: `The fix carries a test that reproduces the failing ${first.name} suite of candidate ${candidate.id} (${candidate.sha})`, proofs: ['unit:failing-suite-reproduced'] },
+      { id: 'AC-2', text: `The ${first.name} suite that failed on candidate ${candidate.id} (${candidate.sha}) passes against the UAT deployment of a later candidate`, proofs: [followUpUatPassProof] },
+    ],
     policy: { checks: ['test', 'typecheck'], review: true },
   };
 }
