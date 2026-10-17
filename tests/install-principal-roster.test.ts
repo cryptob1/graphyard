@@ -262,7 +262,7 @@ test('unit:external-import-requires-grant — a producer holding external-runs:i
 
   // No producer is created without a grant: not by the planner, and not by principal add.
   assert.ok(!plannedPrincipals('owner-project', { producerProofs: [] }).some(entry => entry.role === 'producer'));
-  assert.throws(() => rosterEntry({ id: 'huck-engineer', role: 'producer' }), /A producer is created only with an explicit grant \(--grant external-runs:import\)/);
+  assert.throws(() => rosterEntry({ id: 'huck-engineer', role: 'producer' }), /A producer is created only with an explicit grant \(--grant external-runs:import\|delivery:observe-sha\)/);
   assert.throws(() => rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [] }), /explicit grant/);
   assert.deepEqual(rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [GRANT, GRANT] }), { ...huck, source: 'principal' });
 });
