@@ -450,7 +450,9 @@ const runningStates = new Set(['queued', 'in_progress', 'waiting', 'pending', 'r
 /** GY-1513: a candidate's recorded soak verdict (`rc-soak/ID`): passed, failed or cancelled, when, and the soak run that recorded it. */
 export interface CandidateSoak { result: string; at: string; run: string | null }
 /** GY-1491: one release candidate as the loop reads it: the merges it carries, those on main behind it now and its recorded soak verdict, if any (GY-1513). */
-export interface PromotionCandidate { id: string; sha: string; cutAt: string; prs: number | null; queued: number | null; soak?: CandidateSoak | null }
+/** GY-1882: a candidate's newest `rc-seal-check/` answer: whether the uat release credential may seal its imports. */
+export interface CandidateSealCheck { mayseal: boolean; role: string; needed: string[]; at: string; secret: string; environment: string }
+export interface PromotionCandidate { id: string; sha: string; cutAt: string; prs: number | null; queued: number | null; soak?: CandidateSoak | null; sealCheck?: CandidateSealCheck }
 /** How many of the newest candidates the loop reads and `master status` lists. */
 export const promotionCandidatesListed = 5;
 export interface PromotionLedger { mainSha: string | null; promotedSha: string | null; promotedAt: string | null; behind: number | null; candidates?: PromotionCandidate[] }
@@ -712,7 +714,7 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
   return {
     ...(options.merger ? { merger: options.merger } : {}), ...(local !== undefined ? { local } : {}),
     ledger: async () => {
-      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*');
+      await git('fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${config.baseBranch}:refs/remotes/origin/${config.baseBranch}`, '+refs/tags/rc-production/*:refs/tags/rc-production/*', '+refs/tags/rc/*:refs/tags/rc/*', '+refs/tags/rc-soak/*:refs/tags/rc-soak/*', '+refs/tags/rc-seal-check/*:refs/tags/rc-seal-check/*');
       const mainSha = (await git('rev-parse', `refs/remotes/origin/${config.baseBranch}^{commit}`)).trim().toLowerCase() || null;
       let promotedSha: string | null = null, promotedAt: string | null = null;
       try {
@@ -732,12 +734,17 @@ export function promotionReads(config: MasterConfig, root: string, run: ChildRun
       const soaked = new Map<string, CandidateSoak>();
       for (const record of await tagRecords(git, 'refs/tags/rc-soak/', 2 * promotionCandidatesListed))
         if (typeof record?.id === 'string' && typeof record?.result === 'string') soaked.set(record.id, { result: record.result, at: typeof record.at === 'string' ? record.at : '', run: typeof record.run === 'string' ? record.run : null });
+      // GY-1882: the newest seal check of each candidate; tags sort by candidate id, then check time.
+      const sealChecks = new Map<string, CandidateSealCheck>();
+      for (const record of await tagRecords(git, 'refs/tags/rc-seal-check/', 4 * promotionCandidatesListed))
+        if (typeof record?.id === 'string' && typeof record?.mayseal === 'boolean' && !sealChecks.has(record.id))
+          sealChecks.set(record.id, { mayseal: record.mayseal, role: String(record.role), needed: Array.isArray(record.needed) ? record.needed.map(String) : [], at: String(record.at), secret: String(record.secret), environment: String(record.environment) });
       for (const record of await tagRecords(git, 'refs/tags/rc/', promotionCandidatesListed)) {
         if (typeof record?.id !== 'string' || typeof record?.sha !== 'string' || typeof record?.cutAt !== 'string') continue;
         const sha = record.sha.toLowerCase();
         let queued: number | null = null;
         if (mainSha) try { queued = Number((await git('rev-list', '--first-parent', '--count', `${sha}..${mainSha}`)).trim()); } catch { queued = null; }
-        candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null, soak: soaked.get(record.id) ?? null });
+        candidates.push({ id: record.id, sha, cutAt: record.cutAt, prs: Number.isInteger(record.prs) ? record.prs : null, queued: Number.isInteger(queued) ? queued : null, soak: soaked.get(record.id) ?? null, ...(sealChecks.has(record.id) ? { sealCheck: sealChecks.get(record.id) } : {}) });
       }
       return { mainSha, promotedSha, promotedAt, behind, candidates };
     },

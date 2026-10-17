@@ -197,6 +197,40 @@ export async function readImports(plane: Pick<ImportPlane, 'store'>, sha: string
   return { sha, candidate: id ? { id, sha } : null, runs, hold: importedHold(runs), sealed: id ? !!await importSeal(plane.store.pool, { id, sha }) : false };
 }
 
+/** The roles that may seal a candidate's imports for promotion: an admin, or an operator agent (the release-filing identity). */
+export const sealRoles = ['admin', 'operator-agent'] as const;
+export type SealAuthority = { mayseal: true; role: string } | { mayseal: false; role: string; needed: string[] };
+/**
+ * GY-1882: whether `actor` may seal, answered without sealing anything or writing an event, so a
+ * promotion workflow checks its credential before soak and UAT results are spent on a seal it
+ * cannot make (`GET /api/validation/import/seal-authority`, `graphyard release seal-check`).
+ */
+export const sealAuthority = (actor: Principal): SealAuthority =>
+  (sealRoles as readonly string[]).includes(actor.role) ? { mayseal: true, role: actor.role } : { mayseal: false, role: actor.role, needed: [...sealRoles] };
+/** Where the workflows hold the credential `release imports` seals with: the uat environment's release-filing secret. */
+export const sealCredential = { secret: 'GRAPHYARD_RELEASE_TOKEN', environment: 'uat' } as const;
+/** The ledger records `release seal-check ID` writes, one per check, on the candidate's exact SHA (`rc-seal-check/ID.AT`). */
+export const sealCheckTagPrefix = 'rc-seal-check/';
+export interface SealCheckRecord { id: string; sha: string; at: string; mayseal: boolean; role: string; needed: string[]; secret: string; environment: string }
+export function sealCheckRecord(candidate: Pick<ReleaseCandidate, 'id' | 'sha'>, answer: SealAuthority, now: Date): SealCheckRecord {
+  return { id: candidate.id, sha: candidate.sha, at: now.toISOString(), mayseal: answer.mayseal, role: answer.role, needed: answer.mayseal ? [] : answer.needed, ...sealCredential };
+}
+export const sealCheckTag = (record: SealCheckRecord) => `${sealCheckTagPrefix}${record.id}.${record.at.replace(/[-:]/g, '')}`;
+/**
+ * The one attention item (owned by the master) master status raises when the newest candidate whose seal was checked was refused for
+ * seal authority, naming the secret, its environment, the role it holds and the role it needs; null
+ * when no candidate was checked, or the newest check may seal.
+ */
+export function sealRefusalLine(candidates: readonly { id: string; sealCheck?: Omit<SealCheckRecord, 'id' | 'sha'> | null }[]) {
+  const checked = candidates.find(candidate => candidate.sealCheck);
+  const check = checked?.sealCheck;
+  if (!checked || !check || check.mayseal) return null;
+  return { subject: 'installation', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, text: `Promotion of candidate ${checked.id} was refused for seal authority at ${check.at}: ${check.secret} in the ${check.environment} environment authenticates as ${check.role}, and sealing a candidate's imports needs ${check.needed.join(' or ')}`,
+    next: `graphyard master setup --apply, which re-issues the release-filing identity (an operator agent) and stores its token as ${check.secret} in the ${check.environment} environment; the next candidate's seal check then passes` };
+}
+/** The loop cursor's promotion state as master status reads it: the refused seal check's item, or none. */
+export const sealRefusalAttention = (promotion?: { candidates?: Parameters<typeof sealRefusalLine>[0] } | null) => { const line = sealRefusalLine(promotion?.candidates ?? []); return line ? [line] : []; };
+
 /**
  * Read candidate `id`'s hold at `sha` for promotion and, when it is released, seal it in the same
  * transaction under the candidate's lock: no import binds to the candidate afterwards, so the hold a
@@ -205,7 +239,7 @@ export async function readImports(plane: Pick<ImportPlane, 'store'>, sha: string
  * release-filing identity the workflows hold) seal; sealing twice answers the standing seal.
  */
 export async function sealImports(plane: Pick<ImportPlane, 'store'>, actor: Principal, sha: string, input: unknown, now = new Date()) {
-  demand(actor.role === 'admin' || actor.role === 'operator-agent', 'Sealing a candidate\'s imports for promotion needs an admin or the release-filing identity', 403);
+  demand(sealAuthority(actor).mayseal, 'Sealing a candidate\'s imports for promotion needs an admin or the release-filing identity', 403);
   demand(/^[a-f0-9]{40}$/.test(sha), 'A candidate head is a 40-hex commit', 400);
   const id = (input as { candidate?: unknown } | null)?.candidate;
   demand(typeof id === 'string' && /^[0-9A-Za-z._-]{1,100}$/.test(id), 'Name the candidate whose imports are sealed: {"candidate":"ID"}', 400);

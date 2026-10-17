@@ -177,6 +177,8 @@ export const promotionStateSchema = z.object({
     queued: z.number().int().min(0).nullable(),
     /** GY-1513: the advisory soak's verdict as the candidate's record (rc-soak/ID) keeps it, once its run recorded one. */
     soak: z.object({ result: z.string().max(32), at: z.string().max(64), run: z.string().max(500).nullable() }).strict().nullable().optional(),
+    /** GY-1882: the candidate's newest seal check (rc-seal-check/ID.AT): whether the uat release credential may seal its imports. */
+    sealCheck: z.object({ mayseal: z.boolean(), role: z.string().max(64), needed: z.array(z.string().max(64)).max(8), at: z.string().max(64), secret: z.string().max(100), environment: z.string().max(100) }).strict().optional(),
   }).strict()).max(5).optional(),
   /** GY-1513: the newest advisory soak runs (release-candidate-soak.yml), by the SHA each soaks; never holds promotion back. */
   soaks: z.array(z.object({
