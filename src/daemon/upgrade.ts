@@ -20,7 +20,7 @@ import { detailChanged } from './decisions.js';
 import { checkoutState, loopCodeRoot, reconcileLoadedRelease, unquotePath, type CheckoutState } from './checkout-state.js';
 import { heldCliSnapshots, heldExecutorEntryOf, holdCliAt, sameCommit } from './held-cli.js';
 import { restartEndedBySupervisorStop } from './loop-supervisor.js';
-import { externalUpgradeRefusal, managesOwnCheckout } from './upgrade-ownership.js';
+import { externalInstallPass, managesOwnCheckout } from './upgrade-ownership.js';
 
 /**
  * Code the loop and the executors load: TypeScript modules and the package manifest. A diff that
@@ -48,6 +48,7 @@ export function upgradeTouchesCode(paths: readonly string[]): boolean {
  * readings agree on the same names.
  */
 const listedPaths = (out: string): string[] => out.split('\n').map(path => unquotePath(path.trim())).filter(Boolean);
+
 // The held-cli snapshot pin (GY-1585/GY-1773/GY-1790) and the loop's own supervisor unit (GY-916) are
 // modules of their own; this path re-exports them, so every existing import keeps working.
 export { heldCliPointer, heldCliSnapshotAt, readHeldCli, holdCliAt, heldLauncherOf, heldExecutorEntryOf, loadedHeldSnapshot, leftBehindCheckoutAttention } from './held-cli.js';
@@ -55,7 +56,7 @@ export { loopUnitPattern, detectLoopSupervisorUnit, restartEndedBySupervisorStop
 
 export { checkoutState, type CheckoutState };
 // GY-1958: the project-identification probe re-exported, so every existing import keeps working.
-export { externalUpgradeRefusal, managesOwnCheckout } from './upgrade-ownership.js';
+export { externalUpgradeRefusal, isExternalUpgradeRefusal, managesOwnCheckout } from './upgrade-ownership.js';
 
 export type SelfUpgradeOutcome =
   | { outcome: 'skipped'; reason: string }
@@ -208,20 +209,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     } else touchStanding(state, refusedKey, at());
     return { outcome: 'refused', reason, commit };
   };
-  // GY-1958: the managed repository decides what the alignment may touch. `config.baseBranch` is
-  // the managed repository's base branch; where that repository is not the project the CLI checkout
-  // tracks — an external install managing another project — fetching `+refs/heads/${config.baseBranch}`
-  // in the checkout would pull whatever shares that ref name in the checkout's own origin and move
-  // it onto Graphyard's unreleased base tip, and the release-lag hold would merge-base a served SHA
-  // this repository cannot place. Such an install runs no alignment: the pass records that the
-  // install upgrades by command, and the checkout stays where it stands. The checkout's own
-  // project — Graphyard's install of Graphyard, a linked worktree of it, or another checkout of its
-  // upstream — keeps today's behaviour. The record stands every pass (the refusal never clears by
-  // touching the checkout), deduplicated into one action row like every standing refusal.
-  if (!(await managesOwnCheckout(codeRoot, deps.root, deps.run))) {
-    const standing = await checkoutState(codeRoot, deps.run);
-    return refused(externalUpgradeRefusal, standing.commit);
-  }
   /**
    * The supervisor unit re-applied before the loop re-executes through it (GY-916): a unit whose
    * text drifted from the running configuration — a hand-copied example's watchdog window — is
@@ -245,6 +232,14 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     return aligned;
   };
   const alignUnit = async (): Promise<boolean> => (await alignUnitRecorded()).wrote !== 'refused';
+  // GY-1958: an install managing another project runs no alignment — the checkout is never fetched
+  // in or moved, what an earlier alignment left owed is retired, and the install upgrades by command.
+  if (!(await managesOwnCheckout(codeRoot, deps.root, deps.run))) return externalInstallPass(state, codeRoot, deps.run, {
+    at, persist, unstall, refused, note: (detail, failure) => note(detail, failure, alignKey),
+    settle: async () => (await holdCli(null).then(() => null, error => `the held snapshot pin could not be lifted: ${message(error)}`))
+      ?? (await alignExecutorUnits(null).then(why => why && `the executor units could not be returned to the checkout's launcher: ${why}`))
+      ?? (await alignUnit() ? null : `the loop's supervisor unit could not be returned to the checkout's launcher (upgrade:unit names why)`),
+  });
   /**
    * GY-1790: the unit the restart re-executes the loop through, pointed at the launcher it must
    * start before the cursor records the restart as made — the snapshot's while a snapshot restart's

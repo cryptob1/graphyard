@@ -6,12 +6,14 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { deploymentObservationSchema, emptyDaemonState, writeDaemonState, type DaemonState } from '../src/master-daemon.js';
-import { alignRunningLoopUnit, heldCliSnapshotAt, heldCliPointer, loadedHeldSnapshot, performSelfUpgrade, readHeldCli, type SelfUpgradeDeps, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
+import { daemonStatePath } from '../src/daemon/state.js';
+import { alignRunningLoopUnit, heldCliSnapshotAt, heldCliPointer, holdCliAt, loadedHeldSnapshot, performSelfUpgrade, readHeldCli, type SelfUpgradeDeps, type SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { daemonEffects } from '../src/daemon/effects-production.js';
 import { alignLoopUnit, loopUnitOf } from '../src/supervisor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { minute } from './helpers/soak-world.js';
 import { soakControlPlanes } from './helpers/soak-plane.js';
+import { upgradeRefusalAttention } from '../src/master/release-lag.js';
 import { simulateDay } from './helpers/soak-simulation.js';
 
 /**
@@ -52,7 +54,7 @@ interface World {
 }
 
 /** The day's world: one shared history, a managed clone at its own commit, a CLI checkout one move behind, a real cursor and unit file. */
-async function world(label: string): Promise<World> {
+async function world(label: string, options: { external?: boolean } = {}): Promise<World> {
   // The CLI checkout's history: base (the loaded commit), then the merged release, then heads pushed as the day runs.
   const seed = await temporaryDirectory(`soak-code-root-${label}-seed`), origin = await temporaryDirectory(`soak-code-root-${label}-origin`);
   await mkdir(join(seed, 'src'), { recursive: true });
@@ -84,10 +86,23 @@ async function world(label: string): Promise<World> {
   git(checkout, 'fetch', '-q', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main');
   git(checkout, 'checkout', '-q', '--detach', loaded);
   const managedRoot = await temporaryDirectory(`soak-code-root-${label}-managed`);
-  git(managedRoot, 'init', '-q');
-  git(managedRoot, 'remote', 'add', 'origin', origin);
-  git(managedRoot, 'fetch', '-q', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main');
-  git(managedRoot, 'checkout', '-q', '--detach', 'origin/main');
+  if (options.external) {
+    // GY-1958: an external install — the managed repository is another project, its own history
+    // and its own origin, whose base branch shares the name `main` with Graphyard's.
+    const appOrigin = await temporaryDirectory(`soak-code-root-${label}-app-origin`);
+    git(appOrigin, 'init', '-q', '--bare');
+    git(managedRoot, 'init', '-q', '-b', 'main');
+    await writeFile(join(managedRoot, 'app.txt'), 'the managed app\n');
+    git(managedRoot, 'add', 'app.txt');
+    git(managedRoot, 'commit', '-q', '-m', 'app');
+    git(managedRoot, 'remote', 'add', 'origin', appOrigin);
+    git(managedRoot, 'push', '-q', 'origin', 'main');
+  } else {
+    git(managedRoot, 'init', '-q');
+    git(managedRoot, 'remote', 'add', 'origin', origin);
+    git(managedRoot, 'fetch', '-q', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main');
+    git(managedRoot, 'checkout', '-q', '--detach', 'origin/main');
+  }
   // The control-plane configuration a managed repository carries in production, untracked like the real one.
   await mkdir(join(managedRoot, '.graphyard'), { recursive: true });
   await writeFile(join(managedRoot, '.graphyard', 'master.json'), '{}\n');
@@ -292,4 +307,41 @@ test('manual:loop-code-root-real-loop-release-lag-day — the real loop over a s
   assert.ok(r.passes.some(pass => pass.stall === 'release-lagged' && pass.pin), 'the day held a restart with the served release pinned');
   assert.deepEqual(r.restarts.filter(restart => !restart.contained), [], 'every restart landed on a commit the served release contains');
   assertDistinctRoots(day, root, 'release-lag day', false);
+});
+
+test('manual:loop-code-root-external-install-day — an install managing another project over a simulated day of Graphyard heads and app deploys: the legacy pin and owed restart an earlier loop left are retired on the first pass, then every pass refuses with one standing action row and one unchanging attention, writes nothing to the cursor, restarts nothing, and never fetches in or moves the CLI checkout or the managed repository', { timeout: 300_000 }, async () => {
+  const w = await world('external', { external: true });
+  const originTip = () => git(w.checkout, 'rev-parse', 'refs/remotes/origin/main');
+  const fetched = originTip();
+  // What the pre-GY-1958 loop left: a held snapshot pinned under the CLI checkout and a restart owed.
+  await holdCliAt(w.checkout, run, w.loaded);
+  w.state.upgrade.snapshot = { at: new Date(dayStart).toISOString(), commit: w.loaded, checkout: w.loaded, dirty: ['src/loop.ts'] };
+  w.state.upgrade.pending = { from: null, to: w.loaded, code: true };
+  w.state.upgrade.stalled = { cause: 'executors-refused', reason: 'a claim was in flight', since: new Date(dayStart).toISOString(), at: new Date(dayStart).toISOString() };
+  const cursor = daemonStatePath(w.master);
+  const attentions = new Set<string>();
+  let written: string | null = null;
+  // A day: Graphyard's own main advances every four hours while the app deploys every cycle.
+  for (let pass = 0; pass < 6 * 24; pass++) {
+    if (pass % 24 === 12) await w.advance(10 + pass);
+    w.state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: w.managed.head, at: new Date(dayStart + pass * cycle).toISOString(), reason: null, deployed: [`GY-${pass + 1}`], pending: [] });
+    const outcome = await w.pass(`external day, pass ${pass}`);
+    assert.equal(outcome.outcome, 'refused', JSON.stringify(outcome));
+    assert.equal(git(w.checkout, 'rev-parse', 'HEAD'), w.loaded, `pass ${pass}: the CLI checkout never moves`);
+    assert.equal(originTip(), fetched, `pass ${pass}: nothing is fetched into the CLI checkout`);
+    assert.equal(w.pins.at(-1), null, `pass ${pass}: the legacy pin is lifted and no pin is placed`);
+    assert.equal(w.state.upgrade.pending, null);
+    assert.equal(w.state.upgrade.snapshot, undefined);
+    assert.equal(w.state.upgrade.stalled, undefined, `pass ${pass}: no stall stands`);
+    for (const item of upgradeRefusalAttention(w.state.upgrade.refused, w.managed.root, 'main')) attentions.add(`${item.text}\n${item.next}`);
+    // From the second pass on the cursor on disk is never rewritten: the standing refusal wakes nothing.
+    if (pass === 1) { written = await readFile(cursor, 'utf8'); assert.match(written, /upgrade:refused/); }
+    if (pass > 1) assert.equal(await readFile(cursor, 'utf8').catch(() => null), written, `pass ${pass}: an idle refusal writes nothing`);
+  }
+  assert.equal(w.restarts.length, 0, 'an external install never restarts itself onto Graphyard code');
+  assert.equal(w.state.actions['upgrade:refused']?.attempts, 1, 'one deduplicated action row for the whole day');
+  assert.equal(w.state.actions['upgrade:align']?.state, 'done', 'the retirement is recorded once');
+  assert.equal(attentions.size, 1, `one unchanging attention across the day: ${[...attentions].join(' | ')}`);
+  assert.match([...attentions][0], /graphyard up\b/);
+  assert.doesNotMatch([...attentions][0], /checkout --detach/);
 });

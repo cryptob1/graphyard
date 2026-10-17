@@ -86,7 +86,7 @@ test('unit:upgrade-external-install — a verified deployment of a managed repos
     const outcome = await performSelfUpgrade(master, state, deps(managed, run));
 
     assert.ok(outcome.outcome === 'refused', `the external install's pass refuses: ${JSON.stringify(outcome)}`);
-    assert.match(outcome.reason, /`graphyard upgrade`/, 'the refusal names the command the install upgrades by');
+    assert.match(outcome.reason, /graphyard up\b/, 'the refusal names the command the install upgrades by');
     // No fetch and no checkout ran anywhere in the pass, least of all in the CLI checkout.
     assert.deepEqual(operations.filter(entry => /^(fetch|checkout)\b/.test(entry)), [], `the pass ran only reads: ${operations.join(' | ')}`);
     // HEAD, branch and working tree stand exactly where they stood.
@@ -101,11 +101,19 @@ test('unit:upgrade-external-install — a verified deployment of a managed repos
     const action = state.actions['upgrade:refused'];
     assert.ok(action, 'the pass records its upgrade:refused action');
     assert.equal(action.state, 'failed');
-    assert.match(action.detail, /`graphyard upgrade`/);
+    assert.match(action.detail, /graphyard up\b/);
     const attention = upgradeRefusalAttention(state.upgrade.refused, managed, 'main');
     assert.equal(attention.length, 1);
     assert.equal(attention[0].subject, 'upgrade');
-    assert.match(attention[0].text, /`graphyard upgrade`/, 'master status names that the install upgrades by command');
+    assert.match(attention[0].text, /upgrades by command/, 'master status names that the install upgrades by command');
+    assert.match(attention[0].next, /graphyard up\b/, 'the remedy is the command upgrade');
+    // The remedy never sends anyone to detach-checkout the managed repository, nor says the loop aligns a checkout here.
+    for (const words of [attention[0].text, attention[0].next]) {
+      assert.doesNotMatch(words, /checkout --detach/);
+      assert.doesNotMatch(words, /aligns the checkout/);
+      assert.ok(!words.includes(managed), 'the attention names no command against the managed repository');
+    }
+    const timeOfRefusal = state.upgrade.refused!.at;
 
     // The next pass records no new refusal row: one standing refusal, its time touched, not re-opened.
     const { run: runAgain, operations: operationsAgain } = recordingRun();
@@ -113,6 +121,7 @@ test('unit:upgrade-external-install — a verified deployment of a managed repos
     assert.equal(second.outcome, 'refused');
     assert.deepEqual(operationsAgain.filter(entry => /^(fetch|checkout)\b/.test(entry)), [], 'no later pass fetches or moves either');
     assert.equal(state.actions['upgrade:refused']?.attempts, 1, 'the standing refusal is deduplicated, not re-recorded per pass');
+    assert.equal(state.upgrade.refused?.at, timeOfRefusal, 'the standing refusal is not rewritten, so the attention never churns');
     assert.equal(state.upgrade.stalled, undefined, 'nothing is owed, so no stall stands');
   } finally {
     await rm(checkout, { recursive: true, force: true });
@@ -135,7 +144,7 @@ test('unit:upgrade-external-install — a managed root that is no repository is 
     const outcome = await performSelfUpgrade(master, state, deps(managed, run));
 
     assert.ok(outcome.outcome === 'refused', `the unreadable root's pass refuses: ${JSON.stringify(outcome)}`);
-    assert.match(outcome.reason, /`graphyard upgrade`/);
+    assert.match(outcome.reason, /graphyard up\b/);
     assert.deepEqual(operations.filter(entry => /^(fetch|checkout)\b/.test(entry)), [], 'a root git cannot place never sends the upgrade fetching');
   } finally {
     await rm(checkout, { recursive: true, force: true });
@@ -251,5 +260,67 @@ test('unit:upgrade-external-install — managesOwnCheckout judges the checkout\u
     await rm(otherOrigin, { recursive: true, force: true });
     await rm(worktree, { recursive: true, force: true });
     await rm(plain, { recursive: true, force: true });
+  }
+});
+
+test('unit:upgrade-external-install — origins are compared case-sensitively in their path and case-insensitively in their host', async () => {
+  // Two repositories whose common directories differ, answering these origins.
+  const judged = (code: string, managed: string) => managesOwnCheckout('/code', '/managed', async (_command, args) => {
+    if (args[2] === 'rev-parse') return `${args[1]}/.git\n`;
+    return `${args[1] === '/code' ? code : managed}\n`;
+  });
+  assert.equal(await judged('/srv/Owner/App', '/srv/owner/app'), false, 'filesystem origins differing in path case are two projects');
+  assert.equal(await judged('https://GitHub.com/cryptob1/graphyard.git', 'git@github.com:cryptob1/graphyard'), true, 'one upstream spelled two ways, its host in another case, is one project');
+  assert.equal(await judged('https://github.com/Owner/App', 'https://github.com/owner/other'), false);
+});
+
+test('unit:upgrade-external-install — an external install an earlier loop already moved has its owed restart and held snapshot retired, never left standing', async () => {
+  const checkout = await temporaryDirectory('upgrade-external-legacy-checkout');
+  const managed = await temporaryDirectory('upgrade-external-legacy-managed');
+  try {
+    const loaded = await repository(checkout, 'README.md', 'graphyard\n');
+    await repository(managed, 'app.txt', 'app\n');
+    const master = await config(join(checkout, 'bin/graphyard.mjs'), 'owner/app');
+    const state = emptyDaemonState(master);
+    state.release = { commit: loaded, dirty: false };
+    state.deployment = verified(git(managed, 'rev-parse', 'HEAD'));
+    // What the pre-GY-1958 loop left on the cursor after moving this install's checkout.
+    state.upgrade.pending = { from: 'a'.repeat(40), to: loaded, code: true };
+    state.upgrade.snapshot = { at: iso(0), commit: loaded, checkout: 'b'.repeat(40), dirty: ['src/master.ts'] };
+    state.upgrade.stalled = { cause: 'executors-refused', reason: 'a claim was in flight', since: iso(0), at: iso(0) };
+    const pins: (string | null)[] = [], executorEntries: (string | null)[] = [];
+    let unitRewrites = 0, unitRefused = true;
+    const { run, operations } = recordingRun();
+    const legacyDeps = { ...deps(managed, run),
+      holdCli: async (commit: string | null) => { pins.push(commit); },
+      alignExecutorUnits: async (script: string | null) => { executorEntries.push(script); return { wrote: 'updated', reason: null }; },
+      alignUnit: async () => { unitRewrites++; return unitRefused ? { wrote: 'refused', reason: 'unit not writable', launcherStale: true } : { wrote: 'updated', reason: null }; } };
+
+    // A step that fails keeps the record, says why once, and is retried next pass.
+    assert.equal((await performSelfUpgrade(master, state, legacyDeps)).outcome, 'refused');
+    assert.ok(state.upgrade.pending && state.upgrade.snapshot, 'nothing is forgotten while the unit still names the snapshot’s launcher');
+    assert.equal(state.actions['upgrade:align']?.state, 'failed');
+    assert.match(state.actions['upgrade:align']!.detail, /could not be retired/);
+
+    unitRefused = false;
+    assert.equal((await performSelfUpgrade(master, state, legacyDeps)).outcome, 'refused');
+    assert.deepEqual(pins, [null, null], 'the pin is lifted, never placed');
+    assert.deepEqual(executorEntries, [null, null], 'the executor units go back to the checkout’s launcher');
+    assert.equal(unitRewrites, 2);
+    assert.equal(state.upgrade.pending, null, 'the owed restart is retired');
+    assert.equal(state.upgrade.snapshot, undefined, 'the held snapshot record is retired');
+    assert.equal(state.upgrade.stalled, undefined, 'the stall is retired');
+    assert.equal(state.actions['upgrade:align']?.state, 'done');
+    assert.match(state.actions['upgrade:align']!.detail, /^Retired the restart owed onto .*the held snapshot of .*the executors-refused stall/);
+    assert.equal(state.upgrade.refused?.reason, externalUpgradeRefusal);
+    assert.deepEqual(operations.filter(entry => /^(fetch|checkout)\b/.test(entry)), [], 'retiring moves nothing');
+    assert.equal((await checkoutState(checkout, runPlain)).commit, loaded);
+
+    // Settled, later passes have nothing to retire.
+    await performSelfUpgrade(master, state, legacyDeps);
+    assert.deepEqual(pins, [null, null]);
+  } finally {
+    await rm(checkout, { recursive: true, force: true });
+    await rm(managed, { recursive: true, force: true });
   }
 });

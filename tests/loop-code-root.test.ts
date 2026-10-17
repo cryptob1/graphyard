@@ -129,7 +129,7 @@ test('unit:loop-reports-cli-checkout-commit — a loop run from a separate CLI c
   // that gate: the pass reads the CLI checkout, finds its own commit there, corrects the cursor,
   // records the refusal, and writes all of it durably.
   assert.equal(outcome.outcome, 'refused');
-  assert.match(outcome.reason, /graphyard upgrade/);
+  assert.match(outcome.reason, /graphyard up\b/);
   assert.equal(state.release.commit, cli.loaded);
   assert.notEqual(state.release.commit, managed.commit);
   assert.equal(state.release.dirty, false);
