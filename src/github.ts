@@ -3197,18 +3197,29 @@ export function landedPeerObserver(engine: Engine, github: GitHub, peers: Work[]
 /** GY-1917. How often delivered heads' verdicts are re-read, for how long after the merge, and at most how many per read. */
 export const deliveredVerdictIntervalMs = 5 * 60_000, deliveredVerdictWatchMs = 24 * 60 * 60_000, deliveredVerdictBatch = 25;
 const deliveredVerdictsRead = new WeakMap<Engine, number>();
+/** Where the last delivered-verdict read stopped, so the next one continues past it (GY-1917 rework). */
+const deliveredVerdictCursor = new WeakMap<object, { mergedAt: string; id: string }>();
 /**
- * GY-1917. Re-read the latest `Graphyard / merge` run of every head delivered within
- * `deliveredVerdictWatchMs` (newest first, at most `deliveredVerdictBatch`) and record a changed one
- * on the delivered observation, so `public-verdict-contradicts-delivery` sees a run rewritten after
- * the item reached done. Reads only GitHub; the delivery itself is never touched, and an unchanged
- * verdict saves nothing. Answers how many verdicts it recorded.
+ * GY-1917. Re-read the latest `Graphyard / merge` run of heads delivered within
+ * `deliveredVerdictWatchMs` and record a changed one on the delivered observation, so
+ * `public-verdict-contradicts-delivery` sees a run rewritten after the item reached done. Each read
+ * takes at most `deliveredVerdictBatch` deliveries, newest first, continuing from where the previous
+ * read stopped and starting over from the newest once the window is exhausted, so every delivery in
+ * the window is re-read in rotation however many there are. Reads only GitHub; the delivery itself
+ * is never touched, and an unchanged verdict saves nothing. Answers how many verdicts it recorded.
  */
 export async function refreshDeliveredVerdicts(engine: Engine, github: Pick<GitHub, 'mergeVerdictOf'>): Promise<number> {
   const since = new Date(Date.now() - deliveredVerdictWatchMs).toISOString();
-  const rows = (await engine.store.pool.query(`SELECT id, document->'observation'->'candidate'->>'sha' AS head, document->'observation'->'mergeVerdict' AS verdict FROM work_items
+  const cursor = deliveredVerdictCursor.get(engine.store);
+  const rows = (await engine.store.pool.query(`SELECT id::text AS id, document->'delivery'->>'mergedAt' AS "mergedAt", document->'observation'->'candidate'->>'sha' AS head, document->'observation'->'mergeVerdict' AS verdict FROM work_items
     WHERE document->>'stage'='done' AND document->'observation'->>'merged'='true' AND document->'observation' ? 'mergeVerdict' AND document->'delivery'->>'mergedAt' IS NOT NULL
-      AND (document->'delivery'->>'mergedAt')::timestamptz >= $1::timestamptz ORDER BY (document->'delivery'->>'mergedAt')::timestamptz DESC LIMIT $2`, [since, deliveredVerdictBatch])).rows as { id: string; head: string | null; verdict: Observation['mergeVerdict'] }[];
+      AND (document->'delivery'->>'mergedAt')::timestamptz >= $1::timestamptz
+      AND ($3::timestamptz IS NULL OR ((document->'delivery'->>'mergedAt')::timestamptz, id::text) < ($3::timestamptz, $4::text))
+      ORDER BY (document->'delivery'->>'mergedAt')::timestamptz DESC, id::text DESC LIMIT $2`, [since, deliveredVerdictBatch, cursor?.mergedAt ?? null, cursor?.id ?? null])).rows as { id: string; mergedAt: string; head: string | null; verdict: Observation['mergeVerdict'] }[];
+  // A short page ends the window: the next read starts again from the newest delivery.
+  const last = rows.at(-1);
+  if (rows.length < deliveredVerdictBatch || !last) deliveredVerdictCursor.delete(engine.store);
+  else deliveredVerdictCursor.set(engine.store, { mergedAt: last.mergedAt, id: last.id });
   let recorded = 0;
   for (const row of rows) {
     if (!row.head) continue;

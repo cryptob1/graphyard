@@ -226,4 +226,49 @@ test('unit:merge-verdict-contradiction-attention — master status names a deliv
   assert.match(mergeStallAttention({ work: [stored], now: new Date().toISOString() })[0].text, /^public-verdict-contradicts-delivery: GY-1912 merged head 7{12} .*run 117431141907 reads failure/);
   assert.equal(await refreshDeliveredVerdicts(engine, reader), 0, 'the recorded contradiction is not saved again');
   assert.deepEqual([reads.length, saves.length], [3, 1], 'one read per delivered head per refresh, one save per change');
+
+  // More deliveries inside the watch than one read takes: the reads rotate, so the oldest delivery's
+  // rewritten run still reaches master status. A delivery older than the 24h watch is never read.
+  const { deliveredVerdictBatch, deliveredVerdictWatchMs } = githubModule as any;
+  assert.equal(deliveredVerdictWatchMs, 24 * 60 * 60_000, 'the watch is 24h, as docs/github.md states');
+  const now = Date.now();
+  const fleet = Array.from({ length: deliveredVerdictBatch + 1 }, (_, index) => {
+    const sha = index.toString(16).padStart(40, 'a');
+    const candidate = { sha, baseSha: base, pr: 2000 + index, branch: `graphyard/gy-${2000 + index}-1`, author: 'worker' };
+    return delivered({ ...structuredClone(agreeing), candidate }, { id: `work-${2000 + index}`, key: `GY-${2000 + index}`, candidate,
+      delivery: { mergedAt: new Date(now - (index + 1) * 60_000).toISOString(), mergeSha, authorizationRevision: 9 } as any });
+  });
+  const expired = delivered({ ...structuredClone(agreeing), candidate: { ...agreeing.candidate, sha: 'c'.repeat(40) } }, { id: 'work-expired', key: 'GY-1999',
+    delivery: { mergedAt: new Date(now - deliveredVerdictWatchMs - 60_000).toISOString(), mergeSha, authorizationRevision: 9 } as any });
+  const documents = [...fleet, expired];
+  const oldest = fleet.at(-1)!;
+  const sinces: number[] = [];
+  const window = { query: async (_sql: string, [since, limit, afterAt, afterId]: any[]) => {
+    sinces.push(Date.parse(since));
+    const key = (item: Work) => [Date.parse((item.delivery as any).mergedAt), item.id] as const;
+    const rows = documents.filter(item => Date.parse((item.delivery as any).mergedAt) >= Date.parse(since))
+      .filter(item => afterAt === null || key(item)[0] < Date.parse(afterAt) || (key(item)[0] === Date.parse(afterAt) && item.id < afterId))
+      .sort((a, b) => key(b)[0] - key(a)[0] || (a.id < b.id ? 1 : -1)).slice(0, limit);
+    return { rows: rows.map(item => ({ id: item.id, mergedAt: (item.delivery as any).mergedAt, head: item.observation!.candidate.sha, verdict: item.observation!.mergeVerdict })) };
+  } };
+  const windowDb = { query: async (sql: string, params: any[] = []) => {
+    if (/^SELECT document FROM work_items/.test(sql)) return { rows: [{ document: structuredClone(documents.find(item => item.id === params[0])) }], rowCount: 1 };
+    if (/^UPDATE work_items SET document/.test(sql)) { const next = JSON.parse(params[1]); Object.assign(documents.find(item => item.id === next.id)!, next); }
+    return { rows: [], rowCount: 1 };
+  } };
+  const windowEngine = { store: { pool: window, transaction: (fn: (client: any, at: Date) => Promise<unknown>) => fn(windowDb, new Date()) } };
+  const windowReads: string[] = [];
+  const rewritten = { id: 117431141999, conclusion: 'failure' };
+  const windowReader = { mergeVerdictOf: async (sha: string) => { windowReads.push(sha); return sha === oldest.candidate!.sha || sha === expired.observation!.candidate.sha ? rewritten : agreeing.mergeVerdict; } };
+  assert.equal(await refreshDeliveredVerdicts(windowEngine, windowReader), 0, 'the first read takes the newest batch, which excludes the oldest delivery');
+  assert.equal(windowReads.length, deliveredVerdictBatch);
+  assert.ok(!windowReads.includes(oldest.candidate!.sha));
+  assert.deepEqual(verdictContradictions(documents), []);
+  assert.equal(await refreshDeliveredVerdicts(windowEngine, windowReader), 1, 'the next read continues past the batch and records the oldest delivery\'s rewrite');
+  assert.deepEqual(verdictContradictions(documents).map(entry => [entry.key, entry.run, entry.conclusion]), [[oldest.key, 117431141999, 'failure']]);
+  assert.match(mergeStallAttention({ work: documents, now: new Date().toISOString() })[0].text, new RegExp(`^public-verdict-contradicts-delivery: ${oldest.key} `));
+  assert.equal(await refreshDeliveredVerdicts(windowEngine, windowReader), 0, 'the window then starts over from the newest');
+  assert.equal(windowReads.length, 2 * deliveredVerdictBatch + 1, 'each delivery in the window is read once per rotation');
+  assert.ok(!windowReads.includes(expired.observation!.candidate.sha), 'a delivery older than the watch is never read');
+  assert.ok(sinces.every(since => Math.abs(since - (now - deliveredVerdictWatchMs)) < 60_000), 'every read is bounded by the 24h watch');
 });
