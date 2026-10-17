@@ -1,13 +1,14 @@
-// Concern: an item's openable preview (GY-1902) — which declared static application an item's cases need, and the durable preview record the loop keeps on the item.
+// Concern: an item's openable preview (GY-1902, GY-1903) — which declared application an item's cases need, and the durable preview record the loop keeps on the item.
 import { z } from 'zod';
 import type { ProjectDelivery } from './project-applications.js';
 import type { Work } from './model/work.js';
 
 // ---------------------------------------------------------------------------
-// A change whose criteria cite an E2E case bound to a declared static application gets its own
-// local preview: the loop (merge-writer/preview.ts `itemPreviewStep`) checks out the change, builds
-// and serves the application, runs those cases against it and records the outcome here, on the
-// item; a running record carries the built site's files, which the server keeps and serves at
+// A change whose criteria cite an E2E case bound to a declared application gets its own local
+// preview: the loop (merge-writer/preview.ts `itemPreviewStep`) checks out the change, builds and
+// serves the static site or brings up the Compose project (compose-preview.ts), runs those cases
+// against it and records the outcome here, on the item; a running record carries the site's files
+// (a Compose application's served pages), which the server keeps and serves at
 // `/preview/KEY/` (server/static.ts), so the link never depends on reaching the loop's host. The record is
 // the control plane's own observation, written by the coordinator identity only: it is never
 // evidence and satisfies no proof. Pure and browser-safe: Work details reads it.
@@ -15,8 +16,8 @@ import type { Work } from './model/work.js';
 
 export const itemPreviewStates = ['starting', 'running', 'failed', 'cleaned'] as const;
 export type ItemPreviewState = (typeof itemPreviewStates)[number];
-/** Why a preview ended: a newer head replaced it, the item was closed or delivered, a case failed, the loop that served it restarted, or the server did not confirm its record. */
-export const previewEndReasons = ['superseded', 'cancelled', 'delivered', 'failed', 'restarted', 'unconfirmed'] as const;
+/** Why a preview ended: a newer head replaced it, the item was closed or delivered, a case failed, the loop that served it restarted, the server did not confirm its record, or it ran its configured lifetime. */
+export const previewEndReasons = ['superseded', 'cancelled', 'delivered', 'failed', 'restarted', 'unconfirmed', 'expired'] as const;
 export type PreviewEndReason = (typeof previewEndReasons)[number];
 /** How many ended previews an item keeps beside its current one, newest last. */
 export const previewHistoryLimit = 5;
@@ -47,6 +48,8 @@ export const itemPreviewSchema = z.object({
   detail: z.string().max(1000),
   startedAt: instant, readyAt: instant.nullable(), cleanedAt: instant.nullable(),
   endReason: z.enum(previewEndReasons).nullable(),
+  /** GY-1903: the preview's own state identity and database (null: a static site has none), and the credentials it was given — always none. */
+  instance: z.string().max(200).optional(), database: z.string().max(200).nullable().optional(), secrets: z.array(z.string().max(200)).max(0).optional(),
 }).strict().superRefine((preview, context) => {
   const problem = (message: string) => context.addIssue({ code: z.ZodIssueCode.custom, message });
   // Only a preview whose every declared case passed is recorded running: a failed case never yields a passing record.
@@ -101,18 +104,22 @@ export function applyPreviewRecord(work: Work, preview: ItemPreview): string | n
   return null;
 }
 
+/** A preview's state identity and database name (GY-1903): the item's own, so two items' previews never share either. */
+export const previewInstance = (key: string) => `preview-${key}`;
+export const previewDatabase = (key: string) => `${previewInstance(key)}-db`;
+
 /**
- * The static application an item's declared cases need, and those cases; null when it needs none or
- * previews are off. An item previews one application, the first declared that its cases cite; the
- * cases it cites of any other static application are `omitted`, and the preview's detail names them.
+ * The declared application an item's cases need — a static site or a Compose project — and those
+ * cases; null when it needs none or previews are off. An item previews one application, the first
+ * declared that its cases cite; the cases it cites of any other application are `omitted`, and the
+ * preview's detail names them.
  */
-export function previewDemand(work: Pick<Work, 'criteria'>, delivery: ProjectDelivery | null): { application: Extract<ProjectDelivery['applications'][number], { kind: 'static' }>; cases: string[]; omitted: string[] } | null {
+export function previewDemand(work: Pick<Work, 'criteria'>, delivery: ProjectDelivery | null): { application: ProjectDelivery['applications'][number]; cases: string[]; omitted: string[] } | null {
   if (!delivery || delivery.previews !== 'local') return null;
   const cited = [...new Set(work.criteria.flatMap(criterion => criterion.proofs).flatMap(proof => proof.startsWith('e2e:') ? [proof.slice(4)] : []))];
-  const statics = delivery.applications.flatMap(application => application.kind === 'static' ? [application] : []);
-  const application = statics.find(entry => cited.some(id => delivery.cases[id] === entry.id));
+  const application = delivery.applications.find(entry => cited.some(id => delivery.cases[id] === entry.id));
   if (!application) return null;
-  return { application, cases: cited.filter(id => delivery.cases[id] === application.id), omitted: cited.filter(id => delivery.cases[id] !== application.id && statics.some(entry => entry.id === delivery.cases[id])) };
+  return { application, cases: cited.filter(id => delivery.cases[id] === application.id), omitted: cited.filter(id => delivery.cases[id] !== application.id && delivery.applications.some(entry => entry.id === delivery.cases[id])) };
 }
 
 /** Why an item no longer wants its preview, or null while it does. */

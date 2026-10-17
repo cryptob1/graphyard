@@ -1,0 +1,286 @@
+import { after, before, test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { createServer as netServer, type AddressInfo } from 'node:net';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Store, save } from '../src/store.js';
+import { lockedWork } from '../src/store/locked-read.js';
+import { Engine } from '../src/engine.js';
+import { server } from '../src/server.js';
+import type { Principal, Work } from '../src/model.js';
+import { masterConfigSchema } from '../src/master.js';
+import { emptyDaemonState } from '../src/daemon/state-cursor.js';
+import { mergeWriterReads, mergeWriterStep } from '../src/daemon/cycle-merge-writer.js';
+import { mergeRecordKey, type MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { composeLeftovers, composeMountProblems, composePreviewConfig, composeProjectName, composeProjectPrefix, sweepComposePreviews, composeBounds, currentOwner } from '../src/compose-preview.js';
+import { previewPath, type ItemPreview } from '../src/project-previews.js';
+import { defaultChildRun } from '../src/child-runner.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import { PreviewPanel } from '../web/pages/work-details.js';
+import { processPidNamespace } from '../src/tmp-reclaim.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// GY-1903 (GOAL-1, preview-isolation and declared-app-previews): a declared Compose application is
+// previewed locally like GY-1902's static site, as its own Compose project — its own state, database,
+// network and volumes, no production credential, bounded — and every container, volume and network of
+// it is removed when the preview ends, however it ends. Everything runs on this host's Docker daemon:
+// no Railway, no GitHub Actions.
+
+const fixtureSource = fileURLToPath(new URL('./fixtures/goal-compose-preview/', import.meta.url));
+const operator: Principal = { id: 'operator', role: 'admin' }, coordinator: Principal = { id: 'graphyard', role: 'coordinator' };
+const tokens = { operator: `operator-${'o'.repeat(40)}`, coordinator: `coordinator-${'c'.repeat(40)}` };
+const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+  repository: 'owner/fixture', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-fixture', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 1 } } });
+/** Production credentials the loop's host holds: none of them may reach a preview. */
+const production = { GRAPHYARD_UAT_TOKEN: 'prod-secret-uat-token', DATABASE_URL: 'postgres://prod:prod-secret-password@db.internal/production', GITHUB_TOKEN: 'ghp_prodsecretgithubtoken' };
+/** The configured bounds every preview container runs under. */
+const bounds = { GRAPHYARD_PREVIEW_CPUS: '0.5', GRAPHYARD_PREVIEW_MEMORY_MB: '64', GRAPHYARD_PREVIEW_PIDS: '64' };
+const environment = { PATH: process.env.PATH, ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}), ...production, ...bounds };
+
+let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string, repo: string, base: string;
+const shas: Record<string, string> = {};
+const docker = spawnSync('docker', ['compose', 'version'], { encoding: 'utf8' }).status === 0 && spawnSync('docker', ['image', 'inspect', 'alpine:3'], { encoding: 'utf8' }).status === 0;
+const freePort = async () => { const probe = netServer(); await new Promise<void>(done => probe.listen(0, '127.0.0.1', done)); const { port } = probe.address() as AddressInfo; await new Promise<void>(done => probe.close(() => done())); return port; };
+const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+const dockerJson = (...args: string[]) => JSON.parse(execFileSync('docker', args, { encoding: 'utf8' }));
+
+/** The fixture project (tests/fixtures/goal-compose-preview): main, a static change, a Compose change, a Compose change that breaks its case, and one mounting a host credential path. */
+async function fixture() {
+  execFileSync('git', ['init', '-q', '-b', 'main', repo]);
+  git('config', 'user.email', 't@example.com'); git('config', 'user.name', 'T');
+  await cp(fixtureSource, repo, { recursive: true });
+  const commit = (name: string) => { git('add', '-A'); git('commit', '-q', '-m', name); shas[name] = git('rev-parse', 'HEAD'); };
+  commit('main');
+  const change = async (name: string, edit: () => Promise<void>) => { git('checkout', '-q', '--detach', shas.main!); await edit(); commit(name); };
+  await change('static', () => writeFile(join(repo, 'site/index.html'), '<h1>Fixture static site</h1>\n<p>Static change S is live</p>\n'));
+  await change('compose', () => writeFile(join(repo, 'app/banner.txt'), 'Compose change C is live\n'));
+  await change('broken', () => writeFile(join(repo, 'app/heading.txt'), 'Something else\n'));
+  await change('mount', async () => { const file = join(repo, 'compose.yml'); await writeFile(file, (await readFile(file, 'utf8')).replace('      - state:/state\n', '      - state:/state\n      - /var/run/docker.sock:/var/run/docker.sock\n')); });
+  git('checkout', '-q', 'main');
+}
+
+before(async () => {
+  if (!docker) return;
+  scratch = await realpath(await temporaryDirectory('goal-compose-preview'));
+  repo = join(scratch, 'repo'); base = join(scratch, 'worktrees'); await mkdir(base);
+  await fixture();
+  const port = await freePort();
+  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('goal-compose-preview-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  await database.initialise(); await database.start(); await database.createDatabase('compose_preview_test');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/compose_preview_test`); await store.init();
+  http = server(new Engine(store, [15368], 120, 'owner/fixture'), [{ ...operator, token: tokens.operator }, { ...coordinator, token: tokens.coordinator }]);
+  await new Promise<void>(done => http.listen(0, '127.0.0.1', done));
+  url = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
+});
+after(async () => {
+  if (http) await new Promise<void>(done => http.close(() => done()));
+  if (store) await store.close(); if (database) await database.stop();
+  // Whatever a failed assertion left of this file's previews goes with it.
+  if (docker) for (const project of execFileSync('docker', ['ps', '-a', '--format', '{{.Label "com.docker.compose.project"}}'], { encoding: 'utf8' }).split('\n').filter(name => name.startsWith(`${composeProjectPrefix}gy-`) || name.startsWith(`${composeProjectPrefix}abandoned`)))
+    spawnSync('docker', ['compose', '-p', project, 'down', '--volumes', '--timeout', '1']);
+  if (scratch) await rm(scratch, { recursive: true, force: true });
+});
+
+const call = async (method: string, path: string, as: keyof typeof tokens, body?: unknown, key?: string) => {
+  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${tokens[as]}`, 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}) }, body: body === undefined ? undefined : JSON.stringify(body) });
+  return { status: response.status, body: await response.json() as any };
+};
+const read = async (id: string): Promise<Work> => { const answer = await call('GET', `work/${id}`, 'operator'); assert.equal(answer.status, 200); return answer.body; };
+let created = 0;
+async function change(title: string, proof: string) {
+  const answer = await call('POST', 'work', 'operator', { title, description: 'A change whose declared application case needs a local preview.', type: 'feature', priority: 3,
+    policy: { checks: ['test'], review: true }, criteria: [{ id: 'AC-1', text: 'The declared application shows this change', proofs: [`e2e:${proof}`] }] }, `create-${++created}`);
+  assert.equal(answer.status, 200, JSON.stringify(answer.body));
+  return answer.body as Work;
+}
+async function submit(item: Work, name: string) {
+  await store.transaction(async (db, now) => {
+    const work = (await lockedWork(db, [item.id])).find(entry => entry.id === item.id)!;
+    work.candidate = { sha: shas[name]!, baseSha: shas.main!, pr: 100 + created, branch: `graphyard/${work.key.toLowerCase()}-1`, author: 'worker-1' };
+    await save(db, work, 'test', 'test.submitted', now);
+  });
+}
+const close = async (item: Work, reason: string) => assert.equal((await call('POST', `work/${item.id}/close`, 'operator', { kind: 'obsolete', reason }, `close-${item.id}`)).status, 200);
+
+/** The loop's merge-writer step as the daemon wires it, in a host environment holding production credentials and the configured bounds. */
+function loop() {
+  const state = emptyDaemonState(config);
+  const record = async (work: Pick<Work, 'id' | 'key'>, event: MergeRecordEvent) => {
+    const answer = await call('POST', `work/${work.id}/merge-record`, 'coordinator', event, mergeRecordKey(work, event));
+    if (answer.status !== 200) throw new Error(`${answer.status}: ${answer.body.error}`);
+    return answer.body;
+  };
+  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'github', environment }), advisory: undefined };
+  return { step: async (ids: string[]) => {
+    const work = await Promise.all(ids.map(read));
+    await mergeWriterStep({ state, effects: { mergeWriter: reads, persist: async () => {} }, now: Date.now, snapshot: { work }, performed: [] } as unknown as Cycle);
+  } };
+}
+async function until(run: ReturnType<typeof loop>, ids: string[], target: string, done: (preview: ItemPreview | null | undefined) => boolean) {
+  for (let round = 0; round < 600; round++) {
+    await run.step(ids);
+    const work = await read(target);
+    if (done(work.preview)) return work.preview!;
+    await new Promise(accept => setTimeout(accept, 100));
+  }
+  assert.fail(`${target}'s preview never settled: ${JSON.stringify((await read(target)).preview)}`);
+}
+const open = async (key: string, path = '/') => fetch(`${url}${previewPath(key)}${path}`);
+const project = (item: Work, preview: ItemPreview) => composeProjectName(item.key, preview.id);
+const nothingLeft = async (name: string) => assert.deepEqual(await composeLeftovers(name), { containers: [], volumes: [], networks: [] }, `${name} left nothing behind`);
+
+test('integration:goal-declared-application-previews — a declared static site and a declared Compose application each get a real local preview of the exact change: the item names the local runner, the link serves the changed page, and the declared cases\' results are on the item', { timeout: 300_000 }, async t => {
+  if (!docker) { assert.ok(!process.env.CI, 'CI runs the Compose previews'); t.skip('no Docker Compose or alpine:3 image on this host'); return; }
+  const run = loop();
+  const site = await change('A change to the static site', 'fixture-static-home'), app = await change('A change to the compose app', 'fixture-compose-app');
+  await submit(site, 'static'); await submit(app, 'compose');
+  const staticPreview = await until(run, [site.id, app.id], site.id, preview => preview?.state === 'running');
+  const composePreview = await until(run, [site.id, app.id], app.id, preview => preview?.state === 'running');
+  for (const [item, preview, application, sha] of [[site, staticPreview, 'site', shas.static], [app, composePreview, 'app', shas.compose]] as const) {
+    assert.deepEqual({ path: preview.path, runner: preview.runner, application: preview.application, sha: preview.sha, source: preview.source }, { path: `/preview/${item.key}`, runner: 'local', application, sha, source: 'head' });
+    assert.match(preview.origin!, /^http:\/\/127\.0\.0\.1:\d+$/, 'served on this host\'s loopback');
+  }
+  assert.deepEqual(staticPreview.cases, [{ case: 'fixture-static-home', result: 'pass' }]);
+  assert.deepEqual(composePreview.cases, [{ case: 'fixture-compose-app', result: 'pass' }]);
+  assert.deepEqual({ instance: composePreview.instance, database: composePreview.database, secrets: composePreview.secrets }, { instance: `preview-${app.key}`, database: `preview-${app.key}-db`, secrets: [] });
+
+  // The static link serves the changed page built with the item's title.
+  const staticPage = await (await open(site.key)).text();
+  assert.match(staticPage, /Fixture static site/); assert.match(staticPage, /Static change S is live/); assert.match(staticPage, /A change to the static site/);
+  // The Compose link serves the running application's page: the changed banner, the item's title, its own state and database.
+  const served = await open(app.key);
+  assert.equal(served.status, 200);
+  const page = await served.text();
+  for (const text of ['Fixture compose app', 'Compose change C is live', 'A change to the compose app', `state preview-${app.key}`, `database preview-${app.key}-db`, 'production credentials none']) assert.ok(page.includes(text), `${text} in ${page}`);
+  assert.deepEqual(await (await open(app.key, '/status.json')).json(), { heading: 'Fixture compose app', state: `preview-${app.key}`, database: `preview-${app.key}-db`, credentials: 'none' }, 'the page\'s relative link is published too');
+  // The live application answers the same on the loop's origin.
+  assert.match(await (await fetch(`${composePreview.origin}/`)).text(), /Compose change C is live/);
+  // Work details name the application, the runner and the isolation.
+  const panel = renderToStaticMarkup(createElement(PreviewPanel, { preview: composePreview }));
+  for (const text of ['app · local runner', `preview-${app.key}-db`, 'no production credentials', 'fixture-compose-app passed']) assert.ok(panel.includes(text), text);
+
+  await close(site, 'Previewed'); await close(app, 'Previewed');
+  await until(run, [site.id, app.id], site.id, preview => preview?.state === 'cleaned');
+  assert.equal((await until(run, [site.id, app.id], app.id, preview => preview?.state === 'cleaned')).endReason, 'cancelled');
+  await nothingLeft(project(app, composePreview));
+});
+
+test('integration:goal-compose-preview-isolation-cleanup — two simultaneous Compose previews keep their own state and database, get no production credential and run bounded; their containers, volumes and networks are removed on success, failure and cancellation; restart recovery keeps live owners and removes abandoned previews', { timeout: 300_000 }, async t => {
+  if (!docker) { assert.ok(!process.env.CI, 'CI runs the Compose previews'); t.skip('no Docker Compose or alpine:3 image on this host'); return; }
+  const run = loop();
+  const first = await change('First compose change', 'fixture-compose-app'), second = await change('Second compose change', 'fixture-compose-app');
+  await submit(first, 'compose'); await submit(second, 'compose');
+  const a = await until(run, [first.id, second.id], first.id, preview => preview?.state === 'running');
+  const b = await until(run, [first.id, second.id], second.id, preview => preview?.state === 'running');
+  assert.notEqual(project(first, a), project(second, b));
+  assert.deepEqual([a.instance, a.database, b.instance, b.database], [`preview-${first.key}`, `preview-${first.key}-db`, `preview-${second.key}`, `preview-${second.key}-db`]);
+  assert.deepEqual([a.secrets, b.secrets], [[], []]);
+
+  // Both run at once, each answering its own state and database — read from its own volumes over its own network.
+  for (const [item, preview] of [[first, a], [second, b]] as const) {
+    const status = await (await fetch(`${preview.origin}/status.json`)).json();
+    assert.deepEqual(status, { heading: 'Fixture compose app', state: `preview-${item.key}`, database: `preview-${item.key}-db`, credentials: 'none' });
+    const page = await (await open(item.key)).text();
+    for (const text of [`state preview-${item.key}`, `database preview-${item.key}-db`, 'production credentials none']) assert.ok(page.includes(text), text);
+  }
+  const left = { a: await composeLeftovers(project(first, a)), b: await composeLeftovers(project(second, b)) };
+  assert.equal(left.a.containers.length, 2); assert.equal(left.b.containers.length, 2);
+  assert.deepEqual(left.a.volumes.filter(name => left.b.volumes.includes(name)), [], 'no volume is shared');
+  assert.deepEqual(left.a.networks.filter(name => left.b.networks.includes(name)), [], 'no network is shared');
+  for (const id of [...left.a.containers, ...left.b.containers]) {
+    const [container] = dockerJson('inspect', id);
+    // No production credential reached any container, by value or by host path.
+    const env: string[] = container.Config.Env;
+    for (const secret of Object.values(production)) assert.ok(!env.some(entry => entry.includes(secret)), `${container.Name} holds no production credential`);
+    for (const mount of container.Mounts) assert.ok(mount.Type === 'volume' || mount.Source.startsWith(base), `${container.Name} mounts only its own volumes and the change's checkout, not ${mount.Source}`);
+    assert.deepEqual(container.Config.Env.filter((entry: string) => entry.startsWith('HOME=/home') || entry.startsWith('XDG_RUNTIME_DIR=')), []);
+    // The configured bounds hold.
+    assert.deepEqual({ cpus: container.HostConfig.NanoCpus, memory: container.HostConfig.Memory, pids: container.HostConfig.PidsLimit, privileged: container.HostConfig.Privileged, restart: container.HostConfig.RestartPolicy.Name },
+      { cpus: 500_000_000, memory: 64 * 1024 * 1024, pids: 64, privileged: false, restart: 'no' }, container.Name);
+    assert.ok(container.HostConfig.SecurityOpt.includes('no-new-privileges:true'));
+    assert.ok(Object.values<{ HostIp: string }[] | null>(container.NetworkSettings.Ports).flat().every(binding => !binding || binding.HostIp === '127.0.0.1'), 'published on loopback only');
+  }
+
+  // Restart recovery: a preview whose owner still runs is kept; one a gone process left is removed, volumes and networks with it.
+  const gone = spawnSync('true').pid!;
+  const abandoned = `${composeProjectPrefix}abandoned-${process.pid}`;
+  const resolved = JSON.parse(execFileSync('docker', ['compose', '-f', 'compose.yml', '-p', abandoned, 'config', '--format', 'json'], { cwd: repo, encoding: 'utf8' }));
+  const directory = await mkdtemp(join(scratch, 'abandoned-'));
+  await writeFile(join(directory, 'compose.json'), JSON.stringify(composePreviewConfig(resolved, { project: abandoned, service: 'web', port: 8080, bounds: composeBounds(bounds), variables: {}, owner: { pid: gone, startedAt: 1, pidNamespace: processPidNamespace(), at: new Date().toISOString() } })));
+  execFileSync('docker', ['compose', '-f', join(directory, 'compose.json'), '-p', abandoned, '--project-directory', repo, 'up', '--detach', '--wait'], { stdio: 'ignore' });
+  assert.equal((await composeLeftovers(abandoned)).containers.length, 2);
+  const removed = await sweepComposePreviews();
+  assert.ok(removed.includes(abandoned), 'the abandoned preview is removed');
+  assert.ok(!removed.includes(project(first, a)) && !removed.includes(project(second, b)), 'live previews are kept');
+  await nothingLeft(abandoned);
+  assert.equal((await fetch(`${b.origin}/status.json`)).status, 200, 'a live preview keeps serving through the sweep');
+
+  // Success: the first change settles; its preview is cleaned automatically while the other keeps running.
+  await close(first, 'The case settles this change');
+  const cleaned = await until(run, [first.id, second.id], first.id, preview => preview?.state === 'cleaned');
+  assert.deepEqual({ instance: cleaned.instance, cases: cleaned.cases }, { instance: `preview-${first.key}`, cases: [{ case: 'fixture-compose-app', result: 'pass' }] });
+  assert.ok(cleaned.cleanedAt);
+  assert.equal((await open(first.key)).status, 404, 'the cleaned link stops serving');
+  await nothingLeft(project(first, a));
+  assert.equal((await open(second.key)).status, 200, 'the other preview keeps running');
+
+  // Failure: a change whose case fails ran for real, and nothing of it remains.
+  const broken = await change('A compose change that breaks its case', 'fixture-compose-app');
+  await submit(broken, 'broken');
+  const failed = await until(run, [second.id, broken.id], broken.id, preview => preview?.state === 'failed');
+  assert.deepEqual(failed.cases.map(entry => [entry.case, entry.result]), [['fixture-compose-app', 'fail']]);
+  await nothingLeft(project(broken, failed));
+  assert.equal((await open(broken.key)).status, 404);
+
+  // A change mounting a host credential path is refused before anything starts.
+  const mounting = await change('A compose change mounting the Docker socket', 'fixture-compose-app');
+  await submit(mounting, 'mount');
+  const refused = await until(run, [second.id, mounting.id], mounting.id, preview => preview?.state === 'failed');
+  assert.match(refused.detail, /mounts the host path \/var\/run\/docker\.sock, outside the change's checkout/);
+  await nothingLeft(project(mounting, refused));
+
+  // Cancellation while it starts: the item closes before its preview is up; it is stopped, cleaned and leaves nothing.
+  const early = await change('Cancelled while its compose preview starts', 'fixture-compose-app');
+  await submit(early, 'compose');
+  await run.step([second.id, early.id]);
+  const starting = (await read(early.id)).preview!;
+  assert.equal(starting.state, 'starting');
+  await close(early, 'Closed while its preview starts');
+  assert.equal((await until(run, [second.id, early.id], early.id, preview => preview?.state === 'cleaned')).endReason, 'cancelled');
+  await nothingLeft(project(early, starting));
+
+  // Cancellation of the running one: closed, cleaned, nothing left.
+  await close(second, 'Done');
+  assert.equal((await until(run, [second.id], second.id, preview => preview?.state === 'cleaned')).endReason, 'cancelled');
+  await nothingLeft(project(second, b));
+  assert.equal((await fetch(`${b.origin}/`).catch(() => null)), null, 'its loopback origin no longer answers');
+});
+
+test('unit:compose-preview-config — the resolved configuration is refused for host mounts and privileges, and rewritten without host ports or container names, bounded and labelled', () => {
+  const checkout = '/work/checkout';
+  const resolved = { name: 'x', services: {
+    web: { image: 'alpine:3', container_name: 'fixed', ports: [{ target: 8080, published: '8080' }], deploy: { resources: { limits: { cpus: '8' } } }, volumes: [{ type: 'bind', source: '/work/checkout/app', target: '/app' }] },
+    db: { image: 'alpine:3', ports: [{ target: 5432, published: '5432' }], volumes: [{ type: 'bind', source: '/home/me/.ssh', target: '/root/.ssh' }], privileged: true, network_mode: 'host', cap_add: ['SYS_ADMIN'] },
+  }, volumes: { data: { name: 'shared-db' } }, networks: { outside: { external: true } }, secrets: { token: { file: '/etc/graphyard/token' } } };
+  assert.deepEqual(composeMountProblems(resolved, checkout, 'web'), [
+    'service db mounts the host path /home/me/.ssh, outside the change\'s checkout', 'service db is privileged', 'service db shares the host network_mode', 'service db adds capabilities SYS_ADMIN',
+    'the network outside is external, shared with something outside the preview', 'the secret token reads /etc/graphyard/token, outside the change\'s checkout']);
+  assert.deepEqual(composeMountProblems(resolved, checkout, 'api')[0], 'the Compose file declares no service "api" to serve');
+  const owner = currentOwner();
+  const rewritten = composePreviewConfig(resolved, { project: 'graphyard-preview-gy-1-abcdef12', service: 'web', port: 8080, bounds: composeBounds({ GRAPHYARD_PREVIEW_CPUS: '99', GRAPHYARD_PREVIEW_MEMORY_MB: '128' }), variables: { GRAPHYARD_PREVIEW_INSTANCE: 'preview-GY-1' }, owner });
+  assert.equal(rewritten.services.web.container_name, undefined);
+  assert.deepEqual(rewritten.services.web.ports, [{ target: 8080, host_ip: '127.0.0.1', protocol: 'tcp' }]);
+  assert.equal(rewritten.services.db.ports, undefined, 'only the served service is published');
+  assert.deepEqual({ cpus: rewritten.services.web.cpus, memory: rewritten.services.web.mem_limit, pids: rewritten.services.web.pids_limit, deploy: rewritten.services.web.deploy }, { cpus: 16, memory: '128m', pids: 256, deploy: undefined }, 'bounds are clamped and replace the file\'s own');
+  assert.equal(rewritten.services.web.environment.GRAPHYARD_PREVIEW_INSTANCE, 'preview-GY-1');
+  assert.equal(rewritten.services.web.labels['graphyard.preview.owner'], JSON.stringify(owner));
+  assert.equal(rewritten.volumes.data.name, 'graphyard-preview-gy-1-abcdef12_data', 'a fixed volume name is the preview\'s own');
+  assert.equal(rewritten.networks.outside.labels['graphyard.preview.owner'], JSON.stringify(owner));
+  assert.equal(composeProjectName('GY-12', 'ABCDEF12-0000'), 'graphyard-preview-gy-12-abcdef12');
+  assert.deepEqual(composeBounds({}), { cpus: 1, memoryMb: 512, pids: 256, lifetimeMs: 720 * 60_000, concurrent: 4 });
+});

@@ -10,8 +10,9 @@ import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
 import { serveStaticSite, type ReleaseCandidate, type StaticUat } from '../release-candidate.js';
 import { hostPassthrough } from '../e2e/steps.js';
 import { buildStaticSite, projectCaseSuite, type StaticBuildShell } from '../release-project.js';
-import { previewDemand, previewEnded, previewEndReason, previewPath, previewSiteByteLimit, previewSiteFileLimit, previewSitePathSchema, type ItemPreview, type PreviewCaseResult, type PreviewEndReason, type PreviewSiteFile } from '../project-previews.js';
-import type { ProjectDelivery } from '../project-applications.js';
+import { composeBounds, composeProjectName, composeStack, dockerEnvironment, snapshotComposeSite, sweepComposePreviews, type ComposeBounds, type Docker } from '../compose-preview.js';
+import { previewDatabase, previewDemand, previewEnded, previewEndReason, previewInstance, previewPath, previewSiteByteLimit, previewSiteFileLimit, previewSitePathSchema, type ItemPreview, type PreviewCaseResult, type PreviewEndReason, type PreviewSiteFile } from '../project-previews.js';
+import type { Application, ProjectDelivery } from '../project-applications.js';
 import type { Work } from '../model/work.js';
 import { heldEntries, heldOpenPaths, readTempOwner, tempOwnerGone, tempOwnerJudgeable, tempOwnerMarker, tmpReclaimMinAgeMs, treeLastWritten, writeTempOwner } from '../tmp-reclaim.js';
 
@@ -129,6 +130,8 @@ export interface PreviewInput {
   procRoot?: string;
   /** The host environment the build's basics are drawn from; tests substitute it. */
   hostEnvironment?: NodeJS.ProcessEnv;
+  /** GY-1903: a declared Compose application to bring up instead of building and serving `site`, under its own project, bounded. */
+  compose?: { application: Extract<Application, { kind: 'compose' }>; project: string; bounds: ComposeBounds; docker?: Docker };
 }
 
 /** Host variables a preview's processes never get: the coordinator's runtime directory and display, whose sockets (a session bus, an agent, a keyring) answer as the coordinator. */
@@ -181,8 +184,10 @@ export interface PreviewOptions {
   /** Cancels the preview from outside, as its budget running out does. */
   signal?: AbortSignal;
 }
-/** A preview that passed and is still served: its loopback origin, the built site's directory it serves, and `close`, which ends the server and removes the checkout. */
-export interface OpenedPreview { verdict: PreviewVerdict; url: string | null; site?: string | null; close(): Promise<void> }
+/** What serves a preview while it runs: the static site's server, or the Compose project (compose-preview.ts). */
+type Served = { url: string | null; close(): Promise<void> };
+/** A preview that passed and is still served: its loopback origin, the built site's directory it serves (or, for a Compose application, `publish`, its served pages), and `close`, which ends the server and removes the checkout. */
+export interface OpenedPreview { verdict: PreviewVerdict; url: string | null; site?: string | null; publish?: () => Promise<PreviewSiteFile[]>; close(): Promise<void> }
 
 /**
  * The preview of one passing trial merge: in a free slot (at most `previewConcurrency` at once), a
@@ -221,10 +226,10 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
   const cancelled = () => { if (signal.aborted) throw new Error('the preview was cancelled'); };
   // A declared case is mandatory whatever its own flags say: the item's criteria name it.
   const mandatory = (entry: CaseFile) => options.cases ? true : entry.definition.required;
-  let directory: string | null = null, served: StaticUat | null = null, timer: NodeJS.Timeout | undefined, running: Promise<PreviewVerdict> | null = null;
+  let directory: string | null = null, served = null as Served | null, timer: NodeJS.Timeout | undefined, running: Promise<PreviewVerdict> | null = null;
   let closed: Promise<void> | null = null, outcome: PreviewVerdict | null = null;
   const close = () => closed ??= (async () => {
-    try { await (served as StaticUat | null)?.close(); } catch { /* the server is gone either way */ }
+    try { await (served as Served | null)?.close(); } catch { /* the server is gone either way */ }
     if (directory) {
       try { await run('git', ['-C', input.root, 'worktree', 'remove', '--force', join(directory, 'checkout')]); } catch { /* removed below; the next prune forgets it */ }
       await rm(directory, { recursive: true, force: true });
@@ -256,18 +261,30 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
       if (!runnable.length) return verdict('fail', `no required or uat E2E case the preview can run is in the merge, so it exercised nothing${unrun}`, withheld, ['cases']);
       const home = join(directory!, 'home'), environment = { ...previewEnvironment(home, input.hostEnvironment), ...options.variables };
       await mkdir(environment.TMPDIR, { recursive: true });
-      if (input.site.build) {
-        const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell, signal, environment);
+      let origin: string;
+      if (input.compose) {
+        // The Compose project is closed with the preview whatever happened while it came up: `served` holds it before it starts.
+        const { application, project, bounds, docker } = input.compose;
+        const stack = composeStack({ checkout, file: application.file, service: application.service, port: application.port, project, bounds, docker, fetcher: input.fetcher,
+          environment: dockerEnvironment(environment, input.hostEnvironment ?? process.env), variables: options.variables ?? {}, scratch: join(directory!, 'compose') });
+        served = stack;
+        try { origin = await stack.start(signal, input.timeoutMs); } catch (error) { cancelled(); return verdict('fail', `the Compose application did not start: ${error instanceof Error ? error.message : String(error)}`, [], ['build']); }
+      } else {
+        if (input.site.build) {
+          const failed = await buildStaticSite(input.site.build, checkout, input.timeoutMs, input.shell, signal, environment);
+          cancelled();
+          if (failed) return verdict('fail', failed, [], ['build']);
+        }
         cancelled();
-        if (failed) return verdict('fail', failed, [], ['build']);
+        served = await serveStaticSite(join(checkout, input.site.directory), input.mergeSha);
+        origin = served.url!;
       }
       cancelled();
-      served = await serveStaticSite(join(checkout, input.site.directory), input.mergeSha);
       let report: E2eReport | null = null;
       // The cases come from the merge itself, so they run with a token minted for this preview, never the UAT principal's, and never read the install's secrets; the runner keeps their requests on the served origin.
       const suite = projectCaseSuite(checkout, `preview-${randomUUID()}`, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, hostEnvironment: environment,
         cases: runnable, select: () => true, withholdSecrets: true, report: value => { report = value; } });
-      const result = await suite.run(served.url, { id: `preview-${input.mergeSha.slice(0, 12)}` } as ReleaseCandidate);
+      const result = await suite.run(origin, { id: `preview-${input.mergeSha.slice(0, 12)}` } as ReleaseCandidate);
       cancelled();
       const ran = report as E2eReport | null;
       const cases = [...(ran?.cases ?? []).map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: options.cases ? true : outcome.required })), ...withheld];
@@ -280,7 +297,8 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
     running = preview();
     const first = await Promise.race([running, expired, stopped]);
     if (first === 'stopped') return { verdict: outcome = verdict('error', 'the preview was cancelled'), url: null, close };
-    if (first !== 'expired') return { verdict: outcome = first, url: (served as StaticUat | null)?.url ?? null, site: served ? join(directory, 'checkout', input.site.directory) : null, close };
+    const url = (served as Served | null)?.url ?? null;
+    if (first !== 'expired') return { verdict: outcome = first, url, site: served && !input.compose ? join(directory, 'checkout', input.site.directory) : null, ...(input.compose && url ? { publish: () => snapshotComposeSite(url, input.fetcher) } : {}), close };
     // Past the budget: the run is cancelled, and its slot is not freed until it has ended (finally).
     cancel.abort();
     return { verdict: outcome = verdict('timeout', `the preview ran past its ${Math.round(input.timeoutMs / 60_000)}-minute budget`), url: null, close };
@@ -324,6 +342,8 @@ export interface LivePreview {
   /** Records the server has not confirmed yet, oldest first, a running one with its built site; retried each step. */
   owed: { record: ItemPreview; site?: PreviewSiteFile[] }[];
   failures: number;
+  /** GY-1903: the Compose project serving it, when its application is a Compose one. */
+  compose?: string;
 }
 /** What the step reads and writes: the loop's delivery declaration, its checkout and the server. */
 export interface ItemPreviewPorts {
@@ -336,7 +356,10 @@ export interface ItemPreviewPorts {
   run?: ChildRun; shell?: StaticBuildShell; launcher?: E2eLauncher; fetcher?: typeof fetch; stepTimeoutMs?: number; hostEnvironment?: NodeJS.ProcessEnv; now?: () => number;
   slots?: ReturnType<typeof previewSlots>; procRoot?: string;
   open?: typeof openPreview;
+  docker?: Docker;
 }
+/** Whether this process swept abandoned Compose previews yet (GY-1903): once, before its first. */
+let composeSwept = false;
 /**
  * How many sends in a row an unconfirmed record may fail before its preview stops serving. A record
  * is never dropped: its server and checkout are then removed and a terminal record (`unconfirmed`)
@@ -409,7 +432,8 @@ const caseResults = (verdict: PreviewVerdict): PreviewCaseResult[] => verdict.ca
 
 /**
  * One step of the item previews, beside the loop's cycle (GY-1902). Every open item whose criteria
- * cite a case bound to a declared static application (`previewDemand`) gets a preview of its
+ * cite a case bound to a declared application (`previewDemand`; a Compose one, GY-1903, brought up as
+ * its own bounded project, at most `composeBounds().concurrent` at once and for its lifetime) gets a preview of its
  * submitted head, or of the base tip while it has none: `starting` is recorded, the change is checked
  * out, built, served on loopback and its declared cases run against it (`openPreview`, kept served on
  * a pass), and the outcome recorded — `running` with every case passed and the built site published
@@ -443,6 +467,14 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
     if (entry.opened && await settleRecords(entry, ports)) { live.delete(entry.key); return true; }
     return false;
   };
+  // GY-1903: a Compose preview a gone process left on the daemon is removed before this process starts any; its bounds are the loop's configuration.
+  const bounds = composeBounds(ports.hostEnvironment ?? process.env);
+  if (!composeSwept && delivery?.applications.some(application => application.kind === 'compose')) {
+    composeSwept = true;
+    try { for (const project of await sweepComposePreviews({ docker: ports.docker, env: dockerEnvironment({ PATH: (ports.hostEnvironment ?? process.env).PATH ?? '' }, ports.hostEnvironment ?? process.env) })) notes.push(`Removed the abandoned Compose preview ${project}`); }
+    catch (error) { notes.push(`Could not sweep abandoned Compose previews: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  const composing = () => [...live.values()].filter(entry => entry.compose && !entry.ending).length;
   let tip: string | null | undefined;
   for (const item of work) {
     const demand = previewDemand(item, delivery), reason = previewEndReason(item, !!demand);
@@ -450,8 +482,10 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
     let entry = live.get(item.key);
     // The server already holds this preview ended, as an owed terminal record whose reply was lost leaves it: that record is confirmed.
     if (entry?.opened && previewEnded(entry.record) && item.preview?.id === entry.record.id && previewEnded(item.preview)) entry.owed = [];
-    if (entry && (reason || entry.ending || (head && entry.record.sha !== head))) {
-      const why = entry.ending ?? reason ?? 'superseded';
+    // A Compose preview serves for its configured lifetime at most.
+    const expired = entry?.compose && entry.record.state === 'running' && entry.record.readyAt && (ports.now ?? Date.now)() - Date.parse(entry.record.readyAt) > bounds.lifetimeMs;
+    if (entry && (reason || entry.ending || expired || (head && entry.record.sha !== head))) {
+      const why = entry.ending ?? reason ?? (expired ? 'expired' : 'superseded');
       if (await end(entry, why)) notes.push(`Ended ${item.key}'s preview of ${entry.record.sha.slice(0, 12)} (${why}): its server closed and its checkout removed`);
       if (live.has(item.key)) continue;
       endedNow.set(item.key, entry.record);
@@ -467,7 +501,8 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
     }
     if (reason || !demand) continue;
     const sha = head ?? (tip === undefined ? (tip = await ports.baseTip().then(value => value.toLowerCase(), () => null)) : tip);
-    if (!sha || (recorded?.sha === sha && recorded.state === 'failed')) continue;
+    if (!sha || (recorded?.sha === sha && (recorded.state === 'failed' || recorded.endReason === 'expired'))) continue;
+    if (demand.application.kind === 'compose' && composing() >= bounds.concurrent) { notes.push(`${item.key}'s Compose preview waits: ${bounds.concurrent} already run`); continue; }
     await start(item, sha, head ? 'head' : 'base', demand);
     notes.push(`Started ${item.key}'s preview of ${sha.slice(0, 12)} (${demand.application.id}: ${demand.cases.join(', ')})`);
   }
@@ -475,12 +510,15 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
 
   async function start(item: Work, sha: string, source: 'head' | 'base', demand: NonNullable<ReturnType<typeof previewDemand>>) {
     const record: ItemPreview = { id: randomUUID(), path: previewPath(item.key), state: 'starting', runner: 'local', application: demand.application.id, sha, source, origin: null,
-      cases: demand.cases.map(id => ({ case: id, result: 'unrun' as const })), detail: demand.omitted.length ? cut(`not previewed, bound to another static application: ${demand.omitted.join(', ')}`) : '', startedAt: at(), readyAt: null, cleanedAt: null, endReason: null };
-    const entry: LivePreview = { key: item.key, work: item.id, record, opened: null, stop: new AbortController(), ending: null, owed: [], failures: 0 };
+      cases: demand.cases.map(id => ({ case: id, result: 'unrun' as const })), detail: demand.omitted.length ? cut(`not previewed, bound to another application: ${demand.omitted.join(', ')}`) : '', startedAt: at(), readyAt: null, cleanedAt: null, endReason: null,
+      instance: previewInstance(item.key), database: demand.application.kind === 'compose' ? previewDatabase(item.key) : null, secrets: [] };
+    const application = demand.application;
+    const compose = application.kind === 'compose' ? { application, project: composeProjectName(item.key, record.id), bounds, docker: ports.docker } : undefined;
+    const entry: LivePreview = { key: item.key, work: item.id, record, opened: null, stop: new AbortController(), ending: null, owed: [], failures: 0, compose: compose?.project };
     owe(entry, record);
     live.set(item.key, entry);
-    const variables = { GRAPHYARD_PREVIEW_KEY: item.key, GRAPHYARD_PREVIEW_TITLE: item.title, GRAPHYARD_PREVIEW_SHA: sha };
-    const omitted = demand.omitted.length ? `; not previewed, bound to another static application: ${demand.omitted.join(', ')}` : '';
+    const variables = { GRAPHYARD_PREVIEW_KEY: item.key, GRAPHYARD_PREVIEW_TITLE: item.title, GRAPHYARD_PREVIEW_SHA: sha, GRAPHYARD_PREVIEW_INSTANCE: record.instance!, ...(record.database ? { GRAPHYARD_PREVIEW_DATABASE: record.database } : {}) };
+    const omitted = demand.omitted.length ? `; not previewed, bound to another application: ${demand.omitted.join(', ')}` : '';
     // `starting` reaches the server before the build begins and before any outcome is recorded after it.
     await settleRecords(entry, ports);
     void (async () => {
@@ -488,7 +526,7 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
       while (!await settleRecords(entry, ports) && !entry.stop.signal.aborted) {
         await new Promise<void>(accept => { const timer = setTimeout(accept, 1000); entry.stop.signal.addEventListener('abort', () => { clearTimeout(timer); accept(); }, { once: true }); });
       }
-      const opened = await (ports.open ?? openPreview)({ root: ports.root, base: ports.base, mergeSha: sha, site: { directory: demand.application.directory, build: demand.application.build }, timeoutMs: ports.timeoutMs,
+      const opened = await (ports.open ?? openPreview)({ root: ports.root, base: ports.base, mergeSha: sha, site: application.kind === 'static' ? { directory: application.directory, build: application.build } : { directory: '.', build: null }, compose, timeoutMs: ports.timeoutMs,
         run: ports.run, shell: ports.shell, launcher: ports.launcher, fetcher: ports.fetcher, stepTimeoutMs: ports.stepTimeoutMs, now: ports.now, slots: ports.slots, procRoot: ports.procRoot, hostEnvironment: ports.hostEnvironment },
       { keep: true, cases: demand.cases, variables, signal: entry.stop.signal })
         .catch((error: unknown): OpenedPreview => ({ verdict: { result: 'error', mergeSha: sha, cases: [], failed: [], detail: cut(`the preview could not run: ${error instanceof Error ? error.message : String(error)}`), durationMs: 0 }, url: null, close: async () => {} }));
@@ -496,7 +534,7 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
       // The link serves the site the cases passed on: its built files, published with the running record.
       let site: PreviewSiteFile[] | null = null, unpublished = '';
       if (!entry.ending && opened.url && opened.verdict.result === 'pass') {
-        try { site = await readPreviewSite(opened.site!); } catch (error) { unpublished = `; not published: ${error instanceof Error ? error.message : String(error)}`; }
+        try { site = opened.publish ? await opened.publish() : await readPreviewSite(opened.site!); } catch (error) { unpublished = `; not published: ${error instanceof Error ? error.message : String(error)}`; }
       }
       if (entry.ending || !opened.url || opened.verdict.result !== 'pass' || !site) {
         await opened.close();
