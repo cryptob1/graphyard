@@ -240,6 +240,8 @@ test('unit:reinstall-reissues-stale-credentials — a self-contained host instal
   const cli: UpDependencies['cli'] = async args => {
     calls.push(args);
     if (args[0] === 'install' && args.includes('--plan')) return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }], preflight: [{ name: 'GitHub CLI', ok: true }] }) };
+    // GY-1850: the accounts step's profile write on the host is no install.
+    if (args[0] === 'install' && args.includes('--profiles-only')) return { code: 0, stdout: JSON.stringify({ host: 'box', profiles: { counts: { workers: 1, reviewers: 1 } } }) };
     if (args[0] === 'install' && args.includes('--apply')) {
       // The install itself: install --fresh-cursor resets the cursor on the host, through its transport.
       const fleet = { host: 'box', units: [{ name: unit, scope: 'user' as const, path: '', role: 'master loop', active: 'active' }] };
@@ -308,16 +310,16 @@ test('unit:reinstall-reissues-stale-credentials — a self-contained host instal
   const state = JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8'));
   assert.equal(state.reissue, null); assert.equal(state.hostCursor, null);
 
-  // Accepted credentials again: no install (Herdr's own --herdr-only check runs on every run), nothing touched on the host but reads.
+  // Accepted credentials again: no install (Herdr's own --herdr-only check and the accounts step's --profiles-only write run on every run), nothing touched on the host but reads.
   const settled = { calls: calls.length, commands: host.commands.length };
   assert.equal((await runUp(request, deps([]))).exitCode, 0);
-  assert.deepEqual(calls.slice(settled.calls).filter(args => (args[0] === 'install' && !args.includes('--herdr-only')) || args[1] === 'restart'), []);
+  assert.deepEqual(calls.slice(settled.calls).filter(args => (args[0] === 'install' && !args.includes('--herdr-only') && !args.includes('--profiles-only')) || args[1] === 'restart'), []);
   assert.deepEqual(host.commands.slice(settled.commands).filter(command => !command.startsWith('cat ')), []);
 
   // A host that cannot be read is said so, and nothing is judged stale.
   unreachable = true;
   const blind: UpEvent[] = [], quiet = calls.length;
   assert.equal((await runUp(request, deps(blind))).exitCode, 0);
-  assert.deepEqual(calls.slice(quiet).filter(args => (args[0] === 'install' && !args.includes('--herdr-only')) || args[1] === 'restart'), []);
+  assert.deepEqual(calls.slice(quiet).filter(args => (args[0] === 'install' && !args.includes('--herdr-only') && !args.includes('--profiles-only')) || args[1] === 'restart'), []);
   assert.ok(blind.some(event => event.kind === 'note' && /recorded credentials could not be checked against the control plane \(.*master\.json on fake host could not be read\)/.test(event.text)), JSON.stringify(blind));
 });

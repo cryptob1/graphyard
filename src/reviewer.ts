@@ -3,13 +3,15 @@ import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, basename, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { sessionSlotsGrant } from './master/harness.js';
+import { classified } from './model/fault-classes.js';
+import type { AttentionItem } from './master/attention.js';
 import { sessionConfinement } from './master/launch.js';
 import { underTestRunner } from './supervisor.js';
 import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type SandboxExec } from './worker-sandbox.js';
@@ -909,6 +911,86 @@ async function pausedGhRead<T>(dependencies: { run?: ChildRun; now?: () => Date 
   try { return await read(); } catch (error) { await notePossibleGhRateLimit(error, dependencies.run ?? defaultChildRun, at); throw error; }
 }
 
+/**
+ * GY-1850: a review launch refused because no configured reviewer profile carries the name it asks
+ * for is a configuration fault, not a failing candidate. The refusals are counted here, beside the
+ * master's other private launch state, so `master status` raises one attention naming the profile
+ * and the command that writes the profiles, and the launch boundary in `launchReview` spaces its
+ * own attempts of one unknown profile five minutes apart until the profiles change.
+ */
+
+/**
+ * A review launch refused because no configured reviewer profile carries the name it asks for: a
+ * configuration wait, never a failure counted against the request (auto-dispatch.ts), so a fault
+ * that outlasts the dispatcher's attempt limit still resumes the same request once the profiles change.
+ */
+export class UnknownReviewerProfileError extends Error {
+  constructor(readonly profile: string, message: string) { super(message); }
+}
+
+/** How many consecutive review launches one unknown reviewer profile refuses before master status raises one configuration attention. */
+export const reviewerProfileRefusalLimit = 3;
+/** How far apart the launch boundary makes its attempts of one unknown profile once it has refused `reviewerProfileRefusalLimit` in a row: a launch inside the window is refused before the review ledger is read. */
+export const reviewerProfileRetryMs = 5 * 60_000;
+
+const reviewerProfileRefusalSchema = z.object({
+  version: z.literal(1),
+  /** The profile name the launches asked for. */
+  profile: z.string().min(1).max(100),
+  /** Consecutive refusals of that name. */
+  refusals: z.number().int().min(1),
+  /** When the launch boundary last really attempted the launch: a refusal inside the retry window is not one. */
+  at: z.string(),
+  /** The configured reviewer and worker profile names at that refusal: a change to them is the profiles changing. */
+  profiles: z.string(),
+}).strict();
+export type ReviewerProfileRefusal = z.infer<typeof reviewerProfileRefusalSchema>;
+
+/** What a refusal is counted against: the sorted reviewer and worker profile names, so any profile change lifts the attention and the backoff. */
+export function configuredProfileFingerprint(config: Pick<MasterConfig, 'workers' | 'reviewers'>): string {
+  return JSON.stringify([config.reviewers.map(profile => profile.name).sort(), config.workers.map(profile => profile.name).sort()]);
+}
+
+/** Beside the master's other private launch state, outside every worktree. */
+export const reviewerProfileRefusalPath = (config: Pick<MasterConfig, 'credentialFile'>) =>
+  resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.reviewer-profile-refusals.json`);
+
+/** The unknown reviewer profile launches are being refused for, or null while none is refused. */
+export async function readReviewerProfileRefusal(config: Pick<MasterConfig, 'credentialFile'>): Promise<ReviewerProfileRefusal | null> {
+  try { return reviewerProfileRefusalSchema.parse(JSON.parse(await readFile(reviewerProfileRefusalPath(config), 'utf8'))); } catch { return null; }
+}
+
+/** Count one more consecutive refusal of `profile`; a change to the configured profiles starts the count over. */
+export async function recordReviewerProfileRefusal(config: Pick<MasterConfig, 'credentialFile' | 'workers' | 'reviewers'>, profile: string, now = Date.now()): Promise<ReviewerProfileRefusal> {
+  const known = await readReviewerProfileRefusal(config), profiles = configuredProfileFingerprint(config);
+  const refusal = reviewerProfileRefusalSchema.parse({ version: 1, profile: profile.slice(0, 100), refusals: known && known.profile === profile && known.profiles === profiles ? known.refusals + 1 : 1, at: new Date(now).toISOString(), profiles });
+  await atomicPrivateWrite(reviewerProfileRefusalPath(config), refusal);
+  return refusal;
+}
+
+/** A launch got past the profile lookup: reviews launch again, so the fault is over. */
+export async function clearReviewerProfileRefusal(config: Pick<MasterConfig, 'credentialFile'>): Promise<void> {
+  await rm(reviewerProfileRefusalPath(config), { force: true });
+}
+
+/**
+ * One configuration attention while review launches are refused for the same unknown reviewer
+ * profile `reviewerProfileRefusalLimit` times in a row with the profiles unchanged (GY-1850): the
+ * dispatcher's retries only refused again, so master status names the profile and the one command
+ * that writes the profiles instead of leaving the loop to knock.
+ */
+export function reviewerProfileRefusalAttention(refusal: ReviewerProfileRefusal | null, current?: Pick<MasterConfig, 'workers' | 'reviewers'>): AttentionItem[] {
+  if (!refusal || refusal.refusals < reviewerProfileRefusalLimit) return [];
+  // The profiles changed since the refusals (the missing one written, say): the record is stale until the next launch clears it, so it raises nothing.
+  if (current && configuredProfileFingerprint(current) !== refusal.profiles) return [];
+  return [{ subject: `unknown reviewer profile ${refusal.profile}`,
+    text: `Review launches asking for reviewer profile ${refusal.profile} were refused ${refusal.refusals} times in a row, the last at ${refusal.at}: no configured reviewer profile carries that name, so no review can start. Run graphyard master environments --apply to write the reviewer and worker profiles from the logged-in environments; the next launch uses them and this clears`,
+    // The master fixes the launcher fault (agentOwner('master', …)); a missing profile is a setup step the installation lacks (classified('setup'), the configuration class).
+    role: 'master', approvedBy: null, human: false, humanOnly: null,
+    next: 'Run graphyard master environments --apply; it writes the reviewer and worker profiles, and the loop\'s next review launch succeeds and clears this',
+    ...classified('setup') }];
+}
+
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: ChildRun;
   mint?: (credential: ReviewerCredential, repository: string) => Promise<{ token: string; expiresAt: string }>;
@@ -953,7 +1035,28 @@ export async function launchReview(root: string, work: Work, profileName: string
   // The App is narrowed once, for the launch closure below as much as for this line.
   const reviewerApp = config.reviewer ?? null;
   const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
-  if (!profile) throw new Error(profileName ? `Unknown reviewer profile ${profileName}` : config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
+  if (!profile) {
+    // GY-1850: a launch naming a profile no configured one carries is a configuration fault, not a
+    // failing candidate: left to the dispatcher's widening retries it was knocked out every cycle
+    // for twenty minutes (the incident this item fixes) with no attention and no fix named. The
+    // refusals are counted beside the master's other private launch state; three in a row raise one
+    // configuration attention in master status naming the profile and the command that writes the
+    // profiles, and this boundary spaces its own attempts of the same unknown profile five minutes
+    // apart — a launch inside the window is refused here, before the review ledger is read, until
+    // the profiles change.
+    if (profileName) {
+      const at = now().getTime(), known = await readReviewerProfileRefusal(config);
+      if (known && known.profile === profileName && known.profiles === configuredProfileFingerprint(config)
+        && known.refusals >= reviewerProfileRefusalLimit && at - Date.parse(known.at) < reviewerProfileRetryMs)
+        throw new UnknownReviewerProfileError(profileName, `Unknown reviewer profile ${profileName}: refused ${known.refusals} launches in a row (last at ${known.at}); backing off to one attempt every ${reviewerProfileRetryMs / 60_000} minutes until the profiles change — write them with graphyard master environments --apply`);
+      await recordReviewerProfileRefusal(config, profileName, at);
+    }
+    if (profileName) throw new UnknownReviewerProfileError(profileName, `Unknown reviewer profile ${profileName}`);
+    throw new Error(config.reviewers.length ? 'Name the reviewer profile to launch; this master has more than one' : 'Add a reviewer profile with master reviewer add before launching a review');
+  }
+  // A launch got past the profile lookup: whichever profile it found, the loop launches reviews again
+  // (the missing name written, or a replacement one the dispatcher now selects), so the fault is over.
+  if (await readReviewerProfileRefusal(config)) await clearReviewerProfileRefusal(config);
   const binding = postMerge ? await postMergeBinding(root, work, postMerge, dependencies.run) : assertReviewCandidate(work, observedAt, dependencies.request);
   if (reviewerApp && binding.author.toLowerCase() === `${reviewerApp.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
   // The reviewer principal a control-plane launch registers: the profile's agent name, which every session of the profile posts as.
