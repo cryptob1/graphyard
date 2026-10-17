@@ -9,7 +9,7 @@ Ask only: **Which provider**; **Provider login**; **GitHub App confirmation clic
 
 - **Never print, echo, `cat`, log, paste, or commit a credential.**
 - **One principal per role** (`--workers N`); never share worker credentials.
-- **Workers never receive admin/coordinator/producer credentials.**
+- **Workers never receive an admin, coordinator, or producer credential.**
 - **Proof producers get explicit grants only** (`--producer-proof NAME`).
 - Credentials only under `$GRAPHYARD_CONFIG_HOME` (default `~/.config/graphyard`): plan's `installDirectory`, `init --apply`'s `workers/` (`0700`/`0600`).
 
@@ -55,17 +55,17 @@ No App: skip; else dispatch [small item](onboarding.md#4-prove-the-first-pr); on
 
 ## Principal roster
 
-`principal add ID --role ROLE [--grant external-runs:import|delivery:observe-sha]`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply` (planned-ID collisions refuse); writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant` ([lanes](validation.md#release-verdicts)). `delivery:observe-sha` is held alone, by a dedicated principal (`principal add huck-observer --role producer --grant delivery:observe-sha`); an existing principal's grants never change to or from it. Target server and CLI need GY-1912; older ones refuse it.
+`principal add ID --role ROLE [--grant external-runs:import|delivery:observe-sha]`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply` (planned-ID collisions refuse); writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant` ([lanes](validation.md#release-verdicts)). `delivery:observe-sha` is held alone by a dedicated principal (`principal add huck-observer --role producer --grant delivery:observe-sha`); existing principals' grants never gain/lose it. Server+CLI need GY-1912; older refuse it.
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4: `<ip>.sslip.io`, else `--domain`. Unpullable images build at installer's commit. Workers push/open PRs as App (one-hour tokens). `--apply --profiles-only`: `master environments --apply` there.
+`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4: `<ip>.sslip.io`, else `--domain`. Unpullable images build at installer's commit. Workers push/open PRs as App (1h tokens). `--apply --profiles-only`: `master environments --apply` there.
 
 Price: `--confirm-price`/`--max-monthly`; saved Apps (`--github-app FILE`/this install's/`.graphyard/github-app.json`) reused if token-minting; `--reuse-app SLUG` (or App page) reuses host-saved Apps; `--migrate` stops loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores.
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--plan]`: needs `DATABASE_URL`+`GRAPHYARD_URL`, records release, then checkout+`npm ci`/backup/recorded-roster redeploy/loop+executor restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (roll-forward once migrated). Beside `.graphyard/github-app.json`, `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `appPermissions.missing` empties. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
+`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; checkout+`npm ci`/backup/recorded-roster redeploy/loop+executor restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (migrated: roll-forward). Beside `.graphyard/github-app.json`, `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `appPermissions.missing` empties. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
 
 ## Failure handling
 

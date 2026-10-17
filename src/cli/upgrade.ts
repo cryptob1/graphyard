@@ -20,9 +20,13 @@ export interface UpgradeInputs {
   /** The generation the database is migrated to, or null when it could not be read. */
   databaseSchema: number | null;
   install: InstallRecord | null; url: string | null; backupFile: string;
+  /** Tracked files modified in the CLI checkout: checkout keeps them, so the target would run mixed source. */
+  cliChanges: string[];
+  /** The Railway workspace the redeploy names, for an account that belongs to several (--workspace). */
+  workspace: string | null;
 }
 export interface UpgradePlan {
-  from: Release; to: UpgradeTarget; databaseSchema: number | null; steps: UpgradeStep[]; rollback: string;
+  from: Release; to: UpgradeTarget; databaseSchema: number | null; steps: UpgradeStep[]; rollback: string; cliChanges: string[];
   /** When the target migrates the database: what a failure at or after the redeploy names instead of the rollback, which the migrated database would refuse. */
   rollforward: string | null;
 }
@@ -45,7 +49,7 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
     throw new Error(`Refusing ${target.version}: its schema generation ${target.schema} is older than the database's (${databaseSchema}); that release would refuse this database. Upgrade to a release at generation ${databaseSchema} or newer`);
   const image = `${imageRepository}:${target.version}`;
   // The install preview runs first, so the redeploy prints what it changes before it applies it.
-  const install = inputs.install && redeployArguments(inputs.install, image);
+  const install = inputs.install && redeployArguments(inputs.install, image, inputs.workspace);
   const redeploy = install ? `${cli(cliRoot, 'install', ...install.slice(0, -1), '--plan')} && ${cli(cliRoot, 'install', ...install)}` : `no install record for this repository: redeploy ${image} by hand`;
   const url = inputs.url ? ['--url', inputs.url] : [];
   const steps: UpgradeStep[] = [
@@ -58,7 +62,7 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
     { id: 'health', title: `Check that /healthz answers healthy at ${target.version}`, command: `GET ${inputs.url ?? 'GRAPHYARD_URL'}/healthz` },
   ];
   const migrates = target.schema !== null && databaseSchema !== null && target.schema > databaseSchema;
-  return { from: inputs.current, to: target, databaseSchema, steps, rollback: rollbackCommand(inputs.current, cliRoot),
+  return { from: inputs.current, to: target, databaseSchema, steps, rollback: rollbackCommand(inputs.current, cliRoot), cliChanges: inputs.cliChanges,
     rollforward: migrates ? `the server migrates the database from generation ${databaseSchema} to ${target.schema} when it redeploys, and ${inputs.current.version} refuses it after that: fix the failing step and rerun graphyard upgrade --to ${target.version}, or restore ${inputs.backupFile} with graphyard db restore into an empty database migrated by ${inputs.current.version} before rolling back` : null };
 }
 
@@ -73,6 +77,7 @@ const migratedFrom: UpgradeStepId[] = ['redeploy', 'restart', 'refresh', 'health
 /** Run the plan's steps in order, stopping at the first that fails with its name and the rollback command. */
 export async function runUpgrade(plan: UpgradePlan, effects: UpgradeEffects): Promise<UpgradeResult> {
   if (plan.databaseSchema === null) throw new Error('Refusing to upgrade: the database\'s schema generation could not be read (set DATABASE_URL or GRAPHYARD_URL), so a downgrade across a generation cannot be ruled out');
+  if (plan.cliChanges.length) throw new Error(`Refusing to upgrade: the CLI checkout has modified tracked files (${plan.cliChanges.join(', ')}), which checkout would carry into the target release; commit or discard them first. Nothing was changed`);
   await effects.record({ previous: plan.from, target: plan.to, rollback: plan.rollback });
   const done: UpgradeStepId[] = [];
   for (const step of plan.steps) {
@@ -89,6 +94,9 @@ const git = (cwd: string, ...args: string[]) => {
   if (run.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${(run.stderr || run.stdout).trim()}`);
   return run.stdout.trim();
 };
+
+/** Tracked files with uncommitted changes in the CLI checkout. */
+export const cliChangesOf = (cliRoot: string) => git(cliRoot, 'diff', '--name-only', 'HEAD').split('\n').filter(Boolean);
 
 /** The schema generation a revision's code expects, read from its release.ts; null when it names none. */
 export function schemaAt(source: string): number | null {
@@ -154,12 +162,12 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
 }
 
 export const renderPlan = (plan: UpgradePlan) => [`upgrade ${plan.from.version} -> ${plan.to.version} (schema ${plan.to.schema ?? 'unknown'}; database ${plan.databaseSchema ?? 'unknown'})`,
-  ...plan.steps.map((step, index) => `${index + 1}. ${step.id.padEnd(8)} ${step.title}\n   ${step.command}`), `rollback: ${plan.rollback}`, ...(plan.rollforward ? [`from the redeploy on: ${plan.rollforward}`] : [])].join('\n');
+  ...(plan.cliChanges.length ? [`refused until the CLI checkout is clean: ${plan.cliChanges.join(', ')}`] : []), ...plan.steps.map((step, index) => `${index + 1}. ${step.id.padEnd(8)} ${step.title}\n   ${step.command}`), `rollback: ${plan.rollback}`, ...(plan.rollforward ? [`from the redeploy on: ${plan.rollforward}`] : [])].join('\n');
 
 export const upgradeCommands = defineCommands([{
   name: 'upgrade',
   help: [
-    '  upgrade [--to VERSION|stable] [--plan]',
+    '  upgrade [--to VERSION|stable] [--workspace NAME] [--plan]',
     '                                Move the CLI checkout (then npm ci), back up the database,',
     '                                redeploy the server, restart loop and executors, refresh the',
     '                                generated files, and check /healthz, to one dated release;',
@@ -169,6 +177,9 @@ export const upgradeCommands = defineCommands([{
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
     const toIndex = flags.indexOf('--to');
     const to = toIndex >= 0 ? flags[toIndex + 1] ?? '' : stableChannel;
+    const workspaceIndex = flags.indexOf('--workspace');
+    const workspace = workspaceIndex >= 0 ? flags[workspaceIndex + 1] ?? '' : null;
+    if (workspace === '') throw new Error('Use upgrade --workspace NAME-OR-ID (railway whoami --json lists them)');
     const cliRoot = installationRoot, repoRoot = context.repositoryRoot();
     if (!flags.includes('--plan')) git(cliRoot, 'fetch', '--tags', '--force', 'origin');
     const repository = repositoryFromRemote(git(repoRoot, 'remote', 'get-url', 'origin'));
@@ -176,7 +187,7 @@ export const upgradeCommands = defineCommands([{
     const url = process.env.GRAPHYARD_URL || context.connection?.url ? context.base : null;
     const current = checkoutRelease(cliRoot);
     const target = resolveTarget(cliRoot, to);
-    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, databaseSchema: await databaseSchemaOf(url), url,
+    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), workspace, databaseSchema: await databaseSchemaOf(url), url,
       install: directory ? await readInstallRecord(directory) : null,
       backupFile: join(directory ?? join(repoRoot, '.graphyard'), 'backups', `before-${target.version}-${Date.now()}.json`) };
     const plan = upgradePlan(inputs);

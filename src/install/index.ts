@@ -216,9 +216,11 @@ export function installRequestFromArgs(args: string[]) {
  * upgrade`): its repository, provider or target, base branch, service, domain and host, and the
  * choices the record carries — its installer-created workers and producer grants, review policy,
  * no-App or observation-only mode — so the full apply plans the roster it has and revokes nothing.
- * An installation with no installer-created worker was applied with --observe-only.
+ * An installation with no installer-created worker was applied with --observe-only. The record keeps
+ * no Railway workspace, so an account in several workspaces names it again with `workspace`.
  */
-export function redeployArguments(record: InstallRecord, image: string) {
+export function redeployArguments(record: InstallRecord, image: string, workspace: string | null = null) {
+  if (workspace && record.provider !== 'railway') throw new Error(`--workspace names a Railway installation's workspace; ${record.repository} is installed on ${record.provider}`);
   const host = record.deployment;
   const installer = record.principals.filter(principal => principal.source !== 'principal');
   const workers = installer.filter(principal => principal.role === 'worker' && principal.id.startsWith(`${record.installId}-worker-`)).length;
@@ -227,7 +229,7 @@ export function redeployArguments(record: InstallRecord, image: string) {
   return ['--repo', record.repository, ...(record.selfContained ? ['--target', record.provider === 'hetzner' ? 'hetzner' : 'host'] : ['--provider', record.provider]),
     '--base-branch', record.baseBranch, ...(record.service ? ['--server-name', record.service] : []), ...(record.domain ? ['--domain', record.domain] : []),
     ...(host?.sshHost ? ['--ssh-host', host.sshHost, '--ssh-user', host.sshUser] : []), ...(host?.port ? ['--port', String(host.port)] : []),
-    ...(host?.local ? ['--local'] : []), '--review-policy', record.reviewPolicy, ...mode, '--image', image, '--apply'];
+    ...(host?.local ? ['--local'] : []), ...(workspace ? ['--workspace', workspace] : []), '--review-policy', record.reviewPolicy, ...mode, '--image', image, '--apply'];
 }
 
 function restoreRequest(values: Record<string, string | boolean | string[] | undefined>): InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice & RestoreProtectionChoice {

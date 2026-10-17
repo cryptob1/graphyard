@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { healthVerdict, liveEffects, renderPlan, resolveTarget, runUpgrade, schemaAt, upgradePlan, type UpgradeInputs, type UpgradeStep } from '../src/cli/upgrade.js';
+import { cliChangesOf, healthVerdict, liveEffects, renderPlan, resolveTarget, runUpgrade, schemaAt, upgradePlan, type UpgradeInputs, type UpgradeStep } from '../src/cli/upgrade.js';
 import { installRequestFromArgs, redeployArguments } from '../src/install/index.js';
+import { chooseRailwayWorkspace } from '../src/install/adapters.js';
 import type { InstallRecord } from '../src/install/secrets.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -20,7 +21,7 @@ const record = { installId: 'acme-app', repository: 'acme/app', provider: 'railw
 function inputs(overrides: Partial<UpgradeInputs> = {}): UpgradeInputs {
   return { cliRoot: '/opt/graphyard', repoRoot: '/work/app', current: { version: '2026.10.16', revision: 'a'.repeat(40), released: true },
     target: { version: '2026.10.17', revision: 'b'.repeat(40), schema: 4 }, databaseSchema: 4, install: record, url: 'https://gy.example',
-    backupFile: '/home/op/.config/graphyard/acme-app/backups/before-2026.10.17.json', ...overrides };
+    backupFile: '/home/op/.config/graphyard/acme-app/backups/before-2026.10.17.json', cliChanges: [], workspace: null, ...overrides };
 }
 
 test('unit:upgrade-command-plan — the plan lists the ordered steps without acting, and refuses a target older than the database\'s schema', async () => {
@@ -44,6 +45,13 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   const observed = redeployArguments({ ...record, noGithubApp: true, principals: record.principals.filter(entry => entry.role !== 'worker') }, 'img');
   assert.ok(observed.includes('--observe-only') && !observed.includes('--workers'), 'an installation with no installer worker redeploys observation-only');
   assert.equal(installRequestFromArgs(observed).request.observeOnly, true);
+  // The record keeps no Railway workspace: an account in several names it with upgrade --workspace, and the redeploy's preflight settles on it.
+  const workspaces = [{ id: 'ws-1', name: 'Personal' }, { id: 'ws-2', name: 'Acme' }];
+  assert.match(chooseRailwayWorkspace(installRequestFromArgs(redeployArguments(record, 'img')).request.workspace ?? null, workspaces).problem ?? '', /belongs to 2 workspaces/);
+  const named = upgradePlan(inputs({ workspace: 'Acme' }));
+  assert.match(named.steps[3].command, /--server-name graphyard --workspace Acme --review-policy github .*--plan && .*--workspace Acme .*--apply$/);
+  assert.deepEqual(chooseRailwayWorkspace(installRequestFromArgs(redeployArguments(record, 'img', 'Acme')).request.workspace ?? null, workspaces).selected, workspaces[1]);
+  assert.throws(() => redeployArguments({ ...record, provider: 'compose' }, 'img', 'Acme'), /Railway installation's workspace/);
 
   assert.throws(() => upgradePlan(inputs({ target: { version: '2026.10.1', revision: 'c'.repeat(40), schema: 3 } })), /Refusing 2026\.10\.1: its schema generation 3 is older than the database's \(4\)/);
   assert.equal(plan.rollforward, null, 'a target at the database generation migrates nothing');
@@ -65,6 +73,10 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   assert.equal(git(cli, 'rev-parse', 'HEAD'), old.revision, 'planning never moves the checkout');
   assert.throws(() => resolveTarget(cli, 'latest'), /dated release/);
   assert.equal(schemaAt('nothing here'), null);
+  assert.deepEqual(cliChangesOf(cli), []);
+  await writeFile(join(cli, 'src/release.ts'), 'export const schemaVersion = 9;\n'); await writeFile(join(cli, 'scratch.txt'), 'untracked');
+  assert.deepEqual(cliChangesOf(cli), ['src/release.ts'], 'a tracked edit makes the checkout dirty; untracked files do not');
+  assert.match(renderPlan(upgradePlan(inputs({ cliChanges: ['src/release.ts'] }))), /refused until the CLI checkout is clean: src\/release\.ts/);
 });
 
 test('unit:upgrade-command-run — steps run in order, the previous release is recorded first, npm ci follows every checkout, and a failure stops naming the step and rollback', async () => {
@@ -110,6 +122,8 @@ test('unit:upgrade-command-run — steps run in order, the previous release is r
   }
 
   calls.length = 0;
+  await assert.rejects(runUpgrade(upgradePlan(inputs({ cliChanges: ['src/store.ts'] })), effects()), /CLI checkout has modified tracked files \(src\/store\.ts\).*Nothing was changed/);
+  assert.deepEqual(calls, [], 'a dirty CLI checkout changes nothing, not even the record');
   await assert.rejects(runUpgrade(upgradePlan(inputs({ databaseSchema: null })), effects()), /schema generation could not be read/);
   assert.deepEqual(calls, [], 'an unreadable database generation changes nothing, not even the record');
 });
