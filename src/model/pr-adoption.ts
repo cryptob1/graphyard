@@ -116,6 +116,16 @@ export function adoptionHolderRefusal(all: readonly AdoptionPeer[], work: Pick<A
   return null;
 }
 
+/**
+ * Whether an open attempt holds the adopted branch: the workspace reservation rule for that branch.
+ * Every attempt on the adopted item shares the pull request's one branch, so an ended attempt's
+ * record — the item's own earlier epoch or a peer's — holds nothing, by the same judgement the
+ * holder check reads at adopt, and the two checks never disagree.
+ */
+export function adoptedBranchHeld(all: readonly AdoptionPeer[], branch: string): AdoptionPeer | null {
+  return all.find(item => (item.workspaces ?? []).some(space => space.branch === branch && attemptOpen(item, space.epoch))) ?? null;
+}
+
 /** The same adoption recorded again — one binding, one head, one repository: the idempotent no-op. */
 export function sameAdoption(binding: PrAdoption, intent: { pr: number; head: string }, repository: string): boolean {
   return binding.pr === intent.pr && binding.head === intent.head && binding.repository === repository;

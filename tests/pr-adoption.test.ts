@@ -118,6 +118,11 @@ test('unit:pr-adoption-binds-once — adopting a pull request at its live head b
   await engine.execute(worker, 'release', reserving.id, { epoch: claim.epoch, cause: 'stood down' }, randomUUID());
   const afterEnd = await adopt(await released(), thirdPull.number, thirdHead);
   assert.equal(afterEnd.prAdoption!.branch, 'graphyard/huck-notes');
+  // The ended attempt's record no more holds the branch at the workspace than at adoption: the adopting item's attempt reserves it.
+  const afterEndClaim = await engine.execute(worker, 'claim', afterEnd.id, {}, randomUUID());
+  const afterEndSpace = await engine.execute(worker, 'workspace', afterEnd.id, { epoch: afterEndClaim.epoch, host: 'machine-a', path: `/tmp/adopted-after/${afterEnd.id}`, branch: 'graphyard/huck-notes' }, randomUUID());
+  assert.equal(afterEndSpace.workspaces.at(-1)!.branch, 'graphyard/huck-notes');
+  await engine.execute(worker, 'release', afterEnd.id, { epoch: afterEndClaim.epoch, cause: 'stood down' }, randomUUID());
   // A fork's head lives outside the managed origin, and a pull request against another base never
   // lands on the managed one: either could never be worked or completed, so both are refused.
   const { head: sixthHead, pull: sixthPull } = externalPull('feature/huck-fork');
@@ -190,8 +195,18 @@ test('unit:pr-adoption-same-pr-no-double-dispatch — an attempt on the adopted 
   assert.equal(rows.length, 1, `one dispatch row stands: ${JSON.stringify(redispatched.actionQueue!.actions.map(row => [row.kind, row.binding]))}`);
   assert.equal(rows[0]!.binding, `dispatch:${item.epoch}`);
 
-  // An attempt is assigned the adopted branch: a fresh branch name is refused naming the adopted one.
+  // A second dispatch reaching claim while the first attempt holds the item is refused: one assignment.
+  const first = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
+  await assert.rejects(engine.execute(worker, 'claim', item.id, {}, randomUUID()));
+  // The first attempt works on the adopted branch and ends without submitting; its record stays as history.
+  await engine.execute(worker, 'workspace', item.id, { epoch: first.epoch, host: 'machine-a', path: `/tmp/adopted-1/${item.id}`, branch: 'feature/huck-reviews' }, randomUUID());
+  await engine.execute(worker, 'heartbeat', item.id, { epoch: first.epoch }, randomUUID());
+  const ended = await engine.execute(worker, 'release', item.id, { epoch: first.epoch, cause: 'stood down' }, randomUUID());
+  assert.ok(ended.workspaces.some(space => space.epoch === first.epoch && space.branch === 'feature/huck-reviews'), 'the ended attempt keeps its workspace record');
+
+  // The next attempt is assigned the same adopted branch: a fresh branch name is refused naming the adopted one.
   const attempt = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
+  assert.notEqual(attempt.epoch, first.epoch);
   await refused(engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-a', path: `/tmp/adopted-2/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${attempt.epoch}` }, randomUUID()),
     'its attempt works on the adopted branch feature/huck-reviews');
   const worked = await engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-a', path: `/tmp/adopted-2/${item.id}`, branch: 'feature/huck-reviews' }, randomUUID());

@@ -44,7 +44,7 @@ import { nextAction, nextActionKinds, sameAction } from './model/next-action.js'
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { sameObservationInputs } from './model/observation-save.js';
-import { adoptSchema, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
+import { adoptSchema, adoptedBranchHeld, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
@@ -1946,11 +1946,14 @@ export class Engine {
         demand(validBranch(data.branch) || !!work.prAdoption && data.branch === work.prAdoption.branch,
           `Only a Graphyard branch${work.prAdoption ? `, or the adopted pull request's own branch ${work.prAdoption.branch},` : ''} can be reserved`);
         demand(!work.workspaces.some(w => w.epoch === data.epoch), 'This assignment already has a workspace');
-        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
+        // GY-1849: the adopted branch is shared by every attempt on the adopted item, so only an open attempt's record of it holds.
+        const adoptedBranch = !!work.prAdoption && data.branch === work.prAdoption.branch;
+        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && !adoptedBranch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
+        if (adoptedBranch) { const holder = adoptedBranchHeld(all, data.branch); demand(!holder, `${holder?.key} holds ${data.branch} in an open attempt; the adopted branch is reserved by one attempt at a time`, 409); }
         if (work.submission) demand(data.branch === work.workspaces.find(w => w.epoch === work!.submission!.epoch)?.branch, 'Rework must use the already linked PR branch in a fresh workspace');
         // GY-1849: an attempt on an adopted item is assigned the adopted pull request's own branch —
         // it works there from the pull request's existing commits, and no fresh branch is reserved beside it.
-        else if (work.prAdoption) demand(data.branch === work.prAdoption.branch, `${work.key} adopted pull request #${work.prAdoption.pr}; its attempt works on the adopted branch ${work.prAdoption.branch}, not ${data.branch}`);
+        else if (work.prAdoption) demand(data.branch === work.prAdoption.branch, `${work.key} adopted pull request #${work.prAdoption.pr}; its attempt works on the adopted branch ${work.prAdoption.branch}, not ${data.branch}`, 409);
         const { preserved, ...workspace } = data;
         work.workspaces.push({ ...workspace, owner: actor.id });
         // The preserved-attempt record (GY-860): what the released holder of this branch carried —
