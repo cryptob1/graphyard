@@ -478,6 +478,8 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     local: provider === 'local' ? await localSettings(directory, installId, dependencies.localSupervisor) : null,
     spend: { maxMonthly: inputs.maxMonthly ?? null, confirmPrice: inputs.confirmPrice ?? null },
     observeOnly: !!inputs.observeOnly,
+    // The repository this install manages: the observe-only upload guard refuses it as the source.
+    managedRoot: root,
     wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))),
     transport, ssh, fetch: dependencies.fetch ?? fetch, vault,
   };

@@ -18,7 +18,7 @@ const adapters = () => import('../src/install/adapters.js');
 function context(overrides: Partial<AdapterContext>, responses: Parameters<typeof fakeTransport>[0] = {}) {
   const transport = fakeTransport(responses);
   const vault = new Vault();
-  const ctx = { provider: 'railway', service: 'graphyard-owner-project', sourceRoot: SOURCE, railwayDir: LINK, managedRoot: MANAGED, sourceCommit: null, vault, transport, ...overrides } as AdapterContext;
+  const ctx = { provider: 'railway', service: 'graphyard-owner-project', sourceRoot: SOURCE, railwayDir: LINK, managedRoot: MANAGED, sourceCommit: SHA, vault, transport, ...overrides } as AdapterContext;
   return { ctx, transport, vault };
 }
 
@@ -26,16 +26,16 @@ test('unit:railway-upload-path-as-root — a source that is not the cwd uploads 
   const { railwayAdapter } = await adapters();
   const away = context({});
   await railwayAdapter.deploy(away.ctx);
-  assert.equal(away.transport.commands.length, 1);
-  const [up] = away.transport.commands;
+  assert.deepEqual(away.transport.commands.map(command => command.args[0]), ['variables', 'up']);
+  const [, up] = away.transport.commands;
   assert.equal(up.program, 'railway');
   assert.equal(up.cwd, LINK, 'the upload left the private link directory');
   assert.deepEqual(up.args, ['up', SOURCE, '--service', 'graphyard-owner-project', '--ci', '--detach', '--path-as-root']);
 
   const here = context({ sourceRoot: LINK });
   await railwayAdapter.deploy(here.ctx);
-  assert.deepEqual(here.transport.commands[0].args, ['up', LINK, '--service', 'graphyard-owner-project', '--ci', '--detach'], 'a cwd source changed its upload');
-  assert.equal(here.transport.commands[0].cwd, LINK);
+  assert.deepEqual(here.transport.commands[1].args, ['up', LINK, '--service', 'graphyard-owner-project', '--ci', '--detach'], 'a cwd source changed its upload');
+  assert.equal(here.transport.commands[1].cwd, LINK);
 });
 
 test('unit:railway-upload-receipts-and-source — a failed upload is a failed step with its exit code and message that stops the apply, a success records exit 0, and --observe-only never uploads the managed tree', async () => {
@@ -76,12 +76,24 @@ test('unit:railway-upload-receipts-and-source — a failed upload is a failed st
   // The Graphyard source is uploaded as usual under --observe-only.
   const graphyard = context({ observeOnly: true });
   await railwayAdapter.deploy(graphyard.ctx);
-  assert.equal(graphyard.transport.commands.length, 1);
+  assert.deepEqual(graphyard.transport.commands.map(command => command.args[0]), ['variables', 'up']);
+
+  // prepareInstall hands the adapter the checkout it was given as the managed tree, not the
+  // process cwd: with the process elsewhere, that checkout is still refused as the source.
+  const managedFixture = await harness({ provider: 'railway' });
+  try {
+    assert.notEqual(managedFixture.root, process.cwd());
+    const session = await prepareInstall(managedFixture.root, { repository: 'owner/project', provider: 'railway', observeOnly: true }, { ...managedFixture.deps, sourceRoot: managedFixture.root });
+    assert.equal(session.context.managedRoot, managedFixture.root);
+    const before = managedFixture.transport.commands.length;
+    await assert.rejects(railwayAdapter.deploy(session.context), /provider\.deploy refused: under --observe-only the upload source .* is the managed repository's tree/);
+    assert.equal(managedFixture.transport.commands.length, before, 'the refused upload ran a command');
+  } finally { await managedFixture.cleanup(); }
 
   // Through a full apply, a failed upload stops it: nothing after the deploy step runs.
   const fixture = await harness({ provider: 'railway', extraResponses: [{ match: 'railway up', result: { stdout: '', stderr: 'prefix not found', code: 1 } }] });
   try {
-    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway' }, { ...fixture.deps, sourceRoot: SOURCE });
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway' }, { ...fixture.deps, sourceRoot: process.cwd() });
     await assert.rejects(applyInstall(session, await buildPlan(session)), { message: 'provider.deploy failed: railway up exited with 1: prefix not found' });
     const railway = fixture.transport.commands.filter(command => command.program === 'railway');
     assert.equal(railway.at(-1)!.args[0], 'up', 'the apply continued past the failed upload');
@@ -111,5 +123,12 @@ test('unit:railway-upload-stamps-build-sha — the upload sets GRAPHYARD_BUILD_S
   const app = railwayAdapter.plan(ctx, { ...emptyObservation(), compute: true, database: true, app: true, installed: true })
     .find(action => action.id === 'provider.provision.app')!;
   assert.match(app.title, new RegExp(`GRAPHYARD_BUILD_SHA to ${SHA}`));
+
+  // A source whose commit is unknown is refused before anything runs: a service stamped by an
+  // earlier upload would otherwise keep that commit and serve it for the new contents.
+  const unknown = context({ sourceCommit: null });
+  await assert.rejects(railwayAdapter.deploy(unknown.ctx), /provider\.deploy refused: the commit of the upload source .* is unknown/);
+  assert.equal(unknown.transport.commands.length, 0, 'an upload of unknown commit ran a command');
+  assert.deepEqual(railwayUploadReceipts(unknown.ctx), []);
   assert.deepEqual(app.values, [{ name: 'GRAPHYARD_BUILD_SHA', value: SHA, secret: false }]);
 });

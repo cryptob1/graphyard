@@ -664,7 +664,7 @@ export function railwayUploadArgs(ctx: Pick<AdapterContext, 'sourceRoot' | 'serv
 /**
  * The commit the uploaded source is at: an upload carries no Git metadata, so the served build
  * knows its commit only from GRAPHYARD_BUILD_SHA, which the upload stamps first. Null when the
- * source is no checkout and this process has no build identity either.
+ * source is no checkout and this process has no build identity either; the upload then refuses.
  */
 export function railwaySourceCommit(ctx: Pick<AdapterContext, 'sourceRoot' | 'sourceCommit'>): string | null {
   if (ctx.sourceCommit !== undefined) return ctx.sourceCommit;
@@ -684,9 +684,11 @@ export async function railwayUpload(ctx: AdapterContext): Promise<RailwayUploadR
     throw new Error(`provider.deploy refused: under --observe-only the upload source ${ctx.sourceRoot} is the managed repository's tree (${managed}); only the Graphyard source is uploaded`);
   }
   // Stamped before the upload, without a deploy of its own: the upload's build then serves its
-  // commit at /healthz, and a rerun on a deployed app restamps and redeploys it.
+  // commit at /healthz, and a rerun on a deployed app restamps and redeploys it. A source whose
+  // commit is unknown is refused: the service would keep an earlier upload's stamp and serve it.
   const commit = railwaySourceCommit(ctx);
-  if (commit) await runRailway(ctx, ['variables', '--service', ctx.service, '--skip-deploys', '--set', `GRAPHYARD_BUILD_SHA=${commit}`], { timeout: 300_000 });
+  if (!commit) throw new Error(`provider.deploy refused: the commit of the upload source ${ctx.sourceRoot} is unknown (no Git checkout and no GRAPHYARD_BUILD_SHA), so GRAPHYARD_BUILD_SHA cannot be set and the service would keep a previous upload's commit`);
+  await runRailway(ctx, ['variables', '--service', ctx.service, '--skip-deploys', '--set', `GRAPHYARD_BUILD_SHA=${commit}`], { timeout: 300_000 });
   const args = railwayUploadArgs(ctx);
   const result = await runRailway(ctx, args, { allowFailure: true, timeout: 1_800_000 });
   const message = ctx.vault.scrub((result.code === 0 ? result.stdout.trim() || result.stderr.trim() : result.stderr.trim() || result.stdout.trim()).split('\n').filter(Boolean).slice(-8).join('\n').slice(-2000));
@@ -756,7 +758,7 @@ export const railwayAdapter: ProviderAdapter = {
     return [
       { id: 'provider.provision.project', target: 'provider', title: `Link or create the Railway project for ${ctx.repository}${workspace.selected ? ` in workspace ${workspace.selected.name}` : ''}, linked from ${ctx.railwayDir}`, state: observation.compute ? 'satisfied' : 'create', command: `railway ${railwayInitArgs(ctx, workspace.selected).join(' ')}`, ...(workspace.selected ? { values: [{ name: 'workspace', value: `${workspace.selected.name} (${workspace.selected.id})`, secret: false }] } : {}) },
       { id: 'provider.provision.database', target: 'provider', title: 'Add the managed Postgres database', state: observation.database ? 'satisfied' : 'create', command: 'railway add --database postgres' },
-      { id: 'provider.provision.app', target: 'provider', title: `Add the ${ctx.service} application service built from the Graphyard checkout's root Dockerfile; every upload first sets GRAPHYARD_BUILD_SHA to ${commit ?? 'the source commit, which is unknown here, so /healthz reports commit null'}`, state: observation.app ? 'satisfied' : 'create', command: `railway add --service ${ctx.service}`, values: [{ name: 'GRAPHYARD_BUILD_SHA', value: commit ?? 'unknown', secret: false }] },
+      { id: 'provider.provision.app', target: 'provider', title: `Add the ${ctx.service} application service built from the Graphyard checkout's root Dockerfile; every upload first sets GRAPHYARD_BUILD_SHA to ${commit ?? 'the source commit, which is unknown here, so the upload is refused'}`, state: observation.app ? 'satisfied' : 'create', command: `railway add --service ${ctx.service}`, values: [{ name: 'GRAPHYARD_BUILD_SHA', value: commit ?? 'unknown', secret: false }] },
     ];
   },
   async provision(ctx, observation) {
