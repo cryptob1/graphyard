@@ -12,7 +12,7 @@ human pushing to main is reported by the main watch, not blocked.
 
 ## Method and evidence
 
-- Source: this worktree at HEAD 9198a6c88f (files named per row).
+- Source: base commit 9198a6c88f of `main` (files named per row).
 - Live reads: the worker credential of this attempt (App installation token: `contents`,
   `pull_requests`, `workflows` write; `metadata` read) against `github.com/cryptob1/graphyard`:
   repository document (owner type `User`, `allow_auto_merge: true`), branch rules of `main`
