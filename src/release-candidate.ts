@@ -1091,22 +1091,6 @@ export function recordSoak(git: Git, id: string, input: { sha: string; result: S
   return { recorded: true as const, record };
 }
 
-/**
- * GY-1965: the uat job's always() step. A job cancelled or failed before its suites recorded a
- * verdict records `cancelled`, so UAT stops reading that candidate as a validation in progress and
- * the next candidate deploys at once; a candidate that already has a verdict keeps it.
- */
-export function recordUatCancelled(git: Git, id: string, input: { base: string; now: Date; push: boolean }) {
-  syncLedger(git, input.base);
-  const ledger = readLedger(git);
-  const candidate = findCandidate(ledger, id);
-  const existing = ledger.uat.find(record => record.id === candidate.id);
-  if (existing) return { recorded: false as const, record: existing };
-  const record: UatRecord = { id: candidate.id, sha: candidate.sha, result: 'cancelled', deployedSha: null, at: input.now.toISOString(), suites: [], followUp: null };
-  writeRecord(git, `${uatTagPrefix}${candidate.id}`, candidate.sha, record, input.push);
-  return { recorded: true as const, record };
-}
-
 /** Every candidate with its UAT, advisory soak and production state, newest first. */
 export const ledgerStatus = (ledger: Ledger) => ledger.candidates.map(candidate => {
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null, soak = ledger.soak.find(record => record.id === candidate.id) ?? null;
