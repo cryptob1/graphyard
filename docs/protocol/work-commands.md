@@ -21,7 +21,7 @@ No endpoint sets lifecycle state.
 
 ## Splitting an item
 
-Never-dispatched items over `run.decomposition` bounds (4 criteria, 2 root directories, 5 source files (`maxPlannedFiles`; tests/docs exempt), ~600 lines) get a read-only Pi session (`run.research`; `concurrency` 4, `timeoutMinutes` 10) proposing 2–10 children; `"split": false`, keep-whole answers, refused splits, failed runs dispatch unchanged; `"split": true` forces it. Each criterion goes to one child, `plannedFiles` inside the parent's, within the bound; `after` orders children; they inherit release, dependencies, `exclusiveResources`, policy and docs criterion. Unclaimed parents refuse requirements revisions; children only add criteria; last delivery delivers the parent. `master status` `itemSize`: 7-day median first-claim-to-merge minutes/attempts per band (1-2/3-5/6-10/>10 source files; `directoryScoped` apart).
+Never-dispatched items over `run.decomposition` bounds (4 criteria, 2 root directories, 5 distinct source files (`maxPlannedFiles`; tests/docs exempt), ~600 lines) get a read-only Pi session (`run.research`; `concurrency` 4, `timeoutMinutes` 10) proposing 2–10 children; `"split": false`, keep-whole answers, refused splits, failed runs dispatch unchanged; `"split": true` forces it. Each criterion goes to one child, `plannedFiles` inside the parent's, within the bound; `after` orders children; they inherit release, dependencies, `exclusiveResources`, policy and docs criterion. Unclaimed parents refuse requirements revisions; children only add criteria; last delivery delivers the parent. `master status` `itemSize`: 7-day median first-claim-to-merge minutes/attempts per band (1-2/3-5/6-10/>10 source files; `directoryScoped` apart).
 
 ## Other commands and routes
 

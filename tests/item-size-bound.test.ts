@@ -66,8 +66,14 @@ test('unit:item-size-five-source-files — with default settings six planned sou
   // Companions never count toward the bound: test files, test helpers, docs pages, the timing baseline.
   assert.deepEqual(plannedSourceFiles({ plannedFiles: ['src/decomposition.ts', 'tests/item-size-bound.test.ts', 'tests/helpers/timing-baseline.json', 'docs/master-agent-reference.md', 'web/app.ts'] }),
     ['src/decomposition.ts', 'web/app.ts']);
-  for (const scope of ['tests/', 'tests/helpers/', 'docs/', 'docs/page.md']) assert.equal(companionScope(scope), true, `${scope} is a companion`);
-  for (const scope of ['src/', 'src/one.ts', 'web/', 'README.md']) assert.equal(companionScope(scope), false, `${scope} is a source change`);
+  for (const scope of ['tests/', 'tests/helpers/', 'docs/', 'docs/page.md', 'README.md', 'AGENTS.md', 'src/one.test.ts', 'src/runner/two.spec.tsx', 'browser-tests/login.spec.ts', 'browser-tests/', 'test/foo.ts', 'src/__tests__/a.ts'])
+    assert.equal(companionScope(scope), true, `${scope} is a companion`);
+  for (const scope of ['src/', 'src/one.ts', 'web/', 'web/app.ts']) assert.equal(companionScope(scope), false, `${scope} is a source change`);
+  // The item's configured documentation is a companion too; the default rule does not apply to an item configuring its own.
+  const configured = { id: 'DOCS', text: 'Documentation reflects this change', paths: ['guide/**', 'packages/*/README.md'], changelog: 'CHANGELOG.md' } as unknown as Work['documentation'];
+  assert.deepEqual(plannedSourceFiles({ plannedFiles: ['guide/setup.md', 'packages/core/README.md', 'CHANGELOG.md', 'src/a.ts'], documentation: configured }), ['src/a.ts']);
+  // Each source file counts once, however it is spelled: duplicates and `./` prefixes are one file.
+  assert.deepEqual(plannedSourceFiles({ plannedFiles: ['src/a.ts', './src/a.ts', 'src/a.ts', 'src/runner/**', 'src/runner/'] }), ['src/a.ts', 'src/runner/']);
 
   // Six source files, however many test and docs files beside them, are over the bound; five source files and ten test files are within it.
   const over = item('GY-2', { plannedFiles: ['src/one.ts', 'src/two.ts', 'src/three.ts', 'src/four.ts', 'src/five.ts', 'src/six.ts', 'tests/seven.test.ts', 'docs/page.md'] });
@@ -76,6 +82,11 @@ test('unit:item-size-five-source-files — with default settings six planned sou
   assert.ok(sizeBoundsExceeded(over, decompositionSettings({})).some(reason => /6 planned source files, over 5/.test(reason)), 'six source files are over the bound; their companions are not counted');
   assert.ok(decompositionWanted(over, decompositionSettings({})), 'an item over the bound is sent to decomposition');
   assert.equal(decompositionWanted(within, decompositionSettings({})), null, 'an item within the bounds is dispatched unchanged');
+  // Colocated tests, tests outside tests/ and README.md are companions as well; a repeated source path counts once.
+  const colocated = item('GY-9', { plannedFiles: ['src/one.ts', 'src/two.ts', 'src/three.ts', 'src/four.ts', 'src/five.ts', ...Array.from({ length: 10 }, (_, index) => `src/file-${index}.test.ts`),
+    'browser-tests/login.spec.ts', 'test/foo.ts', 'README.md', 'src/five.ts', './src/one.ts'] });
+  assert.deepEqual(sizeBoundsExceeded(colocated, decompositionSettings({})), [], 'five distinct source files beside colocated tests, other test roots, README.md and repeated entries are within every bound');
+  assert.equal(decompositionWanted(colocated, decompositionSettings({})), null);
   assert.equal(estimatedLines(within), 600, 'companions add nothing to the estimate: five source files and two criteria sit exactly at the scaled bound');
 
   // The bounds judge the source change, however many criteria carry it: a one-criterion item over
@@ -133,11 +144,19 @@ test('unit:time-to-merge-by-size-reported — master status reports, for deliver
   assert.equal(report.windowDays, 7);
   assert.deepEqual(report.bands.map(band => band.band), ['1-2', '3-5', '6-10', 'over 10']);
   const band = (name: string) => report.bands.find(entry => entry.band === name)!;
-  assert.deepEqual(band('1-2'), { band: '1-2', items: 3, measured: 2, medianMinutesToMerge: 60, medianAttempts: 2 }, 'the merge is read on the repository clock; the unmeasured delivery is counted, not measured');
+  assert.deepEqual(band('1-2'), { band: '1-2', items: 3, measured: 2, medianMinutesToMerge: 60, medianAttempts: 1.5 }, 'the median of one and two attempts is 1.5, never rounded; the merge is read on the repository clock; the unmeasured delivery is counted, not measured');
   assert.deepEqual(band('3-5'), { band: '3-5', items: 2, measured: 2, medianMinutesToMerge: 30, medianAttempts: 1 });
   assert.deepEqual(band('6-10'), { band: '6-10', items: 1, measured: 1, medianMinutesToMerge: 200, medianAttempts: 3 });
   assert.deepEqual(band('over 10'), { band: 'over 10', items: 0, measured: 0, medianMinutesToMerge: null, medianAttempts: null }, 'a delivery eight days old is outside the window');
   assert.deepEqual(report.directoryScoped, { items: 0, measured: 0, medianMinutesToMerge: null, medianAttempts: null });
+
+  // Elapsed minutes are not rounded before their median: 90 s and 150 s give a 2-minute median, not 2.5 rounded from 2 and 3.
+  const seconds = [mergedItem('GY-22', { sources: 3, mergedAt: NOW - day, claimedMinutes: 1.5 }), mergedItem('GY-23', { sources: 4, mergedAt: NOW - day, claimedMinutes: 2.5 }), mergedItem('GY-24', { sources: 4, mergedAt: NOW - day, claimedMinutes: 3.5, attempts: 2 })];
+  assert.deepEqual(timeToMergeBySize(seconds, NOW).bands.find(entry => entry.band === '3-5'), { band: '3-5', items: 3, measured: 3, medianMinutesToMerge: 2.5, medianAttempts: 1 });
+  assert.equal(timeToMergeBySize(seconds.slice(0, 2), NOW).bands.find(entry => entry.band === '3-5')?.medianMinutesToMerge, 2, 'the median of 1.5 and 2.5 minutes is 2, not the median of their rounded values (2 and 3)');
+  // A repeated planned path counts once in the bands too: a one-file item listed six times stays in 1-2.
+  const repeated = { ...mergedItem('GY-25', { sources: 1, mergedAt: NOW - day, claimedMinutes: 10 }), plannedFiles: Array.from({ length: 6 }, () => 'src/file-1.ts') } as Work;
+  assert.equal(timeToMergeBySize([repeated], NOW).bands.find(entry => entry.band === '1-2')?.items, 1, 'a repeated path does not move an item to the 6-10 band');
 
   // A delivery planning a source directory scope has no known file count: it is reported apart,
   // never in the band its count of paths would give (one path, `src/`, is not a 1-2 file item).
@@ -197,6 +216,8 @@ test('unit:child-source-file-bound — a split child planning more than the run�
   for (const scope of ['src/runner/', 'src/runner/**'])
     assert.throws(() => validateChildSizes([{ title: 'Directory', criteria: ['AC-1'], plannedFiles: [scope, 'src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts'], after: [] }], 5),
       /Child 1 plans the source directory scope src\/runner\/\*{0,2}, which covers an unknown number of files/, `a child planning ${scope} is refused though it names five paths`);
+  assert.doesNotThrow(() => validateChildSizes([{ title: 'Repeated', criteria: ['AC-1'], plannedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts', 'src/e.ts', './src/a.ts', 'src/a.test.ts', 'README.md'], after: [] }], 5),
+    'a child counts distinct source files: repeated entries, colocated tests and README.md add nothing');
   assert.doesNotThrow(() => validateChildSizes([{ title: 'Companion directory', criteria: ['AC-1'], plannedFiles: ['src/a.ts', 'tests/helpers/', 'docs/'], after: [] }], 5), 'companion directories stay allowed');
 
   const starts: string[] = [];
