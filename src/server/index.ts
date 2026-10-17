@@ -1,25 +1,14 @@
 import { createServer, type IncomingMessage } from 'node:http';
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type { Engine } from '../engine.js';
 import { Refusal, demand, type Principal } from '../model.js';
 import type { GitHub } from '../github.js';
-import { Validation } from '../validation.js';
-import { Delivery } from '../delivery.js';
-import { OperatorAgents } from '../operator-agent.js';
-import { assembleDelegationLimits } from './limits.js';
-import { ProofGrants } from '../proof-grants.js';
-import { AgentRegistry } from '../agent-registry.js';
-import { ProductionDelivery } from '../production-delivery.js';
-import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
-import { buildIdentity } from '../protocol-version.js';
-import type { ProductionWatch } from '../production-watch.js';
-import { responderFromEnv, type Responder } from '../closed-question.js';
-import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule, type Services } from './routes.js';
-import { authenticate, operatorAgentRouteGuard, operatorVisible } from './auth.js';
-import type { Credential } from './principals.js';
+import { artifactCapacityFromEnv } from '../artifacts.js';
+import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule } from './routes.js';
+import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, operatorAgentRouteGuard, operatorVisible, refreshDelegationLimits, type ArtifactOptions, type ServerOptions } from './auth.js';
+import { type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
-import { signinClaimFromEnv, signinRoutes } from './routes/signin.js';
+import { signinRoutes } from './routes/signin.js';
 import { githubRoutes } from './routes/github.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
 import { proofGrantRoutes } from './routes/proof-grants.js';
@@ -35,9 +24,11 @@ import { statusRoutes } from './routes/status.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
 import { goalRoutes } from './routes/goals.js';
-import { interventionPolicyFromEnv, interventionRoutes } from './routes/interventions.js';
+import { interventionRoutes } from './routes/interventions.js';
 import { staticRoutes } from './static.js';
 export { principalSchema, type Credential } from './principals.js';
+export type { ArtifactOptions, ServerOptions } from './auth.js';
+export { assembleServices } from './auth.js';
 
 /** Routes that answer without a bearer token. */
 export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes, signinRoutes];
@@ -58,51 +49,13 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
   return Buffer.concat(chunks);
 }
 
-/** Where retained validation artifacts live and how much the postgres backend may hold. */
-export interface ArtifactOptions { backend: ArtifactBackend | null; capacityBytes: number }
-
-/**
- * What an embedder tells the control plane about the installation: the principals it already
- * ran with (the seeded proof-grant roster, deciding whether an over-limit roster warns or
- * refuses), the environment the limits are read from, the deployment watch, and the responder.
- */
-export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null; responder?: Responder | null }
-
-/** Wire the engine, its integrations and the principals into the shared services. */
-export function assembleServices(engine: Engine, credentials: Credential[], github: GitHub | null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}): Services {
-  const env = options.env ?? process.env;
-  const delegationLimits = assembleDelegationLimits(credentials, env, options.knownPrincipals);
-  const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
-  // The engine is constructed with the repository this control plane coordinates; GITHUB_REPOSITORY is
-  // only a process default (the CI checkout) and never overrides an explicit engine binding.
-  const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
-  demand(!engine.repository || !github || engine.repository.toLowerCase() === github.config.repository.toLowerCase(),
-    'Engine and GitHub repositories must match');
-  // Mutations authorize against the same canonical binding as authentication; some embedders pass it only via GitHub.
-  engine.repository = repository;
-  // Reviewer identities come from deployment configuration alongside the control-plane App,
-  // so a single parsed registry authorizes both policy validation and provider observation.
-  if (github) { engine.reviewerApps = github.config.reviewerApps ?? []; engine.controlPlaneAppId = github.config.appId; }
-  demand(!engine.reviewerApps.some(app => app.appId === engine.controlPlaneAppId),
-    'A registered reviewer App must be distinct from the Graphyard control-plane App');
-  const validation = new Validation(engine, principals.map(p => p.actor), repository);
-  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
-  const delivery = new Delivery(validation);
-  const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
-  const productionDelivery = new ProductionDelivery(engine.store);
-  engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
-  // Proof authority is Graphyard state. The configured registry only identifies which
-  // principals exist and what role each holds; the grant store decides what they may prove.
-  const configured = credentials.map(({ token, ...actor }) => actor);
-  engine.principals = configured;
-  const proofGrants = new ProofGrants(engine.store, configured);
-  return { signinClaim: signinClaimFromEnv(env, credentials), engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
-}
-
 export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {
   const services = assembleServices(engine, credentials, github, artifacts, options);
+  // Reviewer slots counted from the grant store once it can be read; status reports it as soon as it lands.
+  const delegationReady = refreshDelegationLimits(services, credentials, options.env ?? process.env, options.knownPrincipals)
+    .catch(error => console.error('Delegation limits could not be recounted from recorded proof grants:', error instanceof Error ? error.message : 'unknown'));
   const unauthenticated: Principal = { id: '', role: 'reader' };
-  // The services ride on the server so the entry announces their decisions (limit drift, build) without reassembling.
+  // The services ride on the server so the entry announces decisions without reassembling.
   return Object.assign(createServer(async (req, res) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -128,10 +81,14 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
         }
         return false;
       };
-      if (await dispatch(publicRoutes)) return;
+      // A lane-only producer's credential is held to its lane before any public /api/ handler runs (GY-1879):
+      // sign-in and claim answer it with the lane refusal, while an unauthenticated request reaches them as before.
+      // Effective authority (grant store over the env seed) decides confinement, matching the authenticated guard.
+      const lane = url.pathname.startsWith('/api/') ? configuredActor(services, req.headers.authorization) : null;
+      if (!(lane && await confinedLaneProducer(services, lane)) && await dispatch(publicRoutes)) return;
       if (url.pathname.startsWith('/api/')) {
         context.actor = await authenticate(services, req.headers.authorization, services.repository, req.method, url.pathname);
-        if (await dispatch(apiRoutes)) return;
+        if (await dispatch([laneProducerScope, ...apiRoutes])) return;
         return send(404, { error: 'Route not found' });
       }
       await dispatch([staticRoutes]);
@@ -142,5 +99,5 @@ export function server(engine: Engine, credentials: Credential[], github: GitHub
       console.error(requestFailure(req.method, req.url, error));
       send(500, { error: 'Internal error; consult server logs' });
     }
-  }), { services });
+  }), { services, delegationReady });
 }
