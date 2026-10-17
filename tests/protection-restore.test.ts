@@ -72,7 +72,7 @@ async function restore(fixture: Harness, mode: 'plan' | 'apply') {
   return mode === 'plan' ? plan : await applyInstall(session, plan) as any;
 }
 
-test('protection-prior-state-recorded-before-first-apply', async () => {
+test('unit:protection-prior-state-recorded-before-first-apply — the first github.protection apply records the protection it read (none for an unprotected branch) before any write, a second apply keeps the record, and it holds no credential', async () => {
   // An unprotected branch: the record says so, and is on disk before the first GitHub write.
   const fake = fakeGitHub();
   const first = await install(fake);
@@ -112,7 +112,7 @@ test('protection-prior-state-recorded-before-first-apply', async () => {
   } finally { await fixture.cleanup(); }
 });
 
-test('protection-restore-matches-recorded-state', async () => {
+test('unit:protection-restore-matches-recorded-state — the restore plan lists its writes and writes nothing, the apply writes exactly the recorded payload (or deletes protection for none) and its re-read matches, and no record refuses naming it', async () => {
   // No record: plan and apply both refuse, naming the file they looked for, having written nothing.
   const empty = await harness({ provider: 'railway' });
   try {
