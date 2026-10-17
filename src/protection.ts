@@ -301,8 +301,9 @@ export function withOperatorRulesets<T extends object>(protection: T, rulesets: 
  */
 function operatorRulesetPlan(current: any, config: { repository: string; baseBranch: string; githubAppId: number }, work: Work[], rules: unknown, workflows: WorkflowFile[], operator: any[]) {
   const { protection, items } = requiredReviewProtection(work);
-  const { target, refusal } = rulesetTarget(operator, config.baseBranch);
+  const { target, refusal: ambiguous } = rulesetTarget(operator, config.baseBranch);
   const missing = target ? missingGraphyardChecks(target, config.githubAppId) : [];
+  const refusal = ambiguous ?? (missing.length ? inheritedRefusal(target, config.baseBranch) : null);
   const changes = missing.map(entry => `operator ruleset ${target.id} (${target.name}) required check ${entry.context}: missing to required from App ${entry.integration_id}`);
   const classicPresent = !current?.[classicMissingKey];
   const requiredChecks = work.filter(item => item.stage !== 'done').flatMap(item => item.policy.checks);
@@ -340,7 +341,8 @@ export function readProtection(config: { repository: string; baseBranch: string 
   try {
     listed = [];
     for (let page = 1; ; page++) {
-      const entries = JSON.parse(run('gh', ['api', `repos/${config.repository}/rulesets?includes_parents=false${page > 1 ? `&per_page=30&page=${page}` : ''}`]));
+      // Inherited (organization or enterprise) rulesets govern the base as much as the repository's own (GY-1926).
+      const entries = JSON.parse(run('gh', ['api', `repos/${config.repository}/rulesets?includes_parents=true${page > 1 ? `&per_page=30&page=${page}` : ''}`]));
       listed.push(...(Array.isArray(entries) ? entries : []));
       if (!Array.isArray(entries) || entries.length < 30) break;
     }
@@ -348,7 +350,7 @@ export function readProtection(config: { repository: string; baseBranch: string 
   // The queue ruleset's bypass actors are only on the ruleset's own document.
   let queueRuleset: unknown = null;
   try {
-    const found = listed?.find(ruleset => ruleset?.name === mergeQueueRulesetName);
+    const found = listed?.find(ruleset => ruleset?.name === mergeQueueRulesetName && repositoryOwned(ruleset));
     if (found?.id) queueRuleset = JSON.parse(run('gh', ['api', `repos/${config.repository}/rulesets/${found.id}`]));
   } catch { queueRuleset = null; }
   // With no classic protection, an unread listing would leave the branch's governance unknown.
@@ -487,14 +489,45 @@ export const ghApiFromRun = (run: ProtectionRun): GhApi => async (args, options 
 /** GitHub's answer for a classic-protection GET on a branch that has none. */
 export const classicAbsent = (detail: string) => /Branch not protected/i.test(detail);
 const graphyardRulesets: string[] = [mergeQueueRulesetName, mainWriteRulesetName];
-const rulesetsPage = (repository: string, page: number) => `repos/${repository}/rulesets?includes_parents=false&per_page=100&page=${page}`;
+// Inherited rulesets are listed too: an organization ruleset governs the base exactly as a repository one does.
+const rulesetsPage = (repository: string, page: number) => `repos/${repository}/rulesets?includes_parents=true&per_page=100&page=${page}`;
+/** Whether a ruleset is the repository's own, so writable through its repository endpoint (a listing without source_type predates inheritance). */
+const repositoryOwned = (ruleset: any) => (ruleset?.source_type ?? 'Repository') === 'Repository';
 
+/** An fnmatch glob as a regular expression source: `*` within one segment, `**` across them, `?`, `[set]`, `[!set]`/`[^set]` and `\\` escapes. */
+function fnmatchSource(glob: string) {
+  const literal = (char: string) => char.replace(/[.+^${}()|[\]\\*?\/-]/g, '\\$&');
+  let source = '';
+  for (let at = 0; at < glob.length; at++) {
+    const char = glob[at];
+    if (char === '\\' && at + 1 < glob.length) source += literal(glob[++at]);
+    else if (char === '*') { if (glob[at + 1] === '*') { source += '.*'; at++; } else source += '[^/]*'; }
+    else if (char === '?') source += '[^/]';
+    else if (char === '[') {
+      let end = at + 1;
+      if (glob[end] === '!' || glob[end] === '^') end++;
+      if (glob[end] === ']') end++;
+      while (end < glob.length && glob[end] !== ']') end++;
+      // An unclosed bracket is a literal, as fnmatch reads it.
+      if (end >= glob.length) { source += literal(char); continue; }
+      let body = glob.slice(at + 1, end), negated = false;
+      if (body[0] === '!' || body[0] === '^') { negated = true; body = body.slice(1); }
+      let set = '';
+      for (let index = 0; index < body.length; index++) {
+        if (body[index + 1] === '-' && index + 2 < body.length) { set += `${literal(body[index])}-${literal(body[index + 2])}`; index += 2; }
+        else set += literal(body[index]);
+      }
+      source += negated ? `[^/${set}]` : `[${set}]`;
+      at = end;
+    } else source += literal(char);
+  }
+  return source;
+}
 /** A ref_name pattern as GitHub matches it: `~ALL`, `~DEFAULT_BRANCH`, or an fnmatch glob over `refs/heads/…`. */
 export function refPatternMatches(pattern: string, branch: string, defaultBranch: string | null) {
   if (pattern === '~ALL') return true;
   if (pattern === '~DEFAULT_BRANCH') return !!defaultBranch && branch === defaultBranch;
-  const glob = pattern.replace(/^refs\/heads\//, '').replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]').replace(/\u0000/g, '.*');
-  return new RegExp(`^${glob}$`).test(branch);
+  return new RegExp(`^${fnmatchSource(pattern.replace(/^refs\/heads\//, ''))}$`).test(branch);
 }
 /** Whether an active branch ruleset document's conditions include BRANCH. */
 export function rulesetGovernsBranch(ruleset: any, branch: string, defaultBranch: string | null) {
@@ -508,7 +541,7 @@ const checksOf = (ruleset: any): { context: string; integration_id?: number }[] 
 /** What a plan names per operator ruleset: id, required checks with integration ids, strict policy, conditions and bypass actors. */
 export function describeRuleset(ruleset: any) {
   const rule = checksRule(ruleset);
-  return { id: ruleset.id, name: ruleset.name, enforcement: ruleset.enforcement, requiredStatusChecks: checksOf(ruleset).map(check => ({ context: check.context, integrationId: check.integration_id ?? null })),
+  return { id: ruleset.id, name: ruleset.name, source: `${ruleset.source_type ?? 'Repository'}${ruleset.source ? ` ${ruleset.source}` : ''}`, enforcement: ruleset.enforcement, requiredStatusChecks: checksOf(ruleset).map(check => ({ context: check.context, integrationId: check.integration_id ?? null })),
     strict: rule ? rule.parameters?.strict_required_status_checks_policy === true : null, conditions: ruleset.conditions ?? null, bypassActors: ruleset.bypass_actors ?? null };
 }
 export interface OperatorRulesets { rulesets: any[]; effectiveRules: unknown }
@@ -566,6 +599,10 @@ export function rulesetTarget(rulesets: any[], branch: string): { target: any; r
   return { target: null, refusal: carrying.length
     ? `Several operator rulesets require status checks on ${branch}: ${carrying.map(name).join(', ')}; Graphyard adds its checks to exactly one, so merge their required checks into one ruleset, then rerun`
     : `No operator ruleset governing ${branch} requires status checks (governing: ${rulesets.map(name).join(', ') || 'none'}); add a required_status_checks rule to the one Graphyard should extend, then rerun` };
+}
+/** Null when TARGET is the repository's own ruleset, else why Graphyard cannot write it: an inherited ruleset is edited only where it is defined. */
+export function inheritedRefusal(target: any, branch: string) {
+  return repositoryOwned(target) ? null : `Operator ruleset ${target.id} (${target.name}), which requires status checks on ${branch}, is inherited from ${target.source_type}${target.source ? ` ${target.source}` : ''}; Graphyard writes rulesets only through the repository's own endpoint and never falls back to classic protection, so add or retire the check in that ${String(target.source_type).toLowerCase()} ruleset yourself, then rerun`;
 }
 const sameCheck = (left: { context: string; integration_id?: number | null }, right: { context: string; integration_id?: number | null }) => left.context === right.context && (left.integration_id ?? null) === (right.integration_id ?? null);
 const graphyardEntries = (githubAppId: number) => GRAPHYARD_CHECKS.map(context => ({ context, integration_id: githubAppId }));
@@ -628,6 +665,12 @@ const effectivePath = (repository: string, branch: string) => `repos/${repositor
  * any mismatch the snapshot is put back and its digest verified, and the refusal reports both.
  */
 async function writeRulesetEdit(api: GhApi, input: { repository: string; branch: string; id: number; snapshots: string; now: number; describe: string; prepare: (fresh: any) => ((checks: any[]) => any[]) | null }) {
+  // Every governing ruleset is read again just before the write: if another one has since come to
+  // require checks, the target is no longer the unique one, and the write refuses rather than proceed.
+  const again = await readOperatorRulesets(api, input.repository, input.branch);
+  const { target, refusal } = rulesetTarget(again.rulesets, input.branch);
+  if (!target) throw new Error(`The operator rulesets on ${input.repository}@${input.branch} changed after they were read: ${refusal}; nothing was written`);
+  if (target.id !== input.id) throw new Error(`The operator rulesets on ${input.repository}@${input.branch} changed after they were read: ruleset ${target.id} (${target.name}), not ${input.id}, now requires its checks; nothing was written, so rerun`);
   const fresh = await readRuleset(api, input.repository, input.id);
   const edit = input.prepare(fresh);
   if (!edit) return null;
@@ -661,6 +704,13 @@ export async function applyOperatorRulesetAdd(api: GhApi, config: RulesetWriteCo
   const standing = { applied: false, ruleset: target.id, result: `operator ruleset ${target.id} (${target.name}) already requires ${GRAPHYARD_CHECKS.join(' and ')} from App ${config.githubAppId}; nothing was written` };
   const missing = missingGraphyardChecks(target, config.githubAppId);
   if (!missing.length) return standing;
+  const inherited = inheritedRefusal(target, config.baseBranch);
+  if (inherited) throw new Error(inherited);
+  // Requiring a check the App has never published would block every pull request, so the add waits for it.
+  if (missing.some(entry => entry.context === CHECK_NAME)) {
+    const published = await confirmedGet(api, `repos/${config.repository}/commits/${config.baseBranch}/check-runs?per_page=100`, `the check runs on ${config.repository}@${config.baseBranch}`);
+    if (!(published?.check_runs ?? []).some((run: any) => Number(run?.app?.id) === config.githubAppId)) throw new Error(`App ${config.githubAppId} has not yet published ${CHECK_NAME} on ${config.baseBranch}, so requiring it in operator ruleset ${target.id} (${target.name}) would block every pull request; nothing was written. Once Graphyard has published it on a pull request, rerun graphyard master protection --apply`);
+  }
   const written = await writeRulesetEdit(api, { repository: config.repository, branch: config.baseBranch, id: target.id, snapshots: config.snapshots, now: config.now,
     describe: missing.map(entry => `${entry.context}@${entry.integration_id}`).join(' and ') + ' added',
     prepare: fresh => {
@@ -692,6 +742,8 @@ export async function retireOperatorRulesetCheck(api: GhApi, config: RulesetWrit
   const { rulesets } = await readOperatorRulesets(api, config.repository, config.baseBranch);
   const { target, refusal } = rulesetTarget(rulesets, config.baseBranch);
   if (!target) return refuse(refusal!);
+  const inherited = inheritedRefusal(target, config.baseBranch);
+  if (inherited) refuse(inherited);
   // The ruleset's requirements, judged on the discovered document and again on the fresh one the write edits.
   const judge = (document: any) => {
     const missing = missingGraphyardChecks(document, config.githubAppId);

@@ -29,6 +29,10 @@ const mainRuleset = () => ({ id: 22322922, name: 'main', target: 'branch', sourc
 const stagingRuleset = () => ({ id: 22322921, name: 'staging', target: 'branch', source_type: 'Repository', source: REPOSITORY, enforcement: 'active',
   bypass_actors: [{ actor_id: 5, actor_type: 'RepositoryRole', bypass_mode: 'always' }], conditions: { ref_name: { include: ['refs/heads/staging'], exclude: [] } },
   rules: [{ type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: 'ci', integration_id: CI }, { context: 'work-context', integration_id: CI }] } }] });
+/** An organization ruleset inherited by the repository, requiring checks on every branch. */
+const organizationRuleset = () => ({ id: 5001, name: 'org checks', target: 'branch', source_type: 'Organization', source: 'owner', enforcement: 'active', bypass_actors: [],
+  conditions: { ref_name: { include: ['~ALL'], exclude: [] }, repository_name: { include: ['~ALL'], exclude: [] } },
+  rules: [{ type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: 'org-ci', integration_id: CI }] } }] });
 /** An unrelated operator ruleset on main that requires no checks. */
 const signingRuleset = () => ({ id: 22322930, name: 'signed commits', target: 'branch', source_type: 'Repository', source: REPOSITORY, enforcement: 'active', bypass_actors: [],
   conditions: { ref_name: { include: ['refs/heads/main', 'refs/heads/release/*'], exclude: [] } }, rules: [{ type: 'required_signatures' }] });
@@ -42,11 +46,13 @@ function fakeGitHub(rulesets: any[] = [mainRuleset(), stagingRuleset(), signingR
   const state = {
     rulesets: new Map(rulesets.map(ruleset => [ruleset.id, structuredClone(ruleset)])), classic: null as any, classicAnswer: null as GhAnswer | null,
     pulls: new Map<number, any>([[42, { number: 42, head: { sha: SHA }, base: { ref: 'main' } }]]), runs: [] as any[], movesHead: false, pullReads: 0,
+    // What the App has published on main's head: by default Graphyard / merge, so the add may require it.
+    baseRuns: [{ id: 1, name: 'Graphyard / merge', status: 'completed', conclusion: 'success', app: { id: APP } }] as any[],
     calls: [] as string[][], writes: [] as { path: string; body: any }[], onPut: null as null | ((id: number, body: any, count: number) => any),
   };
   const ok = (value: unknown): GhAnswer => ({ stdout: JSON.stringify(value), stderr: '', code: 0 });
   const missing = (stderr = 'gh: Not Found (HTTP 404)'): GhAnswer => ({ stdout: '', stderr, code: 1 });
-  const effective = () => [...state.rulesets.values()].filter(ruleset => rulesetGovernsBranch(ruleset, 'main', 'main')).flatMap(ruleset => ruleset.rules.map((rule: any) => ({ ...rule, ruleset_source_type: 'Repository', ruleset_id: ruleset.id })));
+  const effective = () => [...state.rulesets.values()].filter(ruleset => rulesetGovernsBranch(ruleset, 'main', 'main')).flatMap(ruleset => ruleset.rules.map((rule: any) => ({ ...rule, ruleset_source_type: ruleset.source_type ?? 'Repository', ruleset_id: ruleset.id })));
   const answer = (args: string[], input?: string): GhAnswer => {
     state.calls.push(args);
     const method = args.includes('--method') ? args[args.indexOf('--method') + 1] : 'GET', path = args.find(arg => arg.startsWith('repos/'))!;
@@ -55,7 +61,9 @@ function fakeGitHub(rulesets: any[] = [mainRuleset(), stagingRuleset(), signingR
     if (path === 'repos/owner/project') return method === 'GET' ? ok({ full_name: REPOSITORY, default_branch: 'main', owner: { type: 'Organization' }, allow_auto_merge: false }) : missing();
     if (path.startsWith('repos/owner/project/rulesets?')) {
       const page = Number(/[?&]page=(\d+)/.exec(path)?.[1] ?? 1), size = Number(/per_page=(\d+)/.exec(path)?.[1] ?? 30);
-      return ok([...state.rulesets.values()].slice((page - 1) * size, page * size).map(({ id, name, target, enforcement, source_type }) => ({ id, name, target, enforcement, source_type })));
+      // Inherited rulesets are listed only when the listing asks for them, as GitHub does.
+      const listed = [...state.rulesets.values()].filter(ruleset => !/includes_parents=false/.test(path) || (ruleset.source_type ?? 'Repository') === 'Repository');
+      return ok(listed.slice((page - 1) * size, page * size).map(({ id, name, target, enforcement, source_type }) => ({ id, name, target, enforcement, source_type })));
     }
     const ruleset = /^repos\/owner\/project\/rulesets\/(\d+)$/.exec(path);
     if (ruleset) {
@@ -74,6 +82,7 @@ function fakeGitHub(rulesets: any[] = [mainRuleset(), stagingRuleset(), signingR
       if (found && state.movesHead && state.pullReads++ > 0) return ok({ ...found, head: { sha: 'b'.repeat(40) } });
       return found ? ok(found) : missing();
     }
+    if (path.startsWith('repos/owner/project/commits/main/check-runs')) return ok({ total_count: state.baseRuns.length, check_runs: state.baseRuns });
     if (path.startsWith(`repos/owner/project/commits/${SHA}/check-runs`)) return ok({ total_count: state.runs.length, check_runs: state.runs });
     return missing(`unexpected gh ${args.join(' ')}`);
   };
@@ -97,7 +106,7 @@ test('unit:protection-reads-operator-rulesets — a classic 404 is no classic pr
   assert.match(plan.classicProtection, /none \(GitHub answered 404 Branch not protected\)/);
   // Every active ruleset whose conditions include main, as full documents; staging's ruleset does not govern main.
   assert.deepEqual(plan.operatorRulesets.map((ruleset: any) => ruleset.id), [22322922, 22322930]);
-  assert.deepEqual(plan.operatorRulesets[0], { id: 22322922, name: 'main', enforcement: 'active',
+  assert.deepEqual(plan.operatorRulesets[0], { id: 22322922, name: 'main', source: 'Repository owner/project', enforcement: 'active',
     requiredStatusChecks: [{ context: 'ci', integrationId: CI }, { context: 'work-context', integrationId: CI }, { context: 'guard', integrationId: CI }],
     strict: true, conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } }, bypassActors: [] });
   assert.deepEqual(plan.operatorRulesets[1].requiredStatusChecks, []);
@@ -137,6 +146,42 @@ test('unit:protection-reads-operator-rulesets — a classic 404 is no classic pr
   const failing = fakeGitHub();
   const failingGh = async (args: string[]) => args.some(arg => arg.includes('/rulesets?')) ? { stdout: '', stderr: 'gh: Server Error (HTTP 500)', code: 1 } : failing.gh(args);
   await assert.rejects(readOperatorRulesets(failingGh, REPOSITORY, 'main'), /GitHub did not answer page 1 of the rulesets of owner\/project/);
+  // An inherited organization ruleset governs main as much as a repository one: it is listed, named
+  // with its source, and, when it is the one requiring checks, refused by name, never sent down the classic path.
+  const inheritedOnly = fakeGitHub([organizationRuleset()]);
+  const inheritedPlan: any = protectionPlan(readProtection(config, inheritedOnly.run), config, [work], undefined, []);
+  assert.equal(inheritedPlan.governance, 'operator-ruleset');
+  assert.deepEqual(inheritedPlan.operatorRulesets.map((ruleset: any) => [ruleset.id, ruleset.source]), [[5001, 'Organization owner']]);
+  assert.match(inheritedPlan.refusal, /Operator ruleset 5001 \(org checks\), which requires status checks on main, is inherited from Organization owner; Graphyard writes rulesets only through the repository's own endpoint and never falls back to classic protection/);
+  await assert.rejects(applyProtection(config, [work], inheritedOnly.run, [], { snapshots: '/nonexistent', now: 1 }), /is inherited from Organization owner/);
+  await assert.rejects(applyOperatorRulesetAdd(inheritedOnly.gh, { ...config, snapshots: '/nonexistent', now: 1 }), /is inherited from Organization owner/);
+  assert.deepEqual(inheritedOnly.state.writes, [], 'neither classic protection nor the inherited ruleset is written');
+  // Beside a repository ruleset requiring checks, an inherited one requiring checks too is a second candidate.
+  const inheritedBeside = fakeGitHub([mainRuleset(), organizationRuleset()]);
+  assert.match((protectionPlan(readProtection(config, inheritedBeside.run), config, [work], undefined, []) as any).refusal, /Several operator rulesets require status checks on main: 22322922 \(main\), 5001 \(org checks\)/);
+  // An inherited ruleset requiring no checks governs too, and the repository's own ruleset stays the target.
+  const inheritedSigning = fakeGitHub([mainRuleset(), { ...signingRuleset(), id: 5002, source_type: 'Organization', source: 'owner' }]);
+  const besidePlan: any = protectionPlan(readProtection(config, inheritedSigning.run), config, [work], undefined, []);
+  assert.deepEqual(besidePlan.operatorRulesets.map((ruleset: any) => ruleset.id), [22322922, 5002]); assert.deepEqual(besidePlan.target, { id: 22322922, name: 'main' });
+
+  // fnmatch character sets target the base as GitHub matches them: inclusion, negation and exclusion.
+  const governs = (include: string[], exclude: string[] = [], branch = 'release-1') => rulesetGovernsBranch({ target: 'branch', enforcement: 'active', conditions: { ref_name: { include, exclude } } }, branch, 'main');
+  assert.equal(governs(['refs/heads/release-[0-9]']), true);
+  assert.equal(governs(['refs/heads/release-[0-9]'], [], 'release-a'), false);
+  assert.equal(governs(['refs/heads/release-[!0-9]']), false);
+  assert.equal(governs(['refs/heads/release-[^a-z]']), true);
+  assert.equal(governs(['refs/heads/release-[abc1]']), true);
+  assert.equal(governs(['refs/heads/release-*'], ['refs/heads/release-[1-3]']), false);
+  assert.equal(governs(['refs/heads/release-*'], ['refs/heads/release-[4-9]']), true);
+  assert.equal(governs(['refs/heads/release-[0-9'], [], 'release-[0-9'), true, 'an unclosed bracket is a literal');
+  // A base governed only through a character set reads as operator-governed, so no classic write is proposed or made.
+  const charset = fakeGitHub([{ ...mainRuleset(), conditions: { ref_name: { include: ['refs/heads/m[a-z]in'], exclude: ['refs/heads/[!m]*'] } } }]);
+  const charsetPlan: any = protectionPlan(readProtection(config, charset.run), config, [work], undefined, []);
+  assert.equal(charsetPlan.governance, 'operator-ruleset'); assert.deepEqual(charsetPlan.target, { id: 22322922, name: 'main' });
+  const charsetSnapshots = await snapshotsDirectory();
+  try { await applyProtection(config, [work], charset.run, [], { snapshots: charsetSnapshots, now: 1 }); } finally { await rm(charsetSnapshots, { recursive: true, force: true }); }
+  assert.deepEqual(charset.state.writes.map(write => write.path), ['PUT repos/owner/project/rulesets/22322922'], 'only the ruleset is written, never classic protection');
+
   // A classic-protected branch with no operator ruleset plans exactly as before.
   const classic = fakeGitHub([stagingRuleset()]);
   classic.state.classic = { required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: APP }, { context: 'graphyard/landable', app_id: APP }] }, enforce_admins: { enabled: true },
@@ -180,6 +225,25 @@ test('unit:protection-adds-graphyard-checks-to-operator-ruleset — --apply adds
     const several = fakeGitHub([mainRuleset(), { ...stagingRuleset(), id: 22322923, name: 'main extra', conditions: { ref_name: { include: ['refs/heads/main'], exclude: [] } } }]);
     await assert.rejects(applyOperatorRulesetAdd(several.gh, { ...config, snapshots, now: 3_000 }), /Several operator rulesets require status checks on main: 22322922 \(main\), 22322923 \(main extra\)/);
     assert.deepEqual([...none.state.writes, ...several.state.writes], []);
+
+    // Before the App has published Graphyard / merge on main, --apply refuses rather than require a check that never comes.
+    const fresh = fakeGitHub();
+    fresh.state.baseRuns = [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success', app: { id: CI } }];
+    await assert.rejects(applyProtection(config, [work], fresh.run, [], { snapshots, now: 4_000 }), /App 1234 has not yet published Graphyard \/ merge on main, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
+    assert.deepEqual(fresh.state.writes, []);
+
+    // Another governing ruleset that comes to require checks after discovery makes the target no longer
+    // unique: every governing ruleset is read again just before the write, and the write refuses.
+    const raced = fakeGitHub();
+    let signingReads = 0;
+    const racedGh = async (args: string[], options: { input?: string } = {}) => {
+      if (args.includes('repos/owner/project/rulesets/22322930') && signingReads++ === 1) {
+        raced.state.rulesets.set(22322930, { ...signingRuleset(), rules: [...signingRuleset().rules, { type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: 'sign-ci', integration_id: CI }] } }] });
+      }
+      return raced.gh(args, options);
+    };
+    await assert.rejects(applyOperatorRulesetAdd(racedGh, { ...config, snapshots, now: 5_000 }), /changed after they were read: Several operator rulesets require status checks on main: 22322922 \(main\), 22322930 \(signed commits\).*; nothing was written/);
+    assert.deepEqual(raced.state.writes, []);
   } finally { await rm(snapshots, { recursive: true, force: true }); }
 });
 
@@ -412,6 +476,18 @@ test('unit:install-preserves-operator-rulesets — install plans and applies the
     await assert.rejects(applyInstall(session, plan), /main is governed by operator ruleset\(s\) 22322922 \(main\), 22322930 \(signed commits\), so the installer writes no classic protection there, and adding Graphyard's checks was refused: App \d+ has not yet published Graphyard \/ merge on main/);
     assert.deepEqual(unpublished.state.writes.filter(write => write.path !== 'PATCH repos/owner/project'), []);
   } finally { await first.cleanup(); }
+
+  // An inherited organization ruleset alone: the installer plans no classic write, names the ruleset's source, and stops.
+  const inherited = fakeGitHub([organizationRuleset()]);
+  const orgInstall = await harness({ provider: 'railway', extraResponses: installResponses(inherited) as any });
+  try {
+    const session = await prepareInstall(orgInstall.root, { repository: REPOSITORY, provider: 'railway' }, orgInstall.deps);
+    const plan: any = await buildPlan(session);
+    assert.match(plan.preflight.find((item: any) => item.name === 'Branch protection' && !item.ok).detail, /governed by operator ruleset\(s\) 5001 \(org checks\).*is inherited from Organization owner/);
+    await assert.rejects(applyInstall(session, plan), /is inherited from Organization owner/);
+    assert.deepEqual(inherited.state.writes.filter(write => write.path !== 'PATCH repos/owner/project'), []);
+    assert.ok(!inherited.state.calls.some(call => call.includes('--method') && call.some(arg => arg.endsWith('/protection') || arg.includes('/protection/'))), 'classic protection is never written');
+  } finally { await orgInstall.cleanup(); }
 
   // Refused: two rulesets carry checks for main, so the plan stops naming both, and apply writes nothing.
   const several = fakeGitHub([mainRuleset(), { ...stagingRuleset(), id: 22322923, name: 'main extra', conditions: { ref_name: { include: ['refs/heads/main'], exclude: [] } } }]);

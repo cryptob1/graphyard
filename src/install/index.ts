@@ -12,7 +12,7 @@ import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/deliver
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, hetznerAddress, publishedPort, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
-import { applyOperatorRulesetAdd, missingGraphyardChecks, protectionSnapshots, readOperatorRulesets, rulesetTarget, type OperatorRulesets } from '../protection.js';
+import { applyOperatorRulesetAdd, inheritedRefusal, missingGraphyardChecks, protectionSnapshots, readOperatorRulesets, rulesetTarget, type OperatorRulesets } from '../protection.js';
 import { applyProtection, applyRestore, observeRestore, protectionRecordFile, readProtectionRecord, recordProtectionOnce, restoreChanges, type ProtectionRecord, type RestoreChange, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
@@ -1250,9 +1250,10 @@ function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
  * never planned there.
  */
 function rulesetPlanAction(operator: OperatorRulesets, branch: string, appId: number | null): { action: PlanAction; refusal: string | null } {
-  const { target, refusal } = rulesetTarget(operator.rulesets, branch);
+  const { target, refusal: ambiguous } = rulesetTarget(operator.rulesets, branch);
   const governing = operator.rulesets.map(ruleset => `${ruleset.id} (${ruleset.name})`).join(', ');
   const satisfied = !!target && appId !== null && !missingGraphyardChecks(target, appId).length;
+  const refusal = ambiguous ?? (target && !satisfied ? inheritedRefusal(target, branch) : null);
   return { refusal: refusal && `${branch} is governed by operator ruleset(s) ${governing}, so Graphyard writes no classic protection there, and its checks cannot be added: ${refusal}`,
     action: { id: 'github.protection', target: 'github', state: satisfied ? 'satisfied' : 'update',
       title: `Add ${GRAPHYARD_CHECKS.join(' and ')} from App ${appId ?? '<the bound App>'} to the required checks of operator ruleset ${target ? `${target.id} (${target.name})` : `<none qualifies among ${governing}>`} on ${branch}, after snapshotting it; every other rule, condition, bypass actor and check stays as the operator wrote it, and classic protection is never written while an operator ruleset governs ${branch}` } };

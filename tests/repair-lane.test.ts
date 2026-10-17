@@ -48,7 +48,7 @@ test('unit:repair-bypass-ruleset — the queue ruleset has exactly one bypass ac
     const path = args.find(arg => arg.startsWith('repos/'))!;
     if (args.includes('PUT') && path === 'repos/owner/project/rulesets/7') { const body = JSON.parse(input!); writes.push({ args, body }); stored = { id: 7, ...body }; return '{}'; }
     if (args.includes('--method')) throw new Error(`unexpected write ${args.join(' ')}`);
-    if (path === 'repos/owner/project/rulesets?includes_parents=false') return JSON.stringify([{ id: 7, name: mergeQueueRulesetName }]);
+    if (/^repos\/owner\/project\/rulesets\?includes_parents=(true|false)$/.test(path)) return JSON.stringify([{ id: 7, name: mergeQueueRulesetName }]);
     if (path === 'repos/owner/project/rulesets/7') return JSON.stringify(stored);
     if (path.startsWith('repos/owner/project/rules/branches/')) return JSON.stringify(queueRules);
     if (path.endsWith('/protection')) return JSON.stringify(branch());
