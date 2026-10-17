@@ -253,3 +253,23 @@ test('unit:reconcile-due-evidence-expiry — an evidence record expiring before 
   copy.evidence = [...copy.evidence, { proof: 'unit:reconcile-due-evidence-expiry', trusted: false, expiresAt } as unknown as Work['evidence'][number]];
   assert.equal(engine.evaluate(copy, all, at), Date.parse(expiresAt), 'the evidence expiry is the earliest instant the outcome can change');
 });
+
+test('unit:reconcile-due-held-gates — a mechanical review hold lapsing at its round window and a running split lapsing at its limit and grace are the instants the evaluation records, since the review gate and dispatch move then with no write', { timeout: 120_000 }, async () => {
+  const { mechanicalRoundStartMs } = await import('../src/mechanical-findings.js');
+  const { decompositionHoldGraceMs } = await import('../src/decomposition.js');
+  const work = await engine.execute(operator, 'create', null,
+    { title: 'Due holds', plannedFiles: ['src/due-holds.ts'], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-held-gates'] }] }, randomUUID());
+  const at = new Date(await nowMs()), all = await store.list(), base = all.find(entry => entry.id === work.id)!;
+  const without = engine.evaluate(structuredClone(base), all, at);
+  assert.ok(without === null || without > at.getTime() + 1_000, `no other bound of the fixture falls within the second: ${without}`);
+  // An approval naming mechanical findings, submitted a second short of its round window.
+  const head = 'b'.repeat(40), submittedAt = new Date(at.getTime() - mechanicalRoundStartMs + 1_000).toISOString();
+  const candidate = { sha: head, baseSha: 'c'.repeat(40), pr: 9001, branch: 'graphyard/due-holds', author: 'implementer' };
+  const held = { ...structuredClone(base), stage: 'review', candidate, submission: { epoch: base.epoch, pr: 9001 }, policy: { ...base.policy, review: true, reviewProvider: 'github' },
+    observation: { candidate, reviews: [{ reviewer: 'reviewer[bot]', sha: head, state: 'APPROVED', id: 77, submittedAt, mechanical: 1 }], checks: [], merged: false, prState: 'open', draft: false, at: submittedAt } } as unknown as Work;
+  assert.equal(engine.evaluate(held, all, at), Date.parse(submittedAt) + mechanicalRoundStartMs, 'the mechanical hold\'s round window is the earliest instant the outcome can change');
+  // A split recorded running, a second short of its limit and grace.
+  const splitting = structuredClone(base);
+  splitting.decomposition = { state: 'running', startedAt: new Date(at.getTime() - decompositionHoldGraceMs).toISOString(), endedAt: null, runtime: 'claude', model: 'm', timeoutMs: 1_000, bounds: ['opted in'], reason: null } as unknown as Work['decomposition'];
+  assert.equal(engine.evaluate(splitting, all, at), at.getTime() + 1_000, 'the running split\'s hold end is the earliest instant the outcome can change');
+});

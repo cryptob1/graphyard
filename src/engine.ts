@@ -63,7 +63,8 @@ import { loopOwnedRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
 import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, quarantinedRevisionRefusal, requiredDecisionCapabilities, type Decision, type HeldApplication } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
-import { deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
+import { mechanicalHoldUntil } from './mechanical-findings.js';
+import { decompositionHoldGraceMs, deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
@@ -797,7 +798,8 @@ function mergeFaceMoves(moves: Iterable<FaceMove>): FaceMove[] {
  * The earliest instant at which this evaluated document's outcome could change with no write
  * (GY-1873): the minimum over the time-bounded inputs its evaluation read — the lease's expiry,
  * every open row's due (its claim, its retry, its settle window, the idle bound), the bound the
- * named wait runs to, the observation window's opening, every evidence record's expiry, and the
+ * named wait runs to, the observation window's opening, every evidence record's expiry, the review
+ * gate's mechanical hold and a running split's dispatch hold, and the
  * widest backoff a stalled action's escalation lifts at. Instants already past are ignored: what they guarded has flipped already
  * (or needs a write, or the full evaluation), and a past due would wake the item every pass. Null
  * when the document holds none — then only a write or the full evaluation can change the outcome,
@@ -816,6 +818,9 @@ function reconcileDueAt(work: Work, all: Work[], now: Date, account: ActionAccou
   considerIso(work.observationWindow?.notBefore);
   // Accepted evidence stops counting once its expiry passes (currentEvidence), so a gate can fail by the clock alone.
   for (const evidence of work.evidence ?? []) considerIso(evidence.expiresAt);
+  // The review gate's mechanical hold lapses at its round window, and dispatch's wait on a running split at its limit and grace.
+  consider(mechanicalHoldUntil(work, nowMs));
+  if (work.decomposition?.state === 'running') consider(Date.parse(work.decomposition.startedAt) + work.decomposition.timeoutMs + decompositionHoldGraceMs);
   for (const lift of stalledActionLifts(work)) consider(lift);
   return due;
 }
