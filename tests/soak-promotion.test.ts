@@ -156,7 +156,9 @@ test('unit:soak-promotion-stale-tip-settlement — successive candidates settle 
     mainSha: state.mainSha ?? promoted,
     promotedSha: state.promotedSha ?? promoted,
   }, { tip: lagWhileOff, awaiting: pending, now: now + cycleMs, intervalMs: cycleMs });
-  assert.equal(disabled.attention, null, 'disabled promotion raises no stuck-drive attention');
+  assert.ok(disabled.attention, 'disabled promotion raises the neutral mismatch attention');
+  assert.match(disabled.attention.text, new RegExp(lagWhileOff.slice(0, 12)));
+  assert.doesNotMatch(`${disabled.attention.text} ${disabled.attention.next}`, /past its .*read window|systemctl/, 'never a stuck-drive restart');
   assert.ok((disabled.reason ?? '').startsWith(promotionOffReason));
   assert.match(disabled.reason ?? '', new RegExp(lagWhileOff.slice(0, 12)));
   assert.doesNotMatch(disabled.reason ?? '', /Production runs the base branch tip/);

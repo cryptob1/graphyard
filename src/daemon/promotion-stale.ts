@@ -21,8 +21,13 @@ function stalePromotionTip(state: PromotionState, observed: PromotionObserved | 
   if (!tip || !state.mainSha || !awaiting.length || tip.startsWith(state.mainSha) || state.mainSha.startsWith(tip)) return null;
   const short = (sha: string) => sha.slice(0, 12), waiting = `${awaiting.join(', ')} await promotion on the base tip ${short(tip)} the checkout reads now`;
   const tipReason = `The ledger last read ${short(state.mainSha)} as the base tip; the checkout names ${short(tip)}, where ${waiting}`;
-  // Loop promotion off retains its ledger by design: name the observed tips, never a stuck-drive alert.
-  if (state.reason === promotionOffReason) return { attention: null, reason: `${promotionOffReason}; ${tipReason.charAt(0).toLowerCase()}${tipReason.slice(1)}` };
+  // Loop promotion off retains its ledger by design: name both tips neutrally, never a stuck-drive alert.
+  if (state.reason === promotionOffReason) return {
+    reason: `${promotionOffReason}; ${tipReason.charAt(0).toLowerCase()}${tipReason.slice(1)}`,
+    attention: { subject: 'promotion', role: 'master', approvedBy: null, human: false, humanOnly: null,
+      text: `Loop promotion is off; its ledger last read ${short(state.mainSha)} as the base tip and ${short(state.promotedSha ?? state.mainSha)} production, while ${waiting}`,
+      next: `Promotion is intentionally off, so no candidate is cut for these deliveries until it is turned back on; no restart is needed` } satisfies AttentionItem,
+  };
   const reason = state.reason?.startsWith(promotionUpToDateReason) ? tipReason : state.reason;
   const pastWindow = !state.ledgerReadAt || now - Date.parse(state.ledgerReadAt) >= ledgerMs;
   const attention: AttentionItem = pastWindow

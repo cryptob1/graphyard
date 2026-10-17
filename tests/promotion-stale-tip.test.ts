@@ -170,11 +170,17 @@ test('unit:promotion-reason-agrees-with-release-lag — master status\'s promoti
   promotionSummaryWithLag(stuckState({ ledgerReadAt: iso(T - 16 * minute), checkedAt: iso(T - minute) }), { baseTip: LAG_TIP, promotion: { pending: ['GY-1872'] } }, lagAttention, T, 300_000);
   assert.equal(lagAttention.length, 2, 'the summary past the interval-granted window raises the stuck-drive attention');
   assert.match(lagAttention[1]!.text, /15-minute read window/);
-  // Intentionally disabled promotion retains its ledger: tips are named, no stuck-drive / restart alert.
+  // Intentionally disabled promotion retains its ledger: both tips are named in reason and attention, no stuck-drive / restart alert.
   const disabled = observedPromotionStatus(stuckState({
     ...pastWindow, reason: promotionOffReason, inFlight: false,
   }), { tip: LAG_TIP, awaiting: ['GY-1872'], now: T });
-  assert.equal(disabled.attention, null, 'disabled promotion never raises a stuck-drive attention');
+  assert.ok(disabled.attention, 'disabled promotion still raises the neutral mismatch attention');
+  assert.match(disabled.attention.text, new RegExp(PROMOTED.slice(0, 12)));
+  assert.match(disabled.attention.text, new RegExp(LAG_TIP.slice(0, 12)));
+  assert.doesNotMatch(`${disabled.attention.text} ${disabled.attention.next}`, /past its .*read window|systemctl|restart it|dispatch .* by hand/, 'never a stuck-drive / restart diagnosis');
+  const offAttention: AttentionItem[] = [];
+  promotionSummaryWithLag(stuckState({ ...pastWindow, reason: promotionOffReason, inFlight: false }), { baseTip: LAG_TIP, promotion: { pending: ['GY-1872'] } }, offAttention, T);
+  assert.equal(offAttention.length, 1, 'promotionSummaryWithLag appends the disabled mismatch attention');
   assert.ok((disabled.reason ?? '').startsWith(promotionOffReason), 'disabled reason stays named');
   assert.match(disabled.reason ?? '', new RegExp(PROMOTED.slice(0, 12)));
   assert.match(disabled.reason ?? '', new RegExp(LAG_TIP.slice(0, 12)));
