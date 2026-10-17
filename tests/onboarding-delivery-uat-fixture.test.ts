@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -58,6 +58,10 @@ function dashboardLauncher(): E2eLauncher {
   } };
 }
 
+/** Every file under `directory` with its content, so a tree compares equal only when nothing in it was written, added or removed. */
+const tree = (directory: string): Record<string, string> => Object.fromEntries(readdirSync(directory, { recursive: true, withFileTypes: true }).filter(entry => entry.isFile())
+  .map(entry => { const path = join(entry.parentPath, entry.name); return [path.slice(directory.length + 1), readFileSync(path, 'utf8')]; }).sort(([a], [b]) => a.localeCompare(b)));
+
 const probe: CaseFile = { file: 'e2e/cases/shared-merger-probe.json', definition: parseCase('e2e/cases/shared-merger-probe.json', JSON.stringify({
   id: 'shared-merger-probe', title: 'The shared install keeps its merger', target: 'uat', required: true,
   steps: [{ kind: 'http', method: 'GET', path: '/api/merger', status: 200, expect: [{ path: 'mode', equals: 'github' }] }] })) };
@@ -88,7 +92,23 @@ test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-de
     assert.equal(before.cases[0].failingStep!.reason, 'mode is "github", expected "control-plane"');
 
     // The repaired suite: the fixture case on an isolated normally onboarded project, every other uat case on the shared install.
-    const fixture = async () => { const made = await createOnboardingFixture({ root }); opened.push(made); return made; };
+    // The host as the uat job meets it: a supported runtime on PATH, and a home and configuration of its own that already
+    // hold an install record and a worker credential, so normal init both proposes worker credentials and could read or write the host's.
+    const sentinel = await temporaryDirectory('onboarding-uat-host');
+    const bin = join(sentinel, 'bin'), home = join(sentinel, 'home'), hostConfig = join(sentinel, 'graphyard-config');
+    mkdirSync(bin); writeFileSync(join(bin, 'claude'), '#!/bin/sh\nexit 0\n'); chmodSync(join(bin, 'claude'), 0o755);
+    for (const directory of [join(home, '.config/graphyard/workers'), join(home, '.config/graphyard/installs/owner-fixture'), join(hostConfig, 'workers')]) mkdirSync(directory, { recursive: true });
+    writeFileSync(join(home, '.config/graphyard/workers/claude-primary.token'), 'host-owned\n');
+    writeFileSync(join(home, '.config/graphyard/installs/owner-fixture/install.json'), '{"repository":"owner/fixture","host":"sentinel"}\n');
+    writeFileSync(join(hostConfig, 'workers/claude-primary.token'), 'host-owned\n');
+    const host = { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), GRAPHYARD_CONFIG_HOME: hostConfig };
+    const hostBefore = tree(sentinel);
+    const credentials: string[][] = [];
+    const fixture = async () => {
+      const made = await createOnboardingFixture({ root, host }); opened.push(made);
+      credentials.push(Object.keys(tree(made.scratch)).filter(path => path.endsWith('.token')).map(path => join(made.scratch, path)));
+      return made;
+    };
     const policy = checkoutRepositoryPolicy(root);
     const candidate = { id: '20261017T150000Z', sha: head, pendingOutcomes: [] } as any;
     const report = await runOnboardingE2e([shipped, probe], { url: shared.url, token: shared.token, fixture, candidate, contract, policy, root, launcher: dashboardLauncher() });
@@ -101,8 +121,13 @@ test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-de
     assert.equal(made.cli, join(root, 'bin/graphyard.mjs')); assert.equal(made.sha, head);
     assert.ok(made.onboarding.scanned.mergeGate.some((line: string) => /^local: .*at most 5 changes/.test(line)), 'init --scan proposed the local defaults');
     assert.deepEqual([made.config.delivery.mode, made.config.delivery.previews, made.config.delivery.candidateMaxChanges, made.config.delivery.productionVerification], ['local', 'local', 5, true]);
-    // Every isolated resource is gone once the run ends: the files, the database and the plane.
+    // Init proposed the discovered runtime's worker and wrote its credential inside the fixture's scratch, never under the host's configuration.
+    assert.ok(made.onboarding.applied.applied.includes('claude-primary credential file'), 'init wrote the discovered runtime\'s worker credential');
+    assert.ok(credentials[0].length > 0 && credentials[0].every(path => path.startsWith(`${made.scratch}/`)), `the fixture wrote its credentials in scratch: ${credentials[0].join(', ')}`);
+    assert.deepEqual(tree(sentinel), hostBefore, 'the host configuration and its install record are untouched');
+    // Every isolated resource is gone once the run ends: the files, its credentials, the database and the plane.
     assert.equal(existsSync(made.scratch), false);
+    assert.ok(credentials.flat().every(path => !existsSync(path)));
     await assert.rejects(fetch(`${made.url}/healthz`));
 
     // The shared install still records its explicit github merger, set once, by its admin.

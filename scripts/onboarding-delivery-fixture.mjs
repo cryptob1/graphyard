@@ -9,7 +9,8 @@
 // candidate's own CLI (`init --scan`, then `init --scan --apply`), deploys the declaration init
 // committed to that plane as the install does, and runs the case there. Every other uat case runs
 // against UAT as before, in one report and one verdict, so the release holds read it unchanged.
-// Nothing here reconfigures the shared install, and every fixture resource is removed afterwards.
+// Nothing here reconfigures the shared install or writes the host's configuration (the fixture's
+// configuration and data homes sit in its scratch directory), and every fixture resource is removed afterwards.
 //
 //   node --import tsx scripts/onboarding-delivery-fixture.mjs   (the uat job's `e2e` suite)
 import { spawn, execFile, execFileSync } from 'node:child_process';
@@ -52,6 +53,12 @@ const freePort = async () => {
 };
 /** The environment a fixture process starts from: the host's basics, never a Graphyard, GitHub, Railway or database setting of the job. */
 const isolated = (env) => Object.fromEntries(Object.entries(env).filter(([key]) => !/^(GRAPHYARD_|GITHUB_|RAILWAY_|DATABASE_URL$|PORT$|HOST$|SOURCE_COMMIT$)/.test(key)));
+/**
+ * The fixture-owned configuration, state and data homes under `scratch`: init writes worker profiles,
+ * credentials and install records, and gh its state, under these, so none reaches, or is read from, the host's own.
+ */
+export const confinedHomes = (scratch) => ({ GRAPHYARD_CONFIG_HOME: join(scratch, 'config/graphyard'), GRAPHYARD_DATA_HOME: join(scratch, 'data'),
+  XDG_CONFIG_HOME: join(scratch, 'config'), XDG_STATE_HOME: join(scratch, 'state'), XDG_DATA_HOME: join(scratch, 'share'), XDG_CACHE_HOME: join(scratch, 'cache') });
 export const checkoutHead = (root) => execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim().toLowerCase();
 
 /**
@@ -75,7 +82,7 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
     const listen = await freePort();
     output = '';
     child = spawn(process.execPath, ['--import', 'tsx', join(root, 'src/server.ts')], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'], env: {
-      ...isolated(host), ...deployed, DATABASE_URL: `postgres://graphyard:fixture-only@127.0.0.1:${port}/fixture`, PORT: String(listen), HOST: '127.0.0.1',
+      ...isolated(host), ...confinedHomes(scratch), ...deployed, DATABASE_URL: `postgres://graphyard:fixture-only@127.0.0.1:${port}/fixture`, PORT: String(listen), HOST: '127.0.0.1',
       GRAPHYARD_PRINCIPALS: JSON.stringify([{ id: 'fixture-operator', role: 'admin', token }]), GRAPHYARD_BUILD_SHA: sha, GRAPHYARD_BUILD_REVISION: sha, GITHUB_CI_APP_IDS: '15368' } });
     const keep = chunk => { output = `${output}${chunk}`.slice(-4000); };
     child.stdout.on('data', keep); child.stderr.on('data', keep);
@@ -117,7 +124,7 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
     // A new install: a fresh database, nothing recorded, and no delivery declaration deployed yet.
     plane = await startControlPlane({ root, sha: head, scratch, host });
     const cli = join(root, 'bin/graphyard.mjs');
-    const run = args => promisify(execFile)(process.execPath, [cli, ...args], { cwd: repository, env: { ...isolated(host), GRAPHYARD_URL: plane.url, GRAPHYARD_TOKEN: plane.token }, maxBuffer: 16 * 1024 * 1024 })
+    const run = args => promisify(execFile)(process.execPath, [cli, ...args], { cwd: repository, env: { ...isolated(host), ...confinedHomes(scratch), GRAPHYARD_URL: plane.url, GRAPHYARD_TOKEN: plane.token }, maxBuffer: 16 * 1024 * 1024 })
       .then(result => JSON.parse(result.stdout), error => { throw new Error(`graphyard ${args.join(' ')} failed in the fixture repository: ${String(error.stderr || error.message).trim().slice(0, 1500)}`); });
     // Normal onboarding: init --scan, the App the operator approves once, then init --scan --apply of the reviewed proposal.
     const scanned = await run(['init', '--scan']);
