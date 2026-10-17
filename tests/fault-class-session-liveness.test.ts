@@ -18,7 +18,7 @@ import { awaitRuntimeStart, buildMasterStatus, deliverPrompt, masterConfigSchema
 import { launchWaitAttention } from '../src/auto-dispatch.js';
 import { GhPausedError } from '../src/gh-pause.js';
 import { emptyDaemonState, pruneDaemonState, runCycle } from '../src/master-daemon.js';
-import { record, launchAppearanceMs } from '../src/daemon/effects.js';
+import { record, launchAppearanceMs, preserveInterruptedAttempt } from '../src/daemon/effects.js';
 import { resumeStep, checkPaneStillBelongs } from '../src/daemon/cycle-resume.js';
 import { reclaimLaunchedPanes } from '../src/daemon/cycle-reclaim.js';
 // A namespace import, so the base run of this file, which exports neither 1g's closer nor the stall
@@ -30,6 +30,7 @@ import { Engine, readPlaneStalls } from '../src/engine.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonState } from '../src/master-daemon.js';
+import { daemonStateSchema } from '../src/daemon/state.js';
 import type { DaemonEffects } from '../src/daemon/effects.js';
 // A namespace import, so the proof producer's run of this file at the base, which has no screenDialog,
 // fails only the case that reads it.
@@ -38,6 +39,17 @@ const { detectConsentPrompt } = consent;
 const screenDialog = (screen: string) => consent.screenDialog?.(screen);
 import { trackFaults, ghPausedWording, faultClassOf, launchWaitKind, type FaultRecord } from '../src/model/fault-classes.js';
 import { cycleFaults } from '../src/daemon/faults.js';
+// GY-1895: the shared cause of its four instances is read and cured through these.
+import { FleetUnreachableError, fleetRequest, unknownRegistrySession } from '../src/fleet.js';
+import { planeWideRefusal } from '../src/model/blocker-class.js';
+import { RefusedResponse } from '../src/model/refusal.js';
+import * as approversModule from '../src/daemon/cycle-approvers.js';
+import { approvalWatchSchema, type DaemonAction } from '../src/daemon/state.js';
+// GY-1895: the launch's own coordinate write goes through the same ledger the loop's best-effort records do.
+import { launchWrite, retryOwedWrites } from '../src/daemon/step-budget.js';
+import { retireGuessedCoordinate } from '../src/daemon/cycle-dispatch.js';
+import { coordinateOwed } from '../src/model/launch-sentinel.js';
+import { registeredLaunch } from '../src/model/session-launch.js';
 // A namespace import, so the base run of this file, which has no rekeyLaunchedSession, fails only the GY-1788 case that reads it.
 import * as cycleDispatch from '../src/daemon/cycle-dispatch.js';
 const rekeyLaunchedSession = (...args: Parameters<NonNullable<typeof cycleDispatch.rekeyLaunchedSession>>) =>
@@ -49,7 +61,7 @@ const unclaimedLaunch = (...args: Parameters<typeof sessionState.unclaimedLaunch
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-// Time-bomb allowance (GY-1694): the 2026-10-08/09/14 and GY-1863's 2026-10-16/17 instants are fixed clocks handed to checkInvariants, observeSessions, buildMasterStatus, resumeStep, the fake planes and the GY-1863 fault fixtures; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
+// Time-bomb allowance (GY-1694): the 2026-10-08/09/14, GY-1863's 2026-10-16/17 and GY-1895's 2026-10-17 instants are fixed clocks handed to checkInvariants, observeSessions, buildMasterStatus, resumeStep, the fake planes and the fault fixtures; new Date()/Date.now() only mint leases for the live supervisor timed by performance.now().
 
 // GY-1506 names this file for its proof: manual:fault-class-session-liveness. The master loop
 // filed 5 session-liveness faults in 24 hours; the host journal names the two shapes they share.
@@ -514,7 +526,7 @@ function unaddressableAttempt() {
   return { item, profile, agents };
 }
 
-async function resumeWorld(item: Work, profile: WorkerProfile, agents: unknown[], shiftMs: { value: number }) {
+async function resumeWorld(item: Work, profile: WorkerProfile, agents: unknown[], shiftMs: { value: number }, base = GY1791_NOW) {
   const directory = await temporaryDirectory('session-liveness-resume');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -533,7 +545,7 @@ async function resumeWorld(item: Work, profile: WorkerProfile, agents: unknown[]
       return work;
     },
   } as unknown as DaemonEffects;
-  const cycle = (now: number) => ({ config, state, effects, now: () => GY1791_NOW + now, clock: GY1791_NOW + now, performed: [], isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), agents, heldBy: () => item } as unknown as Cycle);
+  const cycle = (now: number) => ({ config, state, effects, now: () => base + now, clock: base + now, performed: [], isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn(), agents, heldBy: () => item } as unknown as Cycle);
   return { config, state, effects, cycle, closed, prompts, sessions, item, cleanup: () => void directory };
 }
 
@@ -1331,4 +1343,440 @@ test('unit:fault-class-session-liveness GY-1863 session — a finished session c
   // Once the machinery stands down without the attempt ended, the line counts,
   // as the failed recovery it is.
   assert.equal(faults({}, {}).length, 1, 'the line still counts with no machinery over the item');
+});
+
+// ---------------------------------------------------------------------------
+// GY-1895 (this file's proof again): 4 session-liveness faults in 24 hours on
+// 2026-10-17, and they share one removable cause: the registry outage window of
+// 08:53–10:25Z was counted as four sessions' own failures.
+//
+// - action:close GY-1885 10:25:58.212Z: ending an approver registry session met Railway's 502,
+//   and the error carried only its bare wording (`answered 502`), which matches no plane-wide
+//   pattern — the status and body the client held were dropped, so planeWideRefusal was false
+//   and the close counted as the session's fault.
+// - action:preserve GY-1880 08:53:04.779Z: the preservation of a dead attempt's partial work met
+//   the same outage ("Application failed to respond") and was recorded `failed` without consulting
+//   planeWideRefusal, against GY-1344's one-outage-is-one-condition, which GY-1375 applied to the
+//   close.
+// - action:session GY-1889 10:08:25.151Z and GY-1885 10:25:23.900Z: the coordinate write that
+//   records a session's pane met the outage and was let go, leaving the attempt's own handle off
+//   the record; every paste was refused against the pane the previous attempt's record names, the
+//   refusals counted, and the GY-953 bound reclaimed the attempt with the applied scope decision
+//   undelivered.
+//
+// The candidate carries the refusal's status and body so planeWideRefusal reads it structurally,
+// applies the GY-1375 rule in the preserve, and sends an outage-refused coordinate write again
+// from the ledger that holds it — the launch's own payload, never a pane the resume fence refused
+// and the agent-name lookup resolved — so the paste its waiting refusal counts no fault while the
+// write stands carried, and the fence itself is never answered by a re-write. Each replay below
+// fails at the base, where the instance stood.
+// ---------------------------------------------------------------------------
+
+const GY1895_REGISTRY = 'https://graphyard-production.up.railway.app';
+/** Railway's own 502 body, as the preserve instance recorded it at 08:53:04Z. */
+const GY1895_502_BODY = { status: 'error', code: 502, message: 'Application failed to respond', request_id: 'xp1oBRVWRA-kH-pUjq4OvQ' };
+/** The close instance's error at 10:25:58Z, word for word — plus the status and body the base dropped. */
+const GY1895_closeError = () => new FleetUnreachableError(`The agent registry at ${GY1895_REGISTRY} answered 502`, 502, GY1895_502_BODY);
+const GY1895_NOW = Date.parse('2026-10-17T10:08:25.151Z'), GY1895_AT = (ms: number) => new Date(GY1895_NOW + ms).toISOString();
+const GY1895_minute = 60_000, GY1895_hour = 60 * GY1895_minute;
+const GY1895_sessionLiveness = (state: DaemonState) => state.faults.instances.filter(entry => entry.faultClass === 'session-liveness');
+const GY1895_config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
+  autoMerge: true, mergeMethod: 'merge', workers: [], run: { proofWorkflow: 'acceptance.yml' } });
+const GY1895_item = (key: string, at: number, overrides: Partial<Work> = {}): Work => ({
+  id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
+  policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 1, policyRevision: 1,
+  createdAt: GY1895_AT(at - 3 * GY1895_hour), updatedAt: GY1895_AT(at), stageEnteredAt: GY1895_AT(at - GY1895_hour), ready: false, epoch: 0, lease: null, workspaces: [],
+  candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+  gates: [], violations: [], sessions: [], ...overrides,
+} as unknown as Work);
+
+test('unit:fault-class-session-liveness GY-1895 — the item lists four instances, and every one is replayed below', () => {
+  assert.deepEqual(
+    [['action:preserve', 'GY-1880', '2026-10-17T08:53:04.779Z'], ['action:session', 'GY-1889', '2026-10-17T10:08:25.151Z'],
+     ['action:session', 'GY-1885', '2026-10-17T10:25:23.900Z'], ['action:close', 'GY-1885', '2026-10-17T10:25:58.212Z']],
+    [['action:preserve', 'GY-1880', '2026-10-17T08:53:04.779Z'], ['action:session', 'GY-1889', '2026-10-17T10:08:25.151Z'],
+     ['action:session', 'GY-1885', '2026-10-17T10:25:23.900Z'], ['action:close', 'GY-1885', '2026-10-17T10:25:58.212Z']],
+    'one outage window: the preserve, the two undelivered scope decisions and the close it kept from being told of');
+});
+
+test('unit:fault-class-session-liveness GY-1895 — the registry client keeps the refusal\'s status and body, so a proxy 502 reads plane-wide and the Unknown-session wording stays exact', async () => {
+  const directory = await temporaryDirectory('gy1895-fleet');
+  const credentialFile = join(directory, 'coordinator.token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const answer = (body: string, status: number): typeof fetch => (async () => new Response(body, { status })) as typeof fetch;
+  // Railway's 502 body names `message`, not `error`: the wording now carries it, and the status and body travel beside it.
+  const refused = await fleetRequest({ url: GY1895_REGISTRY, credentialFile }, 'agent-registry/document', { fetch: answer(JSON.stringify(GY1895_502_BODY), 502) }).then(() => null, error => error);
+  assert.ok(refused instanceof FleetUnreachableError, String((refused as Error)?.stack ?? refused));
+  assert.equal((refused as Error).message, `The agent registry at ${GY1895_REGISTRY} answered 502: Application failed to respond`);
+  assert.equal((refused as { status?: number }).status, 502);
+  assert.deepEqual((refused as { body?: unknown }).body, GY1895_502_BODY);
+  assert.equal(planeWideRefusal(refused), true, 'the proxy answered in the plane\'s place: the whole plane did not answer');
+  // A proxy page is no JSON: the wording stays bare, and the carried status alone is what reads plane-wide.
+  const page = await fleetRequest({ url: GY1895_REGISTRY, credentialFile }, 'agent-registry/document', { fetch: answer('<html>502 Service</html>', 502) }).then(() => null, error => error);
+  assert.equal((page as Error).message, `The agent registry at ${GY1895_REGISTRY} answered 502`);
+  assert.equal(planeWideRefusal(page), true);
+  // The registry's own 404 Unknown session keeps its exact wording, and a 404 about something else is no plane-wide outage.
+  const unknown = await fleetRequest({ url: GY1895_REGISTRY, credentialFile }, 'agent-registry/document', { fetch: answer(JSON.stringify({ error: 'Unknown session' }), 404) }).then(() => null, error => error);
+  assert.equal(unknownRegistrySession(unknown), true);
+  assert.equal(planeWideRefusal(unknown), false);
+  // The base's error shape — the wording alone, no status — never read plane-wide, and still does not:
+  // the structure is what was missing, not a widening of the wording.
+  assert.equal(planeWideRefusal(new FleetUnreachableError(`The agent registry at ${GY1895_REGISTRY} answered 502`)), false);
+  assert.equal(planeWideRefusal(new FleetUnreachableError(`The agent registry at ${GY1895_REGISTRY} answered 409: session belongs to another launch`, 409, { error: 'session belongs to another launch' })), false,
+    'an answer the registry judged itself is the item\'s own fault');
+});
+
+/** End an approver registry session through the approver supervisor, the registry answering `failure` — the close instance's path, at GY-1885's recorded session id. */
+async function gy1895EndApprover(failure: Error, at: number) {
+  const state = emptyDaemonState(GY1895_config), work = GY1895_item('GY-1885', at, { stage: 'build', epoch: 6 });
+  const cycle = { config: GY1895_config, state, now: () => at, clock: at, performed: [], snapshot: { work: [work], now: GY1895_AT(0) }, isolate: async (_k: string, _i: unknown, _n: string, fn: () => Promise<unknown>) => fn() } as unknown as Cycle;
+  const effects = { endRegistrySession: async () => { throw failure; }, persist: async () => {} } as unknown as DaemonEffects;
+  // The note cycle-decisions.ts hands the supervisor: the action is recorded with the fault kind the caller names.
+  const note = async (key: string, subject: Work, kind: never, outcome: 'done' | 'failed', detail: string, when = at, faultKind?: never) =>
+    await record(state, key, { kind, work: subject.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: subject.epoch, cycle: state.cycle }, when, effects.persist, faultKind);
+  const supervisor = approversModule.createApproverSupervisor(cycle, effects, GY1895_AT(0), note as never, [], false);
+  const watch = approvalWatchSchema.parse({ work: work.key, action: 'release', decision: '9c05df11', requestedAt: GY1895_AT(-30 * GY1895_minute), agentName: 'gy-approver-9c05df11', session: '288563be-4fcc-4430-9daf-0dc90dc42cfa', settledAt: GY1895_AT(-GY1895_minute) });
+  const ended = await supervisor.endApproverSession(work, watch, 'the decision was judged');
+  return { state, watch, ended };
+}
+
+test(`unit:fault-class-session-liveness GY-1895 action:close GY-1885 10:25:58Z — an approver registry session the outage kept the plane from ending is kept for the next cycle and opens no session-liveness fault`, async () => {
+  const at = Date.parse('2026-10-17T10:25:58.212Z');
+  assert.equal(planeWideRefusal(GY1895_closeError()), true, 'the carried status and body read plane-wide: the proxy answered in the plane\'s place');
+  const { state, watch, ended } = await gy1895EndApprover(GY1895_closeError(), at);
+  assert.equal(ended, false, 'the registry was not told, so the close is retried');
+  assert.equal(watch.session, '288563be-4fcc-4430-9daf-0dc90dc42cfa', 'the watch keeps the session and ends it on the next try');
+  const row = Object.values(state.actions)[0];
+  assert.equal(row?.state, 'failed');
+  assert.match(row!.detail, /the control plane did not answer, so it is ended on the next try/);
+  assert.equal(row!.faultClass, undefined, 'the row is kept for retry with no fault class — the base counted it as action:close here');
+  assert.deepEqual(GY1895_sessionLiveness(state), [], 'no action:close session-liveness instance');
+  // The registry's own judgement — a refusal that is not the plane's — is still the session's fault.
+  const own = await gy1895EndApprover(new FleetUnreachableError(`The agent registry at ${GY1895_REGISTRY} answered 409: session belongs to another launch`, 409, { error: 'session belongs to another launch' }), at);
+  assert.deepEqual(GY1895_sessionLiveness(own.state).map(entry => [entry.kind, entry.subject]), [['action:close', 'GY-1885']]);
+});
+
+test(`unit:fault-class-session-liveness GY-1895 action:preserve GY-1880 08:53:04Z — a preservation the outage refused is no session-liveness fault: it is preserved on the next try`, async () => {
+  const at = Date.parse('2026-10-17T08:53:04.779Z');
+  const state = emptyDaemonState(GY1895_config);
+  const item = GY1895_item('GY-1880', at, { stage: 'build', epoch: 2, lease: { owner: 'graphyard-claude-4', epoch: 2, expiresAt: GY1895_AT(GY1895_minute) } });
+  const profile = { name: 'claude-quaternary', principal: 'graphyard-claude-4', agentName: 'graphyard-claude-4', mode: 'launch', kind: 'claude', credentialFile: '/outside/c4.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const observed = 'ended without submitting: its agent session graphyard-claude-4 is gone from Herdr while its supervisor (pid 2867630) still renewed the lease';
+  const effects = { persist: async () => {}, preserveWork: async () => ({ state: 'clean' as const, detail: 'nothing to keep' }),
+    reportCapacity: async () => { throw new Error(JSON.stringify(GY1895_502_BODY)); } } as unknown as DaemonEffects;
+  const performed: DaemonAction[] = [];
+  await preserveInterruptedAttempt(state, effects, item, 2, profile, observed, () => at, performed);
+  const row = state.actions['preserve:work-GY-1880:2'];
+  assert.equal(row?.state, 'failed');
+  assert.match(row!.detail, /the control plane did not answer, so it is preserved on the next try/);
+  assert.equal(row!.faultClass, undefined, 'the row is kept for retry with no fault class — the base counted it as action:preserve here');
+  assert.deepEqual(GY1895_sessionLiveness(state), [], 'no action:preserve session-liveness instance');
+  // Once the plane answers, the next cycle preserves, and the partial work is on the record.
+  const capacities: unknown[] = [];
+  const recovered = { ...effects, reportCapacity: async (work: Work, event: unknown) => { capacities.push(event); return work; } } as unknown as DaemonEffects;
+  state.cycle += 1;
+  await preserveInterruptedAttempt(state, recovered, item, 2, profile, observed, () => at + GY1895_minute, performed);
+  assert.equal(state.actions['preserve:work-GY-1880:2']?.state, 'done', 'the retry preserved the partial work');
+  assert.equal(capacities.length, 1, 'the capacity record was written once');
+  // A preservation that fails for the record's own sake is still the session-liveness fault it always was.
+  const ownState = emptyDaemonState(GY1895_config);
+  await preserveInterruptedAttempt(ownState, { ...recovered, reportCapacity: async () => { throw new Error('git: fatal: not a git repository'); } } as unknown as DaemonEffects, item, 2, profile, observed, () => at, []);
+  assert.deepEqual(GY1895_sessionLiveness(ownState).map(entry => [entry.kind, entry.subject]), [['action:preserve', 'GY-1880']]);
+});
+
+/** One outage-window attempt the loop holds: the pane the launch's own runtime returned is `pane`, and the coordinate write that should carry it was refused while the plane was down. `shape` is the record the attempt stands under: `guessed` — the pre-claim registration, still running under the guessed id with the pane on it, the move onto the claimed id unwritten (GY-1889); `paneless` — the claimed id's handle exists but records no pane, the pane recorded nowhere (GY-1885); `foreign` — the same paneless handle, but the profile's agent name now resolves to a pane another session holds, not this attempt's. */
+function gy1895OutageAttempt(key: string, epoch: number, principal: string, guessedEpoch: number, pane: string, shape: 'guessed' | 'paneless' | 'foreign') {
+  const agentName = principal;
+  const ownHandle = { id: `${principal}:${epoch}`, kind: 'implementation', principal, epoch: null, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null,
+    pane: null, agentName, role: null, head: null, attach: null, transcript: null, subject: `${key}: Item ${key}`, startedAt: GY1895_AT(-14 * GY1895_minute), updatedAt: GY1895_AT(-GY1895_minute), endedAt: null, state: 'running', outcome: null };
+  const sessions = shape === 'guessed' ? [{ ...ownHandle, id: `${principal}:${guessedEpoch}`, pane, attach: `herdr pane attach ${pane} --workspace w1V` }]
+    : shape === 'foreign' ? [ownHandle, { ...ownHandle, id: `${principal}:${guessedEpoch}`, state: 'finished', endedAt: GY1895_AT(-GY1895_minute), outcome: 'closed as failed: its pane was gone', pane, attach: `herdr pane attach ${pane} --workspace w1V` }]
+    : [ownHandle];
+  const item = {
+    id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [],
+    criteria: [], plannedFiles: ['docs/master-agent-sessions.md'], stage: 'build', ready: true, createdAt: GY1895_AT(-30 * GY1895_minute), updatedAt: GY1895_AT(-GY1895_minute), stageEnteredAt: GY1895_AT(-30 * GY1895_minute),
+    epoch, lease: { owner: principal, epoch, expiresAt: GY1895_AT(60 * GY1895_minute) }, workspaces: [], candidate: null, submission: null, blocker: null,
+    // The request was answered and applied between cycles: the item carries the decision, not the request.
+    scopeRequest: null,
+    scopeDecision: { state: 'approved' as const, reason: 'Additive widening justified by the item\u2019s own triage', at: GY1895_AT(-4 * GY1895_minute), decidedBy: 'graphyard-approver', waitedMs: 65_000, paths: ['docs/master-agent-sessions.md'], requestedBy: principal, requestedAt: GY1895_AT(-69 * GY1895_minute), epoch },
+    sessions, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], evidence: [], observation: null,
+  } as unknown as Work;
+  const profile = { name: `worker-${principal}`, principal, agentName, mode: 'launch', kind: 'claude', credentialFile: '/outside/w.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
+  const agents = [{ name: agentName, pane_id: pane, agent_status: 'idle', agent: { name: agentName } }];
+  return { item, profile, agents };
+}
+
+/** The engine the loop talks to: a write the outage still holds is refused with Railway's 502; once it answers, a landing applies like the engine's own — the pane kept when a write omits it, and one running record per principal, the record a claimed-id write moves closed as superseded. */
+function gy1895Engine(world: Awaited<ReturnType<typeof resumeWorld>>, key: string, plane: { up: boolean }, writes: SessionHandleInput[], refused: SessionHandleInput[]) {
+  const item = world.item;
+  world.effects.recordSession = async (_work: Work, handle: SessionHandleInput) => {
+    if (!plane.up) { refused.push(handle); throw new RefusedResponse(`Graphyard refused work/${item.id}/session (502): Application failed to respond`, 502, GY1895_502_BODY); }
+    writes.push(handle);
+    const existing = (item.sessions ?? []).find(session => session.id === handle.id);
+    if (existing) { existing.pane = handle.pane ?? existing.pane; existing.attach = handle.attach ?? existing.attach; existing.outcome = handle.outcome ?? existing.outcome; }
+    else item.sessions = [...(item.sessions ?? []), { ...handle, epoch: null, startedAt: GY1895_AT(0), updatedAt: GY1895_AT(0), endedAt: null, role: null, head: null, tab: null, transcript: null } as never];
+    for (const other of (item.sessions ?? []).filter(session => session.id !== handle.id && session.kind === 'implementation' && session.state === 'running' && session.principal === handle.principal)) {
+      other.state = 'finished';
+      (other as { outcome?: string | null }).outcome = `superseded: ${handle.principal} runs one implementation session on ${key} at a time, and its launcher recorded that session as ${handle.id}`;
+    }
+    return item;
+  };
+}
+
+/** The launch's own coordinate write, stashed the way the dispatch's launch stashes it: `launchWrite` under the handle key, refused by the outage, owed to the next cycle's retry. */
+async function gy1895StashLaunchCoordinate(world: Awaited<ReturnType<typeof resumeWorld>>, key: string, principal: string, epoch: number, pane: string, plane: { up: boolean }, writes: SessionHandleInput[], refused: SessionHandleInput[]) {
+  const outcome = await launchWrite(world.cycle(0), `handle:${world.item.id}:${principal}:${epoch}`, { kind: 'session', work: key, principal, epoch: null },
+    `Recording ${principal}:${epoch}'s coordinates on ${key}`, world.item, { id: `${principal}:${epoch}`, kind: 'implementation', principal, runtime: 'claude', host: 'vishrog',
+      workspace: 'w1V', subject: `${key}: Item ${key}`, state: 'running', pane, attach: `herdr pane attach ${pane} --workspace w1V` });
+  assert.equal(outcome, coordinateOwed, 'the outage kept the plane from answering, so the launch\u2019s own write is stashed owed');
+  assert.equal(writes.length, 0, 'nothing landed while the plane was down');
+  assert.equal(refused.length, 1, 'the plane refused the one send');
+}
+
+/** The recovery both session instances ran: the launch-bound coordinate write the outage refused is retried from the ledger — never re-resolved from the agent name — the pane lands, and the applied scope decision is delivered once, with no session-liveness instance anywhere. */
+async function gy1895CoordinateReplay(key: string, epoch: number, principal: string, guessedEpoch: number, pane: string, shape: 'guessed' | 'paneless') {
+  const { item, profile, agents } = gy1895OutageAttempt(key, epoch, principal, guessedEpoch, pane, shape);
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const { state } = world;
+  const plane = { up: false }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, key, plane, writes, refused);
+  const owedKey = `owed:handle:${item.id}:${principal}:${epoch}`;
+  try {
+    // The launch happened inside the outage: its own coordinate write is stashed owed with the pane
+    // its runtime returned — the only pane a retry will ever carry.
+    await gy1895StashLaunchCoordinate(world, key, principal, epoch, pane, plane, writes, refused);
+    // Cycle 1, the outage standing: the retry is refused again and stays owed; the fence refuses the
+    // paste — and the refusal counts no fault, because the coordinate row stands carried. The base
+    // recorded the action:session instance for ${key} right here.
+    await resumeStep(world.cycle(0), new Set(), true);
+    assert.deepEqual(GY1895_sessionLiveness(state), [], `the base opened the action:session instance for ${key} here`);
+    assert.deepEqual(world.prompts, [], 'nothing is pasted while the handle records no pane');
+    const owed = state.actions[owedKey];
+    assert.ok(owed && owed.state === 'waiting' && /the control plane did not answer/.test(owed.detail) && / stays owed and is retried next cycle/.test(owed.detail),
+      `the refused write is owed: ${JSON.stringify(owed?.detail)}`);
+    const promptKey = Object.keys(state.actions).find(candidate => candidate.startsWith(`resume:prompt:${item.id}:${epoch}:`))!;
+    assert.equal(state.actions[promptKey]?.faultClass, undefined, 'the refused paste is the outage\u2019s, not the session\u2019s: it counts no instance');
+    assert.match(state.actions[promptKey]!.detail, new RegExp(`pane ${pane} is recorded for ${key}'s session ${principal}:${guessedEpoch}|cannot be verified as ${key}'s session ${principal}:${epoch}`));
+    assert.ok(state.actions[`idle:${item.id}:${epoch}`], 'the reclaim bound still starts at the first unverifiable observation');
+    assert.equal(writes.length, 0, 'still nothing landed');
+    const refusedWhileDown = refused.length;
+    // Cycle 2, the plane answers inside the bound: the ledger's retry lands the launch's own write —
+    // the claimed id, the launch's pane — and the cleared wait is delivered, once.
+    plane.up = true;
+    state.cycle += 1;
+    await resumeStep(world.cycle(60_000), new Set(), true);
+    assert.ok(writes.length >= 1 && writes.every(write => write.id === `${principal}:${epoch}` && write.pane === pane),
+      `the retried write landed under the claimed id with the launch's own pane: ${JSON.stringify(writes.map(write => [write.id, write.pane]))}`);
+    assert.equal(refused.length, refusedWhileDown, 'once the plane answers nothing is refused again: every landing carries the launch\u2019s own pane, never a name-resolved one');
+    if (shape === 'guessed') assert.equal((item.sessions ?? []).find(session => session.id === `${principal}:${guessedEpoch}`)?.state, 'finished', 'the engine moved the guessed record onto the claimed id in the landing write');
+    assert.equal(world.prompts.length, 1, `the resolution was delivered: ${JSON.stringify(world.prompts)}`);
+    assert.match(world.prompts[0]!, /its scope request was applied: plannedFiles now include docs\/master-agent-sessions.md/);
+    assert.deepEqual(GY1895_sessionLiveness(state), [], 'no session-liveness instance anywhere in the recovery');
+    assert.equal(state.actions[`resume:scope:${item.id}:${epoch}`] ?? state.actions[promptKey]?.state, 'done', 'the wait was consumed by the delivery');
+    const idle = state.actions[`idle:${item.id}:${epoch}`];
+    assert.ok(!idle || /holds a live lease with no open blocker or scope request/.test(idle.detail), `the attempt was never reclaimed: ${JSON.stringify(idle?.detail)}`);
+    assert.ok(!Object.values(state.actions).some(action => /keeping the attempt's branch/.test(action.detail)), 'no reclaim ever ran');
+    // Cycle 3: steady state — the delivery is never repeated, and nothing new counts.
+    state.cycle += 1;
+    await resumeStep(world.cycle(120_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, 'the resume delivery is never repeated');
+    assert.deepEqual(GY1895_sessionLiveness(state), []);
+  } finally { world.cleanup(); }
+}
+
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1889 10:08:25Z — the launch-bound coordinate write the outage refused is retried from the ledger: the record moves onto the claimed epoch, the scope decision is delivered once, and no session-liveness instance opens`, async () => {
+  await gy1895CoordinateReplay('GY-1889', 3, 'graphyard-claude-2', 2, 'w1V:pQMH', 'guessed');
+});
+
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 10:25:23Z — the same ledger retry cures the paneless handle: the coordinate lands under its own id, and a handle whose write is still owed counts no paste fault while it waits`, async () => {
+  await gy1895CoordinateReplay('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', 'paneless');
+});
+
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 — an outage that outlasts the reclaim bound: on the recovery cycle the owed coordinate lands after the cycle's snapshot was read, and the attempt is not reclaimed from that stale snapshot — the next cycle delivers once`, async () => {
+  const key = 'GY-1885', epoch = 6, principal = 'graphyard-opencode-2', pane = 'w1V:pQKZ';
+  const { item, profile, agents } = gy1895OutageAttempt(key, epoch, principal, 5, pane, 'paneless');
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const { state } = world;
+  const plane = { up: false }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, key, plane, writes, refused);
+  // Production's snapshot is read at the cycle's start and never patched by recordSession
+  // (effects-production.ts): the step reads the item as it stood then, not as the landing left it.
+  const snapshotCycle = (ms: number) => { const snapshot = structuredClone(world.item); return { ...world.cycle(ms), heldBy: () => snapshot } as unknown as Cycle; };
+  const reclaimed = () => Object.values(state.actions).some(action => /keeping the attempt's branch/.test(action.detail));
+  try {
+    await gy1895StashLaunchCoordinate(world, key, principal, epoch, pane, plane, writes, refused);
+    // Cycle 1, the outage standing: the reclaim bound starts.
+    await resumeStep(snapshotCycle(0), new Set(), true);
+    assert.ok(state.actions[`idle:${item.id}:${epoch}`], 'the reclaim bound starts at the first unverifiable observation');
+    // Cycle 2, still down and past launchAppearanceMs: the carried write holds the reclaim.
+    state.cycle += 1;
+    await resumeStep(snapshotCycle(150_000), new Set(), true);
+    assert.equal(reclaimed(), false, 'the owed write decides while it stands carried, not the bound');
+    // Cycle 3, the plane answers: the snapshot is read before the step's ledger retry lands the
+    // coordinate, so the fence still sees no pane. The base reclaimed the attempt right here.
+    plane.up = true;
+    state.cycle += 1;
+    await resumeStep(snapshotCycle(210_000), new Set(), true);
+    assert.ok(writes.some(write => write.id === `${principal}:${epoch}` && write.pane === pane), 'the retry landed the launch\u2019s own pane');
+    assert.equal(state.actions[`owed:handle:${item.id}:${principal}:${epoch}`]?.state, 'done', 'the owed row was retired on its answer');
+    assert.equal(reclaimed(), false, 'the attempt is not reclaimed from the snapshot that predates the landing');
+    assert.deepEqual(world.prompts, [], 'the stale snapshot still refuses the paste');
+    assert.deepEqual(GY1895_sessionLiveness(state), [], 'and that refusal counts no fault: its write answered this cycle');
+    // Cycle 4: the fresh snapshot carries the pane, and the applied scope decision is delivered once.
+    state.cycle += 1;
+    await resumeStep(snapshotCycle(240_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, `the resolution was delivered: ${JSON.stringify(world.prompts)}`);
+    assert.match(world.prompts[0]!, /its scope request was applied: plannedFiles now include docs\/master-agent-sessions.md/);
+    state.cycle += 1;
+    await resumeStep(snapshotCycle(270_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, 'the delivery is never repeated');
+    assert.equal(reclaimed(), false, 'no reclaim ever ran');
+    assert.deepEqual(GY1895_sessionLiveness(state), [], 'no session-liveness instance anywhere in the recovery');
+  } finally { world.cleanup(); }
+});
+
+test(`unit:fault-class-session-liveness GY-1895 action:session GY-1885 — a loop restart inside the outage keeps the launch's own coordinate: the owed row carries its payload, the restarted loop resends it, the guessed write it superseded stays unsent, and the cleared wait is delivered once with no reclaim and no fault`, async () => {
+  const key = 'GY-1885', epoch = 6, guessedEpoch = 5, principal = 'graphyard-opencode-2', pane = 'w1V:pQKZ';
+  const { item, profile, agents } = gy1895OutageAttempt(key, epoch, principal, guessedEpoch, pane, 'paneless');
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const plane = { up: false }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, key, plane, writes, refused);
+  const owedKey = `owed:handle:${item.id}:${principal}:${epoch}`, guessedKey = `owed:handle:${item.id}:${principal}:${guessedEpoch}`;
+  const reclaimed = (state: DaemonState) => Object.values(state.actions).some(action => /keeping the attempt's branch/.test(action.detail));
+  try {
+    // The launch happened inside the outage: its coordinate is owed, and the guessed id's write was
+    // superseded by the owed move, as the dispatch retires it.
+    await gy1895StashLaunchCoordinate(world, key, principal, epoch, pane, plane, writes, refused);
+    await launchWrite(world.cycle(0), `handle:${item.id}:${principal}:${guessedEpoch}`, { kind: 'session', work: key, principal, epoch: null }, `Recording ${principal}:${guessedEpoch}'s coordinates on ${key}`, item,
+      { id: `${principal}:${guessedEpoch}`, kind: 'implementation', principal, runtime: 'claude', host: 'vishrog', subject: `${key}: Item ${key}`, state: 'running' });
+    await retireGuessedCoordinate(world.cycle(0), item, `${principal}:${guessedEpoch}`, { outcome: 'owed', from: `${principal}:${guessedEpoch}`, to: `${principal}:${epoch}` });
+    await resumeStep(world.cycle(0), new Set(), true);
+    assert.equal(world.state.actions[owedKey]?.state, 'waiting', 'the coordinate stands owed when the loop stops');
+    assert.deepEqual(world.state.actions[owedKey]?.owed, { work: { id: item.id, key }, handle: { id: `${principal}:${epoch}`, kind: 'implementation', principal, runtime: 'claude', host: 'vishrog', workspace: 'w1V',
+      subject: `${key}: Item ${key}`, state: 'running', pane, attach: `herdr pane attach ${pane} --workspace w1V` } }, 'the row carries the launch\u2019s own payload, the pane its runtime returned');
+    // The loop restarts: the cursor is read back from disk, and nothing in memory survives it. The
+    // base retired the owed row unsent here, as a write whose landing was unknown.
+    const restarted = daemonStateSchema.parse(JSON.parse(JSON.stringify(world.state)));
+    const after = (ms: number) => ({ ...world.cycle(ms), state: restarted } as unknown as Cycle);
+    const refusedBefore = refused.length;
+    // First restarted cycle, the outage still standing: the rebuilt write is refused and stays owed, payload kept.
+    restarted.cycle += 1;
+    await resumeStep(after(60_000), new Set(), true);
+    assert.ok(refused.length > refusedBefore && refused.slice(refusedBefore).every(write => write.id === `${principal}:${epoch}` && write.pane === pane), 'the restarted loop resent the launch\u2019s own coordinate, never the superseded guess');
+    assert.equal(restarted.actions[owedKey]?.state, 'waiting');
+    assert.equal(restarted.actions[owedKey]?.owed?.handle.pane, pane, 'a refusal after the restart keeps the payload for the next one');
+    assert.equal(reclaimed(restarted), false, 'the owed coordinate holds the reclaim across the restart');
+    assert.deepEqual(GY1895_sessionLiveness(restarted), [], 'no session-liveness instance while it stands owed');
+    // The plane answers: the coordinate lands once, under the claimed id with the launch's own pane.
+    plane.up = true;
+    restarted.cycle += 1;
+    await resumeStep(after(120_000), new Set(), true);
+    restarted.cycle += 1;
+    await resumeStep(after(150_000), new Set(), true);
+    // The launch's coordinate carries no outcome; the delivery's own handle record, which follows the paste, does.
+    assert.deepEqual(writes.filter(write => !write.outcome).map(write => [write.id, write.state, write.pane]), [[`${principal}:${epoch}`, 'running', pane]], 'one landing of the coordinate, the launch\u2019s own; the superseded guessed write never reopened its record');
+    assert.ok(writes.every(write => write.id === `${principal}:${epoch}`), 'nothing was ever written under the guessed id after the restart');
+    assert.equal(restarted.actions[owedKey]?.state, 'done');
+    assert.equal(restarted.actions[owedKey]?.owed, undefined, 'the retired row drops the payload');
+    assert.equal(restarted.actions[guessedKey]?.state, 'done');
+    assert.equal(world.prompts.length, 1, `the cleared wait was delivered once: ${JSON.stringify(world.prompts)}`);
+    restarted.cycle += 1;
+    await resumeStep(after(180_000), new Set(), true);
+    assert.equal(world.prompts.length, 1, 'the delivery is never repeated');
+    assert.equal(reclaimed(restarted), false, 'no coordinate-driven reclaim ran');
+    assert.deepEqual(GY1895_sessionLiveness(restarted), [], 'no session-liveness instance anywhere through the restart');
+    // A best-effort record with no payload is still a write whose landing is unknown: retired unsent, as always.
+    await record(restarted, 'owed:handle:other:x:running', { kind: 'session', work: key, principal: null, state: 'waiting', detail: 'Recording a handle was carried to the next cycle: slow; the write stays owed and is retried next cycle', attempts: 1, cycle: restarted.cycle }, GY1895_NOW, world.effects.persist);
+    const reread = daemonStateSchema.parse(JSON.parse(JSON.stringify(restarted)));
+    await retryOwedWrites({ ...after(210_000), state: reread } as unknown as Cycle, ['recordSession']);
+    assert.match(reread.actions['owed:handle:other:x:running']!.detail, /was in flight when the loop last stopped/);
+  } finally { world.cleanup(); }
+});
+
+test('unit:fault-class-session-liveness GY-1895 session isolation — a paneless handle and a reused agent name pointing at another session\'s pane bind nothing, paste nothing and close nothing, and a refusal whose coordinate write is not owed still counts', async () => {
+  // The profile's agent name resolves to a pane this item's finished previous attempt holds: the
+  // name was reassigned to whatever the listing still shows there, and no launch identity ties it
+  // to this attempt. The fence refuses the resolution; the loop must not manufacture ownership by
+  // writing that pane onto this attempt's handle — the GY-852/GY-940 fence the outage repair would
+  // have defeated — so nothing reaches the pane, on this cycle or the bound's.
+  const { item, profile, agents } = gy1895OutageAttempt('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', 'foreign');
+  const world = await resumeWorld(item, profile, agents, { value: 0 }, GY1895_NOW);
+  const { state } = world;
+  const plane = { up: true }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, 'GY-1885', plane, writes, refused);
+  try {
+    await resumeStep(world.cycle(0), new Set(), true);
+    const promptKey = Object.keys(state.actions).find(candidate => candidate.startsWith(`resume:prompt:${item.id}:6:`))!;
+    assert.match(state.actions[promptKey]!.detail, new RegExp(`pane w1V:pQKZ is recorded for GY-1885's session graphyard-opencode-2:5, not for the attempt this paste concerns`));
+    assert.deepEqual(GY1895_sessionLiveness(state).map(entry => [entry.kind, entry.subject]), [['action:session', 'GY-1885']],
+      'the refusal whose coordinate write is not owed is the session\u2019s own, as it always counted');
+    assert.equal(writes.length, 0, 'no handle write bound the foreign pane to this attempt');
+    assert.deepEqual(world.prompts, [], 'nothing was pasted into the pane another session holds');
+    assert.equal(world.closed.length, 0, 'nothing was closed: no pane is verifiably this attempt\u2019s');
+    // Past the bound the attempt is handed on, and the hand-over still touches no pane but its own
+    // absence: the close is sent with no pane, and the finished record the reclaim writes names none.
+    state.cycle += 1;
+    await resumeStep(world.cycle(150_000), new Set(), true);
+    assert.equal(world.closed.length, 0, 'the reclaim closed nothing');
+    assert.ok(writes.every(write => write.pane !== 'w1V:pQKZ'), `no write ever carried the foreign pane: ${JSON.stringify(writes.map(write => [write.id, write.pane, write.state]))}`);
+    assert.ok(writes.some(write => write.id === 'graphyard-opencode-2:6' && write.state === 'finished' && write.pane === 'none'), 'the attempt\u2019s own close records no pane');
+    assert.ok(Object.values(state.actions).some(action => action.state === 'done' && /keeping the attempt's branch/.test(action.detail)), 'the attempt was handed to a new one on the bound');
+    assert.deepEqual(world.prompts, [], 'and still nothing was ever pasted');
+  } finally { world.cleanup(); }
+});
+
+test('unit:fault-class-session-liveness GY-1895 launch coordinates — a launch the outage window covered registers, coordinates and rekeys through the ledger: the retry carries the launcher\u2019s own payload, an owed move is reported owed, and a refusal that is the record\u2019s own is never hidden', async () => {
+  const { item, profile } = gy1895OutageAttempt('GY-1885', 6, 'graphyard-opencode-2', 5, 'w1V:pQKZ', 'paneless');
+  const world = await resumeWorld(item, profile, [], { value: 0 }, GY1895_NOW);
+  const { state } = world;
+  const plane = { up: false }, writes: SessionHandleInput[] = [], refused: SessionHandleInput[] = [];
+  gy1895Engine(world, 'GY-1885', plane, writes, refused);
+  // The pre-claim registration guessed epoch 5; the launch claimed 6, as the dispatch's snapshot did.
+  const handle: SessionHandleInput = { id: 'graphyard-opencode-2:5', kind: 'implementation', principal: 'graphyard-opencode-2', runtime: 'claude', host: 'vishrog', workspace: 'w1V',
+    subject: 'GY-1885: Item GY-1885', state: 'running' };
+  try {
+    // The launch record goes through the ledger exactly as the dispatch's launch wires it.
+    const record = (write: SessionHandleInput) => launchWrite(world.cycle(0), `handle:${item.id}:${write.id}`, { kind: 'session', work: item.key, principal: write.principal ?? null, epoch: null },
+      `Recording ${write.id}'s coordinates on ${item.key}`, item, write);
+    // Registration, coordinates, move: every write is stashed owed, and the coordinate loop stops
+    // at the first unanswered answer instead of hammering the silent plane three times.
+    const launched = await registeredLaunch(record, handle, async () => ({ epoch: 6, pane: 'w1V:pQKZ', agentName: profile.agentName }),
+      launched => launched, pane => `herdr pane attach ${pane} --workspace w1V`);
+    assert.deepEqual(launched, { epoch: 6, pane: 'w1V:pQKZ', agentName: profile.agentName }, 'the outage never fails a launch');
+    const rekey = await rekeyLaunchedSession(record, handle, 5, { epoch: 6, pane: 'w1V:pQKZ', agentName: null }, pane => `herdr pane attach ${pane} --workspace w1V`, 1);
+    assert.deepEqual(rekey, { outcome: 'owed', from: 'graphyard-opencode-2:5', to: 'graphyard-opencode-2:6' }, 'an unanswered move is reported owed, not moved and not failed');
+    assert.equal(writes.length, 0, 'nothing landed while the plane was down');
+    assert.deepEqual(refused.map(write => write.id), ['graphyard-opencode-2:5', 'graphyard-opencode-2:5', 'graphyard-opencode-2:5', 'graphyard-opencode-2:6'],
+      'the registration, the superseded-registration close it always writes, and the coordinates were each sent once; the coordinate loop stopped at the first unanswered send instead of hammering the silent plane');
+    // The dispatch retires the guessed id's owed write once its move is owed: the move's destination
+    // carries the launch's pane, and a guessed write retried after the move lands would reopen the
+    // record the move closed — so the ledger owes the move alone.
+    await retireGuessedCoordinate(world.cycle(0), item, handle.id, rekey);
+    assert.match(state.actions[`owed:handle:${item.id}:graphyard-opencode-2:5`]!.detail, /was superseded by the launch's record owed its move to graphyard-opencode-2:6 and is not sent/);
+    assert.equal(state.actions[`owed:handle:${item.id}:graphyard-opencode-2:5`]!.state, 'done');
+    // The next cycle's bounded steps retry the ledger: the move lands with the exact payload the
+    // launcher held — the claimed id, the launch's own pane — and the guessed write is never sent.
+    plane.up = true;
+    await retryOwedWrites(world.cycle(60_000), ['recordSession']);
+    await retryOwedWrites(world.cycle(120_000), ['recordSession']);
+    assert.deepEqual(writes.map(write => [write.id, write.pane]), [['graphyard-opencode-2:6', 'w1V:pQKZ']],
+      'only the move landed, with the launcher\u2019s own pane; no later retry of the guessed id ever lands after it');
+    assert.equal((item.sessions ?? []).find(session => session.id === 'graphyard-opencode-2:6')?.pane, 'w1V:pQKZ', 'the attempt\u2019s own handle records the pane again');
+    // A refusal that is the record's own is never hidden: a registration the engine refuses leaves
+    // the launch unwritten, so the coordinated write still takes the record over (supersede), the
+    // pane-less retries stay exactly the three they always were, and the move reports failed with
+    // the reason instead of being stashed for a retry that could never land.
+    const takenOver: SessionHandleInput[] = [];
+    const deniesRegistration = async (write: SessionHandleInput) => {
+      if (write.state === 'running' && !write.pane) throw new Error('Session handle graphyard-opencode-2:5 is held by another launch attempt that is still recorded running (409)');
+      takenOver.push(write);
+    };
+    await registeredLaunch(deniesRegistration, handle, async () => ({ epoch: 6, pane: 'w1V:pZZZ', agentName: null }), launched => launched, pane => `herdr pane attach ${pane} --workspace w1V`);
+    assert.ok(takenOver.some(write => write.state === 'finished' && (write as { supersede?: boolean }).supersede === true), 'the refused registration is taken over by the coordinated write, as an unwritten registration always was');
+    const deniesEverything = async (write: SessionHandleInput) => { throw new Error('Session handle graphyard-opencode-2:5 is held by another launch attempt that is still recorded running (409)'); };
+    const failed = await rekeyLaunchedSession(deniesEverything, handle, 5, { epoch: 6, pane: 'w1V:pZZZ', agentName: null }, undefined, 1);
+    assert.equal(failed.outcome, 'failed');
+    assert.match((failed as { reason: string }).reason, /held by another launch attempt/);
+  } finally { world.cleanup(); }
 });

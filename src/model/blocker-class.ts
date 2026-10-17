@@ -1,6 +1,6 @@
 import { humanRequestBlocker } from './human-request.js';
 import { userBusRefusal } from './user-bus.js';
-import { RefusedResponse, planeUnavailable } from './refusal.js';
+import { RefusedResponse, planeUnavailable, planeUnavailableStatus } from './refusal.js';
 import { blockedAttemptMarker } from './capacity.js';
 import { namedPaths, pathScopeContains, scopeRefusalBlocker, unplannedPaths } from './scope.js';
 import { widenedPlannedFiles } from './scope-collapse.js';
@@ -107,7 +107,17 @@ export const planeWideFailure = (text: string | null | undefined) => !!text && (
  * so it is read structurally (GY-1344's planeUnavailable): a 502 the server judged itself, with its own
  * `error` field, is the item's; any other failure is read from its text.
  */
-export const planeWideRefusal = (error: unknown) => error instanceof RefusedResponse ? planeUnavailable(error) || startupReadiness.test(error.message) : planeWideFailure(error instanceof Error ? error.message : typeof error === 'string' ? error : null);
+export const planeWideRefusal = (error: unknown) => {
+  if (error instanceof RefusedResponse) return planeUnavailable(error) || startupReadiness.test(error.message);
+  // GY-1895: a client error that keeps the refusal's status and body — the agent registry's
+  // FleetUnreachableError among them — is read the same structural way: a registry 502 the proxy
+  // answered in the plane's place (Railway's body carries `message`, not `error`) is the plane not
+  // answering, not the session's fault; its bare wording (`answered 502`) matches no plane-wide
+  // pattern. Anything else reads as text, as before.
+  const structural = error as { status?: unknown; body?: unknown } | null;
+  if (structural && typeof structural.status === 'number' && structural.body !== undefined && planeUnavailableStatus(structural.status, structural.body)) return true;
+  return planeWideFailure(error instanceof Error ? error.message : typeof error === 'string' ? error : null);
+};
 /** Whether a control-plane blocker is a server error the item's own request met (GY-1055): the server's health cannot show it fixed. */
 export function itemSpecificPlaneError(text: string | null | undefined) {
   return !!text && requestServerError.test(text) && !planeWideError.test(text);

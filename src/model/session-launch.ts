@@ -1,4 +1,5 @@
 import type { SessionHandleInput } from './sessions.js';
+import { coordinateOwed } from './launch-sentinel.js';
 
 /**
  * The registration every launch makes before its runtime starts (GY-172 AC-2), split from
@@ -30,8 +31,12 @@ export async function registeredLaunch<T>(record: ((handle: SessionHandleInput) 
   // Every write carries this attempt's token, so the control plane refuses one that would register
   // over, close or re-coordinate a running handle another attempt holds (`engine.ts`): two launches
   // racing for one request from the same snapshot cannot end the session the other one started.
+  // GY-1895: a launch whose record callback stashes unanswered writes owed (launchWrite) resolves
+  // `coordinateOwed` — the write is unanswered, not failed, so the registration counts as unwritten
+  // (the coordinate write takes the record over, as a refused registration always has) and the
+  // coordinate loop stops hammering a plane that is not answering: the stash retries next cycle.
   const launch = globalThis.crypto.randomUUID().replaceAll('-', '');
-  const registered = await record({ ...handle, launch, state: 'running' }).then(() => true, () => false);
+  const registered = await record({ ...handle, launch, state: 'running' }).then(answer => answer !== coordinateOwed, () => false);
   let launched: T;
   try { launched = await start(); }
   catch (error) {
@@ -42,8 +47,8 @@ export async function registeredLaunch<T>(record: ((handle: SessionHandleInput) 
   const where = coordinates(launched);
   const pane = where?.pane ?? null, agentName = where?.agentName ?? null;
   if (!registered || pane || (agentName && agentName !== handle.agentName)) {
-    // A registration that was refused or never written is taken over now: this attempt's runtime
-    // started, so the launcher let it run and it is the session the record must describe. The
+    // A registration that was refused, unanswered, or never written is taken over now: this attempt's
+    // runtime started, so the launcher let it run and it is the session the record must describe. The
     // record it takes over may still be running under the same id as another session's (GY-1532:
     // a request relaunched while its earlier session's handle is held, unlisted, until the request
     // ends), so that record is closed as superseded first and this session registered afresh — a
@@ -52,7 +57,8 @@ export async function registeredLaunch<T>(record: ((handle: SessionHandleInput) 
     if (!registered) await record({ ...handle, launch, supersede: true, state: 'finished', outcome: `superseded: a later launch for ${handle.subject ?? handle.id} started its runtime, so this record describes the session before it` }).catch(() => {});
     const coordinated = { ...handle, launch, ...(registered ? {} : { supersede: true }), state: 'running' as const, ...(agentName ? { agentName } : {}), ...(pane ? { pane, ...(attach ? { attach: attach(pane) } : {}) } : {}) };
     for (let attempt = 1; attempt <= coordinateAttempts; attempt++) {
-      if (await record(coordinated).then(() => true, () => false)) break;
+      const answered = await record(coordinated).then(answer => answer !== coordinateOwed ? 'landed' : 'owed', () => 'refused' as const);
+      if (answered !== 'refused') break; // landed, or stashed owed with this payload for the next cycle's retry (GY-1895)
       if (attempt < coordinateAttempts) await new Promise(done => setTimeout(done, coordinateRetryMs * attempt));
     }
   }

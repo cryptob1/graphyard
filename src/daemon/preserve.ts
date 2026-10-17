@@ -4,6 +4,7 @@ import type { FaultKind } from '../model/fault-classes.js';
 import type { WorkerProfile } from '../master.js';
 import { type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { readyToRetry } from './sessions.js';
+import { planeWideRefusal } from '../model/blocker-class.js';
 import type { DaemonEffects } from './effects.js';
 // step-budget imported lazily below
 
@@ -45,6 +46,10 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
     // Lazy: step-budget reaches effects and state, which import this module.
     const { recordCarried, stepCallCarried } = await import('./step-budget.js');
     if (stepCallCarried(error)) { await recordCarried({ state, now, performed, effects }, key, { kind: 'preserve', work: item.key, principal, epoch }, error, `Keeping what attempt ${epoch} of ${item.key} left in its worktree`); return state.actions[key]; }
-    return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'failed', detail: `${item.key} attempt ${epoch} ${observed}, but its partial work could not be put on the record: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
+    // GY-1895: a preservation the plane's outage refused is no session-liveness fault of the item's
+    // (GY-1344, applied to the close by GY-1375): the row stays for the retry, which is what puts
+    // the partial work on the record once the plane answers.
+    const unanswered = planeWideRefusal(error);
+    return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'failed', detail: `${item.key} attempt ${epoch} ${observed}, but its partial work could not be put on the record${unanswered ? ' (the control plane did not answer, so it is preserved on the next try)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined)) - 1];
   }
 }

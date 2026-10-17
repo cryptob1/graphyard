@@ -17,7 +17,7 @@ import type { MasterConfig } from '../master.js';
 import { promotionHolds, promotionWait } from '../master/release-lag.js';
 import { storeAction, touchStanding, message, type DaemonState, type UpgradeStallCause } from './state.js';
 import { detailChanged } from './decisions.js';
-import { checkoutState, unquotePath, type CheckoutState } from './checkout-state.js';
+import { checkoutState, loopCodeRoot, reconcileLoadedRelease, unquotePath, type CheckoutState } from './checkout-state.js';
 import { heldCliSnapshots, heldExecutorEntryOf, holdCliAt, sameCommit } from './held-cli.js';
 import { restartEndedBySupervisorStop } from './loop-supervisor.js';
 
@@ -86,7 +86,7 @@ export function describeSelfUpgrade(upgraded: SelfUpgradeOutcome): string {
 }
 
 export interface SelfUpgradeDeps {
-  /** The coordinator checkout: fetched, diffed and checked out here. */
+  /** The managed repository's root; the checkout fetched, diffed and checked out is the CLI's (`loopCodeRoot`), this root only where no launcher stands apart (GY-1899). */
   root: string;
   /** Every git command the alignment runs. */
   run: ChildRun;
@@ -149,10 +149,14 @@ export interface SelfUpgradeDeps {
  */
 export async function performSelfUpgrade(config: MasterConfig, state: DaemonState, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
-  const git = (...args: string[]) => deps.run('git', ['-C', deps.root, ...args]);
+  // GY-1899: the loop's loaded code and this upgrade live in the checkout the running CLI comes
+  // from, never the managed repository's root: the root's HEAD names the managed project, and a
+  // fetch, diff or checkout there would move the managed project, not the code this process runs.
+  const codeRoot = loopCodeRoot(config.cliPath, deps.root);
+  const git = (...args: string[]) => deps.run('git', ['-C', codeRoot, ...args]);
   const persist = async () => { if (deps.persist) await deps.persist(state); };
   const key = `upgrade:${state.deployment?.sha ?? 'none'}`, heldKey = 'upgrade:held';
-  const holdCli = deps.holdCli ?? (commit => holdCliAt(deps.root, deps.run, commit));
+  const holdCli = deps.holdCli ?? (commit => holdCliAt(codeRoot, deps.run, commit));
   /** GY-1790: the executor units' entry follows the pin — the snapshot's script while it stands, the checkout's when it lifts. No unit is aligned where none is supervised. */
   const alignExecutorUnits = async (script: string | null): Promise<string | null> => {
     if (!deps.alignExecutorUnits) return null;
@@ -163,10 +167,16 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   // served release, as every command the launcher starts does, but it read its release from the
   // checkout, which holds the move. It is recorded as running the snapshot's commit, so the pass
   // that lifts the hold still re-executes it onto the checkout.
-  const snapshot = relative(heldCliSnapshots(deps.root), deps.loadedFrom ?? fileURLToPath(import.meta.url)).split(sep)[0];
+  const snapshot = relative(heldCliSnapshots(codeRoot), deps.loadedFrom ?? fileURLToPath(import.meta.url)).split(sep)[0];
   if (snapshot && snapshot !== '..' && !isAbsolute(snapshot)) {
-    const commit = await Promise.resolve(deps.run('git', ['-C', join(heldCliSnapshots(deps.root), snapshot), 'rev-parse', 'HEAD'])).then(out => out.trim(), () => '');
+    const commit = await Promise.resolve(deps.run('git', ['-C', join(heldCliSnapshots(codeRoot), snapshot), 'rev-parse', 'HEAD'])).then(out => out.trim(), () => '');
     if (commit && state.release?.commit !== commit) state.release = { commit, dirty: false };
+  } else if (state.release?.commit) {
+    // GY-1899: the release the loop records is the CLI checkout's own reading, never the managed
+    // repository's HEAD a startup read of the wrong root wrote; the cursor names the checkout the
+    // loop runs, which the master-loop check and doctor read.
+    const corrected = await reconcileLoadedRelease(codeRoot, state.release, deps.run);
+    if (corrected) { state.release = corrected; await persist(); }
   }
   const note = async (detail: string, failure: boolean, actionKey = key) => {
     storeAction(state, actionKey, { kind: 'config', work: null, principal: null, state: failure ? 'failed' : 'done', detail, attempts: (state.actions[actionKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
@@ -301,7 +311,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       // they execute changed, so their restart is not owed and a held claim cannot stall this.
       const unmade = await holdCli(pending.to).then(() => null, error => message(error));
       if (unmade !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} could not be made for the restart from the dirty coordinator checkout at ${shortCommit(left!.checkout)}: ${unmade}`, 'snapshot-failed');
-      const unpointed = await alignExecutorUnits(heldExecutorEntryOf(deps.root, pending.to));
+      const unpointed = await alignExecutorUnits(heldExecutorEntryOf(codeRoot, pending.to));
       if (unpointed !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} stands and the launcher is pinned to it, but the executor units could not be pointed at the snapshot's launcher: ${unpointed}`, 'snapshot-failed');
       const withheld = await pointLoopUnit(pending.to, 'snapshot');
       if (withheld) return withheld;
@@ -358,7 +368,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     if (left) {
       const unmade = await holdCli(pending.to).then(() => null, error => message(error));
       if (unmade !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} could not be made for the restart from the dirty coordinator checkout at ${shortCommit(left.checkout)}: ${unmade}`, 'snapshot-failed');
-      const unpointed = await alignExecutorUnits(heldExecutorEntryOf(deps.root, pending.to));
+      const unpointed = await alignExecutorUnits(heldExecutorEntryOf(codeRoot, pending.to));
       if (unpointed !== null) return failed(`the held snapshot of ${shortCommit(pending.to)} stands and the launcher is pinned to it, but the executor units could not be pointed at the snapshot's launcher: ${unpointed}`, 'snapshot-failed');
     } else {
       // A pointer that failed to go still pins the launcher to the old snapshot: the checkout stays put.
@@ -513,7 +523,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const processed = (head: string) => { const last = state.upgrade.last; return last?.to === head && last.code === false && last.from === loaded; };
   if (!state.upgrade.pending && (!release || state.upgrade.alignedRelease === release)) {
     const idle = release ? `release ${shortCommit(release)} was already aligned` : 'no delivered item is verified deployed yet';
-    const standing = loaded ? await checkoutState(deps.root, deps.run) : null, head = standing?.commit ?? null;
+    const standing = loaded ? await checkoutState(codeRoot, deps.run) : null, head = standing?.commit ?? null;
     // GY-1773: the checkout a snapshot restart left where it stood. Moved onto the commit the loop
     // runs from the snapshot, it lifts the pin, with no fetch. Still dirty (or on a branch, or of
     // unreadable status) where it stood, it is no restart target: its HEAD is behind the snapshot by
@@ -576,7 +586,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   // every newer tip would keep it ahead of each promotion, and the loop would never restart.
   const held = state.upgrade.pending;
   if (held?.code && state.upgrade.stalled?.cause === 'release-lagged') {
-    const holding = await checkoutState(deps.root, deps.run);
+    const holding = await checkoutState(codeRoot, deps.run);
     // GY-1773: a hold completes onto a snapshot whenever the checkout is dirty — one dirtied after
     // the hold moved it onto the commit included: the restart never runs a dirty tree's code.
     if (holding.dirty === true) return finish(held, true, { checkout: holding.commit, dirty: holding.dirtyPaths });
@@ -595,7 +605,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // A restart already owed onto the commit the checkout holds needs no fetch: it is attempted, so
     // an origin outage never holds the loop on stale code (GY-1445). A newer tip waits for the next
     // pass that can fetch.
-    const owed = state.upgrade.pending, holding = owed ? await checkoutState(deps.root, deps.run) : null;
+    const owed = state.upgrade.pending, holding = owed ? await checkoutState(codeRoot, deps.run) : null;
     // GY-1773: a snapshot restart owed from a dirty checkout needs no fetch either: the commit is already held.
     if (owed?.code && holding!.dirty === true) return finish(owed, false, { checkout: holding!.commit, dirty: holding!.dirtyPaths });
     // GY-1790: an unreadable status is never taken for clean: the owed restart waits, recorded.
@@ -605,8 +615,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   }
 
   // 3. How this checkout stands, before anything touches it.
-  const checkout = await checkoutState(deps.root, deps.run);
-  if (!checkout.commit) return unaligned(`the coordinator checkout at ${deps.root} could not be read`);
+  const checkout = await checkoutState(codeRoot, deps.run);
+  if (!checkout.commit) return unaligned(`the coordinator checkout at ${codeRoot} could not be read`);
   if (to === checkout.commit) {
     // The checkout already holds the tip: finish what an earlier pass still owes, or align and
     // clear a refusal that no longer describes anything.
@@ -710,7 +720,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
  */
 export async function recoverMovedHead(config: MasterConfig, state: DaemonState, from: string, to: string, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
-  const git = (...args: string[]) => deps.run('git', ['-C', deps.root, ...args]);
+  // GY-1899: the moved HEAD a recovery judges and adopts is the CLI checkout's (`loopCodeRoot`), never the managed repository's.
+  const codeRoot = loopCodeRoot(config.cliPath, deps.root);
+  const git = (...args: string[]) => deps.run('git', ['-C', codeRoot, ...args]);
   const persist = async () => { if (deps.persist) await deps.persist(state); };
   const key = 'upgrade:recovered';
   const note = async (detail: string, failure: boolean) => {
@@ -718,7 +730,7 @@ export async function recoverMovedHead(config: MasterConfig, state: DaemonState,
     storeAction(state, key, { kind: 'config', work: null, principal: null, state: failure ? 'failed' : 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
     await persist();
   };
-  const checkout = await checkoutState(deps.root, deps.run);
+  const checkout = await checkoutState(codeRoot, deps.run);
   if (checkout.commit !== to) return { outcome: 'refused', reason: `HEAD reads ${shortCommit(checkout.commit)}, not ${shortCommit(to)}`, commit: checkout.commit };
   if (checkout.detached !== true) return { outcome: 'refused', reason: `HEAD holds ${checkout.branch ?? 'a branch'} instead of standing detached`, commit: to };
   if (checkout.dirty !== false) return { outcome: 'refused', reason: 'tracked files differ from the commit it holds', commit: to };
