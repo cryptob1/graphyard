@@ -18,6 +18,7 @@ import { mergeWriterStatus } from '../../merger-mode.js';
 import { rerunFailedChecksEvent } from '../../merge-queue.js';
 import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { eventStats } from '../../store/snapshot-delta.js';
+import { repositoryPolicy } from '../../model/repository-policy.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
 import { routedScopeDecisions } from '../scope-holds.js';
@@ -85,7 +86,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { rerunFailedChecks: engine.rerunFailedChecks },
+        delegationLimits: services.delegationLimits, build, repositoryPolicy: repositoryPolicy(), production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { rerunFailedChecks: engine.rerunFailedChecks },
         // The main guard (GY-1335): whether it is armed and whether a revert it opens can pass main's
         // last-push-approval rule, which doctor and master status raise before any merge breaks main.
         mainGuard: await mainGuardStatus(engine.store.pool, github),

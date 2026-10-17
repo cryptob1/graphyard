@@ -9,9 +9,9 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
 - `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*`); refused while an unjudged <4h candidate serves.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API/`browser`/suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; a [pending](validation.md#release-verdicts) case never blocks.
-- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`.
-- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` (`GRAPHYARD_DEPLOY_ENVIRONMENT`/`_MANIFEST`/`_GENERATION`) `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once a `digests`-suite-observed UAT verdict (`GRAPHYARD_INSTANCE_DIGESTS`) names it, else promotion refuses; `release verify` checks production's instances. Deploys take `rc-deploy/ENV/N`, then `rc-deployed/ENV/N`.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; [pending](validation.md#release-verdicts) blocks only if `e2e.pendingOutcomes: blocking`.
+- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
+- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` (`GRAPHYARD_DEPLOY_ENVIRONMENT`/`_MANIFEST`/`_GENERATION`) `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it — a verdict the UAT `digests` suite observed; with no `GRAPHYARD_INSTANCE_DIGESTS` the verdict names no digests and promotion refuses. `verify`/UAT `digests` check `GRAPHYARD_INSTANCE_DIGESTS`. Deploys take `rc-deploy/ENV/N` (exclusive), then `rc-deployed/ENV/N`.
 - Failures file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID` (advisory).
 
@@ -23,7 +23,7 @@ UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `g
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`ci.yml`); per candidate `releaseCandidateTests`/container/chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`) merges a first item; other human steps block.
+Required: `typecheck`, `test` (`ci.yml`); per candidate `releaseCandidateTests`/container/chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`) merges a first item; human steps block.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
@@ -33,11 +33,13 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard
 
 ### Main guard
 
-Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only a green exact inverse, three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure` (delivery kept): an attention row/P0 item name them; later merges failing only that set are covered (`coveredBy`), not reverted, until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures (per case) hold 30min, file P0, no rework; proofs hold.
+Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure` (delivery kept): an attention row/P0 item name them; later merges failing only that set are covered (`coveredBy`) until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures (per case) hold 30min, file P0; no rework/proof loss.
 
 ## Managed repositories
 
 `init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway` (`deploy.project`), `command` (`deploy.uat`/`deploy.production` with `GRAPHYARD_CANDIDATE_SHA`; unset: none). `--delivery per-pr` keeps per-PR checks; `install --plan` lists resources.
+
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (`only`: `risk`/`lane`), else generic; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
