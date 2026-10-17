@@ -57,9 +57,12 @@ export function failingRequiredCases(uat: Pick<UatRecord, 'e2e'>): { case: strin
  * failed outright (a flaky one never reverts) or the candidate carries no item. The failing cases, the outcomes binding them and the
  * cases' tags name the areas; a map matches when its file name or a segment of its Paths names one
  * of them. The newest candidate item (the candidate lists them newest first) whose merge delta a
- * matched map's globs cover is the target; with none covered, the newest candidate item is.
+ * matched map's globs cover is the target; with none covered, the newest candidate item is — unless
+ * `options.unmatched` is `'hold'` (a repository's `release.revertUnmatched: false`, or a
+ * `release.onFailure` hold, GY-1848), which withholds the newest-item fallback: no map matched, so
+ * the answer is null and the caller holds instead of reverting the newest item.
  */
-export function revertTarget(candidate: Pick<ReleaseCandidate, 'id' | 'sha' | 'items'>, uat: Pick<UatRecord, 'e2e'>, items: readonly CandidateItemDelta[], maps: readonly VerificationMap[], contract: RevertContract): RevertTarget | null {
+export function revertTarget(candidate: Pick<ReleaseCandidate, 'id' | 'sha' | 'items'>, uat: Pick<UatRecord, 'e2e'>, items: readonly CandidateItemDelta[], maps: readonly VerificationMap[], contract: RevertContract, options?: { unmatched?: 'revert' | 'hold' }): RevertTarget | null {
   // A flaky required case stays on the holds and evidence-decision path (release-holds.ts): only an outright failure reverts.
   const failing = failingRequiredCases(uat).filter(entry => entry.verdict === 'failed');
   const first = failing[0];
@@ -79,6 +82,9 @@ export function revertTarget(candidate: Pick<ReleaseCandidate, 'id' | 'sha' | 'i
     return { key: item.key, mergeSha: item.mergeSha, candidate: candidate.id, case: first.case, step: first.step, map: map.path,
       reason: `${failure}; verification map ${map.path} matches it and its globs cover ${item.key}'s merge delta (${covered.slice(0, 5).join(', ')}${covered.length > 5 ? ` and ${covered.length - 5} more` : ''}), so ${item.key}'s merge ${short(item.mergeSha)} is reverted` };
   }
+  // GY-1848: an unmatched failure never reverts the newest item by default — a repository sets
+  // release.revertUnmatched false (or release.onFailure hold) to hold this case instead.
+  if (options?.unmatched === 'hold') return null;
   const newest = ordered[0];
   return { key: newest.key, mergeSha: newest.mergeSha, candidate: candidate.id, case: first.case, step: first.step, map: null,
     reason: `${failure}; ${selected.length ? `the matching verification map${selected.length > 1 ? 's' : ''} ${selected.map(map => map.path).join(', ')} cover${selected.length > 1 ? '' : 's'} no candidate item's merge delta` : 'no verification map names the case, its outcome or its tags'}, so the newest candidate item ${newest.key}'s merge ${short(newest.mergeSha)} is reverted` };
