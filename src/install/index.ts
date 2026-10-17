@@ -1758,6 +1758,9 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   // not recorded yet always writes it, since GitHub does not know the imported App's fresh secret.
   const hook = saved && alreadyBound && !polling ? await readWebhookConfig(appClient({ appId: saved.app.appId, privateKey: saved.app.privateKey }, session.deps.fetch)) : null;
   const merges = typeof adapter.applyVariables === 'function';
+  // A rewrite adapter writes the control-plane variables again beside the App's; a bind refuses any it would change.
+  const rewritten = url && !merges ? await rewrittenCoreVariables(session) : [];
+  if (rewritten.length) preflight.push({ name: 'Control-plane variables', ok: false, detail: `${context.provider} rewrites the whole environment, and binding the App would also change ${rewritten.join(', ')} on ${context.service}; app bind writes exactly ${APP_VARIABLES.join(', ')}`, fix: rewriteFix(session) });
   const actions: PlanAction[] = [
     { id: 'github.app', target: 'github', state: alreadyBound && !deselected ? 'satisfied' : 'update', title: `Bind the imported GitHub App ${slug}${saved ? ` (app ${saved.app.appId})` : ''} as the control-plane App: add ${repository} to its installation with the host's gh login, verify the App reaches it, and record the binding in ${session.directory}; no browser step` },
     { id: 'github.env', target: 'provider', state: ciPending || rebinding ? 'update' : alreadyBound ? 'satisfied' : 'create', title: `Write exactly ${APP_VARIABLES.join(', ')} to the server${merges ? '' : `; ${context.provider} rewrites the whole environment, so the control-plane variables are written again unchanged beside them`}`, values: [
@@ -1809,6 +1812,27 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
 const reachesRepository = async (session: InstallSession, app: Pick<AppFacts, 'appId' | 'privateKey'>, installationId: number) =>
   await repositoryInstallation(app, session.inputs.repository, session.deps.fetch) === installationId;
 
+/**
+ * What a rewrite adapter's bind would change besides the App variables (GY-1877): `setEnv` writes
+ * the whole environment, so the control-plane variables this session derives — the repository
+ * policy and generated-files manifest re-read from the checkout, the principals — are compared,
+ * as markers, with the deployed file. Every variable that differs, is missing, or is deployed but
+ * no longer derived is named; a merge adapter writes only the App variables and changes nothing else.
+ */
+async function rewrittenCoreVariables(session: InstallSession): Promise<string[]> {
+  const { adapter, context } = session;
+  if (typeof adapter.applyVariables === 'function') return [];
+  const observation = await adapter.observe(context);
+  if (observation.variablesObserved !== true) return ['the deployed environment (it could not be read)'];
+  const deployed = observation.variables, core = coreEnv(session);
+  const changed = core.filter(value => deployed[value.name] !== variableMarker(value.name, value.value)).map(value => value.name);
+  // A Compose bundle mounts a key and names its file (GITHUB_PRIVATE_KEY_FILE) in the variable's place.
+  const written = [...core.map(value => value.name), ...APP_VARIABLES];
+  const dropped = Object.keys(deployed).filter(name => !written.some(known => name === known || name === `${known}_FILE`));
+  return [...changed, ...dropped];
+}
+const rewriteFix = (session: InstallSession) => `The deployment's control-plane variables no longer match what this checkout derives; restore the checkout (graphyard.json, the principals) the observation-only install deployed, or redeploy them first with graphyard install --provider ${session.context.provider} --repo ${session.inputs.repository} --observe-only --apply, then rerun graphyard app bind ${session.inputs.bindApp}`;
+
 const bindingCurrent = (bound: { webhookFingerprint: string; installationId: number }, app: { webhookSecret?: string }, installationId: number | null) =>
   bound.webhookFingerprint === fingerprint(app.webhookSecret ?? '') && (installationId === null || installationId === bound.installationId);
 
@@ -1857,8 +1881,12 @@ async function performBindApp(session: InstallSession, plan: InstallPlan): Promi
   }
   if (write) {
     // Exactly the five App variables. A merge adapter keeps every other variable; a rewrite adapter's
-    // environment is the whole file, so the control-plane variables ride along unchanged beside them.
+    // environment is the whole file, so the control-plane variables ride along beside them, proven
+    // unchanged against the deployed file first.
     const appEnv = githubEnv(facts, ciAppIds);
+    // Read again just before the write: the deployment may have changed since the plan.
+    const rewritten = await rewrittenCoreVariables(session);
+    if (rewritten.length) throw new Error(`${context.provider} rewrites the whole environment, and binding the App would also change ${rewritten.join(', ')}; nothing was written. ${rewriteFix(session)}`);
     await adapter.setEnv(context, typeof adapter.applyVariables === 'function' ? appEnv : [...coreEnv(session), ...appEnv]);
     await adapter.deploy(context);
   }

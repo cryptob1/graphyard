@@ -265,8 +265,10 @@ test('app bind refuses an installation not applied with --observe-only, records 
   } finally { await fixture.cleanup(); }
 });
 
-test('app bind reaches a recorded docker-host installation through --ssh-host, which its record does not keep, and refuses without it (GY-1877)', async () => {
-  const fixture = await harness({ provider: 'docker-host', apps: [{ appId: APP_ID, slug: SLUG, installationId: INSTALLATION_ID }],
+test('app bind reaches a recorded docker-host installation through --ssh-host, which its record does not keep, and refuses without it; it writes the control-plane variables back unchanged and refuses a checkout whose policy would change them (GY-1877)', async () => {
+  // The host answers `cat` with what the installer wrote there, so the bind reads the deployed environment.
+  const readHost = { match: 'cat ', result: (line: string) => { const file = fixture.hostFiles.get(line.split(' ').pop()!); return file ? file.content : { stdout: '', stderr: 'No such file or directory', code: 1 }; } };
+  const fixture = await harness({ provider: 'docker-host', apps: [{ appId: APP_ID, slug: SLUG, installationId: INSTALLATION_ID }], extraResponses: [readHost],
     statusBody: () => {
       // The host's environment file is the deployment's: the served App is the one written there.
       const bound = [...fixture.hostFiles.values(), ...[...fixture.remotes.values()].flatMap(remote => [...remote.files.values()])].some(file => file.content.includes(`GITHUB_APP_ID=${APP_ID}`));
@@ -280,12 +282,29 @@ test('app bind reaches a recorded docker-host installation through --ssh-host, w
     const bind = (...flags: string[]) => appCommand(['bind', SLUG, ...flags], { root: fixture.root, configHome: fixture.configHome, install: fixture.deps });
     await assert.rejects(bind('--plan', '--ssh-host', target.sshHost, '--workspace', 'Graphyard'), /--workspace names a Railway installation's workspace; owner\/project is installed on docker-host/);
     await assert.rejects(bind('--plan'), /installed on a Docker host, and its record keeps no SSH target: rerun as graphyard app bind graphyard-owner-project-imported --ssh-host HOST/);
+    const serverEnv = () => fixture.hostFiles.get('/opt/graphyard/owner-project/server.env')!.content;
+    const deployed = serverEnv();
+    // A checkout whose policy changed since the observation-only apply would redeploy a different
+    // GRAPHYARD_REPOSITORY_POLICY beside the App's variables: the plan and the apply refuse, writing nothing.
+    const policy = join(fixture.root, 'graphyard.json');
+    const original = await readFile(policy, 'utf8').catch(() => null);
+    await writeFile(policy, JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, risk: { sensitive: [{ rule: 'billing', glob: 'billing/' }] } }));
+    const drifted = await bind('--plan', '--ssh-host', target.sshHost, '--ssh-user', target.sshUser) as InstallPlan;
+    const refusal = drifted.preflight.find(entry => entry.name === 'Control-plane variables');
+    assert.ok(refusal && !refusal.ok && refusal.detail.includes('GRAPHYARD_REPOSITORY_POLICY'), JSON.stringify(drifted.preflight));
+    await assert.rejects(bind('--ssh-host', target.sshHost, '--ssh-user', target.sshUser), /Control-plane variables: docker-host rewrites the whole environment, and binding the App would also change [^\n]*GRAPHYARD_REPOSITORY_POLICY/);
+    assert.equal(serverEnv(), deployed, 'a refused bind wrote the environment');
+    if (original === null) await rm(policy); else await writeFile(policy, original);
     const plan = await bind('--plan', '--ssh-host', target.sshHost, '--ssh-user', target.sshUser) as InstallPlan;
     assert.equal(plan.preflight.find(entry => entry.name === 'SSH target')!.detail, 'deploy@203.0.113.10');
     assert.ok(plan.preflight.every(entry => entry.ok), JSON.stringify(plan.preflight.filter(entry => !entry.ok)));
     const summary = await bind('--ssh-host', target.sshHost, '--ssh-user', target.sshUser) as InstallSummary;
     assert.equal(summary.github?.appId, APP_ID);
     assert.equal(summary.url, 'https://graphyard.example.test');
+    // Exactly the App's variables were added; every deployed control-plane line is written back as it was.
+    const added = serverEnv().split('\n').filter(line => !deployed.split('\n').includes(line)).map(line => line.split('=')[0]);
+    assert.deepEqual(added.sort(), ['GITHUB_APP_ID', 'GITHUB_CI_APP_IDS', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET']);
+    assert.ok(deployed.split('\n').every(line => serverEnv().split('\n').includes(line)), 'a control-plane variable was rewritten');
   } finally { await fixture.cleanup(); }
 });
 
