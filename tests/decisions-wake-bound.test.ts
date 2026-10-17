@@ -235,3 +235,26 @@ test('unit:slow-loop-step-bounded — a carried wake whose resync later fails ke
   await returns(runCycle(config(), state, fx, () => clock + 240_000));
   assert.equal(calls.length, 3, 'the backoff\'s second cycle sends again');
 });
+
+test('unit:slow-loop-step-bounded — while a wakeObservation resync is carried, the rework waker sends no observe resync beside it: the item\'s one wake in flight is joined, then consumed, so the item is never sent two resyncs', async () => {
+  const work = item('GY-1877'), slow = hanging(), observes: Work[] = [];
+  const fx = effects(work, { observe: (async (subject: Work) => { observes.push(subject); return null; }) as unknown as DaemonEffects['observe'], wakeObservation: slow.call as DaemonEffects['wakeObservation'] } as Partial<DaemonEffects>);
+  const state = emptyDaemonState(config());
+  await returns(runCycle(config(), state, fx, () => clock));
+  assert.equal(observes.length, 1, 'the waker observed once before the refusal\'s wake was sent');
+  assert.equal(slow.calls.length, 1, 'the refusal\'s wake was sent once');
+  const row = wakeRow(state, work);
+  assert.equal(row?.state, 'waiting', `the wake past its bound is carried: ${row?.detail}`);
+  // Past the waker's re-wake interval, the carried wake is still the item's one resync in flight: the waker sends no observe resync beside it, and the row's retry joins the flight.
+  await returns(runCycle(config(), state, fx, () => clock + 60_000));
+  assert.equal(observes.length, 1, 'no observe resync was sent while the wakeObservation was carried');
+  assert.equal(slow.calls.length, 1, 'the retry joined the wake in flight');
+  assert.match(wakeRow(state, work).detail, /joining the call still in flight/, `the retry joined the carried wake: ${wakeRow(state, work).detail}`);
+  // It answers; the next cycle consumes the kept answer — still no observe beside it — and the row is done.
+  slow.answer(undefined);
+  await returns(runCycle(config(), state, fx, () => clock + 120_000));
+  assert.equal(wakeRow(state, work).state, 'done', `the retry consumed the kept answer: ${wakeRow(state, work).detail}`);
+  assert.equal(observes.length, 1, 'the consumed wake was the item\'s one resync: no observe was sent for it meanwhile');
+  assert.equal(slow.calls.length, 1, 'the wake was never sent twice');
+  assert.deepEqual(carriedFaults(state), [], 'a carried wake is no fault');
+});
