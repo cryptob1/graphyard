@@ -341,14 +341,18 @@ export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; re
  * required `blocked` case blocks like a failed one: it did not run to a pass, and its missing
  * precondition is the producer's own record of why. A required `unrun` case blocks on its own
  * too: an import has no `stoppedBy` chain, so the run that stopped before reaching it would have
- * carried the required failure it stopped at, and either way the head is not releasable.
+ * carried the required failure it stopped at, and either way the head is not releasable. A case
+ * bound to a still-pending outcome (`pendingCases`, GY-1802) is listed apart and never blocks, as in
+ * `releaseVerdict`.
  */
-export function importedRunVerdict(run: ExternalRunResult, acceptances: readonly FlakyAcceptance[] = []) {
+export function importedRunVerdict(run: ExternalRunResult, acceptances: readonly FlakyAcceptance[] = [], pendingCases: readonly string[] = []) {
   const accepted = (id: string) => !!run.sha && acceptances.some(entry => entry.case === id && entry.runId === run.runId && entry.sha === run.sha);
-  const blocking = run.cases.filter(outcome => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun'
-    || (outcome.verdict === 'flaky' && !accepted(outcome.id))));
-  return { passed: blocking.length === 0, blocking: blocking.map((outcome): ImportedBlockingCase => ({ id: outcome.id, verdict: outcome.verdict,
-    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence) })) };
+  const wouldBlock = (outcome: ExternalRunResult['cases'][number]) => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun'
+    || (outcome.verdict === 'flaky' && !accepted(outcome.id)));
+  const listed = (outcome: ExternalRunResult['cases'][number]): ImportedBlockingCase => ({ id: outcome.id, verdict: outcome.verdict,
+    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence) });
+  const blocking = run.cases.filter(outcome => wouldBlock(outcome) && !pendingCases.includes(outcome.id));
+  return { passed: blocking.length === 0, blocking: blocking.map(listed), pending: run.cases.filter(outcome => wouldBlock(outcome) && pendingCases.includes(outcome.id)).map(listed) };
 }
 
 /** The run id one attempt is recorded under: the run's own for a single attempt, `RUN:attempt-N` when a case took several. */

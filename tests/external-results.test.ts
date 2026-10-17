@@ -93,8 +93,13 @@ test('unit:external-results-imported — a required failed, blocked or unrun cas
   // A digest-only run binds no acceptance, the same rule as the runner's own report naming no served SHA.
   const digestOnly = allRequired(handIn.cases, { sha: undefined, digest });
   assert.ok(importedRunVerdict(digestOnly, [acceptance]).blocking.some(entry => entry.id === 'win-tic-tac-toe'));
+  // A case bound to a still-pending outcome (GY-1802) is listed apart and never blocks, as in releaseVerdict.
+  const spared = importedRunVerdict(imported, [], ['checkout-card', 'search-facet']);
+  assert.deepEqual(spared.blocking.map(entry => entry.id), ['win-tic-tac-toe', 'profile-avatar']);
+  assert.deepEqual(spared.pending.map(entry => [entry.id, entry.verdict]), [['search-facet', 'failed'], ['checkout-card', 'blocked']]);
+  assert.deepEqual(releaseVerdict(own, [], ['search-facet']).blocking.map(entry => entry.id), importedRunVerdict(shared, [], ['search-facet']).blocking.map(entry => entry.id));
   // Optional cases never block, and a required pass blocks nothing.
-  assert.deepEqual(importedRunVerdict(importExternalRun(handIn)), { passed: true, blocking: [] });
+  assert.deepEqual(importedRunVerdict(importExternalRun(handIn)), { passed: true, blocking: [], pending: [] });
   assert.equal(importedRunVerdict(importExternalRun({ ...handIn, cases: [{ id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 1, required: true }] })).passed, true);
 });
 
