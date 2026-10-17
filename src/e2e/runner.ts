@@ -80,8 +80,8 @@ export interface E2eReport {
 export interface RunOptions {
   url: string; token: string; environment?: string; runId?: string;
   stepTimeoutMs?: number; retries?: number;
-  /** How often a step with `waitSeconds` asks again (`httpWaitPollMs` by default); tests shorten it. */
-  waitPollMs?: number;
+  /** How often a step with `waitSeconds` asks again (`httpWaitPollMs` by default), and the longest any step waits (its own `waitSeconds` by default); tests shorten both. */
+  waitPollMs?: number; maxWaitSeconds?: number;
   /** Stop at the first required case that fails: every case after it is unrun, naming it. A case bound to an outcome still pending on the candidate (GY-1802) never stops the run. */
   stopOnRequiredFailure?: boolean;
   /** GY-1802: the required case ids bound to an outcome still pending on the candidate (`contractPendingCases`): their failure records as pending, never blocking. */
@@ -173,7 +173,7 @@ const withTimeout = <T>(work: Promise<T>, ms: number, what: string) => {
   return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms} ms`)), ms); })]).finally(() => clearTimeout(timer));
 };
 
-interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; pollMs: number; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
+interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; pollMs: number; maxWaitSeconds: number; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
   secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string; signal?: AbortSignal } }
 
 /** A step's own timeout: a command or agent step declares one; the request and browser steps share the run's. */
@@ -193,7 +193,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
     const path = substitute(step.path, context.vars);
     const body = step.body === undefined ? undefined : JSON.stringify(substitute(step.body, context.vars));
     // A waiting GET asks again until its answer holds or `waitSeconds` pass; the last answer's failure is the step's.
-    const deadline = Date.now() + (step.waitSeconds ?? 0) * 1000;
+    const waitSeconds = Math.min(step.waitSeconds ?? 0, context.maxWaitSeconds), deadline = Date.now() + waitSeconds * 1000;
     let parsed: unknown = undefined;
     for (;;) {
       const response = await context.fetcher(onTarget(path, context.url), { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
@@ -203,7 +203,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
       try { parsed = text ? JSON.parse(text) : undefined; } catch { /* a non-JSON answer passes only checks that need no body */ }
       const failure = checkAnswer(substitute(step, context.vars), response.status, parsed, text);
       if (!failure) break;
-      if (Date.now() + context.pollMs > deadline) throw new Error(step.waitSeconds ? `${failure} (still, after waiting ${step.waitSeconds} s)` : failure);
+      if (Date.now() + context.pollMs > deadline) throw new Error(waitSeconds ? `${failure} (still, after waiting ${waitSeconds} s)` : failure);
       await new Promise(resolve => setTimeout(resolve, context.pollMs));
     }
     for (const [name, at] of Object.entries(step.save ?? {})) {
@@ -227,7 +227,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
 }
 
 /** Run one case once: its declared secrets resolved first, then its steps in order, stopping at the first that fails. */
-async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number }) {
+async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number }) {
   const { definition } = entry;
   const steps: StepRecord[] = [];
   let secrets: Record<string, string>;
@@ -240,7 +240,7 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
   const pageErrors: string[] = [];
   let browser: E2eBrowser | null = null, page: E2ePage | null = null;
   const session = (index: number) => `graphyard-e2e-${options.runId}-${definition.id}-${options.attempt}-${index + 1}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 120);
-  const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, fetcher: options.fetcher, pageErrors, secrets,
+  const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, maxWaitSeconds: options.maxWaitSeconds ?? Infinity, fetcher: options.fetcher, pageErrors, secrets,
     general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session, signal: options.signal },
     idempotency: index => `e2e:${definition.id}:${options.runId}:${options.attempt}:${index}`,
     page: async () => {
@@ -305,7 +305,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     const attemptResults: AttemptResult[] = [];
     do {
       const began = now();
-      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs, ...general });
+      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs, maxWaitSeconds: options.maxWaitSeconds, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
     } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries && !signal?.aborted);
     const last = attemptResults.at(-1)!;

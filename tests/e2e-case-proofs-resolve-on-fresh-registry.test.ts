@@ -149,7 +149,8 @@ test('unit:e2e-case-proofs-resolve-on-fresh-registry — run through the release
   // is not this item's to pin.
   const batches = (await loadCases(root)).filter(entry => entry.definition.id === 'candidate-batches-five');
   assert.equal(batches.length, 1, 'GOAL-1 ships candidate-batches-five');
-  const report = await runCases(batches, { url, token, runId: 'gy-1800-fresh-registry', environment: 'uat', stopOnRequiredFailure: true });
+  // GY-1904: nothing delivers the case's changes here, so its waits for their delivery are cut to a second.
+  const report = await runCases(batches, { url, token, runId: 'gy-1800-fresh-registry', environment: 'uat', stopOnRequiredFailure: true, maxWaitSeconds: 1, waitPollMs: 200 });
   const [outcome] = report.cases;
   assert.equal(outcome.id, 'candidate-batches-five');
   assert.equal(outcome.required, true);
