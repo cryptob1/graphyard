@@ -70,5 +70,6 @@ export async function alignRunningLoopUnit(root: string, config: MasterConfig, u
   // GY-1899: the pin lives under the checkout the running CLI comes from, where the upgrade's
   // holdCliAt wrote it — never under the managed root, whose HEAD names the managed project; the
   // unit itself stays this install's, owned by the managed root (root), which keeps its ownership.
-  return align({ root, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds, heldLauncher: heldLauncherOf(loopCodeRoot(config.cliPath, root)) });
+  const codeRoot = loopCodeRoot(config.cliPath, root);
+  return align({ root, codeRoot, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds, heldLauncher: heldLauncherOf(codeRoot) });
 }

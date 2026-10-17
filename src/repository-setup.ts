@@ -741,6 +741,18 @@ export function renderExecutorUnit(template: string, binding: { root: string; no
 }
 
 /**
+ * GY-1899: the entry a slot's unit starts and the checkout handed to it. While the pin stands it is
+ * the held snapshot's entry, handed the Graphyard checkout the pin lives in (CODE), never the managed
+ * repository; with no pin a CODE apart from PRIMARY runs its own entry — the commit the loop reports
+ * and the upgrade restarts the fleet onto — and PRIMARY's default otherwise.
+ */
+export const executorEntryBinding = (primary: string, code: string | undefined, held: string | null | undefined): { script?: string; checkoutRoot?: string } => {
+  const codeRoot = code ?? primary, own = resolve(codeRoot, 'scripts/graphyard-executor.mjs');
+  if (held) return { script: held, checkoutRoot: codeRoot };
+  return resolve(codeRoot) !== resolve(primary) && existsSync(own) ? { script: own } : {};
+};
+
+/**
  * The entry a slot's unit starts while the CLI pin stands (GY-1790): the held snapshot's own
  * scripts/graphyard-executor.mjs, so an entry the checkout holds dirty is never what boots a slot;
  * null restores the checkout's. The install's template unit is re-rendered exactly as the
@@ -758,9 +770,7 @@ export async function alignExecutorUnitScript(root: string, script: string | nul
     if (error.code === 'ENOENT') return { wrote: 'none', reason: `${unitFile} is not installed; node scripts/graphyard-executor.mjs --install installs it` };
     throw error;
   }
-  // GY-1899: with no pin a slot runs the CLI checkout's entry, the commit the upgrade restarts the fleet onto, never the managed repository's.
-  const own = options.codeRoot && resolve(options.codeRoot) !== resolve(primary) ? resolve(options.codeRoot, 'scripts/graphyard-executor.mjs') : null;
-  const rendered = renderExecutorUnit(current, { root: primary, node: process.execPath, ...(script ? { script, checkoutRoot: primary } : own && existsSync(own) ? { script: own } : {}) });
+  const rendered = renderExecutorUnit(current, { root: primary, node: process.execPath, ...executorEntryBinding(primary, options.codeRoot, script) });
   if (current === rendered) return { wrote: 'unchanged', reason: null };
   await atomicWrite(unitFile, rendered, 0o644);
   (options.run ?? systemctl)(['daemon-reload']);
@@ -1074,7 +1084,7 @@ export async function alignExecutorUnits(root: string, options: { run?: Systemct
   // (`heldRoot`), where the loop's holdCliAt wrote it — never under the managed repository.
   const heldScript = options.heldScript !== undefined ? options.heldScript : await (await import('./daemon/held-cli.js')).heldExecutorEntryOf(options.heldRoot ?? primary);
   let rendered: string;
-  try { rendered = renderExecutorUnit(current, { root: primary, node: options.node ?? process.execPath, ...(heldScript ? { script: heldScript, checkoutRoot: primary } : {}) }); }
+  try { rendered = renderExecutorUnit(current, { root: primary, node: options.node ?? process.execPath, ...executorEntryBinding(primary, options.heldRoot, heldScript) }); }
   catch (error) { return { wrote: 'none', reason: `${unitFile} could not be re-bound to this checkout: ${error instanceof Error ? error.message : String(error)}`, restarted: [] }; }
   if (current === rendered) {
     // The binding is already right, but the restart is still the alignment when `restart` asks for
@@ -1220,8 +1230,7 @@ export async function installExecutorSupervision(root: string, options: { count?
   // daemon's module graph and a re-run never points the slots back at the checkout's entry.
   // GY-1899: the pin is read under the running CLI's checkout (`heldRoot`), never the managed root.
   const heldScript = options.heldScript !== undefined ? options.heldScript : (await import('./daemon/held-cli.js')).heldExecutorEntryOf(options.heldRoot ?? primary);
-  const held = heldScript ? { script: heldScript, checkoutRoot: primary } : {};
-  const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath, ...held });
+  const rendered = renderExecutorUnit(template, { root: primary, node: options.node ?? process.execPath, ...executorEntryBinding(primary, options.heldRoot, heldScript) });
   if (current !== rendered) { await mkdir(dirname(unitFile), { recursive: true }); await atomicWrite(unitFile, rendered, 0o644); }
   run(['daemon-reload']);
   const wanted = Array.from({ length: declaration.count }, (_, index) => executorUnit(index + 1, units));
