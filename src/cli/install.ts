@@ -282,7 +282,8 @@ export const installCommands = defineCommands([
     },
   },
   { name: 'app', help: ['  app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo R]', '  app list [--repo OWNER/NAME]  Import an App made elsewhere (key proven by an App JWT, saved 0600,',
-    '                                never printed) for --reuse-app without sudo; list reusable Apps per role'], readsConnection: () => false,
+    '                                never printed) for --reuse-app without sudo; list reusable Apps per role',
+    '  app bind SLUG [--plan] [--ssh-host H] [--workspace W]  Bind an imported App to the observe-only install'], readsConnection: () => false,
     async run(context) { context.print(await appCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { root: context.repositoryRoot() })); } },
   {
     name: 'github-setup',

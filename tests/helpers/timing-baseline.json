@@ -736,6 +736,7 @@
     "tests/session-liveness-launch-window.test.ts": 3365,
     "tests/session-liveness-model.test.ts": 3250,
     "tests/session-liveness.test.ts": 2811,
+    "tests/session-out-of-credits.test.ts": 1500,
     "tests/session-reconcile.test.ts": 1396,
     "tests/setup-checks-consistent.test.ts": 1400,
     "tests/setup-guide-no-operator-token.test.ts": 300,
@@ -800,6 +801,7 @@
     "tests/soak-merge-writer.test.ts": 4000,
     "tests/soak-observation-window.test.ts": 45000,
     "tests/soak-orphan-supervisor.test.ts": 1500,
+    "tests/soak-out-of-credits-failover.test.ts": 20000,
     "tests/soak-session-liveness-deaf.test.ts": 1500,
     "tests/soak-pages-environment-and-branch-recovery.test.ts": 61453,
     "tests/soak-pi-provider-limit.test.ts": 80000,
@@ -943,6 +945,7 @@
     "tests/sync-timing-baseline.test.ts": 4000,
     "tests/file-durations-status.test.ts": 257,
     "tests/event-loop-lag-pending.test.ts": 729,
+    "tests/install-worker-credentials.test.ts": 900,
     "tests/fault-class-loop.test.ts": 504
   }
 }
