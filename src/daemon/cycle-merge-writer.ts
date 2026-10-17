@@ -6,7 +6,7 @@ import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import type { MergerMode } from '../merger-mode.js';
 import type { MergeLedgerState } from '../model/merge-ledger.js';
-import { mergeWriterTrialGround } from '../model/rework-ground.js';
+import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-ground.js';
 import { installIdFor } from '../install/types.js';
 import { mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../merge-writer/trial.js';
@@ -343,10 +343,19 @@ export async function replayUnconfirmed(cycle: Pick<Cycle, 'state' | 'now' | 'sn
     const ledger = item?.mergeLedger ? `${item.mergeLedger.state}${item.mergeLedger.mergeSha ? ` ${item.mergeLedger.mergeSha.slice(0, 12)}` : ''}` : 'empty';
     const adopt = (why: string) => action('done', `The ${kind} record of ${pending.key} (attempt ${pending.attempt}, write ${pending.write}) ${why}; it is never sent again: the item's merge ledger (${ledger}) is adopted and the next merge runs under a new attempt id`);
     if (!item) { adopt('names an item the snapshot no longer holds'); continue; }
+    // A failed trial's refusal grounds a rework the lost reply never handed the settled flight: it is owed once the server holds the refusal (the replay stored or answered it, or the adopted ledger records it), and asked for by requestPendingReworks.
+    const head = String(pending.event.head ?? '').toLowerCase(), reason = String(pending.event.reason ?? '');
+    const oweRework = () => {
+      if (kind !== 'refused' || !reason.startsWith(trialFailurePrefix) || writer.reworks.some(entry => entry.key === pending.key && entry.head === head)) return;
+      writer.reworks = [...writer.reworks, { key: pending.key, id: pending.id, head, reason: reason.slice(0, 2000), refusedAt: at(), attempts: 0, lastError: null }].slice(-mergeWriterKeptReworks);
+    };
+    const ledgerHolds = () => item.mergeLedger?.state === 'refused' && item.mergeLedger.head?.toLowerCase() === head && item.mergeLedger.refusal?.reason === reason;
     try {
       await record({ ...item, mergeAttempt: { id: pending.attempt, write: pending.write } }, pending.event as unknown as MergeRecordEvent);
+      oweRework();
       action('done', `Replayed the ${kind} record of ${pending.key} (attempt ${pending.attempt}, write ${pending.write}) with its exact input; the server answered its receipt and the merge proceeds from the ledger`);
     } catch (error) {
+      if (ledgerHolds()) oweRework();
       if (keyReusedRefusal(error)) adopt('was refused as a key reused with different input');
       else if (!replyUnknown(error)) adopt(`was refused: ${errorText(error).slice(0, 500)}`);
       else if (pending.replays + 1 >= mergeWriterUnconfirmedReplays) adopt(`was still unanswered after ${pending.replays + 1} replays: ${errorText(error).slice(0, 500)}`);

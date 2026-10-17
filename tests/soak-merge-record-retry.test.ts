@@ -16,8 +16,9 @@ import type { Work } from '../src/model.js';
  * coordinator keeps the receipt rule (a key answers its own input and refuses any other). Some
  * writes reach the server but their replies are lost; for a stretch every reply is lost though the
  * server keeps the write; some keys are refused as reused with different input, in flight and on a
- * replay; and the record route is down for an hour, longer than the replay bound. The writer must
- * deliver every item, push each merge commit once, never send a refused key again, replay each lost
+ * replay; and the record route is down for an hour, longer than the replay bound. Some heads fail
+ * their trial and the refusal's reply is lost, or its request never arrives until the replay. The
+ * writer must request each such rework once, deliver every item (a failed one on its reworked head), push each merge commit once, never send a refused key again, replay each lost
  * write at most the bound, keep its state bounded, keep other items moving once the route is back,
  * and hold every system invariant docs/master-agent.md#system-invariants names.
  */
@@ -35,9 +36,11 @@ const reused = 'Idempotency key reused with different input';
 const items = 60, submitEveryMs = 12 * minute, cycleMs = 2 * minute, cycles = (24 * 60) / 2;
 const reusedInFlight = (n: number) => n % 13 === 0;
 const reusedOnReplay = (n: number) => n % 19 === 0;
-const lostReply = (n: number, kind: string) => (n % 7 === 0 && kind === 'trial') || (reusedOnReplay(n) && kind === 'pushed') || (n % 9 === 0 && kind === 'pushed') || (n % 11 === 0 && kind === 'intent');
+const lostReply = (n: number, kind: string) => (n % 17 === 0 && n % 2 === 1 && kind === 'refused') || (n % 7 === 0 && kind === 'trial') || (reusedOnReplay(n) && kind === 'pushed') || (n % 9 === 0 && kind === 'pushed') || (n % 11 === 0 && kind === 'intent');
 const repliesLost = (cycle: number) => cycle >= 150 && cycle < 153;
 const routeDown = (cycle: number) => cycle >= 300 && cycle < 330;
+/** Items whose first head fails its trial: the refusal's reply is lost (odd multiples) or its request first arrives on replay (even). */
+const failsTrial = (n: number) => n % 17 === 0;
 
 class World {
   main = [sha('base')];
@@ -49,10 +52,12 @@ class World {
   resent: string[] = [];
   injected = new Set<string>();
   submittedAt = new Map<number, number>();
+  reworked = new Map<number, number>();
+  merges = new Map<string, string>();
   cycle = 0; lost = 0; down = 0;
   constructor(readonly now: () => number) {}
   tip() { return this.main[0]!; }
-  head(n: number) { return sha(`head${n}`); }
+  head(n: number) { return sha(this.reworked.has(n) ? `head${n}:rework` : `head${n}`); }
   ledger(n: number) {
     let ledger = null as MergeLedgerState | null;
     for (const event of this.stored.get(n) ?? []) {
@@ -83,8 +88,8 @@ class World {
     return {
       baseBranch: 'main', retrials: 3, now: this.now, merger: async () => 'control-plane',
       fetch: async () => world.tip(),
-      merge: async (head, baseTip) => ({ mergeSha: sha(`merge:${head}:${baseTip}`), files: ['src/app.ts'] }),
-      trial: async mergeSha => ({ build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),
+      merge: async (head, baseTip) => { const mergeSha = sha(`merge:${head}:${baseTip}`); world.merges.set(mergeSha, head); return { mergeSha, files: ['src/app.ts'] }; },
+      trial: async mergeSha => ({ build: [...world.submittedAt.keys()].some(n => failsTrial(n) && world.merges.get(mergeSha) === sha(`head${n}`)) ? 'fail' : 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),
       push: async (mergeSha, baseTip) => { if (baseTip !== world.tip()) return 'rejected'; world.main.unshift(mergeSha); world.pushes.push(mergeSha); return 'pushed'; },
       holds: async mergeSha => world.main.includes(mergeSha),
       record: async (item, event) => {
@@ -95,6 +100,8 @@ class World {
         if (routeDown(world.cycle)) { world.down += 1; throw Object.assign(new Error('merge-record: route down (HTTP 503)'), { status: 503 }); }
         // A merge in flight whose intent key the server already holds with other input.
         if (event.kind === 'intent' && reusedInFlight(n) && !world.injected.has(`flight:${n}`)) { world.injected.add(`flight:${n}`); refuse(); }
+        // A failed trial's refusal that never reaches the server the first time: nothing stored, no reply.
+        if (event.kind === 'refused' && failsTrial(n) && n % 2 === 0 && !world.injected.has(`dropped:${n}`)) { world.injected.add(`dropped:${n}`); world.lost += 1; throw new Error('connect ECONNREFUSED'); }
         const held = world.receipts.get(key);
         if (held !== undefined) {
           if (held !== input) refuse();
@@ -117,7 +124,7 @@ class World {
   }
 }
 
-test('unit:soak-merge-record-retry — a simulated day of lost record replies, a stretch of kept-but-unanswered writes, reused-key refusals in flight and on replay, and an hour-long record outage past the replay bound: every item delivered with one push of its merge commit, no refused key sent again, each lost write replayed at most the bound, state bounded, other items moving once the route is back, and every system invariant holding', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-record-retry — a simulated day of lost record replies, a stretch of kept-but-unanswered writes, reused-key refusals in flight and on replay, failed-trial refusals whose reply is lost or which first arrive on replay, and an hour-long record outage past the replay bound: each such rework requested once, every item delivered with one push of its merge commit, no refused key sent again, each lost write replayed at most the bound, state bounded, other items moving once the route is back, and every system invariant holding', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submittedAt.set(n, start + n * submitEveryMs);
@@ -127,6 +134,7 @@ test('unit:soak-merge-record-retry — a simulated day of lost record replies, a
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    decide: async (item: Work, kind: string) => { assert.equal(kind, 'rework'); const n = Number(item.key.slice(3)); world.reworked.set(n, (world.reworked.get(n) ?? 0) + 1); return { id: `decision-${n}` }; },
     github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: reads } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   const invariantNames = new Set<string>();
@@ -157,6 +165,12 @@ test('unit:soak-merge-record-retry — a simulated day of lost record replies, a
   assert.ok(details.some(detail => new RegExp(`was still unanswered after ${mergeWriterUnconfirmedReplays} replays`).test(detail)), 'the outage outlasted the replay bound and the write was abandoned for the ledger');
   assert.ok(heldDuringOutage > 0, 'new merges were held while a write was owed');
   assert.ok(world.refusedKeys.size > 0, 'keys were refused as reused');
+  // Every failed trial's refusal, its reply lost or first stored on replay, had its rework requested exactly once, and the reworked head was delivered.
+  const failed = [...world.submittedAt.keys()].filter(failsTrial);
+  assert.ok(failed.some(n => n % 2 === 0) && failed.some(n => n % 2 === 1), 'both refusal faults were injected');
+  assert.deepEqual(failed.map(n => [n, world.reworked.get(n)]), failed.map(n => [n, 1]), 'each failed trial grounded exactly one rework');
+  assert.deepEqual([...world.reworked.keys()].sort((a, b) => a - b), failed, 'no other item was reworked');
+  for (const n of failed) assert.equal(final.find(item => item.key === `GY-${n}`)!.candidate!.sha, sha(`head${n}:rework`), `GY-${n} was delivered on its reworked head`);
   assert.deepEqual(world.resent, [], 'no key was sent again after the server refused it as reused');
   for (const [key, count] of world.sends) assert.ok(count <= 1 + mergeWriterUnconfirmedReplays, `${key} was sent ${count} times, past the replay bound`);
   // Other items kept moving: no head waited more than three hours, and items submitted during the outage were delivered after it.

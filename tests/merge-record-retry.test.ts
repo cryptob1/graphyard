@@ -33,14 +33,18 @@ const submitted = () => ({
  * its own input and refuses any other, server/merge-record.ts), the item's ledger folded from what it
  * accepted, and a push the base then holds. `loseReply` drops the reply of a write the server kept.
  */
-function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean; receipts?: [string, MergeRecordEvent][]; ledger?: MergeLedgerState | null } = {}) {
+function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean; dropRequest?: (event: MergeRecordEvent) => boolean; failTrial?: boolean; receipts?: [string, MergeRecordEvent][]; ledger?: MergeLedgerState | null } = {}) {
   const receipts = new Map((options.receipts ?? []).map(([key, event]) => [key, JSON.stringify(event)]));
   const sent: { key: string; input: string; answer: 'stored' | 'receipt' | 'refused' | 'lost' }[] = [];
-  const lost = new Set<string>();
+  const lost = new Set<string>(), dropped = new Set<string>();
+  const decisions: { kind: string; head: string | undefined }[] = [];
+  let reworked = false;
   let ledger: MergeLedgerState | null = options.ledger ?? null, pushes = 0, clock = start;
   const pushed = new Set<string>(ledger?.state === 'pushed' && ledger.mergeSha ? [ledger.mergeSha] : []);
   const record: MergePorts['record'] = async (item, event) => {
     const key = mergeRecordKey(item, event), input = JSON.stringify(event), held = receipts.get(key);
+    // A request that never reached the server: nothing stored, no reply.
+    if (!dropped.has(event.kind) && options.dropRequest?.(event)) { dropped.add(event.kind); sent.push({ key, input, answer: 'lost' }); throw new Error('connect ECONNREFUSED'); }
     if (held !== undefined) {
       if (held !== input) { sent.push({ key, input, answer: 'refused' }); throw Object.assign(new Error(`Graphyard refused work/${item.id}/merge-record (409): ${reused}`), { status: 409 }); }
       sent.push({ key, input, answer: 'receipt' });
@@ -60,13 +64,13 @@ function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean
     baseBranch: 'main', retrials: 3, now: () => (clock += 1000),
     fetch: async () => tip,
     merge: async (head, baseTip) => ({ mergeSha: sha(`merge:${head}:${baseTip}`), files: ['src/app.ts'] }),
-    trial: async mergeSha => ({ build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),
+    trial: async mergeSha => ({ build: options.failTrial ? 'fail' : 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),
     push: async mergeSha => { pushes++; pushed.add(mergeSha); return 'pushed'; },
     holds: async mergeSha => pushed.has(mergeSha),
     record,
   };
   const reads: MergeWriterReads = { ...ports, merger: async () => 'control-plane' };
-  const work = () => { const item = submitted(); return [{ ...item, mergeLedger: ledger, ...(ledger?.state === 'reconciled' ? { stage: 'done' } : {}) } as Work]; };
+  const work = () => { const item = submitted(); return [{ ...item, mergeLedger: ledger, reworkRequested: reworked, ...(ledger?.state === 'reconciled' ? { stage: 'done' } : {}) } as Work]; };
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work(), now: iso(start) }),
@@ -74,8 +78,9 @@ function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     shadow: null, mergeWriter: reads,
+    decide: async (item: Work, kind: string) => { decisions.push({ kind, head: item.candidate?.sha }); reworked = true; return { id: `decision-${decisions.length}` }; },
   } as unknown as DaemonEffects;
-  return { effects, sent, ledger: () => ledger, pushes: () => pushes };
+  return { effects, sent, decisions, ledger: () => ledger, pushes: () => pushes };
 }
 
 /** Runs cycles, letting each merge in flight settle, until the item is reconciled with nothing owed or `limit` cycles pass; answers every action detail. */
@@ -157,4 +162,24 @@ test('unit:merge-record-persist-recovers — a persist of the attempt id that fa
   assert.equal(world.pushes(), 1, 'the merge commit is pushed once');
   await runCycle(config, state, world.effects, () => start);
   assert.equal(state.mergeWriter.inFlight, null, 'nothing is left in flight');
+});
+
+test('unit:merge-record-replay-identical — a failed trial\'s refusal whose reply was lost, or which first reached the server on replay, still has its rework requested once the replay confirms it; the request settles it and later cycles ask nothing more', async () => {
+  for (const [label, fault] of [['stored, reply lost', { loseReply: (event: MergeRecordEvent) => event.kind === 'refused' }], ['first stored on replay', { dropRequest: (event: MergeRecordEvent) => event.kind === 'refused' }]] as const) {
+    const world = coordinator({ failTrial: true, ...fault });
+    const state = emptyDaemonState(config);
+    const details: string[] = [];
+    for (let cycle = 0; cycle < 8; cycle++) {
+      details.push(...(await runCycle(config, state, world.effects, () => start)).actions.map(action => action.detail));
+      await mergeWriterIdle(state);
+    }
+    const refusals = world.sent.filter(entry => JSON.parse(entry.input).kind === 'refused');
+    assert.deepEqual(refusals.map(entry => entry.answer), ['lost', label === 'stored, reply lost' ? 'receipt' : 'stored'], `${label}: the refusal is sent, then replayed once: ${JSON.stringify(world.sent)}`);
+    assert.equal(new Set(refusals.map(entry => `${entry.key}|${entry.input}`)).size, 1, `${label}: the replay is the identical input under the identical key`);
+    assert.equal(world.ledger()?.state, 'refused', label);
+    assert.deepEqual(world.decisions, [{ kind: 'rework', head: candidate.sha }], `${label}: the rework the refusal grounds is requested exactly once: ${details.join(' | ')}`);
+    assert.ok(details.some(detail => /^Requested the rework the merge writer's refusal of GY-1 head [0-9a-f]+ grounds/.test(detail)), `${label}: ${details.join(' | ')}`);
+    assert.deepEqual([state.mergeWriter.reworks, state.mergeWriter.unconfirmed, state.mergeWriter.inFlight], [[], undefined, null], `${label}: nothing is left owed`);
+    assert.ok(!world.sent.some(entry => entry.answer === 'refused'), `${label}: no key is refused as reused`);
+  }
 });
