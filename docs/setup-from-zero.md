@@ -16,11 +16,11 @@ Only legacy `--merger github` needs a human (GitHub Mobile).
 
 A Hetzner server waits (exit 3) for price approval: rerun with `--confirm-price`, `--max-monthly` or `--ssh-key`.
 
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip steps `.graphyard/up.json` records.
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only) and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge (a host install: a person); goals wait. Reruns skip recorded `.graphyard/up.json` steps but redo `master-loop` until loop and executors run this CLI's exact clean commit (`doctor`: `loop-code`).
 
 ## The Setup page
 
-A step needing a person prints one link (`SERVER/#sign-in=CODE&setup`) and waits until green, signed in (10 minutes) to the Setup page. Green ends with a fresh link; [phone access](dashboard.md#from-your-phone). Items:
+A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`, signed in 10 minutes), waits until green, then a fresh link; [phone access](dashboard.md#from-your-phone). Items:
 
 | Item | Button
 | --- | ---
@@ -42,7 +42,7 @@ Once green, **Describe what you want built** records a goal.
 ## 1. Machine prerequisites
 
 ```sh
-node --version          # v24 or later
+node --version          # v24+
 gh auth status          # scope repo; non-compose providers also admin:repo_hook
 docker compose version
 herdr --version
@@ -53,7 +53,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-The repository needs a GitHub `origin` and an Actions `pull_request` test workflow (the required check). **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
+The repository needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -77,7 +77,7 @@ Connect each account in Settings → Agents ([dashboard](dashboard.md#settings-a
 
 ## 9. Worker sandbox and harness rules
 
-**Verify:** `worker-sandbox` passes ([worker sandbox](master-agent-sessions.md#worker-sandbox)). `gy master harness claude --apply` allows the master's GitHub administration; merges stay [denied](master-agent-reference.md#github-administration-through-the-browser).
+**Verify:** [`worker-sandbox`](master-agent-sessions.md#worker-sandbox) passes. `gy master harness claude --apply` allows the master's GitHub administration; merges stay [denied](master-agent-reference.md#github-administration-through-the-browser).
 
 ## 10. Start the master
 
@@ -93,7 +93,7 @@ gy master restart
 
 ## 11. Hosted variables (Railway only)
 
-Set `RAILWAY_API_TOKEN` (**HUMAN:** the account owner issues it) and size `GRAPHYARD_DATABASE_POOL_SIZE` ([limits](operations-reference.md)). **Verify:** doctor `production` has no `error`.
+Set `RAILWAY_API_TOKEN` (**HUMAN:** issued by its owner) and size `GRAPHYARD_DATABASE_POOL_SIZE` ([limits](operations-reference.md)). **Verify:** doctor `production` has no `error`.
 
 ## 12. First item end to end
 
