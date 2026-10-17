@@ -1024,7 +1024,9 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
   return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch, ...(digests ? { mode: 'digest' as const, digests } : {}) };
 }
 /** Async promote for the loop's local ports (GY-1526). */
-export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: AsyncDigestDeploy; imports?: (candidate: ReleaseCandidate) => Promise<PromotionImports>; seal?: (candidate: Pick<ReleaseCandidate, 'id' | 'sha'>) => Promise<PromotionImports> }) {
+export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: AsyncDigestDeploy; imports?: (candidate: ReleaseCandidate) => Promise<PromotionImports>; seal?: (candidate: Pick<ReleaseCandidate, 'id' | 'sha'>) => Promise<PromotionImports>;
+  /** GY-1905: the plane's selection of the exact candidate, asked last before any deployer runs; any refusal it answers stops the promotion. */
+  gate?: (candidate: ReleaseCandidate) => Promise<string[]> }) {
   await syncLedgerAsync(git, options.base);
   const ledger = await readLedgerAsync(git);
   const candidate = findCandidate(ledger, id);
@@ -1043,6 +1045,8 @@ export async function promoteAsync(git: AsyncGit, id: string, options: { base: s
   const digests = options.deployDigests && candidate.build?.artifacts?.length ? [...candidate.build.artifacts] : undefined;
   const refusal = digests ? digestPromotionRefusal(candidate, uat) : null;
   if (refusal) return { promoted: false as const, candidate: candidate.id, refusals: [refusal] };
+  const gated = options.gate ? await options.gate(candidate) : [];
+  if (gated.length) return { promoted: false as const, candidate: candidate.id, refusals: gated };
   await fencedDeployAsync(ledger, intentFor('production', candidate, options.now, digests), options.now, (tag, sha, record) => writeRecordAsync(git, tag, sha, record, options.push),
     async fence => digests ? await options.deployDigests!(digests, candidate.sha, fence) : await deployBranchAsync(git, productionBranch, candidate.sha, shaLeasePosition(ledger) ?? await remoteTipAsync(git, productionBranch)));
   if (!ledger.production.some(record => record.id === candidate.id)) await writeRecordAsync(git, `${productionTagPrefix}${candidate.id}`, candidate.sha, { id: candidate.id, sha: candidate.sha, at: options.now.toISOString() } satisfies ProductionRecord, options.push);
