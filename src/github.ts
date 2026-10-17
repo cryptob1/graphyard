@@ -738,6 +738,34 @@ const headBoundMergeMutation = `mutation($id: ID!, $head: GitObjectID!, $method:
 const disableAutoMergeMutation = `mutation($id: ID!) { disablePullRequestAutoMerge(input: { pullRequestId: $id }) { pullRequest { id } } }`;
 /** The merge method auto-merge uses where the base branch has no queue; a queue's own ruleset sets its method. */
 const autoMergeMethod = () => (['MERGE', 'SQUASH', 'REBASE'] as const).find(method => method === process.env.GITHUB_MERGE_METHOD?.toUpperCase()) ?? 'MERGE';
+/** A GraphQL transport: the App client's `graphql`, or the bridge over the operator's `gh` credential a master command runs as (GY-1871). */
+export type GraphqlTransport = (query: string, variables: Record<string, unknown>) => Promise<any>;
+/**
+ * The pull request's place in GitHub's merge queue, read through any transport (GY-258): whether the
+ * base branch has a queue, whether the pull request is queued or set to auto-merge, and the merge
+ * group commit GitHub builds for its entry. One GraphQL read. `GitHub.mergeQueueState` is the App
+ * client's; `master withdraw` reads the same state over the operator's `gh` credential (GY-1871).
+ */
+export async function pullRequestMergeState(graphql: GraphqlTransport, repository: string, base: string, pr: number): Promise<GitHubMergeQueueState> {
+  const [owner, name] = repository.split('/');
+  const data = await graphql(mergeQueueQuery, { owner, name, number: pr, branch: base });
+  const pull = data?.repository?.pullRequest;
+  demand(typeof pull?.id === 'string' && typeof pull?.headRefOid === 'string', `GitHub did not report the merge-queue state of pull request #${pr}`, 502);
+  const entry = pull.mergeQueueEntry ?? null;
+  return { pullRequestId: pull.id, head: pull.headRefOid, queue: !!data.repository.mergeQueue?.id, mergeStateStatus: typeof pull.mergeStateStatus === 'string' ? pull.mergeStateStatus : null,
+    mode: pull.isInMergeQueue || entry ? 'queued' : pull.autoMergeRequest ? 'auto-merge' : 'none',
+    entryState: typeof entry?.state === 'string' ? entry.state : null, position: Number.isSafeInteger(entry?.position) ? entry.position : null,
+    groupHead: typeof entry?.headCommit?.oid === 'string' ? entry.headCommit.oid : null, at: new Date().toISOString() };
+}
+/**
+ * The take-back both the gates' withdrawal and `master withdraw` run (GY-1871): a queued pull
+ * request leaves the merge queue; an auto-merge-armed one has auto-merge disabled. A pull request
+ * in neither of GitHub's hands (`none`) is left untouched, so a second run writes nothing.
+ */
+export async function dequeuePullRequestEntry(graphql: GraphqlTransport, state: GitHubMergeQueueState) {
+  if (state.mode === 'queued') await graphql(dequeueMutation, { id: state.pullRequestId });
+  else if (state.mode === 'auto-merge') await graphql(disableAutoMergeMutation, { id: state.pullRequestId });
+}
 export const installationSettingsUrl = (installationId: number) => `https://github.com/settings/installations/${installationId}`;
 export class GitHub {
   /** The wait between re-requests of a pull request whose mergeability GitHub has not computed yet. */
@@ -2287,15 +2315,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
    * for its entry. One GraphQL read.
    */
   async mergeQueueState(pr: number): Promise<GitHubMergeQueueState> {
-    const [owner, name] = this.config.repository.split('/');
-    const data = await this.graphql(mergeQueueQuery, { owner, name, number: pr, branch: this.config.base });
-    const pull = data?.repository?.pullRequest;
-    demand(typeof pull?.id === 'string' && typeof pull?.headRefOid === 'string', `GitHub did not report the merge-queue state of pull request #${pr}`, 502);
-    const entry = pull.mergeQueueEntry ?? null;
-    return { pullRequestId: pull.id, head: pull.headRefOid, queue: !!data.repository.mergeQueue?.id, mergeStateStatus: typeof pull.mergeStateStatus === 'string' ? pull.mergeStateStatus : null,
-      mode: pull.isInMergeQueue || entry ? 'queued' : pull.autoMergeRequest ? 'auto-merge' : 'none',
-      entryState: typeof entry?.state === 'string' ? entry.state : null, position: Number.isSafeInteger(entry?.position) ? entry.position : null,
-      groupHead: typeof entry?.headCommit?.oid === 'string' ? entry.headCommit.oid : null, at: new Date().toISOString() };
+    return pullRequestMergeState((query, variables) => this.graphql(query, variables), this.config.repository, this.config.base, pr);
   }
   /**
    * Hand an authorized head to GitHub: into the merge queue; where the base branch has none,
@@ -2321,8 +2341,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
   }
   /** Take a pull request out of GitHub's hands: out of the merge queue, or auto-merge disabled. */
   async dequeuePullRequest(state: GitHubMergeQueueState) {
-    if (state.mode === 'queued') await this.graphql(dequeueMutation, { id: state.pullRequestId });
-    else if (state.mode === 'auto-merge') await this.graphql(disableAutoMergeMutation, { id: state.pullRequestId });
+    await dequeuePullRequestEntry((query, variables) => this.graphql(query, variables), state);
   }
   /**
   /** Every check run on a commit, as the gates read a candidate's: what the main guard judges a merge commit by (GY-1250). */
@@ -2834,6 +2853,43 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
     if (action.kind === 'hold' && state.mode === 'queued' && state.groupHead && state.head === work.candidate.sha && mergeAuthorized(work)) await github.publishGroupCheck(work, state.groupHead);
   } catch (error) { return { action: { kind: 'hold', reason: `GitHub refused to ${action.kind} ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state }; }
   return { action, state };
+}
+/** One pull request `master withdraw` acts on: the work item that holds it and the pull request's number. */
+export interface WithdrawEntry { key: string | null; pr: number }
+/** What `master withdraw` reports per pull request: its number, head sha, the mode read before the run, the action taken (or planned) and the result. */
+export interface WithdrawRow { key: string | null; pr: number; head: string | null; mode: GitHubMergeQueueState['mode'] | null; action: 'dequeue' | 'disable-auto-merge' | 'none'; result: string }
+/** The reads and take-backs `master withdraw` makes: the same two calls the merge gate makes on the App client. */
+export type WithdrawClient = Pick<GitHub, 'mergeQueueState' | 'dequeuePullRequest'>;
+/**
+ * `master withdraw` (GY-1871): the operator's take-back of every merge intent Graphyard holds on a
+ * managed repository — each queued pull request dequeued, each auto-merge-armed one disarmed —
+ * before a control transfer hands the repository elsewhere. The caller names the pull requests the
+ * control plane's work items hold; each one's GitHub merge-queue state is read, and with `apply` the
+ * queued and armed ones are taken back through `dequeuePullRequest` and re-read, so the report names
+ * each pull request's number, head sha, prior mode and result. A pull request already out of
+ * GitHub's hands is `none` and left untouched, so a second run writes nothing and reports the same
+ * set. Without `apply` nothing is written: the rows are the plan an apply would carry out. Only the
+ * operator's admin identity withdraws; any other identity is refused.
+ */
+export async function withdrawEnqueuedPullRequests(client: WithdrawClient, entries: readonly WithdrawEntry[], actor: { id?: string; role?: string }, apply = false): Promise<{ applied: boolean; rows: WithdrawRow[] }> {
+  demand(actor.role === 'admin', `Withdrawing Graphyard's merge intent is operator-only; ${actor.id ?? 'this credential'} is a ${actor.role ?? 'credential of unrecorded role'}`, 403);
+  const rows: WithdrawRow[] = [];
+  for (const entry of entries) {
+    let state: GitHubMergeQueueState;
+    try { state = await client.mergeQueueState(entry.pr); }
+    catch (error) { rows.push({ key: entry.key, pr: entry.pr, head: null, mode: null, action: 'none', result: `GitHub's merge-queue state could not be read: ${error instanceof Error ? error.message : String(error)}` }); continue; }
+    const action = state.mode === 'queued' ? 'dequeue' as const : state.mode === 'auto-merge' ? 'disable-auto-merge' as const : 'none' as const;
+    const row: WithdrawRow = { key: entry.key, pr: entry.pr, head: state.head, mode: state.mode, action, result: 'none' };
+    if (action === 'none') { rows.push(row); continue; }
+    if (!apply) { row.result = action === 'dequeue' ? 'planned: dequeue the merge-queue entry' : 'planned: disable auto-merge'; rows.push(row); continue; }
+    try {
+      await client.dequeuePullRequest(state);
+      const after = await client.mergeQueueState(entry.pr);
+      row.result = after.mode === 'none' ? (action === 'dequeue' ? 'dequeued' : 'auto-merge disabled') : `GitHub still reports ${after.mode}`;
+    } catch (error) { row.result = `refused: ${error instanceof Error ? error.message : String(error)}`; }
+    rows.push(row);
+  }
+  return { applied: apply, rows };
 }
 /** A file of a GitHub compare or pull request file list, as the main guard compares them. */
 const fileChange = (file: any): FileChange => ({ filename: String(file?.filename ?? ''), status: String(file?.status ?? ''), previousFilename: typeof file?.previous_filename === 'string' ? file.previous_filename : null, patch: typeof file?.patch === 'string' ? file.patch : null });

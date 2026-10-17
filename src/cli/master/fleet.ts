@@ -1,4 +1,4 @@
-// Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, protection, tip-cleanup, browser, harness.
+// Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, protection, withdraw, tip-cleanup, browser, harness.
 import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -6,7 +6,8 @@ import { parseArgs } from 'node:util';
 import { agentOwner, listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
-import { applyProtection, protectionPlan, readProtection, readWorkflows } from '../../protection.js';
+import { applyProtection, protectionPlan, protectionRun, readProtection, readWorkflows } from '../../protection.js';
+import { dequeuePullRequestEntry, pullRequestMergeState, withdrawEnqueuedPullRequests, type GraphqlTransport, type WithdrawClient, type WithdrawEntry } from '../../github.js';
 import { cleanupTipRefs } from '../../tip-cleanup.js';
 import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
 import { browserFlows, listConfirmAccessFixtures, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
@@ -15,6 +16,7 @@ import { registryCommand } from '../master-registry.js';
 import { executorsCommand } from '../master-executors.js';
 import { assertHandReview } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
+import { readSecretFromStdin } from '../context.js';
 import type { AttentionItem, MasterConfig } from '../../master.js';
 
 /** The write errors of a vantage that may read the checkout but not write it: a read-only bind (GY-888's confinement) or a directory it does not own. */
@@ -70,6 +72,31 @@ export async function masterHarnessDrift(root: string, master: MasterConfig, opt
   }
 }
 
+/**
+ * The merge-queue reads and take-backs of one repository over the operator's `gh` credential — the
+ * path `master protection` writes through — as the transport `master withdraw` acts over (GY-1871).
+ */
+export function ghMergeQueueTransport(repository: string, base: string): WithdrawClient {
+  const graphql: GraphqlTransport = async (query, variables) => {
+    const args = ['api', 'graphql', '-f', `query=${query}`];
+    for (const [name, value] of Object.entries(variables)) args.push(typeof value === 'number' ? '-F' : '-f', `${name}=${String(value)}`);
+    return JSON.parse(protectionRun('gh', args));
+  };
+  return {
+    mergeQueueState: pr => pullRequestMergeState(graphql, repository, base, pr),
+    dequeuePullRequest: state => dequeuePullRequestEntry(graphql, state),
+  };
+}
+/**
+ * Every pull request the control plane's work items hold, deduplicated across candidate and
+ * submission and ordered by number: what `master withdraw` reads and takes back (GY-1871). GitHub
+ * decides each one's state, so a merged or closed pull request reads as `none` and is left untouched.
+ */
+export function withdrawEntries(work: readonly { key?: string; candidate?: { pr?: number } | null; submission?: { pr?: number } | null }[]): WithdrawEntry[] {
+  const entries = new Map<number, string | null>();
+  for (const item of work) for (const pr of [item.candidate?.pr, item.submission?.pr]) if (typeof pr === 'number' && Number.isSafeInteger(pr) && pr > 0 && !entries.has(pr)) entries.set(pr, item.key ?? null);
+  return [...entries].map(([pr, key]) => ({ key, pr })).sort((a, b) => a.pr - b.pr);
+}
 /** Launch profiles, the master session, reviewer launches, and GitHub administration through the operator. */
 export async function fleetCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
@@ -119,6 +146,21 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
     const result = await runBrowserFlow(root, master, flow, { work: snapshot.work, coordinator: coordinator.actor.id, dryRun: !!values['dry-run'], installation: () => masterApi('github/installation') });
     if (result.outcome === 'refused') process.exitCode = 1;
     return print(result);
+  }
+  // GY-1871: the operator's take-back of Graphyard's merge intent on the managed repository before a
+  // control transfer: every pull request a work item enqueued or armed is dequeued or disarmed, each
+  // reported with its number, head sha, prior mode and result. The identity is the control plane's
+  // answer about an admin credential read from stdin (`master main-watch acknowledge`'s path), never
+  // the master's own; the GitHub calls ride the operator's `gh` credential, as `master protection`
+  // writes. Without --apply the plan prints and nothing is written; a rerun writes nothing.
+  if (id === 'withdraw') {
+    const { values } = parseArgs({ args, options: { repo: { type: 'string' }, apply: { type: 'boolean' }, json: { type: 'boolean' }, 'admin-token-stdin': { type: 'boolean' } }, allowPositionals: false });
+    if (!values['admin-token-stdin']) throw new Error('Withdrawing the merge intent is operator-only: pipe an admin credential to graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin (without --apply the plan prints and nothing is written)');
+    const repository = values.repo?.trim() || master.repository;
+    if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error(`${repository} does not name a repository as OWNER/NAME`);
+    const actor = (await masterApi('status', await readSecretFromStdin(10_000))).actor;
+    const entries = withdrawEntries((await masterApi('work-snapshot')).work);
+    return print({ repository, ...(await withdrawEnqueuedPullRequests(ghMergeQueueTransport(repository, master.baseBranch), entries, actor, !!values.apply)) });
   }
   if (id === 'harness') {
     const { values, positionals } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: true });
