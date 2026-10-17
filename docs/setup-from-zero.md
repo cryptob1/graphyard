@@ -16,7 +16,7 @@ Only legacy `--merger github` needs a human (GitHub Mobile).
 
 A new Hetzner server waits (exit 3) for price consent; rerun `--confirm-price X` (or `--max-monthly N`) with `--ssh-key NAME`.
 
-`up` runs, in order: preflight, control plane, host supervisor and Herdr, deploy key, merger setting (legacy only), master identities (`master autonomy --apply`; without the admin credential: exit 2; `--local`: none, you review and merge ([supervised](onboarding.md#supervised-mode-up---local))), onboarding, accounts (host logins), harness, master loop. Onboarding files its `graphyard/onboarding` pull request for the loop to merge; goals wait. Reruns skip steps (`.graphyard/up.json`); a loop or executor unit (or slot registration) on other code re-opens `master-loop`, which rewrites it, green once loop and slots report this commit; `doctor` FAILs `loop-code` naming both paths and the rerun. Host Herdr: `install --herdr-only`.
+`up` runs, in order: preflight, control plane, host supervisor and Herdr, deploy key, merger setting (legacy only), master identities (`master autonomy --apply`; without the admin credential: exit 2; `--local`: none, you review and merge ([supervised](onboarding.md#supervised-mode-up---local))), onboarding, accounts (host logins), harness, master loop. Onboarding files a `graphyard/onboarding` pull request the loop merges; goals wait. Reruns skip steps (`.graphyard/up.json`); a loop, executor unit or slot not on this CLI's exact clean commit re-opens `master-loop`, which rewrites or restarts it (host installs: there) until all report it; `doctor` FAILs `loop-code` naming both paths. Host Herdr: `install --herdr-only`.
 
 ## The Setup page
 

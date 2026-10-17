@@ -156,18 +156,17 @@ test('unit:up-replaces-loop-on-other-code — the master-loop step rewrites a lo
   const done = replacedEvents.find(event => event.kind === 'step' && event.step === 'master-loop' && event.state === 'done') as { detail?: string } | undefined;
   assert.match(done?.detail ?? '', /^replaced: /, 'the step\'s own outcome names the replacement');
 
-  // A loop whose unit already names this CLI but whose cursor records another commit: the rewrite
-  // changes nothing (the unit was already right), so the step restarts the loop itself, and waits
-  // for the commit the restarted loop reports.
+  // A loop whose unit already names this CLI but whose cursor records another commit: the unit is
+  // right, so it is not rewritten; the step restarts the loop itself and waits for the commit the
+  // restarted loop reports.
   const staleCommitRoot = await resumedRoot('graphyard-up-loop-commit');
   const staleCommit = world(
-    [reading({ loop: { unit: MASTER_UNIT, path: MASTER_UNIT_PATH, checkout: CLI_ROOT }, executor: { unit: EXECUTOR_TEMPLATE, path: EXECUTOR_PATH, checkout: CLI_ROOT }, executorStale: null, loopStale: `${MASTER_UNIT_PATH} runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}` }),
-      cleanReading()],
-    { initAnswers: ['{"supervisor":{"state":"unchanged"}}'] });
+    [reading({ loop: { unit: MASTER_UNIT, path: MASTER_UNIT_PATH, checkout: CLI_ROOT }, executor: { unit: EXECUTOR_TEMPLATE, path: EXECUTOR_PATH, checkout: CLI_ROOT }, executorStale: null, loopReplace: 'restart', loopStale: `${MASTER_UNIT_PATH} runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}` }),
+      cleanReading()]);
   const staleRun = await runUp(request(), dependencies(staleCommitRoot, [], staleCommit));
   assert.equal(staleRun.exitCode, 0, staleRun.next);
-  assert.equal(named(staleCommit, ['master', 'init', '--token-stdin', '--replace-supervisor']).length, 1, 'the check still runs, so a stale commit is never read as green');
-  assert.equal(named(staleCommit, ['master', 'restart']).length, 1, 'a unit the rewrite left unchanged gets its restart from the step');
+  assert.equal(named(staleCommit, ['master', 'init', '--token-stdin', '--replace-supervisor']).length, 0, 'a unit already on this checkout is not rewritten');
+  assert.equal(named(staleCommit, ['master', 'restart']).length, 1, 'the loop on another commit is restarted onto this one');
   assert.equal(staleCommit.aligned, 0, 'executor units on this checkout are left alone');
 
   // A loop already on this CLI's commit: nothing is rewritten and nothing is restarted.
@@ -235,7 +234,7 @@ test('unit:up-reopens-a-recorded-master-loop-step — a rerun whose up.json alre
   assert.deepEqual(unreadable.calls, [], 'a failed reading re-opens nothing');
 });
 
-test('unit:up-waits-for-the-loop-own-commit — the post-restart wait goes green only on a succeeded reading whose loop reported one of this install\'s commits; a failed or erroring reading, or a cursor with no commit, polls to a failure naming which', async () => {
+test('unit:up-waits-for-the-loop-own-commit — the post-restart wait goes green only on a succeeded reading whose loop reported this CLI\'s commit; a failed or erroring reading, or a cursor with no commit, polls to a failure naming which', async () => {
   const { runUp } = await up();
   const deadline = (label: string, waitReading: LoopCodeReading | null) => resumedRoot(label).then(async root => {
     const w = world([reading(), waitReading]);
@@ -304,7 +303,7 @@ test('unit:up-waits-for-the-executors-own-commit — executor slots on other cod
   assert.match(bothRun.next, /the executors still run other code/);
 });
 
-test('unit:doctor-flags-loop-on-other-code — the reading judges the units against this CLI, tolerating the pin and the held snapshot; doctor reports a loop or executor on other code as one line naming both paths and the rerun; the executor alignment re-binds and restarts', async () => {
+test('unit:doctor-flags-loop-on-other-code — the reading judges the units against this CLI\'s exact commit, never a pin, a held snapshot, a missing or dirty report; doctor reports a loop or executor on other code as one line naming both paths and the rerun; the executor alignment re-binds and restarts', async () => {
   const { readLoopCode, alignExecutorUnits, readSetupStatus } = await repositorySetup();
   const { readinessChecklist } = await readinessModule();
   const units: InstallUnits = perInstallUnits('acme/shop');
@@ -344,29 +343,38 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     const blocked = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory: blockedDirectory, home });
     assert.match(blocked.error ?? '', new RegExp(`${quote(MASTER_UNIT)} could not be read: EISDIR`), 'a unit read failure other than a missing file is the reading\'s error');
 
-    // Another commit on this checkout's own unit is other code too; the pin and the held snapshot a
-    // restart pinned are this install's own code, and never read as stale.
+    // Another commit on this checkout's own unit is other code too, and so is the commit of the
+    // known-good pin or the held snapshot a restart pinned: this command asks for this CLI's commit,
+    // so a loop on either is restarted onto it rather than accepted. A cursor that records no
+    // commit is no proof the loop runs this code, and neither is a release it loaded dirty.
     await writeFile(join(unitDirectory, units.master), `[Service]\nWorkingDirectory=${root}\nExecStart=/usr/bin/node ${join(cliCheckout, 'bin', 'graphyard.mjs')} master run\n`);
     const staleCommit = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home });
     assert.match(staleCommit.loopStale ?? '', new RegExp(`runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`), 'an old commit on the cursor is other code');
+    assert.equal(staleCommit.loopReplace, 'restart', 'a unit on this checkout running another commit is restarted, not rewritten');
+    assert.equal(foreign.loopReplace, 'unit', 'a unit on another checkout is rewritten');
     await writeFile(join(base, 'config', 'acme-shop', 'coordinator', 'state.json'), JSON.stringify({ sha: OLD_COMMIT, pinnedAt: 'an earlier promotion', previous: null }));
-    const pointer = join(root, '.graphyard', 'held-cli.json');
-    await writeFile(pointer, JSON.stringify({ commit: OLD_COMMIT, root: pilot }));
-    for (const [cursorCommit, label] of [[COMMIT, 'this checkout'], [OLD_COMMIT, 'the pin']] as const) {
-      const tolerated = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: cursorCommit } }) });
-      assert.equal(tolerated.loopStale, null, `a loop reporting ${label}'s commit runs this install's code`);
+    await writeFile(join(root, '.graphyard', 'held-cli.json'), JSON.stringify({ commit: OLD_COMMIT, root: pilot }));
+    const pinned = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: OLD_COMMIT, dirty: false } }) });
+    assert.match(pinned.loopStale ?? '', new RegExp(`runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`), 'a loop on the pin\'s or held snapshot\'s older commit is not this CLI\'s commit');
+    const current = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: false } }) });
+    assert.equal(current.loopStale, null, 'a loop reporting this CLI\'s commit, clean, runs this code');
+    for (const [cursor, label] of [[null, 'no cursor'], ['{not json', 'a malformed cursor'], [JSON.stringify({ release: null }), 'a cursor with no release']] as const) {
+      const silent = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor });
+      assert.match(silent.loopStale ?? '', /cursor records no commit it loaded/, `${label} is no proof the loop runs this code`);
+      assert.equal(silent.loopReplace, 'restart');
     }
-    await writeFile(pointer, JSON.stringify({ commit: 'f'.repeat(40), root: pilot }));
-    const heldOnly = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: OLD_COMMIT } }) });
-    assert.equal(heldOnly.loopStale, null, 'the held snapshot a restart pinned is this install\'s code too');
+    const dirty = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: true } }) });
+    assert.match(dirty.loopStale ?? '', /with uncommitted changes it loaded/, 'a loop that loaded a dirty tree runs code no commit names');
+    const headless = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run: () => { throw new Error('git is gone'); }, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: false } }) });
+    assert.match(headless.error ?? '', /could not be read, so no unit is judged/, 'without this CLI\'s commit nothing is judged ready');
 
     // A slot's own registration is judged the same way: a running slot whose recorded release is
-    // none of this install's commits is other code, a stopped slot runs nothing, and the pin's
-    // commit is this install's for a slot too. The registrations are read beside the master
-    // credential, exactly where the fleet records them (executor-fleet's executor registration).
-    // The slot runs a commit that is neither this checkout's nor the pin's, so only its own
-    // restart can bring it onto this install's code.
-    const slotCommit = 'c'.repeat(40);
+    // neither this CLI's commit nor the repository checkout's (a slot may start the repository's own
+    // executor) is other code, a stopped slot runs nothing, and the pin's older commit is other code
+    // for a slot too. The registrations are read beside the master credential, exactly where the
+    // fleet records them (executor-fleet's executor registration).
+    const slotCommit = 'c'.repeat(40), repositoryCommit = 'd'.repeat(40);
+    const withRepository = (_command: string, args: string[]) => args[2] === 'rev-parse' ? `${args[1] === cliCheckout ? COMMIT : repositoryCommit}\n` : '';
     const slot1Unit = units.executorTemplate.replace('@.service', '@1.service');
     const executorsDirectory = join(home, 'master.executors');
     await mkdir(executorsDirectory, { recursive: true });
@@ -377,15 +385,26 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
       state: 'running', standDown: null, startedAt: 't0', updatedAt: 't1', stoppedAt: null,
       claims: 0, lastClaim: null, inFlight: null, claiming: null, ...over,
     });
+    await writeFile(join(unitDirectory, units.executorTemplate), `[Unit]\nDescription=Graphyard executor\n\n[Service]\nWorkingDirectory=${root}\nExecStart=/usr/bin/node ${join(cliCheckout, 'scripts', 'graphyard-executor.mjs')} --slot %i\n`);
+    const slotReading = () => readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run: withRepository, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: false } }) });
     await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({})));
-    const staleSlot = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT } }) });
+    const staleSlot = await slotReading();
     assert.match(staleSlot.executorStale ?? '', new RegExp(`${quote(slot1Unit)} runs ${slotCommit.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`), 'a slot still running another commit is other code, though its unit binds this checkout');
     await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ state: 'stopped', stoppedAt: 't2' })));
-    const stoppedSlot = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT } }) });
-    assert.equal(stoppedSlot.executorStale, null, 'a stopped slot runs nothing and is never flagged');
+    assert.equal((await slotReading()).executorStale, null, 'a stopped slot runs nothing and is never flagged');
     await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: OLD_COMMIT, dirty: false } })));
-    const pinnedSlot = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, cursor: JSON.stringify({ release: { commit: COMMIT } }) });
-    assert.equal(pinnedSlot.executorStale, null, 'a slot on the pin\'s commit runs this install\'s code');
+    assert.match((await slotReading()).executorStale ?? '', new RegExp(`runs ${OLD_COMMIT.slice(0, 12)}`), 'a slot on the pin\'s older commit is other code');
+    await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: repositoryCommit, dirty: false } })));
+    assert.equal((await slotReading()).executorStale, null, 'a slot started from the repository\'s own executor, on the repository checkout\'s commit, runs the right code');
+    await writeFile(join(executorsDirectory, 'slot-1.json'), JSON.stringify(fleetRecord({ release: { commit: COMMIT, dirty: false } })));
+    assert.equal((await slotReading()).executorStale, null, 'a slot on this CLI\'s commit runs this code');
+
+    // Registrations that exist but cannot be read judge nothing: the reading's error, never an empty fleet.
+    const unreadableHome = join(base, 'home-unreadable');
+    await mkdir(unreadableHome, { recursive: true });
+    await writeFile(join(unreadableHome, 'master.executors'), 'a file where the registrations directory belongs\n');
+    const unreadableFleet = await readLoopCode(root, { cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home, master: { repository: 'acme/shop', credentialFile: join(unreadableHome, 'master.token') }, cursor: JSON.stringify({ release: { commit: COMMIT, dirty: false } }) });
+    assert.match(unreadableFleet.error ?? '', /master\.executors could not be read: ENOTDIR/, 'a registration directory read failure other than a missing one is the reading\'s error');
 
     // The doctor line: one FAIL naming both paths and the rerun, ready once both run this checkout.
     const facts = (code: LoopCodeReading | null) => readinessChecklist('through-merge', {
@@ -466,4 +485,70 @@ test('unit:doctor-loop-code-setup-line — setupFromZero carries the loop-code l
   const untaken = (await checks(null)).find(check => check.id === 'loop-code');
   assert.equal(untaken?.status, 'fail', 'a reading that could not be taken is never a pass');
   assert.match(untaken?.detail ?? '', /could not be read/);
+});
+
+test('unit:up-replaces-host-loop-on-other-code — a host install\'s loop and slots are read, replaced and verified on the host through its transport, the completed-install rerun included', async () => {
+  const { runUp } = await up();
+  const { readHostLoopCode } = await repositorySetup();
+  const units: InstallUnits = perInstallUnits('acme/shop');
+  const layout = { home: '/home/graphyard', graphyard: '/home/graphyard/graphyard', checkout: '/home/graphyard/code/acme-shop', userUnitDirectory: '/home/graphyard/.config/systemd/user' };
+  const credential = '/home/graphyard/.config/graphyard/acme-shop/coordinator.token';
+  const slot1 = units.executorTemplate.replace('@.service', '@1.service');
+  /** The host's files, as `cat` and `ls` on it answer them. */
+  const hostFiles = (cursorCommit: string | null, slotCommit: string): Record<string, string> => ({
+    [`${layout.checkout}/.graphyard/units.json`]: JSON.stringify(units),
+    [`${layout.checkout}/.graphyard/master.json`]: JSON.stringify({ repository: 'acme/shop', credentialFile: credential }),
+    [`${layout.userUnitDirectory}/${units.master}`]: `[Service]\nWorkingDirectory=${layout.checkout}\nExecStart=/usr/bin/node ${layout.graphyard}/bin/graphyard.mjs master run\n`,
+    [`${layout.userUnitDirectory}/${units.executorTemplate}`]: `[Service]\nWorkingDirectory=${layout.checkout}\nExecStart=/usr/bin/node ${layout.graphyard}/scripts/graphyard-executor.mjs --slot %i\n`,
+    ...(cursorCommit ? { [credential.replace(/\.token$/, '.daemon.json')]: JSON.stringify({ release: { commit: cursorCommit, dirty: false } }) } : {}),
+    [`${credential.replace(/\.token$/, '.executors')}/slot-1.json`]: JSON.stringify({ state: 'running', root: layout.graphyard, release: { commit: slotCommit, dirty: false }, supervisor: { unit: slot1 } }),
+  });
+  const hostRun = (files: Record<string, string>) => async (program: string, args: string[]) => {
+    if (program === 'cat') return args[0] in files ? { code: 0, stdout: files[args[0]], stderr: '' } : { code: 1, stdout: '', stderr: `cat: ${args[0]}: No such file or directory` };
+    if (program === 'ls') { const names = Object.keys(files).filter(path => path.startsWith(`${args[1]}/`)).map(path => path.slice(args[1].length + 1)); return names.length ? { code: 0, stdout: names.join('\n'), stderr: '' } : { code: 2, stdout: '', stderr: `ls: cannot access '${args[1]}': No such file or directory` }; }
+    if (program === 'git') return { code: 0, stdout: `${'e'.repeat(40)}\n`, stderr: '' };
+    return { code: 1, stdout: '', stderr: 'unexpected' };
+  };
+
+  // The host's loop and slot still report the commit the host checkout held before: other code,
+  // judged against the host checkout at this CLI's commit, never against this machine's units.
+  const stale = await readHostLoopCode(hostRun(hostFiles(OLD_COMMIT, OLD_COMMIT)), layout, COMMIT, 'host.example');
+  assert.equal(stale.host, 'host.example');
+  assert.equal(stale.cli.root, layout.graphyard, 'the host\'s own Graphyard checkout is the code they must run');
+  assert.match(stale.loopStale ?? '', new RegExp(`runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`));
+  assert.equal(stale.loopReplace, 'restart');
+  assert.match(stale.executorStale ?? '', new RegExp(`${quote(slot1)} runs ${OLD_COMMIT.slice(0, 12)}`));
+  const silent = await readHostLoopCode(hostRun(hostFiles(null, COMMIT)), layout, COMMIT, 'host.example');
+  assert.match(silent.loopStale ?? '', /cursor records no commit/, 'a host loop with no recorded commit is not proof either');
+  const settled = await readHostLoopCode(hostRun(hostFiles(COMMIT, COMMIT)), layout, COMMIT, 'host.example');
+  assert.deepEqual([settled.loopStale, settled.executorStale, settled.error], [null, null, null], 'the host on this commit reads clean');
+  const refused = await readHostLoopCode(async (program, args) => program === 'cat' && args[0].endsWith(units.master) ? { code: 1, stdout: '', stderr: 'cat: Permission denied' } : hostRun(hostFiles(COMMIT, COMMIT))(program, args), layout, COMMIT, 'host.example');
+  assert.match(refused.error ?? '', /could not be read: cat: Permission denied/, 'a refused host read is the reading\'s error, never an absent unit');
+
+  // runUp on a host install whose earlier run recorded every step: the rerun reads the host through
+  // the install's arguments, re-opens master-loop, replaces the loop and slots there (never running
+  // this machine's master init or restart), and goes green only once the host reports this commit.
+  const root = await temporaryDirectory('graphyard-up-host-loop');
+  await mkdir(join(root, '.graphyard'), { recursive: true });
+  await writeFile(join(root, '.graphyard', 'up.json'), JSON.stringify({
+    version: 1, repository: 'acme/shop', provider: 'host', merger: 'control-plane', noHerdr: false, goal: null,
+    completed: ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'merger-setting', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'],
+  }));
+  const hostReadings = [stale, stale, stale, settled];
+  const seen: (string[] | null | undefined)[] = [], replaced: { unit: string; rewrite: boolean }[] = [], aligned: (string | null | undefined)[] = [];
+  const w = world([]);
+  const events: UpEvent[] = [];
+  const run = await runUp({ ...request(), provider: 'host' }, {
+    ...dependencies(root, events, w),
+    loopCode: async hostInstall => { seen.push(hostInstall); return hostReadings.length > 1 ? hostReadings.shift()! : hostReadings[0]; },
+    alignExecutors: async (options = {}, hostInstall) => { aligned.push(options.template); assert.ok(hostInstall?.includes('host')); return { wrote: 'unchanged', reason: null, restarted: [slot1] }; },
+    replaceHostLoop: async (hostInstall, options) => { assert.ok(hostInstall.includes('--provider') && hostInstall.includes('host')); replaced.push(options); },
+  });
+  assert.equal(run.exitCode, 0, run.next);
+  assert.ok(seen.length >= 3 && seen.every(args => Array.isArray(args) && args.includes('--provider') && args.includes('host')), 'every reading is taken on the host, through the install\'s arguments');
+  assert.deepEqual(replaced, [{ unit: units.master, rewrite: false }], 'the host loop is restarted onto this commit where it runs');
+  assert.deepEqual(aligned, [units.executorTemplate], 'and its slots are restarted there');
+  assert.deepEqual(named(w, ['master', 'restart']), [], 'nothing is restarted on this machine for a host install');
+  assert.deepEqual(named(w, ['master', 'init', '--token-stdin', '--replace-supervisor']), [], 'and nothing is rewritten here');
+  assert.ok(events.some(event => event.kind === 'note' && event.text.includes(`the loop now runs ${layout.graphyard} at ${COMMIT.slice(0, 12)}`)), 'the step reports the host loop now on this commit');
 });

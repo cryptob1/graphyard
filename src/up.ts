@@ -14,7 +14,7 @@ import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type O
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './evidence-replay.js';
 import { recordSupervision } from './master/config.js';
-import { unitCheckout, userUnitDirectory } from './install/units.js';
+import { executorGlob, executorInstancePattern, unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { ensureDeployKey, ensureMainWriteProtection } from './install/deploy-key.js';
@@ -22,7 +22,7 @@ import type { GitHubCli } from './install/github.js';
 import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, alignExecutorUnits, type LoopCodeReading } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, type LoopCodeReading } from './repository-setup.js';
 import { recordHerdrInstance } from './master/config.js';
 import { mergerModes, type MergerMode } from './merger-mode.js';
 
@@ -201,14 +201,18 @@ export interface UpDependencies {
    */
   supervise?(): Promise<{ operatorLogin: string | null }>;
   /**
-   * GY-1859: what the install's loop and executor units run against this CLI's code, read from the
-   * host (repository-setup's readLoopCode). A live master-loop checklist item says only that a loop
-   * runs; this says whose code it runs. Absent — a dependency double from before it — the
-   * master-loop step does not check the code and keeps its earlier behaviour.
+   * GY-1859: what the install's loop and executor units run against this CLI's code (repository-setup's
+   * readLoopCode), or, given HOSTINSTALL (the install arguments of a self-contained host), what the
+   * host's units run against the host checkout at this CLI's commit (readHostLoopCode, through the
+   * install's own transport). A live master-loop checklist item says only that a loop runs; this
+   * says whose code it runs. Absent — a dependency double from before it — the master-loop step
+   * does not check the code and keeps its earlier behaviour.
    */
-  loopCode?(): Promise<LoopCodeReading | null>;
-  /** GY-1859: re-bind the install's executor template to this CLI's code and restart its slots (repository-setup's alignExecutorUnits); `restart` restarts the slots even when the template already binds this checkout, for a slot still running a commit the checkout left. */
-  alignExecutors?(options?: { restart?: boolean }): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }>;
+  loopCode?(hostInstall?: string[] | null): Promise<LoopCodeReading | null>;
+  /** GY-1859: re-bind the install's executor template to this CLI's code and restart its slots (repository-setup's alignExecutorUnits, or the host's slots through its transport); `restart` restarts the slots even when the template already binds this checkout, for a slot still running a commit the checkout left. */
+  alignExecutors?(options?: { restart?: boolean; template?: string | null }, hostInstall?: string[] | null): Promise<{ wrote: 'updated' | 'unchanged' | 'none'; reason: string | null; restarted: string[] }>;
+  /** GY-1859: replace a host install's loop where it runs: the host's Graphyard checkout moved to this CLI's commit, the unit rewritten by master init there when REWRITE, and UNIT restarted. */
+  replaceHostLoop?(hostInstall: string[], options: { unit: string; rewrite: boolean }): Promise<void>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
@@ -1057,8 +1061,10 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // recorded the step while its loop served an earlier checkout. So the recorded step is re-opened
     // whenever the units read as other code, and the step below runs again instead of printing the
     // same false green; a reading that cannot be taken re-opens nothing, since it judges nothing.
+    // A host install's units are read on the host, through the install's transport, never this machine's.
+    const hostLoop = remoteLoop ? installArgs('--plan') : null;
     if (state.completed.includes('master-loop') && deps.loopCode) {
-      const recorded = await deps.loopCode().catch(() => null);
+      const recorded = await deps.loopCode(hostLoop).catch(() => null);
       if (recorded?.loopStale || recorded?.executorStale) {
         state.completed = state.completed.filter(name => name !== 'master-loop');
         await writeState(deps.root, state);
@@ -1071,10 +1077,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // serving the repository may be a process an earlier checkout left: every fix since merged is
       // invisible to it, and setup kept saying nothing was needed. Read the units against this CLI
       // first; a loop or executor on other code is rewritten to this CLI and restarted.
-      const reading = deps.loopCode ? await deps.loopCode().catch(() => null) : null;
+      const reading = deps.loopCode ? await deps.loopCode(hostLoop).catch(() => null) : null;
       const loopStale = reading?.loopStale ?? null, executorStale = deps.alignExecutors ? reading?.executorStale ?? null : null;
+      // A unit that starts another checkout is rewritten; one on this checkout whose process loaded other code is restarted.
+      const rewriteLoop = !!loopStale && reading?.loopReplace !== 'restart';
       let rewrote: string | null = null;
-      if (loopStale) {
+      if (loopStale && hostLoop) {
+        if (!deps.replaceHostLoop || !reading?.loop) throw new UpStop(`master-loop: ${loopStale} on ${reading?.host ?? 'the host'}, and this run cannot reach the host to replace it; rerun ${rerun()}`, upExitCodes.failed);
+        await deps.replaceHostLoop(hostLoop, { unit: reading.loop.unit, rewrite: rewriteLoop }).catch(error => { throw new UpStop(`master-loop: ${loopStale} on ${reading.host ?? 'the host'}, and replacing it there failed: ${String(error?.message ?? error).split('\n')[0]}; rerun ${rerun()}`, upExitCodes.failed); });
+        rewrote = 'host';
+      } else if (loopStale && rewriteLoop) {
         const token = await deps.masterToken();
         if (!token) throw new UpStop(`master-loop: ${loopStale}, and no master credential is recorded here to rewrite the unit; run graphyard master init --token-stdin --replace-supervisor from this checkout, then rerun ${rerun()}`, upExitCodes.prerequisite);
         const init = parseJson(await run('master-loop', ['master', 'init', '--token-stdin', '--replace-supervisor'], { stdin: token }));
@@ -1084,7 +1096,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (executorStale && deps.alignExecutors) {
         // GY-1859: the restart runs even when the template already binds this checkout — a slot
         // booted before the checkout moved keeps running the commit it loaded until it is restarted.
-        const aligned = await deps.alignExecutors({ restart: true });
+        const aligned = await deps.alignExecutors({ restart: true, template: reading?.executor?.unit ?? null }, hostLoop);
         // An uninstalled template is not created here: installing executors stays the operator's scripts/graphyard-executor.mjs --install.
         if (aligned.wrote === 'none' && aligned.reason) throw new UpStop(`master-loop: ${executorStale}, and it could not be aligned: ${aligned.reason}`, upExitCodes.failed);
         // An alignment that rewrote nothing and restarted nothing changed nothing the reading judged,
@@ -1111,7 +1123,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         else await run('master-loop', ['master', 'restart']);
         fresh = archived ? `the loop started a fresh cursor; the old one (cycle ${archived.cycle}) is archived at ${archived.file}` : 'the loop started a fresh cursor';
         deps.emit({ kind: 'note', text: `Re-issued the coordinator, operator-agent and approver credentials for the fresh database; ${fresh}.` });
-      } else if (!(await checklist()).find(item => item.id === 'master-loop')?.done || (loopStale && rewrote !== 'updated' && rewrote !== 'created')) await run('master-loop', ['master', 'restart']);
+      } else if (!(await checklist()).find(item => item.id === 'master-loop')?.done || (loopStale && rewrote !== 'host' && rewrote !== 'updated' && rewrote !== 'created')) await run('master-loop', ['master', 'restart']);
       // A loop that refuses to run is a failed setup step naming its cause, never a wait that stalls.
       const refused = async () => {
         const reason = await deps.loopRefusal?.();
@@ -1126,7 +1138,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (loopStale || executorStale) {
         const deadline = deps.now() + machineWaitMs;
         for (let polls = 0; ; polls++) {
-          const now = deps.loopCode ? await deps.loopCode().catch(() => null) : null;
+          const now = deps.loopCode ? await deps.loopCode(hostLoop).catch(() => null) : null;
           const read = now && !now.error ? now : null;
           const reported = read && !read.loopStale ? read.loopCommit : null;
           const loopDone = !loopStale || !!reported, executorsDone = !executorStale || (!!read && !read.executorStale);
@@ -1738,6 +1750,13 @@ export function forwardSignals(children: Set<ChildProcess>, options: { exit?: (c
   return () => { for (const signal of ['SIGINT', 'SIGTERM'] as const) process.off(signal, handler); };
 }
 
+/** GY-1859: what up reaches a host install's loop and executors through. */
+interface HostLoopSession {
+  remote: Transport; layout: { home: string; graphyard: string; cli: string; checkout: string; userUnitDirectory: string }; ref: string; environment: string[];
+  asUser(cwd: string, program: string, args: string[], input?: string): Promise<{ code: number; stdout: string; stderr: string }>;
+  checkoutAtRef(): Promise<void>;
+}
+
 /** The real dependencies: this CLI's own commands as children, the master identity's status read. */
 export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void, githubLogin: () => string | null = hostGithubLogin,
   discoverLogin: (browser: { profile: string; executable?: string }) => string | null = hostProfileLogin): UpDependencies & { children: Set<ChildProcess> } {
@@ -1761,18 +1780,73 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     try { recorded = JSON.parse(await readFile(resolve(root, '.graphyard/master.json'), 'utf8')).cliPath; } catch { /* not initialised yet */ }
     return readCoordinatorCheckout(coordinatorCheckoutRoot(typeof recorded === 'string' && recorded ? recorded : cliPath));
   };
+  // GY-1859: a host install's transport and layout, prepared once per install arguments as credentialAnswers prepares them.
+  const hostSessions = new Map<string, Promise<HostLoopSession>>();
+  const hostLoopSession = (hostInstall: string[]) => {
+    const key = hostInstall.join('\0');
+    if (!hostSessions.has(key)) hostSessions.set(key, (async () => {
+      const [{ installRequestFromArgs, prepareInstall }, hostModule] = await Promise.all([import('./install/index.js'), import('./install/host.js')]);
+      const session = await prepareInstall(root, installRequestFromArgs(hostInstall.slice(1)).request, { cliPath, log: () => {} }, 'plan');
+      const remote = await hostModule.hostRemote(session.context), layout = session.context.host!.layout, ref = session.context.host!.ref;
+      const asUser = (cwd: string, program: string, args: string[], input?: string) => hostModule.asUser(remote, cwd, program, args, { allowFailure: true, timeout: 900_000, ...(input === undefined ? {} : { input }) });
+      // The host checkout at this CLI's commit, as install's provision places it: fetched and installed only when it is elsewhere.
+      const checkoutAtRef = async () => {
+        const moved = await asUser(hostModule.HOST_HOME, 'sh', ['-c', '[ "$(git -C "$0" rev-parse HEAD)" = "$1" ] || { cd "$0" && git fetch --quiet origin && git checkout --quiet "$1" && npm ci --no-audit --no-fund; }', layout.graphyard, ref]);
+        if (moved.code !== 0) throw new Error(`the Graphyard checkout ${layout.graphyard} on ${remote.description} could not be moved to ${ref.slice(0, 12)}: ${(moved.stderr || moved.stdout).trim().split('\n').pop()}`);
+      };
+      const environment = Object.entries(hostModule.hostEnvironment(layout)).map(([name, value]) => `${name}=${value}`);
+      return { remote, layout, ref, asUser, checkoutAtRef, environment };
+    })());
+    return hostSessions.get(key)!;
+  };
   return {
     root, emit, serverUrl, masterToken, children,
     publishOnboarding: workflows => publishOnboarding(root, request.repository, (program, args, env) => execFileSync(program, args, { cwd: root, encoding: 'utf8', timeout: 120_000, stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) }), workflows),
     cliCheckout: async () => { const checkout = await loopCheckout(); return { root: checkout.root, dirty: dirtyCheckoutPaths(checkout) }; },
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop and executor units are judged against the CLI running up, whose launcher and checkout are this run's.
-    // A host install's loop and executors run on the host, from a checkout install manages there, so
-    // this machine's units are never judged or rewritten for it: a leftover local unit is not that loop.
-    ...(remoteLoopProviders.includes(request.provider) ? {} : {
-      loopCode: () => readLoopCode(root, { cliPath }),
-      alignExecutors: (options: { restart?: boolean } = {}) => alignExecutorUnits(root, options),
-    }),
+    // A host install's loop and executors run on the host, from the checkout install keeps there at
+    // this CLI's commit, so they are read, aligned and restarted there through the install's own
+    // transport (the up run passes its install arguments); this machine's units are never judged for it.
+    loopCode: async hostInstall => {
+      if (!hostInstall) return readLoopCode(root, { cliPath });
+      const host = await hostLoopSession(hostInstall);
+      return readHostLoopCode((program, args) => program === 'git' ? host.asUser(args[1], 'git', args.slice(2)) : host.remote.exec(program, args, { allowFailure: true, timeout: 60_000 }), host.layout, host.ref, host.remote.description);
+    },
+    alignExecutors: async (options = {}, hostInstall) => {
+      if (!hostInstall) return alignExecutorUnits(root, options);
+      const host = await hostLoopSession(hostInstall);
+      if (!options.template) return { wrote: 'none', reason: `no executor template of this install is installed on ${host.remote.description}; graphyard install --apply installs it`, restarted: [] };
+      await host.checkoutAtRef();
+      const listed = await host.asUser(host.layout.checkout, 'systemctl', ['--user', 'list-units', '--all', '--plain', '--no-legend', executorGlob({ executorTemplate: options.template })]);
+      const instances = [...new Set([...listed.stdout.matchAll(executorInstancePattern({ executorTemplate: options.template }))].map(match => match[0]))].sort();
+      // A template starting another checkout is written again by the executor installer, from the host checkout now at this commit.
+      const template = await host.remote.exec('cat', [`${host.layout.userUnitDirectory}/${options.template}`], { allowFailure: true, timeout: 60_000 });
+      const rebind = template.code === 0 && !template.stdout.includes(`${host.layout.graphyard}/`) && !template.stdout.includes(`${host.layout.checkout}/`);
+      if (rebind) {
+        const installed = await host.asUser(host.layout.checkout, 'env', [...host.environment, 'node', `${host.layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(Math.max(1, instances.length))]);
+        if (installed.code !== 0) return { wrote: 'none', reason: `the executor installer on ${host.remote.description} failed: ${(installed.stderr || installed.stdout).trim().split('\n').pop()}`, restarted: [] };
+      }
+      if (instances.length) {
+        const restarted = await host.asUser(host.layout.checkout, 'systemctl', ['--user', 'restart', ...instances]);
+        if (restarted.code !== 0) return { wrote: 'none', reason: `systemctl --user restart ${instances.join(' ')} on ${host.remote.description} failed: ${restarted.stderr.trim()}`, restarted: [] };
+      }
+      return { wrote: rebind ? 'updated' : 'unchanged', reason: null, restarted: instances };
+    },
+    replaceHostLoop: async (hostInstall, { unit, rewrite }) => {
+      const host = await hostLoopSession(hostInstall);
+      await host.checkoutAtRef();
+      if (rewrite) {
+        // master init runs where install ran it, with the coordinator credential the host keeps beside master.json.
+        const config = parseJson((await host.remote.exec('cat', [`${host.layout.checkout}/.graphyard/master.json`], { allowFailure: true, timeout: 60_000 })).stdout);
+        const token = typeof config?.credentialFile === 'string' ? (await host.remote.exec('cat', [config.credentialFile], { allowFailure: true, timeout: 60_000 })).stdout.trim() : '';
+        if (token.length < 32) throw new Error(`the coordinator credential master.json names on ${host.remote.description} could not be read, so ${unit} is not rewritten there`);
+        const init = await host.asUser(host.layout.checkout, 'env', [...host.environment, 'node', host.layout.cli, 'master', 'init', '--token-stdin', '--replace-supervisor', '--cli-path', host.layout.cli], token);
+        if (init.code !== 0) throw new Error(`master init --replace-supervisor on ${host.remote.description} exited ${init.code}: ${(init.stderr || init.stdout).trim().split('\n').pop()}`);
+      }
+      const restarted = await host.asUser(host.layout.checkout, 'systemctl', ['--user', 'restart', unit]);
+      if (restarted.code !== 0) throw new Error(`systemctl --user restart ${unit} on ${host.remote.description} failed: ${restarted.stderr.trim()}`);
+    },
     onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
     fileOnboarding: async (url, commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();
