@@ -95,6 +95,15 @@ test('unit:merge-verdict-after-merge — a head GitHub merged keeps the Graphyar
   assert.equal(refused?.conclusion, 'failure');
   assert.equal(open.latest().output.title, 'REFUSED');
   assert.match(open.latest().output.summary, /Reconciliation failed; fresh verification required/);
+
+  // A stale candidate: the pull request moved to another head, and GitHub merged that one. The
+  // recorded head was not delivered, so its error path still publishes REFUSED on it.
+  const stale = fakeGitHub();
+  await stale.github.publish(item);
+  assert.equal(stale.latest().conclusion, 'success');
+  Object.assign(stale.pull, { state: 'closed', merged: true, merge_commit_sha: mergeSha, head: { sha: 'b'.repeat(40) } });
+  assert.equal((await stale.github.publish(item, reconciliationFailed))?.conclusion, 'failure');
+  assert.equal(stale.latest().output.title, 'REFUSED', 'the stale head is refused');
 });
 
 /** An observer of PR #1300 merged at `head`, its App's latest `Graphyard / merge` run reading `conclusion`. */

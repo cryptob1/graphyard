@@ -2590,9 +2590,10 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
       output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}`).slice(0, 60000) } };
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
-    // A head GitHub merged keeps the verdict it was merged under (GY-1917): no later write, the
+    // The head GitHub merged keeps the verdict it was merged under (GY-1917): no later write, the
     // reconciliation error path's forced REFUSED included, contradicts the delivery it authorized.
-    if (pr.merged) return existing ? { id: existing.id ?? null, conclusion: existing.conclusion ?? null } : undefined;
+    // A stale candidate the pull request moved past before merging is still refused.
+    if (pr.merged && pr.head.sha === work.candidate.sha) return existing ? { id: existing.id ?? null, conclusion: existing.conclusion ?? null } : undefined;
     if (!reasons.length || !forcedReason) requireCurrent(pr.head.sha === work.candidate.sha && this.boundBase(work, pr, await this.baseBranch()) === work.candidate.baseSha, 'PR changed before check publication; retry');
     if (!reasons.length) requireCurrent(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();
