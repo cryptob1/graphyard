@@ -8,7 +8,7 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
-import { appImportRoute } from './github-setup.js';
+import { appImportRoute, githubOwnerType } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
@@ -18,6 +18,7 @@ import { recordSupervision } from './master/config.js';
 import { executorGlob, executorInstancePattern, unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
+import { settleWorkerCredentials } from './install/worker-credentials.js';
 import { ensureDeployKey, ensureMainWriteProtection } from './install/deploy-key.js';
 import type { GitHubCli } from './install/github.js';
 import type { Transport } from './install/transport.js';
@@ -1068,32 +1069,58 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // report, not a file, is what the account checklist lines judge. A failed write stops the run,
     // resumed or fresh; a pass with no configured checkout yet writes nothing and judges as before.
     const remoteProfiles = remoteLoop || !!state.identitiesHost;
-    const writeProfiles = async () => {
+    /**
+     * GY-1885: the report the write answered. Every write's refusals stop the run, whatever profiles
+     * it did write: usable profiles beside a refused credential would otherwise turn the checklist
+     * green with that identity missing. On a local install with an account logged in, every write
+     * then settles each of the install's configured workers on its own (src/install/worker-credentials.ts),
+     * never by the aggregate profile count: one worker profile must not stand in for the rest, on
+     * this run or a rerun after a partial issue. A worker the install holds no token for fails the
+     * run naming it; one issued now is written into a profile by one more write. With no account
+     * logged in the write scans no credential, so issuing waits for a login.
+     */
+    const writeProfiles = async (): Promise<any> => {
       let report: any;
       if (remoteProfiles) report = parseJson(await run('accounts', [...installArgs('--apply'), '--profiles-only'].filter(arg => arg !== '--no-herdr' && arg !== '--herdr-instance' && arg !== '--fresh-cursor')))?.profiles;
       else if (existsSync(resolve(deps.root, '.graphyard/master.json'))) report = parseJson(await run('accounts', ['master', 'environments', '--apply']));
       const counts = report?.counts;
       if (counts) writtenProfiles = { workers: counts.workers ?? 0, reviewers: counts.reviewers ?? 0 };
+      const refused = refusedCredentials(report);
+      if (refused.length) throw new UpStop(`accounts: the control plane at ${await deps.serverUrl().catch(() => null) ?? 'its recorded address'} refuses ${refused.map(entry => entry.file).join(', ')} (${refused.map(entry => String(entry.reason ?? 'refused').split('\n')[0]).join('; ')}), so no worker profile can be written from it; a sign-in cannot fix this. Reissue this install's worker credentials, then rerun ${rerun()}`, upExitCodes.failed);
+      if (remoteProfiles || !(counts?.loggedIn > 0)) return report ?? null;
+      const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
+      // Only an absent record means no install here; one that cannot be read or validated stops the run naming it.
+      const settled = await settleWorkerCredentials(directory).catch((error: any) => { throw new UpStop(`accounts: this install's record in ${directory} cannot be read: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard install --repo ${request.repository} --apply to rewrite it, then ${rerun()}`, upExitCodes.failed); });
+      if (settled.missing.length) throw new UpStop(`accounts: ${settled.issued.length ? `issued ${settled.issued.join(', ')}, but ` : ''}this install's worker credentials are missing (${settled.missing.join(', ')}), and none can be regenerated here: the plane accepts only the tokens it was deployed with. Rerun graphyard install --repo ${request.repository} --apply to reissue them, then ${rerun()}`, upExitCodes.failed);
+      if (!settled.issued.length) return report ?? null;
+      deps.emit({ kind: 'note', text: `accounts: issued this install's worker credentials (${settled.issued.join(', ')}), so the profiles write makes a worker profile from each.` });
+      // The settle just made every configured worker present, so this write issues nothing more.
+      return writeProfiles();
     };
-    const accountIds: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
+    /** Files the write refused (a credential the plane would not take); a duplicate of a principal already profiled is not a refusal. */
+    function refusedCredentials(report: any) {
+      return (Array.isArray(report?.skipped) ? report.skipped as unknown[] : [])
+        .filter((entry): entry is { file: string; reason?: string } => !!entry && typeof entry === 'object' && typeof (entry as any).file === 'string' && !/a profile already uses/.test(String((entry as any).reason)));
+    }
     // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
     // handed off in agent mode, on the Setup page interactively. A profile still missing is written
-    // again on each wait, and a wait that polled at all is followed by one more write: an account
-    // signed in during it (say B, while A's profiles already made both counts nonzero) gets its own
-    // profile before the lines are taken as green, and a write that still leaves one missing waits again.
+    // again on each wait (each write settling the install's workers), and a wait that polled at all is
+    // followed by one more write. The handoff asks for a sign-in only while no account is logged in.
     const awaitAccounts = async () => {
       for (;;) {
         let waited = false;
         await waitGreen(accountIds, true, async (pending, polls) => {
           waited = true;
-          if (profileMissing()) await writeProfiles();
-          if (request.agent && polls > 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
+          let report: any = null;
+          if (profileMissing()) report = await writeProfiles();
+          if (request.agent && polls > 0 && !(report?.counts?.loggedIn > 0)) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
         }, 1);
         if (!waited) return;
         await writeProfiles();
         if (!profileMissing()) return;
       }
     };
+    const accountIds: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
     // A run resuming over an earlier pass's completed accounts step still writes the profiles it may
     // lack, and waits for them here with the same rewrite, never in a later wait that writes nothing.
     if (state.completed.includes('accounts')) { await writeProfiles(); await awaitAccounts(); }
@@ -1492,12 +1519,20 @@ class AppRejected extends Error {}
  */
 export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void;
   profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; upFlags?: string; reuseFlags?: string;
+  /** GY-1878: the repository owner's account type for the App-import route; defaults to githubOwnerType. */
+  ownerType?: (owner: string) => Promise<'User' | 'Organization' | null>;
   pending?: () => Promise<SudoState | null> | SudoState | null; remember?: (state: SudoState | null) => Promise<void> | void; onResume?: (state: SudoState) => void }) {
   const { page } = options;
   const owner = options.repository.split('/')[0];
   // The operator's up command past its repository (upCommandFlags), for the rerun and the App-import route; the rerun keeps its --reuse-app too.
   const upFlags = options.upFlags ?? ' --agent';
-  const rerun = `graphyard up --repo ${options.repository}${options.reuseFlags ?? ''}${upFlags}`, importRoute = appImportRoute(options.repository, upFlags);
+  const rerun = `graphyard up --repo ${options.repository}${options.reuseFlags ?? ''}${upFlags}`;
+  // GY-1878: the route names the owner's registration path, so the drive resolves the owner's account
+  // type once (an injected reading, else GitHub's public API) before the handoff that quotes it; a
+  // failed or unknown reading keeps the user path, as on the setup page itself.
+  let route: Promise<string> | null = null;
+  const importRoute = () => route ??= (options.ownerType ?? githubOwnerType)(owner)
+    .then(read => appImportRoute(options.repository, upFlags, false, read === 'Organization' ? 'Organization' : 'User'), () => appImportRoute(options.repository, upFlags));
   let setupPage: string | null = null, resumeChecked = false, settledLocally = false;
   const driveStarted = (options.now ?? (() => new Date()))();
   const awaitSudo = async (handoff: Handoff) => {
@@ -1510,9 +1545,9 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       await options.remember?.(resumed ? { ...state, issuedAt: resumed.issuedAt } : state);
       if (resumed) options.onResume?.(resumed);
       // GY-1510: a GitHub Mobile prompt is handed off as one plain sentence naming its number.
-      else handoff(state.method === 'mobile' ? sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }) : [sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), importRoute].join('\n'),
+      else handoff(state.method === 'mobile' ? sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }) : [sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), await importRoute()].join('\n'),
         { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code });
-      if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${importRoute}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
+      if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${await importRoute()}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
     };
     // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
     try {

@@ -126,6 +126,41 @@ export function readInstallUnits(root: string, unitDirectory = userUnitDirectory
   return parseInstallUnits(text, file, () => unrecordedInstallUnits(root, legacyUnitFiles(unitDirectory), home));
 }
 
+/**
+ * The words of one systemd command line, as systemd.service's "Command lines" section splits one:
+ * whitespace separates words only outside single or double quotes, quoted text concatenates with
+ * whatever word it opens inside or abuts, and a backslash inside double quotes escapes the next
+ * character. `loopUnitText` spells a launcher path that holds whitespace quoted, so a reader that
+ * splits the line bare reads one current launcher as several wrong ones and rewrites a unit that
+ * needed nothing (GY-1880). Specifier and `$` expansions resolve in the manager's own environment,
+ * which no unit reader sees, so a word still holding one is kept as written — it matches a launcher
+ * path under no reading. An unquoted line splits on whitespace exactly as the readers before this
+ * parser did. It is defined beside the ExecStart reader (`unitCheckout`) and exported by
+ * `src/repository-setup.ts` beside its launcher reader, so every reader words the line one way.
+ */
+export function systemdCommandLineWords(line: string): string[] {
+  const words: string[] = [];
+  let word = '', started = false, quote: '"' | "'" | null = null;
+  for (let at = 0; at < line.length; at++) {
+    const character = line[at]!;
+    if (quote) {
+      if (quote === '"' && character === '\\' && at + 1 < line.length) { word += line[++at]; continue; }
+      if (character === quote) { quote = null; continue; }
+      word += character;
+      continue;
+    }
+    if (character === '"' || character === "'") { quote = character; started = true; continue; }
+    if (/\s/.test(character)) {
+      if (started) { words.push(word); word = ''; started = false; }
+      continue;
+    }
+    word += character;
+    started = true;
+  }
+  if (started || quote) words.push(word);
+  return words;
+}
+
 const canonical = (path: string) => { const absolute = resolve(path); try { return realpathSync(absolute); } catch { return absolute; } };
 const setting = (text: string, key: string, home: string) =>
   text.split(/\r?\n/).find(line => line.startsWith(`${key}=`))?.slice(key.length + 1).replace(/%%|%h/g, specifier => specifier === '%%' ? '%' : home) ?? null;
@@ -155,7 +190,10 @@ export function foreignUnitText(text: string, root: string, home = homedir()): s
   const { workingDirectory, execStart } = unitCheckout(text, home);
   const own = canonical(root);
   if (workingDirectory && canonical(workingDirectory) !== own) return workingDirectory;
-  const script = execStart?.split(/\s+/).find(part => /\/scripts\/graphyard-executor\.mjs$/.test(part));
+  // GY-1880: the line is worded by systemd's quoting rules, so a script path holding whitespace that
+  // a unit spells quoted reads back as exactly its checkout instead of dissolving into fragments no
+  // reader can name (the old bare split read such a unit as this checkout's own).
+  const script = execStart ? systemdCommandLineWords(execStart).find(part => /\/scripts\/graphyard-executor\.mjs$/.test(part)) : undefined;
   // A repository without its own executor script runs this package's (renderExecutorUnit): that unit, working in ROOT, is ROOT's.
   const packaged = workingDirectory && script && canonical(script) === canonical(packageExecutorScript);
   // GY-1790: the entry held under ROOT's own .graphyard/held-cli/ is ROOT's — a snapshot restart points the slots at it while the checkout stands dirty.
