@@ -192,3 +192,68 @@ export function describeRemedyRecord(record: RemedyRecord) {
     ? `the loop's ${record.remedy} remedy (${ran}) was refused at ${record.at}: ${record.detail}`
     : `the loop applied the ${record.remedy} remedy (${ran}) at ${record.at}, ${record.outcome}: ${record.detail}`;
 }
+
+// ---- Step-stall remedies (GY-1854) ---------------------------------------------------------------
+
+/**
+ * The remedies a failing loop step's or dispatcher call's normalised signature binds to (GY-1854).
+ * Where the action-row registry above binds a stalled row's unchanged reason, this one binds a
+ * stalled call's signature, and the loop's stall step (src/daemon/step-stalls.ts) applies each
+ * bound remedy once per run and records the attempt on the stall. Pure here: nothing runs until a
+ * caller hands the port in, exactly as `applyInstallationAccept` runs only the flow it is given.
+ */
+export const stepStallRemedyKinds = ['profile-unknown', 'credential-401', 'merge-record-idempotency'] as const;
+export type StepStallRemedyKind = typeof stepStallRemedyKinds[number];
+/** What one bound step-stall remedy is: the lever, named in one line. */
+export interface BoundStepStallRemedy { kind: StepStallRemedyKind; remedy: string }
+/** What applying one remedy reported: its outcome, whether the verification after it held, and why. */
+export interface StepStallRemedyOutcome { outcome: 'applied' | 'unchanged' | 'refused'; verified: boolean; detail: string }
+
+/** Each family of stall signatures and the remedy it binds to; the first entry that recognises a signature binds it. */
+export const stepStallRemedyRegistry: readonly { kind: StepStallRemedyKind; bind: (signature: string) => BoundStepStallRemedy | null }[] = [
+  {
+    // A launch profile no configured agent environment backs refuses this way (src/master/environments.ts
+    // inspectProfileAccounts, src/master/dispatch.ts prepareWorkerLaunch), and a review launch naming
+    // a reviewer profile no configured one carries throws "Unknown reviewer profile NAME"
+    // (src/reviewer.ts launchReview, GY-1850), which the loop signs as its review-launch step.
+    kind: 'profile-unknown',
+    bind: signature => /is not a configured agent environment|A complete launch profile is required|Unknown reviewer profile \S/.test(signature)
+      ? { kind: 'profile-unknown', remedy: 'write the agent profiles as master environments --apply does (setupAgentEnvironments with apply), from the logged-in environments, and let the loop redispatch' }
+      : null,
+  },
+  {
+    // A control plane or provider answering 401 names the status or the word (src/supervisor.ts GY-392,
+    // src/master/dispatch.ts readMergeWriter); stallSignature keeps 401 as its own <unauthorized> token.
+    kind: 'credential-401',
+    bind: signature => /<unauthorized>|unauthorized/i.test(signature)
+      ? { kind: 'credential-401', remedy: 'renew the refused host-owned credential — a worker or producer profile\'s from the credential the install issued for its principal, or the merge writer\'s deploy key — then verify it authenticates; the coordinator\'s own credential is the operator\'s to rotate' }
+      : null,
+  },
+  {
+    // recordMergeEvent (src/server/merge-record.ts) refuses a reused idempotency key with different
+    // input this way, and the record that met the refusal is one the merge writer wrote (GY-1524);
+    // the writer's own settle and replay records name the same refusal as "a record key reused".
+    // The same refusal is every module's (delegation, agent-registry, proof grants, delivery), so
+    // the bind names the merge step: only a stall signed `merge: …` runs the merge-writer remedy;
+    // the same refusal on any other step stays unbound and wakes the master.
+    kind: 'merge-record-idempotency',
+    bind: signature => /^merge: .*key reused with different input/i.test(signature)
+      ? { kind: 'merge-record-idempotency', remedy: 'adopt the server\'s merge ledger for the refused record (read the item\'s folded ledger back and take its event count into the attempt key) and start a new attempt' }
+      : null,
+  },
+];
+
+/** The remedy a step-stall signature binds to, or null when no entry recognises it. */
+export function stepStallRemedy(signature: string): BoundStepStallRemedy | null {
+  for (const entry of stepStallRemedyRegistry) { const bound = entry.bind(signature); if (bound) return bound; }
+  return null;
+}
+
+/**
+ * Apply one bound step-stall remedy through `run` — the caller's port for that kind — and answer
+ * what it did. A port that throws is a refusal carrying its message, never a crash of the step.
+ */
+export async function applyStepStallRemedy(kind: StepStallRemedyKind, run: (kind: StepStallRemedyKind) => Promise<StepStallRemedyOutcome>): Promise<StepStallRemedyOutcome> {
+  try { return await run(kind); }
+  catch (error) { return { outcome: 'refused', verified: false, detail: `${kind} remedy was refused: ${error instanceof Error ? error.message : String(error)}`.slice(0, 2000) }; }
+}

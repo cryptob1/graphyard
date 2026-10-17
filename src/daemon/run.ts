@@ -29,6 +29,8 @@ import { mainWatchSummary } from './main-watch.js';
 import { shadowGateSummary } from './cycle-shadow.js';
 import { adoptLoopRelease, fileSlowLoopItem } from './slow-loop-item.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
+import { wakeMasterForStalls } from './cycle-master.js';
+import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
 
@@ -49,6 +51,9 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     liveness,
     // Failed cycles and the process-level events the loop survived (GY-119).
     failures: state.failures,
+    // The loop-step stalls (GY-1854): the standing runs of one failing call, the stalls among them
+    // with their one recorded remedy attempt, each under the subject key a master wake names it by.
+    stepStalls: Object.values(state.stepStalls).map(run => ({ ...run, subject: stallSubjectKey(run.signature), needsMaster: stallNeedsMaster(run) })),
     // What it could act on and the longest any of those has waited, and the latency budgets.
     silence: silenceReport(state.silence, now),
     budget: latencyBudget(state.latency),
@@ -233,7 +238,13 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** The commit of the held-cli snapshot this process's modules were loaded from (GY-1773), null for the checkout's; defaults to reading where this module was loaded from. */
   loadedSnapshot?: () => string | null;
   /** The dispatcher's wake (GY-1490, loop-wake.ts): ends the sleep after a cycle as soon as the tick sees work the loop acts on. */
-  wake?: Pick<LoopWake, 'sleep'> } ) {
+  wake?: Pick<LoopWake, 'sleep'>;
+  /** The wait after a failed cycle, never cut short by the wake; defaults to a timer. A soak on a simulated clock hands its own. */
+  delay?: (ms: number, signal: AbortSignal) => Promise<void>;
+  /** The ports the stall step's bound remedies run through (GY-1854); absent, the loop's own are wired — the profile write, the host-owned credential renewal and the merge-ledger adoption. */
+  stallRemedies?: StepStallRemedyRunner;
+  /** The profile remedy's write and read-back (GY-1854); absent, `master environments --apply`'s own write and the checkout's configuration. */
+  stallProfiles?: () => ProfileRemedyPorts; } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
@@ -269,7 +280,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
       return Reflect.get(target, property, receiver);
     } });
-    const effects = boundedPersist(namedEffects(scoped));
+    const effects = boundedPersist(namedEffects(stallHeldEffects(scoped, () => state, now, bound => effects.persist(bound))));
     acquireDaemonLock(state, options.identity, now(), interval());
     // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
     // checkout must not report the release the process before it loaded.
@@ -297,6 +308,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
     // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
     const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
+    // GY-1854: the ports the stall step's bound remedies run through; a credential outside the
+    // loop's authority (the coordinator's) is a recorded refusal that wakes the master session.
+    const stallRunner = options.stallRemedies ?? stallRemedyRunner(() => config, () => state, raw.snapshot, () => options.repository ?? coordinatorCheckoutRoot(config.cliPath), undefined, options.stallProfiles);
     // GY-857: the checkout guard. The modules this process imported were read from the coordinator
     // checkout at startup; when it holds uncommitted work, cycling would run unreviewed code and a
     // self-upgrade would move the checkout underneath it, so the loop refuses — at startup it never
@@ -324,6 +338,15 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, loaded: () => guard.expected(),
       restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), credentialFile: config.credentialFile, pid: options.identity.pid }, ledger: { file: checkoutRestoreFreezeLedgerPath(config) }, keepAlive, keepAliveEveryMs }),
       ...(executorsAct ? { executors: (args: string[]) => executorsAct(args, keepAlive) } : {}) }));
+    // GY-1854: a stalled cycle's window is waited out in keep-alive slices, so a supervised loop
+    // holding its next cycle is never mistaken for one that hung.
+    const waitOutStallHold = async (until: number) => {
+      while (!stopping && now() < until) {
+        const slice = Math.min(until - now(), keepAliveEveryMs ?? until - now());
+        try { await (options.delay ? options.delay(slice, waking.signal) : delay(slice, undefined, { signal: waking.signal })); } catch { /* woken to stop */ }
+        if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+      }
+    };
     const serveRestore = async (keepAlive?: () => Promise<void>) => {
       try { await restoreCheckout(adopt => guard.settle({ adopt }), keepAlive, loaded => guard.settle({ revert: loaded })); }
       catch (error) { log(`[graphyard-master] checkout-restore could not be served: ${message(error)}`); }
@@ -341,6 +364,21 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         }
       // A loop stopped during startup runs no cycle (GY-1603).
       } else while (!stopping) {
+        // GY-1854: a loop whose failed cycles stalled on one of the cycle's own calls (the snapshot
+        // read) runs its next cycle once per five-minute window — at startup too, honouring the
+        // window a previous process left on the cursor — and the admitted cycle's window is written
+        // before the cycle makes that call, so a process ending during it restarts into the window.
+        const cycleAdmission = admitStalledCycle(state, now());
+        if (cycleAdmission.hold) {
+          log(`[graphyard-master] the next cycle is held to ${new Date(cycleAdmission.hold.until).toISOString()}: ${cycleAdmission.hold.reason}`);
+          if (options.once) break;
+          await waitOutStallHold(cycleAdmission.hold.until);
+          continue;
+        }
+        if (cycleAdmission.armed) {
+          try { await effects.persist(state); }
+          catch (error) { log(`[graphyard-master] the stalled cycle's admission could not be written, so the cycle waits out its window: ${message(error)}`); continue; }
+        }
         let phase: 'reload' | 'cycle' = 'reload', wait: number, wakeable = false, holdBound: number | null = null;
         try {
           if (options.reload) {
@@ -356,6 +394,21 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           // GY-1775: three consecutive cycles past the cycle bound on one loaded release file the fix item naming the slowest step and call.
           const slowLoop = await fileSlowLoopItem(state, effects, now);
           if (slowLoop) log(`[graphyard-master] cycle ${result.metrics.cycle} ${slowLoop.kind} ${slowLoop.state}: ${slowLoop.detail}`);
+          // GY-1854: the stall step. Every action the cycle recorded failed — the dispatcher's
+          // failures among them — signs its call; three consecutive cycles with one signature are
+          // one stall; a bound remedy is applied once and verified; and a cycle that failed
+          // nowhere ends the runs it did not fail in. Whatever the bookkeeping moved is persisted
+          // at once, so a `master run --once` and a restart both read it.
+          // The dispatcher's review launches refused for an unknown reviewer profile are a wait on
+          // its side, never a failed action, so the refusal the launch boundary records is read here
+          // and signed as the review-launch step's failure of this cycle.
+          const stalls = noteCycleStalls(state, [...result.actions, ...await readReviewerProfileFailures(config)], result.metrics.cycle, now());
+          for (const note of stalls.notes)
+            if (note.stalled) log(`[graphyard-master] cycle ${result.metrics.cycle} recorded one ${note.bound ? `stall bound to the ${note.bound.kind} remedy` : 'stall no remedy binds to'}: ${note.run.signature}`);
+          const applied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
+          for (const { signature, record } of applied)
+            log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail} (${signature.slice(0, 160)})`);
+          if (stalls.notes.length || stalls.cleared || applied.length) await effects.persist(state);
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
           // Both halves of every cycle: what it could act on, and what it did about it — and where its
           // time went: its three slowest steps and its slowest external call (GY-377).
@@ -373,6 +426,29 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });
           failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
           log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
+          // GY-1854: the failed cycle signs its failing call like any loop step, and the runs of
+          // every call this failed cycle did not fail in end with it, so alternating causes never
+          // accumulate toward the bound. A bound remedy is applied once for the stall it records.
+          // The stalled call backs off to once per five minutes through the tracker's attempt
+          // window; the loop's own retry schedule converges to the same bound
+          // (cycleFailureCeilingMs).
+          const stall = noteStepFailure(state, failure.call ?? 'cycle', failure.reason, now(), failure.cycle, { cycleCall: true });
+          // Another cycle-level call's admitted attempt settled with this cycle: its run ends with its window.
+          for (const run of Object.values(state.stepStalls)) if (run.cycle && run !== stall.run && run.attemptAt) run.attemptAt = null;
+          // A refused review launch beside it fails this cycle too, so a failed cycle is no gap in its run.
+          let owedCounted = false;
+          for (const owed of await readReviewerProfileFailures(config)) owedCounted = noteStepFailure(state, owed.kind, owed.detail, now(), failure.cycle).counted || owedCounted;
+          const cleared = noteStepsSucceeded(state, failure.cycle, now());
+          if (stall.stalled) log(`[graphyard-master] cycle ${failure.cycle} recorded one ${stall.bound ? `stall bound to the ${stall.bound.kind} remedy` : 'stall no remedy binds to'}: ${stall.run.signature}`);
+          const stallApplied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
+          for (const { record } of stallApplied)
+            log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
+          if (stall.counted || owedCounted || cleared || stallApplied.length) await effects.persist(state);
+          // A stall that needs the master is woken from here: this cycle failed before its
+          // master-session step, and every cycle the same read fails would too (cycle-master.ts).
+          const woken = await wakeMasterForStalls(config, state, effects, now).catch(error => { log(`[graphyard-master] the stall wake was not delivered beside cycle ${failure.cycle}: ${message(error)}`); return [] as string[]; });
+          if (woken.length) log(`[graphyard-master] woke master session ${state.master.agentName} beside failed cycle ${failure.cycle} for ${woken.join(', ')}`);
+          // The stalled call's five-minute window holds the next cycle at the top of the loop.
           wait = failure.delayMs;
         }
         // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
@@ -398,7 +474,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         if (wakeable && options.wake) {
           const sleptAt = now(), reasons = await options.wake.sleep(wait, waking.signal);
           if (reasons.length && !stopping) log(`[graphyard-master] woken ${Math.round(Math.max(0, wait - (now() - sleptAt)) / 1000)}s before the ${Math.round(wait / 1000)}s wait ended: ${reasons.join('; ')}`);
-        } else try { await delay(wait, undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
+        } else try { await (options.delay ? options.delay(wait, waking.signal) : delay(wait, undefined, { signal: waking.signal })); } catch { /* woken to stop */ }
       }
     } finally {
       // Launches still in flight are let finish, so none is left `started` on the cursor, and what
