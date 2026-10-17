@@ -1,22 +1,25 @@
 // Concern: the control-plane merge executor's cycle step (GY-1524) — reconcile open intents, pick the next head, run one merge beside the cycle and record what it did.
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
 import type { MergerMode } from '../merger-mode.js';
 import type { MergeLedgerState } from '../model/merge-ledger.js';
-import { mergeWriterTrialGround } from '../model/rework-ground.js';
+import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-ground.js';
 import { installIdFor } from '../install/types.js';
 import { mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../merge-writer/trial.js';
 import { previewSiteOf, previewSkip, runPreview } from '../merge-writer/preview.js';
-import { criterionProofs, firstParentHolds, mergeOne, mergeQueue, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergeOutcome, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeOne, mergeQueue, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergeOutcome, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { LoopFiledItem } from './effects.js';
 import type { Cycle } from './cycle.js';
 
 /** How many queued heads, how many refusals and how many pending rework requests `state.mergeWriter` keeps. */
 export const mergeWriterKeptQueue = 50, mergeWriterKeptRefusals = 20, mergeWriterKeptReworks = 50;
+/** How many record writes whose reply was lost `state.mergeWriter` keeps, and how many cycles one is replayed before the ledger is adopted instead (GY-1852). */
+export const mergeWriterKeptUnconfirmed = 20, mergeWriterUnconfirmedReplays = 10;
 const shaField = z.string().max(64), instant = z.string().max(64);
 /**
  * A rework a failed trial grounds that the server has not yet confirmed (AC-3): kept until the
@@ -26,13 +29,23 @@ const shaField = z.string().max(64), instant = z.string().max(64);
  */
 export const pendingReworkSchema = z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, reason: z.string().max(2000), refusedAt: instant, attempts: z.number().int().min(0).max(100_000), lastError: z.string().max(2000).nullable() }).strict();
 export type PendingRework = z.infer<typeof pendingReworkSchema>;
+/**
+ * GY-1852: a merge record write whose reply the loop never saw (a transport failure or a 5xx): the
+ * attempt and write it was sent under and its exact input, replayed next cycle under the same key.
+ */
+export const unconfirmedRecordSchema = z.object({ key: z.string().max(100), id: z.string().max(100), attempt: z.string().max(100), write: z.number().int().min(0).max(1000),
+  event: z.record(z.string(), z.unknown()), sentAt: instant, replays: z.number().int().min(0).max(100_000), lastError: z.string().max(2000) }).strict();
+export type UnconfirmedRecord = z.infer<typeof unconfirmedRecordSchema>;
 /** `state.mergeWriter`: when the writer last delivered, the heads owed a merge oldest first, the merge in flight, the newest refusals, and the reworks still to be confirmed. */
 export const mergeWriterStateSchema = z.object({
   lastMergeAt: instant.nullable().default(null),
   queue: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, submittedAt: instant, waitingMs: z.number().int().min(0) }).strict()).max(mergeWriterKeptQueue).default([]),
-  inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant }).strict().nullable().default(null),
+  /** The merge in flight; `attempt` is the id its record keys carry (GY-1852), persisted before its first write. */
+  inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional() }).strict().nullable().default(null),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
   reworks: z.array(pendingReworkSchema).max(mergeWriterKeptReworks).default([]),
+  /** GY-1852: record writes whose reply was lost, replayed with their exact input before anything new starts; absent until one is. */
+  unconfirmed: z.array(unconfirmedRecordSchema).max(mergeWriterKeptUnconfirmed).optional(),
   /** The advisory budget runs owed after merges (GY-1528); absent until the advisory step first runs. */
   advisory: z.lazy(() => advisoryStateSchema).optional(),
 }).strict();
@@ -281,6 +294,81 @@ export const trialFailureRework = (work: Work, head: string, reason: string) => 
   input: { previousWorkerStopped: true as const, binding: `${head}:${mergeWriterTrialGround}` },
 });
 
+// ---- Record writes that converge (GY-1852) ------------------------------------------------------------
+
+const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
+/** A failed write's HTTP status: the error's own, or the `Graphyard refused PATH (NNN)` its message names; null for a transport failure or a kill. */
+const statusOf = (error: unknown) => { const status = (error as { status?: unknown } | null)?.status; return typeof status === 'number' ? status : Number(/\brefused \S+ \((\d{3})\)/.exec(errorText(error))?.[1]) || null; };
+/** Whether a failed write's reply is unknown, so the server may hold it: no status, a 5xx, 408 or 429. Any other answer is the server's decision on that input. */
+const replyUnknown = (error: unknown) => { const status = statusOf(error); return status === null || status >= 500 || status === 408 || status === 429; };
+
+/**
+ * The record port of one attempt (GY-1852): every write carries the attempt id and its place in the
+ * attempt, so its key (`mergeRecordKey`) is never sent with any other input. A write whose reply is
+ * unknown is kept on `state.mergeWriter.unconfirmed` with its exact input, for `replayUnconfirmed`.
+ */
+export function attemptRecorder(writer: MergeWriterState, record: MergePorts['record'], attempt: string, at: () => string): MergePorts['record'] {
+  let next = 0;
+  return async (item, event) => {
+    const mergeAttempt = { id: attempt, write: next++ };
+    try { return await record({ ...item, mergeAttempt }, event); }
+    catch (error) {
+      if (!keyReusedRefusal(error) && replyUnknown(error)) {
+        writer.unconfirmed = [...writer.unconfirmed ?? [], { key: item.key, id: item.id, attempt, write: mergeAttempt.write, event: { ...event }, sentAt: at(), replays: 0, lastError: errorText(error).slice(0, 2000) }].slice(-mergeWriterKeptUnconfirmed);
+      }
+      throw error;
+    }
+  };
+}
+
+/**
+ * Every write whose reply was lost, replayed before anything new starts (GY-1852): the identical
+ * input under the identical key, so a write the server holds answers its stored receipt and the
+ * merge proceeds from the ledger next cycle. A key the server refuses as reused with different
+ * input, any other answer the server gave, or a write still unanswered after
+ * `mergeWriterUnconfirmedReplays` cycles is never sent again: the item's merge ledger, as the
+ * snapshot read it, is adopted, and the next merge runs under a new attempt id. Answers whether any
+ * write was settled or is still owed; while one is, nothing new starts.
+ */
+export async function replayUnconfirmed(cycle: Pick<Cycle, 'state' | 'now' | 'snapshot' | 'performed'>, record: MergePorts['record']): Promise<boolean> {
+  const { state, now, snapshot, performed } = cycle;
+  const writer = state.mergeWriter;
+  if (!writer.unconfirmed?.length) return false;
+  const at = () => new Date(now()).toISOString();
+  const kept: UnconfirmedRecord[] = [];
+  for (const pending of writer.unconfirmed) {
+    const actionKey = `merge-writer-replay:${pending.key}:${pending.attempt}:${pending.write}`, kind = String(pending.event.kind);
+    const item = snapshot.work.find(entry => entry.id === pending.id);
+    const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, actionKey, { kind: 'merge', work: pending.key, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts: pending.replays + 1, epoch: null, cycle: state.cycle, at: at() }, actionState === 'done' ? undefined : null));
+    const ledger = item?.mergeLedger ? `${item.mergeLedger.state}${item.mergeLedger.mergeSha ? ` ${item.mergeLedger.mergeSha.slice(0, 12)}` : ''}` : 'empty';
+    const adopt = (why: string) => action('done', `The ${kind} record of ${pending.key} (attempt ${pending.attempt}, write ${pending.write}) ${why}; it is never sent again: the item's merge ledger (${ledger}) is adopted and the next merge runs under a new attempt id`);
+    if (!item) { adopt('names an item the snapshot no longer holds'); continue; }
+    // A failed trial's refusal grounds a rework the lost reply never handed the settled flight: it is owed once the server holds the refusal (the replay stored or answered it, or the adopted ledger records it), and asked for by requestPendingReworks.
+    const head = String(pending.event.head ?? '').toLowerCase(), reason = String(pending.event.reason ?? '');
+    const oweRework = () => {
+      if (kind !== 'refused' || !reason.startsWith(trialFailurePrefix) || writer.reworks.some(entry => entry.key === pending.key && entry.head === head)) return;
+      writer.reworks = [...writer.reworks, { key: pending.key, id: pending.id, head, reason: reason.slice(0, 2000), refusedAt: at(), attempts: 0, lastError: null }].slice(-mergeWriterKeptReworks);
+    };
+    const ledgerHolds = () => item.mergeLedger?.state === 'refused' && item.mergeLedger.head?.toLowerCase() === head && item.mergeLedger.refusal?.reason === reason;
+    try {
+      await record({ ...item, mergeAttempt: { id: pending.attempt, write: pending.write } }, pending.event as unknown as MergeRecordEvent);
+      oweRework();
+      action('done', `Replayed the ${kind} record of ${pending.key} (attempt ${pending.attempt}, write ${pending.write}) with its exact input; the server answered its receipt and the merge proceeds from the ledger`);
+    } catch (error) {
+      if (ledgerHolds()) oweRework();
+      if (keyReusedRefusal(error)) adopt('was refused as a key reused with different input');
+      else if (!replyUnknown(error)) adopt(`was refused: ${errorText(error).slice(0, 500)}`);
+      else if (pending.replays + 1 >= mergeWriterUnconfirmedReplays) adopt(`was still unanswered after ${pending.replays + 1} replays: ${errorText(error).slice(0, 500)}`);
+      else {
+        kept.push({ ...pending, replays: pending.replays + 1, lastError: errorText(error).slice(0, 2000) });
+        action('failed', `The ${kind} record of ${pending.key} (attempt ${pending.attempt}, write ${pending.write}) is still unanswered (replay ${pending.replays + 1}); it is replayed with its exact input next cycle and nothing new starts: ${errorText(error)}`);
+      }
+    }
+  }
+  if (kept.length) writer.unconfirmed = kept; else delete writer.unconfirmed;
+  return true;
+}
+
 /** The action key a pending rework of `key`'s `head` is recorded under. */
 export const mergeWriterReworkKey = (key: string, head: string) => `${mergeWriterActionKey(key, head)}:rework`;
 /**
@@ -345,6 +433,7 @@ export async function mergeWriterStep(cycle: Cycle) {
     if ('error' in flight.settled) {
       const error = flight.settled.error;
       action('failed', error instanceof TrialTimeoutError ? `Merge of ${flight.key} head ${flight.head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head stays queued and is tried again`
+        : keyReusedRefusal(error) ? `Merge of ${flight.key} head ${flight.head} was refused a record key reused with different input; that key is never sent again: the item's merge ledger is adopted and the head is tried again under a new attempt id`
         : `Merge of ${flight.key} head ${flight.head} failed before it was recorded, so the head stays queued and is tried again: ${error instanceof Error ? error.message : String(error)}`);
     } else {
       const { outcome, work } = flight.settled;
@@ -367,13 +456,21 @@ export async function mergeWriterStep(cycle: Cycle) {
   }
   if (await advisoryStep(cycle, delivered)) changed = true;
   if (await requestPendingReworks(cycle)) changed = true;
-  if (!flights.has(state)) {
+  // GY-1852: a write whose reply was lost is replayed first; the snapshot predates it, so nothing new starts in the cycle that settled one.
+  const replayed = !flights.has(state) && await replayUnconfirmed(cycle, reads.record);
+  if (replayed) changed = true;
+  if (!flights.has(state) && !replayed) {
     if ((await reads.merger()) !== 'control-plane') {
       if (writer.queue.length) { writer.queue = []; changed = true; }
     } else {
       const ledger = snapshotLedger(snapshot.work);
       // Intents a crash left open are settled against the base before any new merge (AC-5); the next cycle reads the snapshot they changed.
-      const reconciled = await reconcileIntents(reads, snapshot.work, ledger);
+      // Each item's reconcile is its own attempt (GY-1852), so a pushed or reconciled record retried later never reuses a key with a new instant or tip.
+      const attempts = new Map<string, MergePorts['record']>();
+      const record: MergePorts['record'] = (item, event) => { const recorder = attempts.get(item.id) ?? attemptRecorder(writer, reads.record, randomUUID(), at); attempts.set(item.id, recorder); return recorder(item, event); };
+      let reconciled: Awaited<ReturnType<typeof reconcileIntents>>;
+      try { reconciled = await reconcileIntents({ ...reads, record }, snapshot.work, ledger); }
+      catch (error) { if (writer.unconfirmed?.length) await effects.persist(state); throw error; }
       for (const entry of reconciled) {
         if (entry.outcome === 'reconciled') writer.lastMergeAt = at();
         performed.push(storeAction(state, `merge-writer-reconcile:${entry.key}:${entry.mergeSha}`, { kind: 'merge', work: entry.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
@@ -390,9 +487,12 @@ export async function mergeWriterStep(cycle: Cycle) {
         if (due?.candidate) {
           const head = due.candidate.sha.toLowerCase();
           const entry: Flight = { key: due.key, id: due.id, head, startedAt: at(), settled: null };
+          // GY-1852: the attempt id is on the persisted state before the attempt's first write; the flight is published only once it is, so a failed persist leaves nothing in flight and a later cycle starts afresh.
+          const attempt = randomUUID();
+          writer.inFlight = { key: due.key, id: due.id, head, startedAt: entry.startedAt, attempt }; changed = true;
+          try { await effects.persist(state); } catch (error) { writer.inFlight = null; throw error; }
           flights.set(state, entry);
-          writer.inFlight = { key: due.key, id: due.id, head, startedAt: entry.startedAt }; changed = true;
-          void mergeOne(reads, due).then(outcome => { entry.settled = { outcome, work: due }; }, error => { entry.settled = { error }; });
+          void mergeOne({ ...reads, record: attemptRecorder(writer, reads.record, attempt, at) }, due).then(outcome => { entry.settled = { outcome, work: due }; }, error => { entry.settled = { error }; });
         }
       }
     }
