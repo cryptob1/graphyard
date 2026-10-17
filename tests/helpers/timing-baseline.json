@@ -297,6 +297,7 @@
     "tests/closed-question-evidence.test.ts": 2373,
     "tests/codex-protected-paths.test.ts": 500,
     "tests/codex-review.test.ts": 531,
+    "tests/complete-head-no-push.test.ts": 300,
     "tests/completion-clarity.test.ts": 250,
     "tests/confirm-access-capture.test.ts": 1000,
     "tests/conflict-rework-bound.test.ts": 1658,
