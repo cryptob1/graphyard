@@ -45,7 +45,10 @@ type ObservationInput = z.infer<typeof observationSchema>;
  * the production environment at its current revision and covers every one of its services. Recorded
  * once per environment and commit; every delivered item whose merge it contains is marked deployed.
  */
-export const shaObservationSchema = z.object({ environment: ref, sha: z.string().regex(/^[0-9a-f]{40}$/i), services: z.array(name).min(1).max(30).refine(s => new Set(s).size === s.length, 'Services must be unique'), observedAt: z.iso.datetime(), after: z.object({ mergedAt: z.string().max(40), id: z.uuid() }).strict().optional() }).strict();
+const candidateArtifact = z.string().regex(/^(sha256:[0-9a-f]{64}|tree:[0-9a-f]{40})$/, 'sha256:<64 hex> for a build, or tree:<40 hex> for a source tree');
+export const shaObservationSchema = z.object({ environment: ref, sha: z.string().regex(/^[0-9a-f]{40}$/i), services: z.array(name).min(1).max(30).refine(s => new Set(s).size === s.length, 'Services must be unique'), observedAt: z.iso.datetime(), after: z.object({ mergedAt: z.string().max(40), id: z.uuid() }).strict().optional(),
+  /** GY-1906: the release record and artifact the producer read production running, when it reports them, so an exact candidate's selection is verified against them. */
+  release: name.optional(), artifact: candidateArtifact.optional() }).strict();
 export type ShaObservation = Omit<z.infer<typeof shaObservationSchema>, 'after'> & { id: string; observer: string; receivedAt: string };
 /** Whether `descendant` contains `ancestor` by ancestry; null when it cannot be told. */
 export type Containment = (ancestor: string, descendant: string) => Promise<boolean | null>;
@@ -58,6 +61,34 @@ const unrecordedDelivery = `document->>'stage'='done' AND jsonb_typeof(document-
 export type ServiceState = 'matched' | 'mismatched' | 'unknown' | 'unhealthy' | 'incomplete';
 export type DeploymentObservation = ObservationInput & { id: string; observer: string; generation: number; authoritative: boolean; rejection: string[]; receivedAt: string; states: Record<string, ServiceState> };
 const notificationSchema = z.object({ environment: name, provider: z.string().trim().min(1).max(60), payload: z.unknown().optional() }).strict();
+/**
+ * GY-1906: what production was independently observed running — the release record, its source and
+ * the artifact — read from the live identity endpoint by the sweep or reported by an observe-sha
+ * producer. An exact candidate's selection is verified only against this, never against the promotion.
+ */
+export interface ObservedIdentity { environment: string; releaseId: string | null; sourceSha: string; artifact: string | null; observedAt: string; observer: string; source: 'endpoint' | 'producer' }
+/** The event every changed reading of an environment's live identity appends. */
+export const identityObservedKind = 'delivery.identity-observed';
+/** What a live identity endpoint answers: the release record it runs, its source commit and artifact. */
+export const liveIdentitySchema = z.object({ release: name.optional(), sourceSha: sha, artifact: candidateArtifact.optional() });
+export type LiveIdentity = (environment: string) => Promise<z.infer<typeof liveIdentitySchema>>;
+/**
+ * The reader of `GRAPHYARD_PRODUCTION_IDENTITY_URL` (GY-1906): the production deployment's own
+ * identity endpoint, read by the plane itself, so what verifies a promoted candidate is what
+ * production answers, not what the promoter claims. Null when the variable is unset.
+ */
+export function liveIdentityReader(env: Record<string, string | undefined> = process.env, fetcher: typeof fetch = fetch): LiveIdentity | null {
+  const url = env.GRAPHYARD_PRODUCTION_IDENTITY_URL?.trim();
+  if (!url) return null;
+  return async environment => {
+    if (environment !== 'production') throw new Error(`No live identity endpoint is configured for ${environment}`);
+    const response = await fetcher(url, { signal: AbortSignal.timeout(10_000) });
+    if (!response.ok) throw new Error(`The production identity endpoint answered ${response.status}`);
+    const parsed = liveIdentitySchema.safeParse(await response.json());
+    if (!parsed.success) throw new Error(`The production identity endpoint answered no {sourceSha, release, artifact}: ${parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+    return parsed.data;
+  };
+}
 export type VerificationStatus = 'unselected' | 'unobserved' | 'incomplete' | 'unknown' | 'mismatched' | 'unhealthy' | 'no-common-interval' | 'stale' | 'verified' | 'degraded';
 export interface Interval { from: string; to: string }
 export interface ReleaseSelection { generation: number; releaseId: string; releaseRevision: number; policyRevision: number; selectedAt: string; selectedBy: string; outcome: 'selected' | 'verified' | 'skipped'; verifiedAt?: string; interval?: Interval; supersededAt?: string }
@@ -96,6 +127,8 @@ export interface EnvironmentDelivery {
   /** The selected release; `sourceSha` (GY-1905) names the commit it was built from, so the expected release reads as the exact merge it ships. A candidate's selection names its `candidate` and `artifact`. */
   expected: { releaseId: string; releaseRevision: number; sourceSha?: string; manifestHash: string; buildId: string; policyRevision: number; approvalId: string | null; selectedAt: string; selectedBy: string; candidate?: string; artifact?: string } | null;
   history: ReleaseSelection[];
+  /** GY-1906: a candidate selection's newest independently observed live identity, or null when none was read since it was selected. */
+  observed?: ObservedIdentity | null;
   /** Folded from the current generation's authoritative observations only. `segments` is matched history; `latest` is the most recently observed state. */
   coverage: Record<string, { segments: Interval[]; latest: { observationId: string; observedAt: string; validTo: string; state: ServiceState; reasons: string[] } | null }>;
   verification: { generation: number; status: VerificationStatus; reasons: string[]; interval: Interval | null; evaluatedAt: string | null; verifiedAt: string | null };
@@ -116,21 +149,46 @@ export const historyLimit = 100, incidentLimit = 100, segmentLimit = 200, leaseM
 export const candidatePromotionKind = 'release.candidate.promotion';
 type CandidateSelection = { candidate: string; promotion: { environment: string; releaseId: string; sourceSha: string; artifact: string; at: string; by: string } };
 /**
+ * GY-1906: an exact candidate's selection against production's newest observed identity. Verified only
+ * when an observation taken at or after the selection names exactly its release record, source commit
+ * and artifact; any of them observed differently is mismatched, naming each difference, while the
+ * selection stays expected; an observation that leaves the release or artifact unreported cannot prove
+ * the identity (unknown); no observation since the selection is unobserved.
+ */
+export function candidateVerification(expected: NonNullable<EnvironmentDelivery['expected']>, generation: number, observed: ObservedIdentity | null): EnvironmentDelivery['verification'] {
+  const candidate = `candidate ${expected.candidate}'s release ${expected.releaseId} (source ${expected.sourceSha}, artifact ${expected.artifact})`;
+  const result = (status: VerificationStatus, reasons: string[]) => ({ generation, status, reasons, interval: null, evaluatedAt: observed?.observedAt ?? expected.selectedAt, verifiedAt: status === 'verified' ? observed!.observedAt : null });
+  if (!observed || Date.parse(observed.observedAt) < Date.parse(expected.selectedAt))
+    return result('unobserved', [`Production has not been observed since ${candidate} was selected at ${expected.selectedAt}${observed ? `; the last observation, at ${observed.observedAt}, predates it` : ''}`]);
+  const by = `observed by ${observed.observer} from ${observed.source === 'endpoint' ? 'the production identity endpoint' : 'its deployment observation'} at ${observed.observedAt}`;
+  const differences = [
+    ...observed.sourceSha !== expected.sourceSha ? [`Production serves source ${observed.sourceSha}, not ${expected.sourceSha}`] : [],
+    ...observed.releaseId !== null && observed.releaseId !== expected.releaseId ? [`Production runs release ${observed.releaseId}, not ${expected.releaseId}`] : [],
+    ...observed.artifact !== null && observed.artifact !== expected.artifact ? [`Production runs artifact ${observed.artifact}, not ${expected.artifact}`] : [],
+  ];
+  if (differences.length) return result('mismatched', [...differences.map(reason => `${reason} (${by})`), `The expected release is still ${candidate}: redeploy it, or promote a newer candidate`]);
+  const unreported = [...observed.releaseId === null ? ['release'] : [], ...observed.artifact === null ? ['artifact'] : []];
+  if (unreported.length) return result('unknown', [`Production's ${unreported.join(' and ')} went unreported (${by}), so the source matching ${candidate} does not prove it runs exactly that`]);
+  return result('verified', [`Production runs exactly ${candidate} (${by})`]);
+}
+
+/**
  * GY-1905: the delivery state an environment with no release-backed selection reads from its exact
  * candidates' promotions, newest last: each one selected the next generation, the newest is expected.
  * `selections` may be the newest window of `total` promotions; generations count all of them.
- * The git ledger, not delivery observations, observes these, so the verification stays unobserved.
+ * GY-1906: the selection is verified against `observed`, production's newest observed live identity.
  */
-export function candidateEnvironment(environmentId: string, selections: CandidateSelection[], total = selections.length): EnvironmentDelivery {
+export function candidateEnvironment(environmentId: string, selections: CandidateSelection[], total = selections.length, observed: ObservedIdentity | null = null): EnvironmentDelivery {
   const earlier = total - selections.length;
   const history: ReleaseSelection[] = selections.map((entry, index) => ({ generation: earlier + index + 1, releaseId: entry.promotion.releaseId, releaseRevision: 1, policyRevision: 0, selectedAt: entry.promotion.at, selectedBy: entry.promotion.by,
     outcome: index === selections.length - 1 ? 'selected' : 'skipped', ...(index < selections.length - 1 ? { supersededAt: selections[index + 1].promotion.at } : {}) }));
   const newest = selections.at(-1)!;
-  return { environmentId, id: environmentId, source: 'candidate', generation: total,
-    expected: { releaseId: newest.promotion.releaseId, releaseRevision: 1, sourceSha: newest.promotion.sourceSha, manifestHash: newest.promotion.artifact, buildId: `candidate:${newest.candidate}`, policyRevision: 0, approvalId: null,
-      selectedAt: newest.promotion.at, selectedBy: newest.promotion.by, candidate: newest.candidate, artifact: newest.promotion.artifact },
-    history: history.slice(-historyLimit), coverage: {}, incidents: [], cursor: 0,
-    verification: { generation: total, status: 'unobserved', reasons: [`Selected from exact candidate ${newest.candidate}; the release ledger, not delivery observations, observes it`], interval: null, evaluatedAt: newest.promotion.at, verifiedAt: null } };
+  const expected = { releaseId: newest.promotion.releaseId, releaseRevision: 1, sourceSha: newest.promotion.sourceSha, manifestHash: newest.promotion.artifact, buildId: `candidate:${newest.candidate}`, policyRevision: 0, approvalId: null,
+    selectedAt: newest.promotion.at, selectedBy: newest.promotion.by, candidate: newest.candidate, artifact: newest.promotion.artifact };
+  const verification = candidateVerification(expected, total, observed);
+  if (verification.status === 'verified') { const current = history.at(-1)!; current.outcome = 'verified'; current.verifiedAt = verification.verifiedAt!; }
+  return { environmentId, id: environmentId, source: 'candidate', generation: total, expected, observed,
+    history: history.slice(-historyLimit), coverage: {}, incidents: [], cursor: 0, verification };
 }
 
 /** Union of intervals: merge every pair that overlaps or touches, keep the newest when bounded. */
@@ -201,6 +259,8 @@ export function fold(state: EnvironmentDelivery, observation: DeploymentObservat
  * fenced again — registration generation, lease epoch, selection generation — when applied.
  */
 export class Delivery {
+  /** GY-1906: production's live identity endpoint, read by every sweep while an exact candidate is selected there (`liveIdentityReader`). */
+  live: LiveIdentity | null = liveIdentityReader();
   constructor(readonly validation: Validation) {}
   get store() { return this.validation.store; }
   get engine() { return this.validation.engine; }
@@ -660,6 +720,8 @@ export class Delivery {
       const { after: _after, ...reading } = data;
       const observation: ShaObservation = existing ?? { ...reading, id: randomUUID(), observer: actor.id, receivedAt: now.toISOString() };
       if (!existing) await this.event(db, actor.id, 'sha-observed', observation);
+      // GY-1906: every reading is also production's observed identity, so a repeat of an earlier commit after drift is seen.
+      await this.recordIdentity(db, { environment: data.environment.id, releaseId: data.release ?? null, sourceSha: data.sha, artifact: data.artifact ?? null, observedAt: data.observedAt, observer: actor.id, source: 'producer' });
       const deployed: string[] = [], awaiting: { key: string; reason: string }[] = [];
       for (const candidate of candidates) {
         const work = (await db.query('SELECT document FROM work_items WHERE id=$1', [candidate.id])).rows[0]?.document as Work | undefined;
@@ -692,6 +754,35 @@ export class Delivery {
     demand(!missing.length, `A deployment observation by commit must cover every service of '${environment.id}'; missing: ${missing.join(', ')}`, 400);
     return environment;
   }
+  /**
+   * GY-1906: append an environment's observed live identity when it differs from the newest one
+   * recorded, or that one predates the environment's newest candidate selection, so the identity
+   * history holds every change and nothing else.
+   */
+  private async recordIdentity(db: pg.PoolClient, reading: ObservedIdentity) {
+    const latest = (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>\'environment\'=$2 ORDER BY seq DESC LIMIT 1', [identityObservedKind, reading.environment])).rows[0]?.payload as ObservedIdentity | undefined;
+    const selectedAt = (await db.query(`SELECT payload->'promotion'->>'at' AS at FROM events WHERE kind=$1 AND work_id IS NULL AND payload->'promotion'->>'environment'=$2 ORDER BY seq DESC LIMIT 1`, [candidatePromotionKind, reading.environment])).rows[0]?.at as string | undefined;
+    const same = latest && latest.sourceSha === reading.sourceSha && latest.releaseId === reading.releaseId && latest.artifact === reading.artifact;
+    if (same && !(selectedAt && Date.parse(latest.observedAt) < Date.parse(selectedAt))) return false;
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [reading.observer, identityObservedKind, JSON.stringify(reading)]);
+    return true;
+  }
+  /**
+   * GY-1906: read production's live identity endpoint for the environment its exact candidates are
+   * selected in and record what it answers, outside the sweep's transaction as all provider I/O is.
+   * A read that fails records nothing and is named, so the selection stays as last observed.
+   */
+  async observeLive(): Promise<{ observed: ObservedIdentity | null; recorded: boolean; error: string | null } | null> {
+    if (!this.live) return null;
+    const selected = (await this.store.pool.query('SELECT 1 FROM events WHERE kind=$1 AND work_id IS NULL AND payload->\'promotion\'->>\'environment\'=$2 LIMIT 1', [candidatePromotionKind, 'production'])).rowCount;
+    if (!selected) return null;
+    let answer: z.infer<typeof liveIdentitySchema>;
+    try { answer = await this.live('production'); } catch (error) { return { observed: null, recorded: false, error: String((error as Error)?.message ?? error).slice(0, 500) }; }
+    return this.store.transaction(async (db, now) => {
+      const observed: ObservedIdentity = { environment: 'production', releaseId: answer.release ?? null, sourceSha: answer.sourceSha.toLowerCase(), artifact: answer.artifact ?? null, observedAt: now.toISOString(), observer: 'graphyard', source: 'endpoint' };
+      return { observed, recorded: await this.recordIdentity(db, observed), error: null };
+    });
+  }
   /** A provider webhook is a hint to observe again. It is recorded, and it changes nothing. */
   async notify(actor: Principal, input: unknown) {
     demand(['admin', 'producer', 'reader', 'coordinator'].includes(actor.role), 'Notifications require an authenticated non-worker credential', 403);
@@ -711,7 +802,8 @@ export class Delivery {
    * where it stopped and no observation is skipped or applied twice.
    */
   async sweep(bound = 50) {
-    return this.store.transaction(async (db, now) => {
+    const live = await this.observeLive();
+    const swept = await this.store.transaction(async (db, now) => {
       const states: EnvironmentDelivery[] = (await db.query('SELECT document FROM delivery_environments ORDER BY environment_id')).rows.map(r => r.document);
       let applied = 0, complete = true;
       for (const state of states) {
@@ -728,6 +820,7 @@ export class Delivery {
       }
       return { environments: states.length, applied, complete };
     });
+    return live ? { ...swept, live } : swept;
   }
   /** Expected digests come from the immutable release revision the selection names. */
   private async manifest(db: pg.PoolClient, state: EnvironmentDelivery) {
@@ -799,7 +892,10 @@ export class Delivery {
       const entry = byEnvironment.get(row.environment) ?? { selections: [], total: Number(row.total) };
       entry.selections.push(row.payload as CandidateSelection); byEnvironment.set(row.environment, entry);
     }
-    const environments = [...recorded.filter(state => !byEnvironment.has(state.environmentId)), ...[...byEnvironment].map(([id, { selections, total }]) => candidateEnvironment(id, selections, total))].sort((a, b) => a.environmentId.localeCompare(b.environmentId));
+    // GY-1906: each candidate-selected environment's newest observed live identity.
+    const identities = byEnvironment.size ? (await this.store.pool.query(`SELECT DISTINCT ON (payload->>'environment') payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>'environment' = ANY($2::text[]) ORDER BY payload->>'environment', seq DESC`,
+      [identityObservedKind, [...byEnvironment.keys()]])).rows.map(row => row.payload as ObservedIdentity) : [];
+    const environments = [...recorded.filter(state => !byEnvironment.has(state.environmentId)), ...[...byEnvironment].map(([id, { selections, total }]) => candidateEnvironment(id, selections, total, identities.find(entry => entry.environment === id) ?? null))].sort((a, b) => a.environmentId.localeCompare(b.environmentId));
     const releases: Release[] = (await this.store.pool.query('SELECT document FROM releases ORDER BY id,revision DESC')).rows.map(r => r.document);
     const rollbacks: RollbackRequest[] = (await this.store.pool.query('SELECT document FROM delivery_rollbacks ORDER BY created_at DESC,id DESC LIMIT 200')).rows.map(r => r.document);
     const now = (await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
