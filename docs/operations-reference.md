@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: 3 same-signature cycles stall, remedied once, verified (unknown-profile/`review-launch`: profile configured; 401: issued profile credential/deploy key, never coordinator's; merge-record key-reuse), else master woken; retries per 5min.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: 3 same-signature cycles: remedied once, verified (unknown/`review-launch` profile: configured; 401: profile credential/deploy key reissued, never coordinator's; merge-record key-reuse), else wakes master; 5min retries.
 
 ### Perpetual master loop
 
@@ -19,7 +19,7 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`. `scripts/rework-causes.mjs` classifies last 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `speed.reworkRounds.ownChange` (`master status`) excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`. `scripts/rework-causes.mjs` classifies 100 deliveries' rounds (55% own-change, 33% conflicts; raw median 2); `speed.reworkRounds.ownChange` (`master status`) excludes out-of-item causes.
 
 ## Retro synthesis
 
@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; main merges await reruns. Cancelled/timed-out jobs rerun ≤3×, then one `escalation:main-guard:SHA` fault names run and step, reverting nothing. A real failure reruns once; a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
@@ -92,7 +92,7 @@ Stays Done, **delivered with failure**; new item reverts.
 
 ## Merge bypass
 
-Ungated merges are permanent violations: repair access, file follow-up. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+Ungated merges are permanent: repair access, file follow-up. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
 
 ## Merge-intent withdrawal
 
@@ -113,11 +113,11 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json`; rescans and `doctor --profile through-merge|preview-validation|production-verification` report drift, never repair.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`; rescans, `doctor --profile through-merge|preview-validation|production-verification` report drift, never repair.
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool (`leaseHealth`). Starting up, `/healthz` reports `readiness: false` (`/healthz?ready`: 503).
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8; `GRAPHYARD_DATABASE_POOL_SIZE` 16, ≥2× workers) pace per token, merge path first (`observationThroughput`). Heartbeat/claim/`complete`/`blocked` own a lease pool (`leaseHealth`). Starting, `/healthz` reports `readiness: false` (`/healthz?ready`: 503).
 
 ### Concurrent reconciliation
 
