@@ -8,8 +8,7 @@ import { type HerdrAgent, type RoleCapacity, approverProfile, holdRepeatedLimitA
 import { type ApprovalWatch, approvalWatchSchema, type DaemonActionKind, message } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, type ApprovalStep, approverLaunchKey, approverSettleMs, approverPrefixes, boundDetail, handWatchPrefix, maxApproverCloses, maxApproverLaunches, maxDecisionRequests, maxLostApproverRuns, lostRunRefunded, recordWatchEnded } from './decisions.js';
-import { heldApproverPaneIn } from './decision-text.js';
-import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js';
+import { type DaemonEffects, failoverKey, record, stoppedStates } from './effects.js'; import { recoverHeldName } from './decision-holds.js';
 import { capacityRefusal, unknownRegistrySession } from '../fleet.js';
 import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
@@ -219,45 +218,13 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
     });
     return `handed approver session ${name} to the launcher (launch ${count} of ${maxApproverLaunches})`;
   };
-  /**
-   * GY-1888. The recovery a launch refused for its own session name takes before it fails: the runtime held the name for a pane
-   * it names (heldApproverPaneIn), and a name derived from the item and the decision alone belongs to this decision's approver
-   * alone, so the holder is this decision's own approver pane. The inventory that launch read is stale by then, so it is read
-   * again: a session listed under the name is the approver, adopted exactly as a launch that had seen it would adopt it, its
-   * pane-bound launch record dating it; a pane listed under another name is a live session this decision's name cannot be
-   * judged against, and is left alone; an unlisted pane is the leftover the failure's own remedy names for a hand
-   * (`herdr pane close … on the host`), and it is closed so the launch can be made once more. Null when the refusal is not a
-   * held name or nothing safe could be recovered: the launch fails as it did before, and the watch carries why.
-   */
-  const recoverHeldName = async (watch: ApprovalWatch, name: string, error: unknown): Promise<{ how: 'adopt' | 'retry'; detail: string } | null> => {
-    const leftover = heldApproverPaneIn(error, name);
-    if (!leftover || leftover === watch.pane) return null;
-    invalidate();
-    const fresh = await sessions().catch(() => ({ agents: [], available: false }));
-    const relisted = fresh.available ? fresh.agents.find(candidate => candidate.name === name && candidate.pane_id) : undefined;
-    if (relisted) {
-      const recorded = await effects.approverLaunch?.(name).catch(refusal => { if (stepCallCarried(refusal)) throw refusal; return null; }) ?? null;
-      const adopted = recorded?.pane && recorded.pane === relisted.pane_id ? recorded : null;
-      Object.assign(watch, { agentName: name, pane: relisted.pane_id, launchedAt: boundLaunch(await effects.approverLaunches?.().catch(listingLost) ?? [], relisted)?.launchedAt ?? stamp, account: adopted?.account ?? null, runtime: adopted?.runtime ?? null, session: adopted?.session ?? null, capacity: null });
-      await effects.persist(state);
-      return { how: 'adopt', detail: `the runtime held session name ${name} for pane ${leftover}, which the inventory lists again as ${relisted.pane_id}: it is adopted as the decision's approver` };
-    }
-    if (!fresh.available || fresh.agents.some(candidate => candidate.pane_id === leftover)) return null;
-    try { await effects.closeSession(leftover); } catch { return null; }
-    invalidate();
-    return { how: 'retry', detail: `closed leftover approver pane ${leftover}, which held session name ${name} while listed nowhere` };
-  };
   /** The approver launch the launcher runs, and what it did with the watch. */
   const start = async (item: Work, watch: ApprovalWatch) => {
-    const name = approverSessionName(item, watch.decision);
-    // GY-849: the account grab is where oldest-first is won or lost. A cycle that settles its
-    // launches within itself runs this body inline beside the step, so it holds here while another
-    // decision's capacity-waiting relaunch is still on the launcher and makes its call only once
-    // that one has settled: first submitted, first served, whatever the concurrency. The wait is
-    // bounded; past it the launch proceeds as it did before, and the next cycle's guarded relaunch
-    // path applies. The loop's own launcher never sees that wait (GY-924): it counts a body as
-    // running for its whole duration, so a waiting approver once held a shared slot while doing no
-    // work, and `launch` holds such launches back before submission instead.
+    // GY-849: the account grab is where oldest-first is won or lost. A cycle that settles its launches within itself runs this body inline
+    // beside the step, so it holds here while another decision's capacity-waiting relaunch is still on the launcher and makes its call only
+    // once that one has settled: first submitted, first served, whatever the concurrency. The wait is bounded; past it the launch proceeds as it
+    // did before, and the next cycle's guarded relaunch path applies. The loop's own launcher never sees that wait (GY-924): it counts a body as
+    // running for its whole duration, so a waiting approver once held a shared slot while doing no work, and `launch` holds such launches back.
     if (!cycle.detached) {
       const standDownBy = Date.now() + 300_000;
       while (capacityRelaunchInFlight(watch.decision) && Date.now() < standDownBy) await new Promise(resolve => setTimeout(resolve, 50));
@@ -269,8 +236,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         throw new Error(`${item.key}'s last approver sessions each ended on one account's limit notice, and the hold that keeps the next launch off it could not be placed: ${message(error).slice(0, 300)}; nothing was launched`, { cause: error });
       });
     }
-    let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>> | undefined;
-    let recoveredName: string | null = null;
+    let launched: Awaited<ReturnType<NonNullable<DaemonEffects['approver']>>>, recovered: string | null = null;
     try { launched = await (cycle.detached ? cycle.effects : effects).approver!(item, watch.decision); } // GY-1774: on the launcher beside the cycle the launch holds no cycle, so it waits as long as it takes through the cycle's own effects; in place it is bound like every call of the step
     catch (error) {
       // A launch no account could take (GY-182) ran no session either: the watch keeps why, persisted
@@ -285,38 +251,26 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         await effects.persist(state);
         return `left it pending for an approver slot, launched on the first cycle one frees: ${full}`;
       }
-      // GY-1888: before the failure stands, the recovery a held session name takes runs (recoverHeldName):
-      // the runtime refused this decision's own approver name for a pane it names. The recovery either
-      // adopts the pane's session as the approver (no launch is made) or closes the leftover and makes
-      // the launch once more; anything else fails as it did before, so a name some live session holds
-      // is never closed and a recovery that cannot be made never loops.
-      const recovered = await recoverHeldName(watch, name, error);
-      if (recovered?.how === 'adopt') return `${recovered.detail}; the decision is judged without a launch`;
-      let thrown: unknown = null;
-      if (recovered) {
-        try { launched = await (cycle.detached ? cycle.effects : effects).approver!(item, watch.decision); }
-        catch (retryError) { thrown = retryError; }
-        recoveredName = recovered.detail;
-      }
-      if (!recovered || thrown) {
-        // A registry session the failed launch could not end stays on the watch, so the next launch ends it first.
-        // The launch made no session, so it is taken back like a capacity refusal (GY-551): a
-        // registry or server timeout is retried next cycle within the bound, never spends it, and
-        // the escalation past the bound counts only the sessions that ran. GY-920: a failure for
-        // any other reason is not a capacity wait — the stale wait is cleared with the rest of the
-        // launch state, so `master status` classifies the watch by this failure and its remedy
-        // instead of reporting a wait for capacity that is over.
-        const failedLaunch = thrown ?? error, orphan = (failedLaunch as { registrySession?: string })?.registrySession;
+      // GY-1888: a launch refused for this decision's own session name is recovered before it fails (recoverHeldName): adopted, or relaunched once.
+      const held = await recoverHeldName({ effects, state, stamp, sessions, invalidate, listingLost }, item, watch, error, () => (cycle.detached ? cycle.effects : effects).approver!(item, watch.decision));
+      if ('adopted' in held) return held.adopted;
+      if ('launched' in held) ({ launched, detail: recovered } = held); else {
+        // A registry session the failed launch could not end stays on the watch, so the next launch ends it first. The launch made no
+        // session, so it is taken back like a capacity refusal (GY-551): a registry or server timeout is retried next cycle within the bound,
+        // never spends it, and the escalation past the bound counts only the sessions that ran. GY-920: a failure for any other reason is not
+        // a capacity wait — the stale wait is cleared with the rest of the launch state, so `master status` classifies the watch by this
+        // failure and its remedy instead of reporting a wait for capacity that is over.
+        const orphan = (held.failed as { registrySession?: string })?.registrySession;
         Object.assign(watch, { launches: watch.launches - 1, agentName: null, pane: null, launchedAt: null, account: null, runtime: null, session: orphan ?? null, capacity: null });
         await effects.persist(state);
-        throw failedLaunch;
+        throw held.failed;
       }
     }
     Object.assign(watch, { agentName: launched?.agentName ?? name, pane: launched?.pane ?? null, account: launched?.account ?? null, runtime: launched?.runtime ?? null, session: launched?.session ?? null, capacity: null, run: launched?.run ?? null });
     // A headless approver (GY-169) reports its run when it ends; the watch keeps it, and the next
     // cycle reads the verdict it applied back from the control plane like any other.
-    launched?.settled?.then(async record => { if (watch.agentName === launched?.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
-    return `${recoveredName ? `${recoveredName}; ` : ''}${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
+    launched?.settled?.then(async record => { if (watch.agentName === launched.agentName) { watch.run = record; await effects.persist(state); } }).catch(() => { /* the next cycle judges the decision itself */ });
+    return `${recovered ? `${recovered}; ` : ''}${launched?.replaced ? `${launched.replaced}; ` : ''}launched independent approver session ${watch.agentName}${watch.account ? ` on ${watch.account}` : ''} (launch ${watch.launches} of ${maxApproverLaunches})`;
   };
   /** Idle/done screens past the start bound share one pause (GY-1598 / GY-1705 cycle-p90). */
   let screens: { seen: unknown; reads: Map<string, Promise<ScreenMotion>> } | null = null;
