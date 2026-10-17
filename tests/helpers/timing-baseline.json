@@ -611,7 +611,7 @@
     "tests/post-deploy-follow-ups.test.ts": 600,
     "tests/post-deploy-observation-state.test.ts": 657,
     "tests/post-merge-review.test.ts": 4000,
-    "tests/pr-adoption.test.ts": 3497,
+    "tests/pr-adoption.test.ts": 3700,
     "tests/pr-links.test.ts": 261,
     "tests/producer-environment.test.ts": 2661,
     "tests/production-watch-build-serving.test.ts": 400,

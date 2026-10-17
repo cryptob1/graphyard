@@ -44,7 +44,7 @@ import { nextAction, nextActionKinds, sameAction } from './model/next-action.js'
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { sameObservationInputs } from './model/observation-save.js';
-import { adoptSchema, adoptionHolderRefusal, closedPullRefusal, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
+import { adoptSchema, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
@@ -916,7 +916,7 @@ export class Engine {
     const github = await githubFromEnv();
     this.adoptionObserver = github ? async pr => {
       const pull = await github.request(`/pulls/${pr}`);
-      return { head: String(pull.head.sha), branch: String(pull.head.ref), state: pull.state === 'open' ? 'open' as const : 'closed' as const };
+      return { head: String(pull.head.sha), branch: String(pull.head.ref), state: pull.state === 'open' ? 'open' as const : 'closed' as const, draft: pull.draft === true };
     } : null;
     return this.adoptionObserver;
   }
@@ -1477,9 +1477,14 @@ export class Engine {
         demand(!work.prAdoption || work.prAdoption.pr === data.pr, `${work.key} already adopted pull request #${work.prAdoption?.pr}; one binding stands per item`, 409);
         // The binding names this repository, so the number and head mean one pull request.
         demand(!!this.repository, 'The control plane has no repository configured; adoption binds a pull request of one repository', 503);
+        // A GitHub pull request can never complete while the control plane is the merge writer, so
+        // the binding would strand the item: the writer is switched first, never adopted around.
+        demand((await recordedMergerMode(db)).merger !== 'control-plane', `This install's merge writer is the control plane, so no GitHub pull request can complete here; switch the writer with graphyard master merger before adopting`, 409);
         // The live read ran outside this transaction; without it the head cannot be verified, so nothing binds.
         demand(adoption, `Pull request #${data.pr} could not be read from ${this.repository}; adoption binds a live head and is refused unreadable`, 503);
         demand(adoption!.state === 'open', closedPullRefusal(data.pr), 409);
+        // A draft's author is still reshaping it: the adoption waits for it to be marked ready.
+        demand(adoption!.draft === false, draftPullRefusal(data.pr), 409);
         // The moved-head refusal names the head the provider reports now.
         demand(adoption!.head === data.head, movedHeadRefusal(data.pr, adoption!, data.head), 409);
         // A second owner is refused naming the holder: another item's binding or submission, or its hold on the branch.
@@ -1487,6 +1492,14 @@ export class Engine {
         demand(!holder, holder!, 409);
         // Repeating the same adoption is the no-op: the one binding stands, nothing else is recorded.
         if (work.prAdoption && sameAdoption(work.prAdoption, data, this.repository)) return work;
+        // A first adoption never races work in flight: an attempt with a live lease is working the
+        // item now, so the master adopts once it ends. A rebind of the adopted pull request may
+        // pass a live attempt — the moved-head refusal at complete is what sent the master here,
+        // and complete re-checks the observed head and branch against the binding it names.
+        if (!work.prAdoption) {
+          const live = attemptLiveRefusal(work, now);
+          demand(!live, live!, 409);
+        }
         work.prAdoption = prAdoptionOf(data, adoption!, this.repository, actor.id, now);
       }
       if (command === 'reviewpolicy') {
@@ -1964,6 +1977,10 @@ export class Engine {
         }
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
+          // GY-1849: the binding is exact-head, so the head observed now is compared to the adopted
+          // one; a moved head is refused naming both shas, and the master re-adopts at the live head.
+          if (work.prAdoption && observed!.candidate.sha !== work.prAdoption.head)
+            demand(false, `${work.key} adopted pull request #${work.prAdoption.pr} at head ${work.prAdoption.head.slice(0, 12)}, but its live head is ${observed!.candidate.sha.slice(0, 12)}; adopt naming the live head, then complete again`, 409);
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
           // GY-1528: under the control-plane merger the submit refuses nothing on plannedFiles.
           const regressions = merger === 'control-plane' ? [] : regressionRefusals(work, observed, all);

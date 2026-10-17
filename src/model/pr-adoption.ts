@@ -8,13 +8,18 @@ import { z } from 'zod';
  * source's key and URL, kept on the item — to the item as one appended fact. The binding is refused
  * when the pull request's live head differs from the one named (a moved head) or when another item
  * or another open attempt already holds that pull request or its branch (a second owner), naming
- * the holder. Repeating the same adoption is an idempotent no-op that records no second binding,
- * item, pull request or dispatch. An attempt on an adopted item works on the adopted pull request's
- * own branch from its existing commits, and `complete` on it accepts only that pull request, so no
- * replacement pull request is created. Adoption itself writes nothing to GitHub — it never
- * force-pushes, retargets, renames, closes or comments on the pull request — and it never weakens
- * the item's criteria: checks and reviews the old head earned stay history, and the next head is
- * gated afresh. Releasing the adopted item is a separate decision.
+ * the holder; a draft is refused until its author marks it ready, an install whose merge writer is
+ * the control plane refuses every adoption (no GitHub pull request could ever complete there), and
+ * a first adoption waits for any live attempt on the item to end. Repeating the same adoption is an
+ * idempotent no-op that records no second binding, item, pull request or dispatch, and a re-adopt
+ * at a new live head rebinds while nothing is submitted. An attempt on an adopted item works on the
+ * adopted pull request's own branch from its existing commits, and `complete` on it accepts only
+ * that pull request at the adopted head — a head the pull request has moved to since is refused
+ * naming both shas, and the master re-adopts at the live head — so no replacement pull request is
+ * created. Adoption itself writes nothing to GitHub — it never force-pushes, retargets, renames,
+ * closes or comments on the pull request — and it never weakens the item's criteria: checks and
+ * reviews the old head earned stay history, and the next head is gated afresh. Releasing the
+ * adopted item is a separate decision.
  */
 
 /** The intent `master adopt` records; the control plane re-reads the live pull request itself. */
@@ -28,7 +33,7 @@ export const adoptSchema = z.object({
 export type Adopt = z.infer<typeof adoptSchema>;
 
 /** The pull request as the provider reports it live, read outside any coordination transaction. */
-export interface AdoptedPull { head: string; branch: string; state: 'open' | 'closed' }
+export interface AdoptedPull { head: string; branch: string; state: 'open' | 'closed'; draft: boolean }
 
 /** The binding an accepted adoption records on the item, once. */
 export interface PrAdoption {
@@ -57,17 +62,42 @@ export function closedPullRefusal(pr: number): string {
   return `Pull request #${pr} is closed; adoption binds an open pull request`;
 }
 
+/** A draft's author is still reshaping it, so its adoption waits until it is marked ready for review. */
+export function draftPullRefusal(pr: number): string {
+  return `Pull request #${pr} is a draft; adoption binds a pull request marked ready for review`;
+}
+
+/**
+ * Why an item with work in flight takes no adoption: a live lease means an attempt is working the
+ * item now, and adoption never races it (the master adopts once the attempt ends); a recorded
+ * candidate is the same fact in head form. Ended attempts are no hold at all.
+ */
+export function attemptLiveRefusal(work: { key: string; lease: { epoch: number; expiresAt: string } | null; candidate: unknown }, now: Date): string | null {
+  if (work.candidate) return `${work.key} already holds a candidate head; adoption binds an item with nothing in flight`;
+  if (work.lease && Date.parse(work.lease.expiresAt) > now.getTime()) return `${work.key}'s attempt (epoch ${work.lease.epoch}) holds a live lease; adoption waits for the attempt to end`;
+  return null;
+}
+
+/**
+ * Whether the attempt that reserved a workspace is still open: an ended attempt holds nothing, so
+ * its recorded workspace is history the hold judgement reads past. A peer with no timeline recorded
+ * is judged as holding — the absence of the record is no proof the attempt is over.
+ */
+const attemptOpen = (item: AdoptionPeer, epoch: number) =>
+  !item.pipeline?.attempts?.length || (item.pipeline.attempts.find(entry => entry.epoch === epoch)?.endedAt ?? null) === null;
+
 /**
  * Whose pull request is it already. A second owner is refused naming the holder: another item's
- * submission or adoption of the same number, or its reservation of the adopted branch — the hold
- * the adopted item's own attempt would meet at its workspace. The item's own holds are its own.
+ * submission or adoption of the same number, or its live attempt's reservation of the adopted
+ * branch — the hold the adopted item's own attempt would meet at its workspace. The item's own
+ * holds are its own.
  */
 export function adoptionHolderRefusal(all: readonly AdoptionPeer[], work: Pick<AdoptionPeer, 'id' | 'key'>, pr: number, branch: string): string | null {
   for (const item of all) {
     if (item.id === work.id) continue;
     if (item.submission?.pr === pr) return `${item.key} already holds pull request #${pr} as its submission (epoch ${item.submission.epoch})`;
     if (item.prAdoption?.pr === pr) return `${item.key} already adopted pull request #${pr} at head ${item.prAdoption.head.slice(0, 12)} on ${item.prAdoption.branch}`;
-    const reserved = (item.workspaces ?? []).find(space => space.branch === branch);
+    const reserved = (item.workspaces ?? []).find(space => space.branch === branch && attemptOpen(item, space.epoch));
     if (reserved) return `${item.key} reserves ${branch} (epoch ${reserved.epoch}); the adopted pull request's branch is already held`;
   }
   return null;

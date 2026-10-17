@@ -5,8 +5,9 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
-import { Store } from '../src/store.js';
-import type { Principal, Work } from '../src/model.js';
+import { saveDocument, Store } from '../src/store.js';
+import { mergerEventKind } from '../src/merger-mode.js';
+import type { Observation, Principal, Work } from '../src/model.js';
 import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { FakeGitHub } from './helpers/fake-github.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -40,7 +41,10 @@ before(async () => {
   engine.submissionObserver = null;
   github = new FakeGitHub(repository, { autoApprove: true });
   // The live read an adoption is judged against: the fake, as the deployment's GitHub App reads a pull request.
-  engine.adoptionObserver = async pr => { const view = github.view(pr); return { head: view.head.sha, branch: view.head.ref, state: view.state as 'open' | 'closed' }; };
+  engine.adoptionObserver = async pr => {
+    const view = github.view(pr);
+    return { head: view.head.sha, branch: view.head.ref, state: view.state as 'open' | 'closed', draft: false };
+  };
 });
 after(async () => { await store.close(); await database.stop(); });
 
@@ -108,8 +112,51 @@ test('unit:pr-adoption-binds-once — adopting a pull request at its live head b
   const claim = await engine.execute(worker, 'claim', reserving.id, {}, randomUUID());
   await engine.execute(worker, 'workspace', reserving.id, { epoch: claim.epoch, host: 'machine-a', path: `/tmp/adopted/${reserving.id}`, branch: 'graphyard/huck-notes' }, randomUUID());
   await refused(adopt(rival, thirdPull.number, thirdHead), `${reserving.key} reserves graphyard/huck-notes (epoch ${claim.epoch})`);
+  // An ended attempt holds nothing: with the attempt released, the same branch takes an adoption.
+  await engine.execute(worker, 'release', reserving.id, { epoch: claim.epoch, cause: 'stood down' }, randomUUID());
+  const afterEnd = await adopt(await released(), thirdPull.number, thirdHead);
+  assert.equal(afterEnd.prAdoption!.branch, 'graphyard/huck-notes');
   // And an item already past adoption takes no second pull request: one binding stands per item.
   await refused(adopt(item, thirdPull.number, thirdHead), `${item.key} already adopted pull request #${pull.number}; one binding stands per item`);
+});
+
+test('unit:pr-adoption-refuses-unadoptable — a draft, a control-plane merge writer and an item with work in flight are each refused at adoption; a re-adopt at a new live head rebinds once the attempt is over', async () => {
+  const { head, pull } = externalPull('feature/huck-draft');
+  const item = await released();
+  // A draft: the binding waits for the pull request to be marked ready for review.
+  engine.adoptionObserver = async () => ({ head, branch: 'feature/huck-draft', state: 'open', draft: true });
+  try {
+    await refused(adopt(item, pull.number, head), `Pull request #${pull.number} is a draft`);
+  } finally {
+    engine.adoptionObserver = async pr => {
+      const view = github.view(pr);
+      return { head: view.head.sha, branch: view.head.ref, state: view.state as 'open' | 'closed', draft: false };
+    };
+  }
+  // The control plane as merge writer: no GitHub pull request could ever complete, so none is adopted.
+  const setMerger = (merger: string, reason: string) => store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['test-fixture', mergerEventKind, JSON.stringify({ merger, reason, previous: merger === 'github' ? 'control-plane' : 'github' })]);
+  await setMerger('control-plane', 'this case exercises the control-plane writer');
+  try {
+    await refused(adopt(item, pull.number, head), /merge writer is the control plane.*graphyard master merger/);
+  } finally {
+    await setMerger('github', 'this test exercises the legacy github merger');
+  }
+  // An attempt holding a live lease: adoption waits for the attempt to end, then binds.
+  const claim = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
+  await refused(adopt(item, pull.number, head), `${item.key}'s attempt (epoch ${claim.epoch}) holds a live lease`);
+  await engine.execute(worker, 'release', item.id, { epoch: claim.epoch, cause: 'stood down' }, randomUUID());
+  const bound = await adopt(item, pull.number, head);
+  assert.equal(bound.prAdoption!.head, head);
+  // The head moved after adoption: a re-adopt at the new live head rebinds, as its own recorded fact.
+  const moved = github.push('feature/huck-draft', { 'src/basket.ts': 'export const basket = [2];\n' }, 'Move on', 'person:huck');
+  const rebound = await adopt(item, pull.number, moved);
+  assert.equal(rebound.prAdoption!.head, moved);
+  assert.equal((await eventsOf(item, 'adopt')).length, 2, 'the rebind is its own recorded fact');
+  // A recorded candidate is the same hold in head form: a first adoption is refused while it stands.
+  const inFlight = await released();
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{candidate}',$2) WHERE id=$1", [inFlight.id, JSON.stringify({ sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: pull.number + 7, branch: 'feature/huck-draft', author: 'person:huck' })]);
+  const { head: fifthHead, pull: fifthPull } = externalPull('feature/huck-second');
+  await refused(adopt(inFlight, fifthPull.number, fifthHead), `${inFlight.key} already holds a candidate head`);
 });
 
 test('unit:pr-adoption-same-pr-no-double-dispatch — an attempt on the adopted item is assigned the pull request branch, complete accepts only that pull request, two dispatch requests yield one assignment, and GitHub is left untouched', async () => {
@@ -117,12 +164,15 @@ test('unit:pr-adoption-same-pr-no-double-dispatch — an attempt on the adopted 
   const item = await adopt(await released(), pull.number, head);
   const humanSteps = github.humanSteps.length, reviews = github.reviews.length;
 
-  // Two dispatch requests for the adopted item yield one assignment: the queue binds one row to the attempt.
+  // Two dispatch requests, each persisted before the next, yield one assignment: the queue binds
+  // one row to the attempt, so the second pass over the stored item adds no second row.
   const dispatched = await reload(item);
   engine.evaluate(dispatched, [dispatched], new Date());
-  engine.evaluate(dispatched, [dispatched], new Date());
-  const rows = dispatched.actionQueue!.actions.filter(row => row.kind === 'dispatch');
-  assert.equal(rows.length, 1, `one dispatch row stands: ${JSON.stringify(dispatched.actionQueue!.actions.map(row => [row.kind, row.binding]))}`);
+  await store.transaction(async db => { await saveDocument(db, dispatched, new Date()); });
+  const redispatched = await reload(item);
+  engine.evaluate(redispatched, [redispatched], new Date());
+  const rows = redispatched.actionQueue!.actions.filter(row => row.kind === 'dispatch');
+  assert.equal(rows.length, 1, `one dispatch row stands: ${JSON.stringify(redispatched.actionQueue!.actions.map(row => [row.kind, row.binding]))}`);
   assert.equal(rows[0]!.binding, `dispatch:${item.epoch}`);
 
   // An attempt is assigned the adopted branch: a fresh branch name is refused naming the adopted one.
@@ -148,4 +198,34 @@ test('unit:pr-adoption-same-pr-no-double-dispatch — an attempt on the adopted 
   assert.equal(view.merged, false, 'the pull request was never closed or merged');
   assert.equal(github.reviews.length, reviews, 'nothing commented or reviewed the pull request');
   assert.equal(github.humanSteps.length, humanSteps, 'nothing at all was written by hand');
+});
+
+test('unit:pr-adoption-exact-head-complete — complete on an adopted item is refused while the pull request lives at another head, naming both shas; the re-adopt at the live head rebinds and completes', async () => {
+  const { head, pull } = externalPull('feature/huck-head');
+  const item = await adopt(await released(), pull.number, head);
+  const attempt = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
+  await engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-c', path: `/tmp/adopted-3/${item.id}`, branch: 'feature/huck-head' }, randomUUID());
+  // The observation complete is judged against, read as the control plane reads the pull request.
+  engine.submissionObserver = async probe => {
+    const view = github.view(probe.submission!.pr);
+    return {
+      prState: view.state as 'open' | 'closed', draft: false,
+      candidate: { sha: view.head.sha, baseSha: view.base.sha, pr: probe.submission!.pr, branch: view.head.ref, author: 'person:huck' },
+      checks: [], reviews: [], merged: view.merged, mergeSha: view.merge_commit_sha, mergeable: true, protected: false, files: [], scopeFiles: [], at: new Date().toISOString(),
+    } as Observation;
+  };
+  try {
+    // The author pushes while the attempt runs: complete is refused naming the adopted and the live head.
+    const moved = github.push('feature/huck-head', { 'src/basket.ts': 'export const basket = [3];\n' }, 'Move the head', 'person:huck');
+    await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID()),
+      new RegExp(`adopted pull request #${pull.number} at head ${head.slice(0, 12)}, but its live head is ${moved.slice(0, 12)}`));
+    // The master re-adopts at the live head: a recorded rebind, and complete then accepts it.
+    const rebound = await adopt(item, pull.number, moved);
+    assert.equal(rebound.prAdoption!.head, moved);
+    assert.equal((await eventsOf(item, 'adopt')).length, 2, 'the rebind is its own recorded fact');
+    const completed = await engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID());
+    assert.deepEqual(completed.submission, { epoch: attempt.epoch, pr: pull.number });
+  } finally {
+    engine.submissionObserver = null;
+  }
 });
