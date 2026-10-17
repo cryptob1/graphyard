@@ -4,9 +4,9 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  executeSlowTickReceiptRuns, pinnedProofFile, pinnedSourceSha, pinnedSourceTree, requiredPasses,
+  executeSlowTickReceiptRuns, independentSlowTickExecution, pinnedProofFile, pinnedSourceSha, pinnedSourceTree, requiredPasses,
   retainedFailedSlowTickAttempts, retainedReceiptDirectory, retainedSlowTickReceipt, runLogName,
-  slowTickProof, verifyRetainedArtifact, verifySlowTickReceipt,
+  slowTickProof, verifyIndependentExecution, verifyRetainedArtifact, verifySlowTickReceipt,
   type SlowTickReceipt, type SlowTickReceiptRun,
 } from './helpers/slow-tick-repeat-receipt.js';
 
@@ -111,7 +111,26 @@ test('unit:slow-tick-receipt-durable-artifact — the receipt\'s artifact is a c
   }
 });
 
-test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000 }, async t => {
+test('unit:slow-tick-independent-execution-retained — the retained output of the hosted CI runner\'s execution verifies the committed receipt by digest at the pinned source with twenty exit-0 runs; another receipt, another source or a failed run is refused', async () => {
+  const receiptDigest = createHash('sha256').update(await readFile(join(process.cwd(), retainedReceiptDirectory, 'receipt.json'))).digest('hex');
+  assert.deepEqual(verifyIndependentExecution(independentSlowTickExecution, receiptDigest).faults, [], 'the CI execution verified this exact committed receipt');
+  assert.equal(independentSlowTickExecution.head.length, 40);
+  assert.ok(includesFault(verifyIndependentExecution(independentSlowTickExecution, 'f'.repeat(64)).faults, 'does not verify'), 'an execution of another receipt is refused');
+  const otherSource = { ...independentSlowTickExecution, output: independentSlowTickExecution.output.map(line => line.replace(pinnedSourceSha, 'e'.repeat(40))) };
+  assert.ok(includesFault(verifyIndependentExecution(otherSource, receiptDigest).faults, 'does not verify'), 'an execution at another source is refused');
+  const failedRun = { ...independentSlowTickExecution, output: independentSlowTickExecution.output.map(line => line.replace('exit statuses 0,0,0', 'exit statuses 0,1,0')) };
+  assert.ok(includesFault(verifyIndependentExecution(failedRun, receiptDigest).faults, 'run 2 exited 1'), 'a failed run breaks the sequence');
+  const missingRun = { ...independentSlowTickExecution, output: independentSlowTickExecution.output.map(line => line.replace('exit statuses 0,', 'exit statuses ')) };
+  assert.ok(includesFault(verifyIndependentExecution(missingRun, receiptDigest).faults, '19 exit statuses'), 'a missing run is refused');
+  const local = { ...independentSlowTickExecution, output: independentSlowTickExecution.output.map(line => line.replace('ci true', 'ci false')) };
+  assert.ok(includesFault(verifyIndependentExecution(local, receiptDigest).faults, 'not run on a CI runner'), 'a run on a non-CI host is refused');
+});
+
+// CI's sharded suite sits at its 6-minute bound per shard, and this execution takes ~110 s of
+// twenty sequential runs, so a shard leaves it to the proof producer, which runs the whole file.
+const sharded = process.env.SHARD ? 'a CI shard leaves the twenty-run execution to the proof producer' : false;
+
+test('integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one', { timeout: 900_000, skip: sharded }, async t => {
   const execution = await executeSlowTickReceiptRuns();
   try {
     const verdict = verifySlowTickReceipt(execution.receipt);

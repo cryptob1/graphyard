@@ -951,6 +951,6 @@
     "tests/event-loop-lag-pending.test.ts": 729,
     "tests/install-worker-credentials.test.ts": 900,
     "tests/fault-class-loop.test.ts": 630,
-    "tests/slow-tick-repeat-receipt.test.ts": 109215
+    "tests/slow-tick-repeat-receipt.test.ts": 600
   }
 }

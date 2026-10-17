@@ -243,6 +243,46 @@ export const retainedSlowTickReceipt: SlowTickReceipt = readRetained(retainedRec
 export const retainedFailedSlowTickAttempts: SlowTickReceipt[] = [readRetained(`${retainedReceiptDirectory}/failed-attempt-1`)];
 
 /**
+ * The independently produced execution that verified the retained receipt: a GitHub-hosted CI
+ * runner (not the worker's host) ran integration:slow-tick-exact-head-twenty-consecutive on PR
+ * #1297's head 4ef958c53c80, which carries this receipt unchanged. Its output lines are kept
+ * verbatim from the job log, so the record names the pinned source, the receipt (by digest) and
+ * the execution's own twenty runs without relying on the log's retention (their timestamp prefix, 12:55:09Z, dropped).
+ */
+export const independentSlowTickExecution = {
+  job: 'https://github.com/cryptob1/graphyard/actions/runs/39033870261/job/117399733697',
+  runAttempt: 1,
+  head: '4ef958c53c80a42d94b777ef3dfd4540efe11bb5',
+  runner: 'GitHub Actions 1000112460',
+  output: [
+    '✔ integration:slow-tick-exact-head-twenty-consecutive — an independent execution re-runs the pinned source twenty consecutive times and its receipt verifies beside the retained one (113445.867319ms)',
+    'ℹ verified tests/fixtures/gy-1907-slow-tick-receipt/receipt.json sha256 58bf0d5f04588da5b59a2d699ff8d00cc2540bba70dc5d6aef1e4e0d4bf43548 for unit:slow-tick-names-cause at 6d2aabbb31952557c2772935b2f18ba52fb38322 (tree 18677ba6b73eb275c9dc6118697536b0c1945144)',
+    'ℹ independent execution: 20 consecutive passes on node v24.21.0 linux/x64, 4 cpus, ci true; exit statuses 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0; log sha256 4df331ee06bb,805ca9c4a62d,e4edac328f40,72e3a4952c7d,da0a484b2b10,375636e78fcc,abe406709923,6a4996d4dfb5,5f3634f7c833,de93683f0341,189acfd588d6,3e48b3614967,0b969e57c26b,87c67dcb5c26,a37305e06167,bfde5e11fdfd,4094873db7e8,f5d2ec333a2e,e3a84221388a,3da57af18b3f',
+  ],
+} as const;
+
+/** What an independent execution's retained output shows, or the faults that keep it from verifying `receiptDigest` at the pinned source. */
+export function verifyIndependentExecution(execution: { job: string; output: readonly string[] }, receiptDigest: string): { ok: boolean; faults: string[] } {
+  const faults: string[] = [];
+  if (!/^https:\/\/github\.com\/[^/]+\/[^/]+\/actions\/runs\/\d+\/job\/\d+$/.test(execution.job)) faults.push(`${execution.job} is not a hosted CI job reference`);
+  const proof = 'integration:slow-tick-exact-head-twenty-consecutive';
+  if (!execution.output.some(line => line.includes(`✔ ${proof} `))) faults.push(`the output does not show ${proof} passing`);
+  const verified = execution.output.find(line => line.includes('ℹ verified '));
+  if (!verified?.includes(`${retainedReceiptDirectory}/receipt.json sha256 ${receiptDigest} for ${slowTickProof} at ${pinnedSourceSha} (tree ${pinnedSourceTree})`))
+    faults.push(`the output does not verify ${retainedReceiptDirectory}/receipt.json sha256 ${receiptDigest} at ${pinnedSourceSha}`);
+  const ran = execution.output.find(line => line.includes('ℹ independent execution: '))?.match(/(\d+) consecutive passes on .*, ci (true|false); exit statuses ([\d,]+); log sha256 ([0-9a-f,]+)$/);
+  if (!ran) faults.push('the output does not name the execution\'s runs');
+  else {
+    const statuses = ran[3].split(','), logs = new Set(ran[4].split(','));
+    if (ran[2] !== 'true') faults.push('the execution did not run on a CI runner');
+    if (Number(ran[1]) !== requiredPasses || statuses.length !== requiredPasses || logs.size !== requiredPasses) faults.push(`the execution names ${ran[1]} passes, ${statuses.length} exit statuses and ${logs.size} distinct logs, not ${requiredPasses}`);
+    const failed = statuses.flatMap((status, index) => status === '0' ? [] : [`run ${index + 1} exited ${status}`]);
+    if (failed.length) faults.push(`a failure breaks the sequence: ${failed.join(', ')}`);
+  }
+  return { ok: faults.length === 0, faults };
+}
+
+/**
  * Resolve a receipt's artifact reference against the repository root and check that it retains
  * what the receipt claims: each run's TAP output, whose sha256 must match its logDigest, and the
  * receipt itself. `tracked` also requires every file to be committed, so the reference outlives
