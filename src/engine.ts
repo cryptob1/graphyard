@@ -3068,7 +3068,7 @@ export class Engine {
       view();
       return moves;
     };
-    let opened = false, decided = false, changed: string[] = [], config = '', fullCause: ReconcileFull['cause'] | null = null;
+    let opened = false, decided = false, changed: string[] = [], config = '', fullCause: ReconcileFull['cause'] | null = null, openedAt = 0;
     const pass: ReconcilePass = { fleet, all: () => all, view, versionsOf, moved, reread, lockWait: ms => { tick.lockWaitMs = Math.max(tick.lockWaitMs, Math.round(ms)); } };
     try {
       for (;;) {
@@ -3084,7 +3084,8 @@ export class Engine {
             // pass is not full again at once; a face a writer moved still makes it full (`faces`).
             fullCause = !fleet.size ? 'view' : config !== this.reconcileConfig ? 'configuration' : !(now.getTime() - this.reconcileFullAt < this.fullEvaluationIntervalMs()) ? 'interval' : null;
             full = fullCause !== null;
-            if (full) this.reconcileFullAt = now.getTime();
+            openedAt = now.getTime();
+            if (full) this.reconcileFullAt = openedAt;
             const versions = new Map(listed.map(row => [row.id, row]));
             for (const id of [...fleet.keys()]) if (!versions.has(id)) { this.noteFaceMove({ id, key: fleet.get(id)!.work.key, fields: ['gone'] }); fleet.delete(id); }
             changed = listed.filter(row => { const entry = fleet.get(row.id); return !entry || entry.version !== row.version || entry.settled !== row.settled; }).map(row => row.id);
@@ -3130,6 +3131,8 @@ export class Engine {
             this.reconcileOwnMoves.clear();
             const live = [...fleet].filter(([, entry]) => !entry.settled).sort(([, a], [, b]) => a.number - b.number).map(([id]) => id);
             if (full || moved.length) tick.full = { cause: fullCause ?? 'faces', moved: moved.sort((a, b) => (fleet.get(a.id)?.number ?? Infinity) - (fleet.get(b.id)?.number ?? Infinity) || a.key.localeCompare(b.key)) };
+            // A pass a moved face made full evaluates every live item too, so it restarts the clock from when it opened (GY-1867).
+            if (tick.full && !full) this.reconcileFullAt = openedAt;
             const due = tick.full ? new Set(live) : new Set([
               ...changed, ...this.reconcileOwed,
               ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0 || reaches.some(reach => readsFace(fleet.get(id)!, reach)); }),
@@ -3204,8 +3207,8 @@ export class Engine {
     this.lastReconcile = { documentsRead, evaluated: tick.evaluated, live: [...fleet.values()].filter(entry => !entry.settled).length, full };
     const elapsedMs = performance.now() - tickStarted;
     tick.ms = Math.round(elapsedMs);
-    // The next full pass is spaced past this one's own length (GY-1867).
-    if (full) this.reconcileFullMs = tick.ms;
+    // The next full pass is spaced past this one's own length, whatever made it full (GY-1867).
+    if (tick.full) this.reconcileFullMs = tick.ms;
     tick.lagMs = this.eventLoopLag.read();
     this.reconcileTicks.push(tick);
     if (this.reconcileTicks.length > 20) this.reconcileTicks.shift();

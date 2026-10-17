@@ -119,6 +119,45 @@ test('unit:full-evaluation-interval-stretches — the next full pass is due no s
   } finally { recorder.restore(); }
 });
 
+test('unit:face-full-pass-restarts-the-interval — a slow pass a moved face made full restarts the clock and records its length, so the next tick is not a clock full pass', { timeout: 120_000 }, async () => {
+  const parent = await create();
+  await create({ dependencies: [parent.id] });
+  await settle();
+
+  // A quick full pass the reset brings; the interval is set past three of its lengths, so its deadline is I from when it began.
+  engine.reconcileFullEvaluationMs = 300_000;
+  engine.resetReconcileView();
+  const viewStarted = performance.now();
+  await engine.reconcile();
+  assert.equal(engine.reconcileTicks.at(-1)!.full?.cause, 'view');
+  const interval = Math.max(1_000, 3 * engine.reconcileTicks.at(-1)!.ms + 200);
+  engine.reconcileFullEvaluationMs = interval;
+  await settle();
+
+  // A face moved outside the commands late in that interval makes the next pass full; slowed, it ends past the clock pass's deadline.
+  await sleep(viewStarted + 0.6 * interval - performance.now());
+  await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{title}', to_jsonb($2::text)) WHERE id = $1`, [parent.id, `Face moved ${randomUUID()}`]);
+  const slow = evaluations({ holdMs: 0.8 * interval });
+  const faceStarted = performance.now();
+  try { await engine.reconcile(); } finally { slow.restore(); }
+  const face = engine.reconcileTicks.at(-1)!;
+  assert.equal(face.full?.cause, 'faces', 'the moved face makes the pass full');
+  assert.ok(performance.now() > viewStarted + interval, 'the face pass ended past the deadline the earlier full pass set');
+
+  // Straight after it: not a clock full pass — the face pass restarted the clock from when it began.
+  await engine.reconcile();
+  assert.equal(engine.lastReconcile.full, false, `the tick after a slow face full pass is not full: ${JSON.stringify(engine.reconcileTicks.at(-1)!.full)}`);
+
+  // Past I from the face pass, inside 3× its length: still not full — its length was recorded too.
+  const stretch = 3 * face.ms;
+  assert.ok(stretch > interval, `the face pass outlasts a third of the interval (D=${face.ms} ms)`);
+  await sleep(faceStarted + (interval + stretch) / 2 - performance.now());
+  await engine.reconcile();
+  assert.equal(engine.lastReconcile.full, false, `not due before max(I, 3D) = ${stretch} ms after the face pass began (D=${face.ms} ms)`);
+  engine.reconcileFullEvaluationMs = 300_000;
+  await settle();
+});
+
 test('unit:reconcile-yields-between-items — timers scheduled during a batched evaluation fire between items, and the evaluation writes what it wrote', { timeout: 120_000 }, async () => {
   const items: Work[] = [];
   for (let n = 0; n < 40; n++) items.push(await create());
