@@ -1194,6 +1194,36 @@ test('manual:fault-class-decision — action:decision|GY-1884|2026-10-17T08:25:2
   assert.ok(Object.values(live.actions).some(action => action.state === 'failed' && /agent_name_taken/.test(action.detail)), 'the refusal stands');
 });
 
+test('manual:fault-class-decision — action:decision|GY-1884: a recovery relaunch that loses the freed slot or every account waits for capacity, not a failed decision', async () => {
+  // Review of 6653b93a: once the leftover is ended and closed, another launch can take the freed slot (a role-capacity refusal) or the
+  // last account (capacityExhausted) before the recovery's own relaunch. Either is the capacity wait the first launch's refusal would be.
+  const decisionId = 'a17c5808-0000-4000-8000-000000001885';
+  const name = approverSessionName({ key: 'GY-1884' } as Work, decisionId);
+  const heldName = () => new Error(`No session can be launched as ${JSON.stringify(name)}: the runtime refused it: {"error":{"code":"agent_name_taken","message":"agent name ${name} is already used; candidates: terminal_id=term_1 pane_id=w1V:pQGR workspace_id=w1V tab_id=w1V:tQGM"}}`);
+  const slotTaken = () => Object.assign(new Error('approver role is at its concurrency limit of 1'), { roleAtCapacity: 'approver role is at its concurrency limit of 1 (1 running)' });
+  const accountsSpent = () => Object.assign(new Error('every approver account is spent until 12:00Z'), { capacityExhausted: true });
+  for (const [form, refusal, wait] of [['role capacity', slotTaken, /concurrency limit of 1 \(1 running\)/], ['capacityExhausted', accountsSpent, /every approver account is spent/]] as const) {
+    const work = instanceItem('GY-1884', false, true), closed: string[] = [], ended: string[] = [];
+    let launches = 0;
+    const state = emptyDaemonState(loopConfig());
+    await runCycle(loopConfig(), state, instanceEffects(() => work, {
+      decide: async () => ({ id: decisionId }),
+      decisions: async () => ({ decisions: [{ id: decisionId, action: 'rework', state: 'requested', input: {}, approvedBy: null }] }),
+      approver: async () => { launches += 1; throw launches === 1 ? heldName() : refusal(); },
+      approverLaunch: async () => ({ account: null, runtime: 'claude', session: 'registry-1885', pane: 'w1V:pQGR' }),
+      endRegistrySession: async session => { ended.push(session); },
+      closeSession: pane => { closed.push(pane); },
+    }), () => instanceClock);
+    assert.deepEqual([ended, closed, launches], [['registry-1885'], ['w1V:pQGR'], 2], `${form}: the leftover is ended and closed and the launch made once more`);
+    const watch = Object.values(state.approvals).find(entry => entry.decision === decisionId)!;
+    assert.match(watch.capacity ?? '', wait, `${form}: the watch keeps the capacity wait, so it stays in the oldest-first relaunch queue`);
+    assert.equal(watch.launches, 0, `${form}: a launch no slot or account took is not counted against the bound`);
+    assert.equal(Object.values(state.actions).filter(action => action.state === 'failed').length, 0, `${form}: no failed decision action: ${JSON.stringify(state.actions)}`);
+    assert.ok(Object.values(state.actions).some(action => action.state === 'done' && /closed leftover approver pane w1V:pQGR/.test(action.detail)), `${form}: the recovery is named beside the wait`);
+    assert.deepEqual(decisionInstances(state), [], `${form}: a capacity wait judged nothing`);
+  }
+});
+
 test('manual:fault-class-decision — owed-decision|GY-1834|2026-10-16T22:35:33.279Z: the new head the owed rework names is produced, so the line never stands past its bound', async () => {
   // The instance: the reviewer's change request owed GY-1834 a new head; for 52 minutes nothing
   // produced it or settled the decision, because the approver launch met the same held-name refusal

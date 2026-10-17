@@ -59,10 +59,10 @@ export type HeldNameIo = { effects: DaemonEffects; state: DaemonState; stamp: st
  * pane-bound launch record dating it (`adopted`, no launch made); a pane listed under another name is a live session this
  * decision's name cannot be judged against, and is left alone; an unlisted pane is the leftover the failure's own remedy names
  * for a hand (`herdr pane close … on the host`): the registry session its pane-bound launch record names is ended first, so
- * the role's slot it held is free, then the pane is closed and the launch is made once more (`launched`). Anything else returns the launch's failure (`failed`) — the refusal itself, or the repeated launch's — so a name some live session holds is
+ * the role's slot it held is free, then the pane is closed and the launch is made once more (`launched`). Anything else returns the launch's failure (`failed`) — the refusal itself, or the repeated launch's with the recovery's `detail`, which the caller classifies as a capacity wait like the first launch's — so a name some live session holds is
  * never closed and a recovery that cannot be made never loops.
  */
-export async function recoverHeldName(io: HeldNameIo, item: Work, watch: ApprovalWatch, error: unknown, relaunch: () => Promise<Launched>): Promise<{ adopted: string } | { launched: Launched; detail: string } | { failed: unknown; session?: string }> {
+export async function recoverHeldName(io: HeldNameIo, item: Work, watch: ApprovalWatch, error: unknown, relaunch: () => Promise<Launched>): Promise<{ adopted: string } | { launched: Launched; detail: string } | { failed: unknown; session?: string; detail?: string }> {
   const { effects, state } = io, name = approverSessionName(item, watch.decision), leftover = heldApproverPaneIn(error, name);
   if (!leftover || leftover === watch.pane) return { failed: error };
   io.invalidate();
@@ -87,5 +87,5 @@ export async function recoverHeldName(io: HeldNameIo, item: Work, watch: Approva
   try { await effects.closeSession(leftover); } catch { return { failed: error }; }
   io.invalidate();
   const detail = `closed leftover approver pane ${leftover}${session ? ` and ended its registry session ${session}` : ''}, which held session name ${name} while listed nowhere`;
-  try { return { launched: await relaunch(), detail }; } catch (retry) { return { failed: retry }; }
+  try { return { launched: await relaunch(), detail }; } catch (retry) { return { failed: retry, detail }; }
 }
