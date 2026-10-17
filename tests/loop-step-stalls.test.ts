@@ -777,7 +777,7 @@ test('unit:loop-step-stall-upstream — a stall past six consecutive failing cyc
   }
   const [stall] = Object.values(loop.stepStalls);
   assert.equal(stall.count, S.stallUpstreamCycles);
-  assert.equal(S.stallFilesUpstream(stall), true);
+  assert.equal(U.stallFilesUpstream(stall), true);
   assert.equal(S.stallUpstreamCycles, 2 * S.stallCycleBound);
 
   const asks: { input: unknown; key: string }[] = [];
@@ -825,7 +825,7 @@ test('unit:loop-step-stall-upstream — a stall past six consecutive failing cyc
   // A stall under the bound is listed but files nothing yet.
   const early = state();
   for (const cycle of [1, 2, 3]) S.noteCycleStalls(early, [failing], cycle, tick(1));
-  assert.equal(S.stallFilesUpstream(Object.values(early.stepStalls)[0]), false);
+  assert.equal(U.stallFilesUpstream(Object.values(early.stepStalls)[0]), false);
   assert.equal(await U.fileStalledStepsUpstream(early, filer, () => clock, persist), null);
   assert.equal(asks.length, 1);
   const earlyList = U.stallStatusAttention(early, 'graphyard.mjs');
@@ -881,7 +881,7 @@ test('unit:loop-step-stall-upstream-retries — an interrupted filing, a failed 
 
   // The stall re-forms under the same signature: its filed key files nothing more.
   for (const cycle of [20, 21, 22, 23, 24, 25]) { cleared.cycle = cycle; S.noteCycleStalls(cleared, [failing], cycle, tick(S.stallBackoffMs + 1)); }
-  assert.equal(S.stallFilesUpstream(Object.values(cleared.stepStalls)[0]!), true);
+  assert.equal(U.stallFilesUpstream(Object.values(cleared.stepStalls)[0]!), true);
   delete cleared.actions[U.stallUpstreamActionKey(Object.values(cleared.stepStalls)[0]!.signature)];
   assert.equal(await U.fileStalledStepsUpstream(cleared, filer, () => clock, persist), null);
   assert.equal(asks.length, 2, 'one item per signature, even after the done row is pruned');

@@ -20,8 +20,8 @@ import { localTransport } from '../install/transport.js';
 import { DispatchReservedError } from '../master/dispatch-reservation.js';
 import { setupAgentEnvironments } from '../master/environments.js';
 
-/** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1). */
-export const stallCycleBound = 3;
+/** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1); past twice that an uncleared stall files its one upstream item (GY-1855 AC-2, stallFilesUpstream in ./stall-upstream.ts): woken at three, the master holds one stall-length more. */
+export const stallCycleBound = 3, stallUpstreamCycles = 2 * stallCycleBound;
 /**
  * A stalled call is attempted at most once per five minutes while its stall stands (GY-1854 AC-1):
  * `noteStepFailure` arms one window per attempt, failures inside it are that attempt still failing,
@@ -375,11 +375,6 @@ export async function remedyStalledSteps(state: DaemonState, runner: StepStallRe
 
 /** The subject key one stall rides the master wake as, hashed off its signature so a standing stall is never a second subject. */
 export const stallSubjectKey = (signature: string) => `stall:${createHash('sha256').update(signature).digest('hex').slice(0, 12)}`;
-
-/** Past this many consecutive failing cycles an uncleared stall files its one upstream item (GY-1855 AC-2): woken at three, the master session holds one full stall-length more. */
-export const stallUpstreamCycles = 2 * stallCycleBound;
-/** Whether a standing stall files its one upstream item: it still needs the master session and stood past the bound. */
-export const stallFilesUpstream = (stall: StepStall): boolean => stallNeedsMaster(stall) && stall.count >= stallUpstreamCycles;
 
 /**
  * Whether a stall needs the master session: no remedy binds to it, or its one bound remedy was

@@ -10,9 +10,11 @@ import { message, type DaemonAction, type DaemonState, type StepStall } from './
 import type { DaemonEffects } from './effects.js';
 import { record } from './preserve.js';
 import { readyToRetry } from './sessions.js';
-import { stallCycleBound, stallFilesUpstream, stallSubjectKey, stallUpstreamCycles } from './step-stalls.js';
+import { stallCycleBound, stallNeedsMaster, stallSubjectKey, stallUpstreamCycles } from './step-stalls.js';
 import { type AttentionItem, agentOwner } from '../master/attention.js';
 
+/** Whether a standing stall files its one upstream item (GY-1855 AC-2): it still needs the master session and stood past `stallUpstreamCycles`. */
+export const stallFilesUpstream = (stall: StepStall): boolean => stallNeedsMaster(stall) && stall.count >= stallUpstreamCycles;
 /** Cursor action key for one stall's upstream filing (GY-1855): derived from its subject so a done row is the local dedup. */
 export const stallUpstreamActionKey = (signature: string) => `stall-upstream:${stallSubjectKey(signature).slice('stall:'.length)}`;
 /** Idempotency key for the filed item: the signature alone, so a retry or re-ask returns the one item already filed. */
