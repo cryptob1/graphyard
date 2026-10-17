@@ -15,7 +15,7 @@
 // owner marker naming the process that made it, which is what makes "whose owning process is
 // gone" checkable rather than guessed from a modification time.
 
-import { existsSync, readFileSync, type Dirent, type Stats } from 'node:fs';
+import { existsSync, readFileSync, readlinkSync, type Dirent, type Stats } from 'node:fs';
 import { chmod, lstat, opendir, readdir, readFile, readlink, realpath, rm, stat, statfs, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -144,28 +144,54 @@ export function processStartTicks(pid: number, procRoot = '/proc'): number | nul
 }
 
 /** The owner marker a directory created through the tests' helper carries, as a sibling file. */
-export interface TempOwner { pid: number; startedAt: number | null; at: string }
+export interface TempOwner { pid: number; startedAt: number | null; pidNamespace: string | null; at: string }
+/**
+ * The PID namespace `procRoot`'s own process runs in (`pid:[4026531836]`, the target of
+ * `self/ns/pid`), or null when it cannot be read (not Linux, or a fabricated table without one). A
+ * pid means something only in the namespace it was taken in (GY-1370), so a writer records which
+ * one its pid names and a reader answers a pid lookup only from the marker's own.
+ */
+export const processPidNamespace = (procRoot = '/proc'): string | null => {
+  try { return readlinkSync(join(procRoot, 'self', 'ns', 'pid')); } catch { return null; }
+};
 export const readTempOwner = async (directory: string): Promise<TempOwner | null> => {
   const marker = tempOwnerMarker(directory);
   // Most candidates carry no marker at all: a stat beats the read's exception on a scan of thousands.
   if (!existsSync(marker)) return null;
   try {
-    const parsed = JSON.parse(await readFile(marker, 'utf8')) as TempOwner;
-    return typeof parsed?.pid === 'number' ? { ...parsed, startedAt: typeof parsed.startedAt === 'number' ? parsed.startedAt : null } : null;
+    const parsed = JSON.parse(await readFile(marker, 'utf8')) as Partial<TempOwner>;
+    return typeof parsed?.pid === 'number' ? { ...parsed, startedAt: typeof parsed.startedAt === 'number' ? parsed.startedAt : null, pidNamespace: typeof parsed.pidNamespace === 'string' ? parsed.pidNamespace : null, at: typeof parsed.at === 'string' ? parsed.at : '' } as TempOwner : null;
   } catch { return null; }
 };
 /** Mark `directory` as owned by this process, so a later pass knows whose exit frees it. */
 export const writeTempOwner = async (directory: string, now = Date.now()): Promise<TempOwner> => {
-  const owner: TempOwner = { pid: process.pid, startedAt: processStartTicks(process.pid), at: new Date(now).toISOString() };
+  const owner: TempOwner = { pid: process.pid, startedAt: processStartTicks(process.pid), pidNamespace: processPidNamespace(), at: new Date(now).toISOString() };
   await writeFile(tempOwnerMarker(directory), `${JSON.stringify(owner)}\n`);
   return owner;
 };
-/** Whether the process that owns a marked directory is no longer running, pid reuse included. */
+/**
+ * Whether this reader may judge `owner` by a pid lookup at all: only from the namespace the marker
+ * was taken in (GY-1896). A marker from another PID namespace names a pid this reader cannot see or
+ * mismatches with one of its own, and one recorded before namespaces were kept could have been
+ * written by any sandbox on the host, so neither is judged from this reader's table. A reader that
+ * cannot read a namespace (a fabricated /proc) judges only markers that recorded none, the shape
+ * every pre-namespace marker has. Without /proc (macOS and the like) there are no namespaces and
+ * the signal-0 probe decides.
+ */
+export const tempOwnerJudgeable = (owner: TempOwner, procRoot = '/proc'): boolean =>
+  !existsSync(procRoot) || processPidNamespace(procRoot) === owner.pidNamespace;
+/**
+ * Whether the process that owns a marked directory is no longer running, pid reuse included. A
+ * marker this reader cannot judge by pid — another PID namespace's, GY-1896 — is never reported
+ * gone here: its pid is absent from this reader's table whether its writer lives or not. Its
+ * directory is judged as an ownerless one is, by age and live holders (reclaimRoot).
+ */
 export function tempOwnerGone(owner: TempOwner, procRoot = '/proc'): boolean {
   if (!existsSync(procRoot)) {
     // No /proc (macOS and the like): a signal-0 probe is the check, and EPERM means another user's live process.
     try { process.kill(owner.pid, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === 'ESRCH'; }
   }
+  if (!tempOwnerJudgeable(owner, procRoot)) return false;
   if (!existsSync(join(procRoot, String(owner.pid)))) return true;
   const startedAt = processStartTicks(owner.pid, procRoot);
   return owner.startedAt !== null && startedAt !== null && startedAt !== owner.startedAt;
@@ -714,17 +740,25 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
     }
     report.scanned++;
     const owner = entry.isDirectory() ? await readTempOwner(path) : null;
+    // A marker from another PID namespace — or one recorded before namespaces were, GY-1896 — is
+    // never judged by this reader's pid table: the writer's sandbox may still be running though its
+    // pid is absent here, which is how a sweep in one sandbox took a live run's Postgres data dir
+    // away in another. Such a directory is judged as an ownerless one is, by its age and its live
+    // holders, from the module bound rather than its name's: six hours outlasts any run a pass
+    // could race, where a name's two would not.
+    const judged = owner === null || tempOwnerJudgeable(owner);
     const gone = owner ? tempOwnerGone(owner) : false;
     // A live owner keeps its directory only when its start could be recorded: without it a recycled
     // pid would pass for the dead run's owner for as long as it lives, so such a directory is judged
     // as an ownerless one is — by its age and its live holders.
-    if (owner && !gone && owner.startedAt !== null) { report.kept++; continue; }
+    if (owner && !gone && owner.startedAt !== null && judged) { report.kept++; continue; }
     if (owner && gone) { removable.push({ path, mtime: 0, kind }); }
     else {
+      const bound = judged ? maxAgeMs : Math.max(maxAgeMs, tmpReclaimMinAgeMs);
       // A directory's entries are read only once the directory itself is old: a young one is kept on one stat.
       // An entry an earlier pass began removing is due at once: its half-finished removal is what made it look young (GY-1401).
-      let written = pass.unfinished.has(path) ? 0 : now - info.mtimeMs < maxAgeMs || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
-      if (now - written < maxAgeMs) { report.kept++; continue; }
+      let written = pass.unfinished.has(path) ? 0 : now - info.mtimeMs < bound || !entry.isDirectory() ? info.mtimeMs : await lastWritten(path, info.mtimeMs);
+      if (now - written < bound) { report.kept++; continue; }
       // Only holders under the scanned root can hold a candidate, and on a host with a backlog the
       // raw scan holds thousands of paths elsewhere: reduce it once to the root's entries, then
       // every check is a single lookup.
@@ -735,7 +769,7 @@ async function reclaimRoot(root: string, real: string, pass: PassState, report: 
       // An agent's scratch checkout is judged by its whole tree, read last: only an old, unheld one is walked.
       if (written && tree) {
         written = await treeLastWritten(path, written);
-        if (now - written < maxAgeMs) { report.kept++; continue; }
+        if (now - written < bound) { report.kept++; continue; }
       }
       removable.push({ path, mtime: written, kind });
     }
