@@ -1053,10 +1053,29 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const counts = report?.counts;
       if (counts) writtenProfiles = { workers: counts.workers ?? 0, reviewers: counts.reviewers ?? 0 };
     };
-    // A run resuming over an earlier pass's completed accounts step still writes the profiles it may lack.
-    if (state.completed.includes('accounts')) await writeProfiles();
+    const accountIds: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
+    // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
+    // handed off in agent mode, on the Setup page interactively. A profile still missing is written
+    // again on each wait, and a wait that polled at all is followed by one more write: an account
+    // signed in during it (say B, while A's profiles already made both counts nonzero) gets its own
+    // profile before the lines are taken as green, and a write that still leaves one missing waits again.
+    const awaitAccounts = async () => {
+      for (;;) {
+        let waited = false;
+        await waitGreen(accountIds, true, async (pending, polls) => {
+          waited = true;
+          if (profileMissing()) await writeProfiles();
+          if (request.agent && polls > 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
+        }, 1);
+        if (!waited) return;
+        await writeProfiles();
+        if (!profileMissing()) return;
+      }
+    };
+    // A run resuming over an earlier pass's completed accounts step still writes the profiles it may
+    // lack, and waits for them here with the same rewrite, never in a later wait that writes nothing.
+    if (state.completed.includes('accounts')) { await writeProfiles(); await awaitAccounts(); }
     await step('accounts', async () => {
-      const accounts: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
       // In either mode (GY-1477), login homes and keys already on this host become the fleet; nothing is signed in here.
       await run('accounts', ['master', 'registry', 'propose', '--apply']);
       // GY-1850: and the profiles, so master.json holds a reviewer and a worker profile for every
@@ -1064,13 +1083,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // refused for an unknown reviewer profile. The lines are green only once both exist (one worker
       // profile under supervised setup, which launches no reviewer).
       await writeProfiles();
-      // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
-      // handed off in agent mode, on the Setup page interactively. A profile still missing is written
-      // again on each wait, so an account signed in during it gets its profile.
-      await waitGreen(accounts, true, async (pending, polls) => {
-        if (profileMissing()) await writeProfiles();
-        if (request.agent && polls > 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
-      }, 1);
+      await awaitAccounts();
     });
 
     await step('harness', async () => { await run('harness', ['master', 'harness', request.master, '--apply']); });

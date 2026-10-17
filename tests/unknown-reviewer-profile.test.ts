@@ -333,3 +333,53 @@ test('unit:up-writes-profiles — an account signed in while the accounts step w
   const stored = JSON.parse(await readFile(join(checkout, '.graphyard/master.json'), 'utf8'));
   assert.equal(stored.reviewers.length, 1, 'master.json holds the reviewer profile written during the wait');
 });
+
+// Review of eb35104f347d, thread PRRT_kwDOUZby-s6tdp2R: a resumed run whose one write reports no profile waits with the rewrite, not in a later wait that writes nothing.
+test('unit:up-writes-profiles — a resumed run over a completed accounts step whose write reports a profile missing writes again while it waits, so an account signed in then gets its profile and the run ends green', async () => {
+  const { runUp } = await import('../src/up.js');
+  const checkout = await temporaryDirectory('up-writes-profiles-resumed-late');
+  // One world for both passes, so the resumed one sees the installed server and ready fleet the first left.
+  const profiles = { workers: 1, reviewers: 1 };
+  const world = upWorld(checkout, [], profiles);
+  assert.equal((await runUp(request(), world.deps)).exitCode, 0);
+  profiles.workers = 0; profiles.reviewers = 0;
+  const cli = world.deps.cli;
+  let writes = 0;
+  world.deps.cli = async (args, options) => {
+    // The resumed pass's first write finds nothing signed in; the account finishes signing in before the next.
+    if (args.join(' ') === 'master environments --apply' && ++writes === 2) { profiles.workers = 1; profiles.reviewers = 1; }
+    return cli(args, options);
+  };
+  const result = await runUp(request(), world.deps);
+  assert.equal(result.exitCode, 0, result.next);
+  assert.ok(writes >= 2, 'the resumed run wrote the profiles again while they were missing');
+  for (const id of ['account:worker', 'account:reviewer'] as const) assert.equal(result.checklist.find(item => item.id === id)?.done, true, `${id} is green once the profiles exist`);
+});
+
+// Review of eb35104f347d, thread PRRT_kwDOUZby-s6tdp2T: nonzero global counts from account A say nothing of account B, which a role still waits on.
+test('unit:up-writes-profiles — with profiles already written for account A, an account B signed in while a role waits for it gets its own profile before the accounts step ends', async () => {
+  const { runUp } = await import('../src/up.js');
+  const checkout = await temporaryDirectory('up-writes-profiles-second-account');
+  const profiles = { workers: 1, reviewers: 1 };
+  const world = upWorld(checkout, [], profiles);
+  const status = world.deps.status, cli = world.deps.cli;
+  let signedIn = false, polls = 0;
+  world.deps.status = async () => {
+    const served: any = await status();
+    if (!served?.fleet?.roles?.length) return served;
+    // The reviewer role waits for account B, which signs in on the third poll; A's profiles exist throughout.
+    if (++polls >= 3) signedIn = true;
+    return { ...served, fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: signedIn ? ['claude-b'] : [] }],
+      accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }, ...(signedIn ? [{ name: 'claude-b', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] : [])] } };
+  };
+  world.deps.cli = async (args, options) => {
+    // master environments --apply makes a reviewer profile for every logged-in environment: B's once B is signed in.
+    if (args.join(' ') === 'master environments --apply') profiles.reviewers = signedIn ? 2 : 1;
+    return cli(args, options);
+  };
+  const result = await runUp(request(), world.deps);
+  assert.equal(result.exitCode, 0, result.next);
+  assert.ok(result.completed.includes('accounts'));
+  const stored = JSON.parse(await readFile(join(checkout, '.graphyard/master.json'), 'utf8'));
+  assert.equal(stored.reviewers.length, 2, 'master.json holds a reviewer profile for account B, signed in during the wait');
+});
