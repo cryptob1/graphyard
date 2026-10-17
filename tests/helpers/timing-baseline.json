@@ -923,6 +923,6 @@
     "tests/park-requirements-bare-noun.test.ts": 196,
     "tests/github-polling-control-plane.test.ts": 2000,
     "tests/soak-control-plane-observation-job.test.ts": 1500,
-    "tests/evaluator-recovery.test.ts": 2050
+    "tests/evaluator-recovery.test.ts": 4000
   }
 }

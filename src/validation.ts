@@ -3,7 +3,7 @@ import { recordScenarioRun } from './test-runs.js';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
-import { admin, attachedCriteria, demand, exerciseRefusal, proofExerciseSchema, proofSchema, Refusal, type Evidence, type EvidenceArtifact, type Principal, type Work } from './model.js';
+import { admin, attachedCriteria, demand, evaluateWithRecovery, exerciseRefusal, proofExerciseSchema, proofSchema, Refusal, type EvaluationRecord, type Evidence, type EvidenceArtifact, type Principal, type Work } from './model.js';
 import { save, wakeJob } from './store.js';
 import { authorizedForEveryProof, authorizedForProof } from './proof-grants.js';
 import { Engine } from './engine.js';
@@ -79,11 +79,13 @@ export type AttemptMeasurements = z.infer<typeof measurementsSchema>;
 /** What the collector reported for a finished attempt, kept for replay comparison and analytics. */
 export type AttemptReport = { execution: string; behavior: string; executed: number; skipped: number; inventoryComplete: boolean; artifactState: string; attribution: string; measurement: string; passed: boolean };
 export type Attempt = { id: string; epoch: number; dispatchedAt: string; expiresAt: string; acknowledgedAt?: string; collectingAt?: string; lastHeartbeatAt?: string; finishedAt?: string; state: 'dispatched' | 'running' | 'completed' | 'expired' | 'cancelled' | 'superseded'; settled: boolean;
+  /** GY-1841: the collector result's evaluation under the recovery rule — every evaluator attempt with its time, outcome and cause. */
+  evaluation?: EvaluationRecord;
   /** The independently observed target identity when the grant was issued; the result must hold it across the whole window. */
   target?: { state: TargetIdentity['state']; observationIds: string[]; observedAt: string | null; digestHash: string | null };
   /** The durable dispatch order (validation_attempts.seq); absent on attempts that predate it. */
   sequence?: number; report?: AttemptReport; measurements?: AttemptMeasurements };
-export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'collecting' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[] };
+export type ValidationRequest = z.infer<typeof requestSchema> & { id: string; workId: string; proof: string; state: 'queued' | 'dispatched' | 'running' | 'collecting' | 'completed' | 'cancelled' | 'expired' | 'superseded'; attempts: Attempt[]; createdAt: string; createdBy: string; result?: { accepted: boolean; passed: boolean; reasons: string[]; fault?: EvaluationRecord['fault'] };
   /** What the request is bound to for attribution: manifest, signature, target kind and the target observed at creation. Never rewritten; a moved target supersedes the request and a fresh one is created. */
   attribution?: RequestAttribution };
 const commandSchema = z.object({ requestId: z.uuid(), attemptId: z.uuid(), epoch: revision }).strict();
@@ -119,6 +121,8 @@ const same = isDeepStrictEqual;
 export class Validation {
   /** External artifact bytes, when configured. Null keeps bytes in the Postgres row. */
   artifactBackend: ArtifactBackend | null = null;
+  /** GY-1841: the recovery rule's retry spacing and attempt clock for collector results; a test drives both without the wall clock. */
+  evaluationRecovery: { sleep?: (ms: number) => Promise<void>; now?: () => Date } = {};
   artifactCapacityBytes = defaultArtifactCapacityBytes;
   /** D6: scoped evidence reuse and artifact replay, built on this protocol's authority checks. */
   readonly reuse = new EvidenceReuse(this);
@@ -543,35 +547,43 @@ export class Validation {
         if (data.behavior === 'passed' && w) await appendAttribution(db, now, { workId: w.id, workKey: w.key, proof: r.proof, environmentId: c.environment.id, candidateId: c.id, requestId: r.id, attemptId: data.attemptId, kind: 'unsupported-claim-refused', dedupe: `unsupported-claim-refused:${r.id}:${data.attemptId}:${hash(data)}`, details: { claim: 'result', reasons: rejection, reason: rejection.join('; ') } });
         return result;
       }
-      const reasons = await this.reportReasons(db, c, data);
+      // GY-1841: judging the retained evidence is an evaluation under the explicit recovery rule of
+      // model/evidence.ts. An evaluator-error — the retained bytes cannot be read, or the evaluator
+      // itself threw — is retried against the same pinned artifact rows at most twice; a fail is
+      // never retried; a pass on retry is the proof's result; every attempt is kept on the attempt
+      // and the evidence. Exhausted retries are the item's fault on its selection, never a failed proof.
+      const format = ((await this.definition(db, 'bundle', c.bundle, false)) as Bundle).reportFormat ?? defaultReportFormat;
+      const stored: ArtifactRow[] = c.artifactStorage === 'postgres' ? (await db.query('SELECT id,name,digest,expires_at,media_type,size,state,backend,location,bytes FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2', [r.id, a!.id])).rows : [];
+      let judged: { reasons: string[]; expiresAt?: string; evidenceArtifacts: EvidenceArtifact[] } | undefined;
+      const evaluation = await evaluateWithRecovery(format, async () => {
+        await db.query('SAVEPOINT graphyard_evaluation');
+        try {
+          judged = await this.judgeResult(db, c, data, r.id, stored, now);
+          await db.query('RELEASE SAVEPOINT graphyard_evaluation');
+          return judged.reasons.length ? 'fail' : 'pass';
+        } catch (error) {
+          await db.query('ROLLBACK TO SAVEPOINT graphyard_evaluation'); await db.query('RELEASE SAVEPOINT graphyard_evaluation');
+          return { error: error instanceof Error ? error.message : 'The evaluator failed' };
+        }
+      }, this.evaluationRecovery);
+      if (evaluation.fault) {
+        const errors = evaluation.fault.errors;
+        const result = { accepted: true, passed: false, reasons: errors, fault: evaluation.fault };
+        current.state = 'completed'; current.result = result; a!.state = 'completed'; a!.finishedAt = now.toISOString(); a!.settled = data.executionSettled; a!.evaluation = evaluation;
+        if (a!.settled) await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
+        await this.persist(db, current);
+        w.validation![r.proof].fault = { kind: 'evaluator-error', errors, attempts: evaluation.attempts, requestId: r.id, attemptId: a!.id, at: now.toISOString() };
+        await this.changed(db, w, actor.id, 'evaluation-fault', now, { requestId: r.id, attemptId: a!.id, evaluation });
+        return result;
+      }
+      const { reasons, evidenceArtifacts } = judged!;
+      const expiresAt = judged!.expiresAt;
       // The collector's word about the target is necessary, never sufficient: observers must
       // have seen the candidate manifest running for the whole window, and nothing else.
       const attribution = await this.reanchoring.settle(db, current, a!, c, w, data, reasons, now);
-      let expiresAt: string | undefined;
-      const evidenceArtifacts: EvidenceArtifact[] = [];
-      if (c.artifactStorage === 'postgres') {
-        const stored: ArtifactRow[] = (await db.query('SELECT id,name,digest,expires_at,media_type,size,state,backend,location FROM validation_artifacts WHERE request_id=$1 AND attempt_id=$2', [r.id, a!.id])).rows;
-        for (const required of c.requiredArtifacts) {
-          const supplied = data.artifacts.find(x => x.name === required);
-          const actual = stored.find(x => x.name === required && supplied?.digest === x.digest && supplied?.url === this.artifactUrl(r.id, x.id));
-          // Each refusal names its own state: an upload that failed, retention that lapsed and
-          // bytes that never arrived call for different next steps.
-          const availability = !actual ? 'missing' : actual.state === 'upload-failed' ? 'upload-failed' : actual.state === 'stored' && actual.expires_at > now ? 'available' : actual.state === 'pending' ? 'missing' : 'expired';
-          if (availability === 'upload-failed') reasons.push(`Private artifact ${required} upload failed; the collector must retry the upload or the attempt is unverifiable`);
-          else if (availability === 'expired') reasons.push(`Private artifact ${required} retention expired`);
-          else if (availability !== 'available') reasons.push(`Private artifact ${required} is missing, expired or mismatched`);
-          if (actual) {
-            const artifactExpiry = actual.expires_at.toISOString();
-            if (!expiresAt || artifactExpiry < expiresAt) expiresAt = artifactExpiry;
-            evidenceArtifacts.push({ kind: this.artifactKind(actual.name, actual.media_type), label: actual.name, mediaType: actual.media_type, size: Number(actual.size ?? 0), digest: actual.digest, expiresAt: artifactExpiry,
-              availability, reference: { requestId: r.id, artifactId: actual.id } });
-          } else evidenceArtifacts.push({ kind: this.artifactKind(required), label: required, availability: 'missing' });
-        }
-      } else evidenceArtifacts.push(...data.artifacts.map(artifact => safeHttpUrl(artifact.url)
-        ? { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'external' as const, url: artifact.url }
-        : { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'missing' as const }));
       const result = { accepted: true, passed: reasons.length === 0, reasons };
-      current.state = 'completed'; current.result = result; a!.state = 'completed'; a!.finishedAt = now.toISOString(); a!.settled = data.executionSettled;
+      current.state = 'completed'; current.result = result; a!.state = 'completed'; a!.finishedAt = now.toISOString(); a!.settled = data.executionSettled; a!.evaluation = evaluation;
+      delete w.validation![r.proof].fault;
       a!.report = { execution: data.execution, behavior: data.behavior, executed: data.executed, skipped: data.skipped, inventoryComplete: data.inventoryComplete, artifactState: data.artifactState, attribution: data.target.attribution, measurement: data.target.measurement, passed: result.passed };
       if (data.measurements) a!.measurements = data.measurements;
       if (a!.settled) await db.query('DELETE FROM validation_resources WHERE request_id=$1', [r.id]);
@@ -580,7 +592,7 @@ export class Validation {
       // rule as the evidence command: trusted only beside a stripped run that failed.
       const all = (await lockedWork(db, [w.id])).map(x => x.id === w.id ? w : x);
       const unexercised = result.passed ? exerciseRefusal(w, all, { proof: c.proof, result: 'pass', exercise: data.exercise }) : null;
-      const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: !unexercised, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution,
+      const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: !unexercised, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution, evaluation,
         ...(data.exercise ? { exercise: data.exercise } : {}), ...(unexercised ? { unexercised } : {}) };
       w.evidence.push(evidence);
       await recordScenarioRun(db, w, evidence);
@@ -591,6 +603,47 @@ export class Validation {
       await this.changed(db, w, actor.id, 'result', now, { requestId: r.id, attemptId: a!.id, report: data, result });
       return unexercised ? { ...result, unexercised } : result;
     });
+  }
+  /**
+   * One evaluation of a collector's result (GY-1841): the report checks and the retained artifacts —
+   * the rows pinned before the first attempt, re-read and digest-checked, never a newer query.
+   * A reason is a verdict on the change (a fail); a throw, such as bytes that cannot be read, is
+   * this attempt's evaluator-error and the recovery rule retries it.
+   */
+  private async judgeResult(db: pg.PoolClient, c: ValidationCandidate, data: Report, requestId: string, stored: ArtifactRow[], now: Date) {
+    const reasons = await this.reportReasons(db, c, data);
+    let expiresAt: string | undefined;
+    const evidenceArtifacts: EvidenceArtifact[] = [];
+    if (c.artifactStorage === 'postgres') {
+      for (const required of c.requiredArtifacts) {
+        const supplied = data.artifacts.find(x => x.name === required);
+        const actual = stored.find(x => x.name === required && supplied?.digest === x.digest && supplied?.url === this.artifactUrl(requestId, x.id));
+        // Each refusal names its own state: an upload that failed, retention that lapsed and
+        // bytes that never arrived call for different next steps.
+        const availability = !actual ? 'missing' : actual.state === 'upload-failed' ? 'upload-failed' : actual.state === 'stored' && actual.expires_at > now ? 'available' : actual.state === 'pending' ? 'missing' : 'expired';
+        if (availability === 'upload-failed') reasons.push(`Private artifact ${required} upload failed; the collector must retry the upload or the attempt is unverifiable`);
+        else if (availability === 'expired') reasons.push(`Private artifact ${required} retention expired`);
+        else if (availability !== 'available') reasons.push(`Private artifact ${required} is missing, expired or mismatched`);
+        if (actual && availability === 'available') {
+          let bytes = actual.bytes;
+          if (actual.backend !== 'postgres') {
+            if (!this.artifactBackend || this.artifactBackend.kind !== actual.backend) throw new Error(`Artifact ${required} is stored in the ${actual.backend} backend, which this server is not configured to read`);
+            try { bytes = await this.artifactBackend.get(actual.location!); } catch (error) { throw new Error(`Backend read of ${required} failed: ${error instanceof Error ? error.message : 'unknown'}`); }
+          }
+          if (!bytes) throw new Error(`Artifact ${required} bytes are missing from the backend`);
+          if (`sha256:${createHash('sha256').update(bytes).digest('hex')}` !== actual.digest) reasons.push(`Private artifact ${required} bytes fail the digest recorded at upload`);
+        }
+        if (actual) {
+          const artifactExpiry = actual.expires_at.toISOString();
+          if (!expiresAt || artifactExpiry < expiresAt) expiresAt = artifactExpiry;
+          evidenceArtifacts.push({ kind: this.artifactKind(actual.name, actual.media_type), label: actual.name, mediaType: actual.media_type, size: Number(actual.size ?? 0), digest: actual.digest, expiresAt: artifactExpiry,
+            availability, reference: { requestId, artifactId: actual.id } });
+        } else evidenceArtifacts.push({ kind: this.artifactKind(required), label: required, availability: 'missing' });
+      }
+    } else evidenceArtifacts.push(...data.artifacts.map(artifact => safeHttpUrl(artifact.url)
+      ? { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'external' as const, url: artifact.url }
+      : { kind: this.artifactKind(artifact.name), label: artifact.name, digest: artifact.digest, availability: 'missing' as const }));
+    return { reasons, expiresAt, evidenceArtifacts };
   }
   private artifactUrl(requestId: string, artifactId: string) {
     // A route identifier, not a bearer URL: the HTTP API always requires authentication.

@@ -41,6 +41,8 @@ export interface Evidence {
     artifact: { id: number; name: string; digest: string; url: string; createdAt: string };
   };
   validation?: { candidateId: string; requestId: string; attemptId: string };
+  /** GY-1841: the evaluation that judged this result under the recovery rule, every attempt kept with its time, outcome and cause. */
+  evaluation?: EvaluationRecord;
   /**
    * CI-produced evidence: the GitHub Actions job that executed the registered contract on this
    * commit, as the control plane read it back from GitHub before accepting the record. Only the

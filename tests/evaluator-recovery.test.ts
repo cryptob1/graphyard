@@ -36,6 +36,8 @@ const head = sha('1'), base = sha('b');
 const digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
 let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation;
 let serial = 0;
+/** The recovery rule's retry waits on the proof-result path, recorded instead of slept. */
+const waits: number[] = [];
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_EVALUATOR_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1841);
@@ -43,6 +45,7 @@ before(async () => {
   await pg.initialise(); await pg.start(); await pg.createDatabase('evaluator_recovery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/evaluator_recovery_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');
+  validation.evaluationRecovery = { sleep: async ms => { waits.push(ms); } };
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
@@ -103,21 +106,25 @@ const playwrightDocument = (executed: boolean, failed = false) => ({ format: 'gr
   executions: executed ? [{ id: 'a'.repeat(64), status: failed ? 'failed' : 'passed', retry: 0 }, { id: 'b'.repeat(64), status: 'passed', retry: 0 }] : [], steps: [], errors: 0, overflow: false, status: failed ? 'failed' : 'passed' });
 const upload = (command: { requestId: string; attemptId: string; epoch: number }, name: string, document: unknown) => ({ ...command, name, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(document)).toString('base64'), capturePolicy: 'approved-test-data-only' });
 
-/** Retain both artifacts for the attempt and have the collector claim the pass. */
-async function retain(f: Fixture, command: Awaited<ReturnType<typeof start>>, report = playwrightDocument(true)) {
+/** Retain both artifacts for the attempt and have the collector claim the pass; `failures` faults that many backend reads of the result's own evaluation. */
+async function retain(f: Fixture, command: Awaited<ReturnType<typeof start>>, report = playwrightDocument(true), options: { failures?: number; skipped?: number; expect?: boolean } = {}) {
   const inventory: any = await validation.uploadArtifact(collector, upload(command, 'inventory', playwrightDocument(false)), id());
   const executed: any = await validation.uploadArtifact(collector, upload(command, 'report', report), id());
-  const result: any = await validation.result(collector, { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'inventory', digest: inventory.digest, url: inventory.url }, { name: 'report', digest: executed.digest, url: executed.url }], artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
-  assert.equal(result.passed, true, result.reasons.join('; '));
-  return { inventory, executed };
+  f.backend.failures = options.failures ?? 0;
+  const result: any = await validation.result(collector, { ...command, execution: 'completed', behavior: 'passed', executed: 2, skipped: options.skipped ?? 0, inventoryComplete: true, target: { instance: `instance-${f.n}`, artifacts: [{ service: 'api', digest }], measurement: 'provider', coversEntireRun: true, attribution: 'matched' }, bundleDigest: digest, runnerImageDigest: inputs, artifacts: [{ name: 'inventory', digest: inventory.digest, url: inventory.url }, { name: 'report', digest: executed.digest, url: executed.url }], artifactState: 'verified', executionSettled: true, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
+  if (options.expect ?? true) assert.equal(result.passed, true, result.reasons.join('; '));
+  f.backend.failures = 0;
+  return { inventory, executed, result };
 }
+/** The request's last attempt, as the store holds it. */
+async function storedAttempt(requestId: string) { return (await store.pool.query('SELECT document FROM validation_requests WHERE id=$1', [requestId])).rows[0].document.attempts.at(-1); }
 
 test('unit:evaluator-error-retried — an evaluator-error is retried against the same retained evidence at most twice, a fail is never retried, and a pass on retry is the result', async () => {
   // The rule itself, without a database: exactly two retries at most, with the widening backoff.
-  const waits: number[] = [];
-  const exhausted = await evaluateWithRecovery('graphyard-playwright-v1', async () => ({ error: 'the evaluator crashed' }), { sleep: async ms => { waits.push(ms); } });
+  const ruleWaits: number[] = [];
+  const exhausted = await evaluateWithRecovery('graphyard-playwright-v1', async () => ({ error: 'the evaluator crashed' }), { sleep: async ms => { ruleWaits.push(ms); } });
   assert.equal(exhausted.attempts.length, evaluationRetries + 1, 'the first attempt plus at most two retries');
-  assert.deepEqual(waits, [evaluationRetryBackoffMs, evaluationRetryBackoffMs * 2]);
+  assert.deepEqual(ruleWaits, [evaluationRetryBackoffMs, evaluationRetryBackoffMs * 2]);
   let judged = 0;
   const failed = await evaluateWithRecovery('graphyard-playwright-v1', async () => { judged++; return 'fail'; }, { sleep: async () => assert.fail('a fail is never retried') });
   assert.equal(failed.outcome, 'fail'); assert.equal(failed.attempts.length, 1); assert.equal(judged, 1); assert.equal(failed.fault, null);
@@ -131,6 +138,7 @@ test('unit:evaluator-error-retried — an evaluator-error is retried against the
   const f = await fixture();
   const command = await start(f);
   await retain(f, command);
+  f.backend.reads.length = 0; // the result's own evaluation read the set once; count the replay's reads alone
   f.backend.failures = 1; // the first read of the first artifact throws: the host ran out of resources
   const replay = await validation.replay.replay(reader, { requestId: command.requestId, attemptId: command.attemptId }) as ReplayRecord;
   assert.equal(replay.evaluation.attempts.length, 2, JSON.stringify(replay.evaluation));
@@ -159,6 +167,34 @@ test('unit:evaluator-error-retried — an evaluator-error is retried against the
   assert.equal(contradiction.evaluation.attempts[0].outcome, 'fail'); assert.equal(contradiction.evaluation.attempts[0].cause, null);
   assert.equal(contradiction.evaluation.outcome, 'fail'); assert.equal(contradiction.evaluation.fault, null);
   assert.match(contradiction.differences.join('\n'), /Replayed verdict failed but the collector reported behavior passed/);
+
+  // The authorized proof-result path: the collector's result is itself evaluated under the rule.
+  // A host fault while reading the retained evidence is an evaluator-error; the retry re-reads the
+  // same pinned rows and its pass is the proof's result — the item's trusted pass evidence.
+  const p = await fixture();
+  const pCommand = await start(p);
+  waits.length = 0;
+  const { result: recoveredResult } = await retain(p, pCommand, playwrightDocument(true), { failures: 1 });
+  assert.equal(recoveredResult.passed, true);
+  const proven = currentEvidence(await current(p.w.id), p.proof)!;
+  assert.equal(proven.result, 'pass', 'the pass on retry is the proof’s result');
+  assert.equal(proven.trusted, true);
+  assert.equal(proven.evaluation?.outcome, 'pass');
+  assert.deepEqual(proven.evaluation?.attempts.map(x => x.outcome), ['evaluator-error', 'pass']);
+  assert.match(proven.evaluation!.attempts[0].cause!, /Backend read of inventory failed: host fault/);
+  assert.deepEqual(waits, [evaluationRetryBackoffMs], 'one retry, spaced by the first backoff');
+  assert.equal(new Set(p.backend.reads).size, 2, 'the retry read the same two pinned artifacts, never new evidence');
+  assert.equal((await current(p.w.id)).validation?.[p.proof]?.fault, undefined);
+
+  // A fail the collector's result earns is a verdict and is never retried, even with the host faulting.
+  const q = await fixture();
+  const qCommand = await start(q);
+  const { result: failedResult } = await retain(q, qCommand, playwrightDocument(true), { skipped: 1, expect: false });
+  assert.equal(failedResult.passed, false);
+  const refuted = currentEvidence(await current(q.w.id), q.proof)!;
+  assert.equal(refuted.result, 'fail');
+  assert.deepEqual(refuted.evaluation?.attempts.map(x => x.outcome), ['fail'], 'a fail is judged once');
+  assert.equal((await storedAttempt(qCommand.requestId)).evaluation.attempts.length, 1);
 });
 
 test('unit:evaluation-attempts-kept — every attempt is kept with its outcome, cause and time, and exhausted retries leave the evaluator errors as a fault, never a failed proof', async () => {
@@ -189,4 +225,34 @@ test('unit:evaluation-attempts-kept — every attempt is kept with its outcome, 
   assert.equal(after.revision, before.revision);
   const analytics = await validation.replay.analytics();
   assert.ok(analytics.replays.faults >= 1, 'the exhausted evaluation is counted as a fault');
+
+  // The authorized proof-result path: exhausted retries on the collector's own result are the
+  // item's fault on its proof selection, every attempt kept, and no failed proof is recorded.
+  const h = await fixture();
+  const hCommand = await start(h);
+  waits.length = 0;
+  const hBefore = await current(h.w.id);
+  const { result } = await retain(h, hCommand, playwrightDocument(true), { failures: Number.MAX_SAFE_INTEGER, expect: false });
+  assert.equal(result.passed, false);
+  assert.equal(result.fault.kind, 'evaluator-error');
+  assert.equal(result.fault.errors.length, evaluationRetries + 1);
+  assert.deepEqual(waits, [evaluationRetryBackoffMs, evaluationRetryBackoffMs * 2]);
+  const hAfter = await current(h.w.id);
+  // No evidence at all: the errors are a fault of the evaluation, never a failed proof.
+  assert.equal(hAfter.evidence.length, hBefore.evidence.length);
+  assert.equal(currentEvidence(hAfter, h.proof), undefined);
+  const fault = hAfter.validation?.[h.proof]?.fault;
+  assert.ok(fault, 'the item reports the evaluator errors as a fault on its proof selection');
+  assert.equal(fault.kind, 'evaluator-error');
+  assert.equal(fault.requestId, hCommand.requestId); assert.equal(fault.attemptId, hCommand.attemptId);
+  assert.equal(fault.attempts.length, evaluationRetries + 1);
+  assert.ok(fault.attempts.every(x => x.outcome === 'evaluator-error' && x.evaluator === 'graphyard-playwright-v1' && typeof x.at === 'string' && /Backend read of inventory failed: host fault/.test(x.cause!)));
+  assert.equal(new Set(fault.attempts.map(x => x.cause)).size, fault.attempts.length, 'every attempt kept its own cause');
+  assert.deepEqual(fault.errors, fault.attempts.map(x => x.cause));
+  // The proof record of the attempt keeps every evaluation attempt too.
+  const attempt = await storedAttempt(hCommand.requestId);
+  assert.deepEqual(attempt.evaluation.attempts, fault.attempts);
+  assert.deepEqual(attempt.evaluation.fault, { kind: 'evaluator-error', errors: fault.errors });
+  const events = (await store.pool.query("SELECT kind FROM events WHERE work_id=$1 AND kind='validation.evaluation-fault'", [h.w.id])).rows;
+  assert.equal(events.length, 1);
 });
