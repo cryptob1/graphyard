@@ -43,7 +43,6 @@ export interface SshOrigin {
 const run = (command: string, args: string[]) => new Promise<string>((accept, reject) => {
   execFile(command, args, { encoding: 'utf8', timeout: 60_000 }, (error: any, stdout) => {
     if (!error) return accept(String(stdout ?? ''));
-    if (error.code === 'ENOENT') { (error as { code?: unknown }).code = 'ENOENT'; }
     reject(error);
   });
 });
