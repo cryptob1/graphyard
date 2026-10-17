@@ -112,7 +112,6 @@ async function simulate(waits: boolean) {
       const serving = delivered.filter(work => contains(work.delivery!.mergeSha, production.sha));
       return { source: 'endpoint', sha: production.sha, at: iso(now), deployed: serving.map(work => work.key), pending: delivered.filter(work => !serving.includes(work)).map(work => work.key) } as never;
     },
-    postDeployFiler: async () => ({ filer: async () => [], dispose: async () => {} }),
   })['verify-deployment']!;
   const executor = { id: 'soak-executor', host: 'soak-host', principal: 'coordinator' };
 
@@ -128,7 +127,7 @@ async function simulate(waits: boolean) {
       const row = { id: `verify-${key}`, kind: 'verify-deployment', work: `id-${key}`, key, inputs: { kind: 'verify-deployment', mergeSha: merge, mergedAt: iso(now), state: 'done' },
         gate: 'merge', refusal: null, reason: `${key} merged as ${merge.slice(0, 12)} and no deployment carrying it has been observed`, binding: `delivery:${merge}`,
         requestedBy: 'graphyard', requestedAt: iso(now), state: 'pending', claim: null, attempts: 0, history: [] } as unknown as ActionRow;
-      works.push({ id: `id-${key}`, key, stage: 'done', delivery: { mergeSha: merge, mergedAt: iso(now) }, actionQueue: { actions: [row], history: [] } } as unknown as Work);
+      works.push({ id: `id-${key}`, key, stage: 'done', criteria: [], workspaces: [], delivery: { mergeSha: merge, mergedAt: iso(now) }, actionQueue: { actions: [row], history: [] } } as unknown as Work);
       rows.set(key, { key, merge, mergedAt: now, deliveredAt: null, stalledAt: null, attemptsAtEnd: null, servedAt: null, filed: 0 });
     }
     // The pipeline: a run concludes at the end of its validation, promoting its cut unless it fails; production serves a promotion a few minutes later.

@@ -15,35 +15,56 @@
 // app) with its declared fixture-compose-app case, and settling one waits for the loop's cleanup, and so does
 // previews-for-declared-apps (GY-1924): one item previews the declared site, the other the declared Compose app. Every other uat case runs
 // against UAT as before, in one report and one verdict, so the release holds read it unchanged.
+// GY-1906 completes the pilot: candidate-batches-five, candidate-gates-promotion and production-exact-verification
+// run there too, so the whole protected GOAL-1 suite runs on the fixture. Its delivery loop stands in for the
+// implementing worker and the merge writer alone (an item a delivery case creates is implemented from its own
+// text, merged on the fixture's main and recorded delivered, as the merge writer reconciles it); everything after
+// is the real path: the plane cuts the exact candidate, `rc/ID` is tagged, every required case the candidate's
+// checkout declares runs against that exact source (the static site built and served, the Compose app started),
+// the verdict is recorded, the promoter's gate selects a passing candidate, a failed one's members are reverted,
+// and the fixture's production deployment — a front path of the fixture, /production/ — serves the promoted
+// build and answers its identity, which the plane reads (GRAPHYARD_PRODUCTION_IDENTITY_URL) on every sweep.
 // Nothing here reconfigures the shared install or writes the host's configuration (the fixture's
 // configuration and data homes sit in its scratch directory), and every fixture resource is removed afterwards.
 //
 //   node --import tsx scripts/onboarding-delivery-fixture.mjs   (the uat job's `e2e` suite)
 import { spawn, execFile, execFileSync } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { loadCases } from '../src/e2e/case.ts';
-import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, failureDetail, releaseRetries, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
-import { contractPendingCases } from '../src/release-candidate.ts';
+import { candidatePendingOutcomes, checkoutContract, defaultStepTimeoutMs, deliverySuspendedCases, failureDetail, installServesDeliveries, releaseRetries, releaseWaitUntil, releaseVerdict, runCases, summarize } from '../src/e2e/runner.ts';
+import { contractPendingCases, cutAsync, promoteAsync, readLedgerAsync, serveStaticSite, validateAndRecord } from '../src/release-candidate.ts';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.ts';
 import { repositoryDelivery } from '../src/install/index.ts';
 import { loadProjectDelivery, projectDeliveryAssignment } from '../src/project-applications.ts';
 import { mergeRecordKey, mergeWriterReads } from '../src/daemon/cycle-merge-writer.ts';
-import { itemPreviewStep } from '../src/merge-writer/preview.ts';
+import { itemPreviewStep, previewEnvironment } from '../src/merge-writer/preview.ts';
 import { previewDemand, previewEnded } from '../src/project-previews.ts';
 import { defaultChildRun } from '../src/child-runner.ts';
+import { request as httpRequest, createServer as createHttpServer } from 'node:http';
+import { Store, save } from '../src/store.ts';
+import { lockedWork } from '../src/store/locked-read.ts';
+import { buildStaticSite, projectCaseSuite } from '../src/release-project.ts';
+import { candidateArtifact, exactCandidatePorts, exactPromotionGate, exactValidation } from '../src/daemon/release-ports.ts';
+import { e2eRecord } from '../src/release-holds.ts';
+import { composeBounds, composeProjectName, composeStack, dockerEnvironment } from '../src/compose-preview.ts';
 
 export const candidateRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 /** The uat cases that describe a freshly onboarded project, and so run against the fixture, never the shared install. */
-export const fixtureCases = ['onboarding-delivery-defaults', 'preview-serves-change', 'preview-isolation-cleanup', 'previews-for-declared-apps'];
-/** The candidate's own definition of a fixture case, tagged with the application it exercises so onboarding's scan binds it by evidence. */
-const declaredCase = (root, id, application) => { const definition = JSON.parse(readFileSync(join(root, 'e2e/cases', `${id}.json`), 'utf8')); return JSON.stringify({ ...definition, tags: [...definition.tags, application] }); };
+export const fixtureCases = ['candidate-batches-five', 'candidate-gates-promotion', 'onboarding-delivery-defaults', 'preview-serves-change', 'preview-isolation-cleanup', 'previews-for-declared-apps', 'production-exact-verification'];
+/** The fixture cases whose changes the fixture's delivery loop implements and delivers: each creates work that must reach main and a candidate. */
+export const deliveredCases = ['candidate-batches-five', 'candidate-gates-promotion', 'production-exact-verification'];
+/**
+ * The candidate's own definition of a fixture case, tagged with the application it exercises so onboarding's scan binds it by evidence,
+ * and required in the fixture project, so every candidate's combined run must pass it (GY-1906).
+ */
+const declaredCase = (root, id, application) => { const definition = JSON.parse(readFileSync(join(root, 'e2e/cases', `${id}.json`), 'utf8')); return JSON.stringify({ ...definition, required: true, tags: [...definition.tags, application] }); };
 /** The candidate's own runnable Compose application (GY-1903's fixture): `web` serving its state and its own database `db`, from alpine:3 alone. */
 const composeApplication = (root) => {
   const source = join(root, 'tests/fixtures/goal-compose-preview');
@@ -118,7 +139,7 @@ export async function startControlPlane({ root = candidateRoot, sha, scratch, en
   try { await database.initialise(); await database.start(); await database.createDatabase('fixture'); await start(env); }
   catch (error) { await stop(); await Promise.resolve().then(() => database.stop()).catch(() => {}); throw error; }
   return {
-    get url() { return url; }, token, coordinatorToken, sha,
+    get url() { return url; }, token, coordinatorToken, sha, database: `postgres://graphyard:fixture-only@127.0.0.1:${port}/fixture`,
     restart: async (deployed) => { await stop(); await start(deployed); },
     close: async () => { await stop(); await database.stop().catch(() => {}); },
   };
@@ -139,8 +160,8 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
   if (sha && sha.toLowerCase() !== head) throw new Error(`the onboarding fixture builds from the checkout's HEAD ${head}, not the candidate ${sha}; check out the candidate's exact SHA`);
   if (dashboard && !existsSync(join(root, 'dist/index.html'))) throw new Error('the onboarding fixture serves the dashboard from dist/, which the checkout has not built: run npx vite build --configLoader runner first');
   const scratch = await allocate();
-  let plane = null, loop = null;
-  const close = async () => { await loop?.stop(); loop = null; await plane?.close(); plane = null; await rm(scratch, { recursive: true, force: true }); };
+  let plane = null, loop = null, front = null, releases = null;
+  const close = async () => { await loop?.stop(); loop = null; await releases?.close(); releases = null; await front?.close(); front = null; await plane?.close(); plane = null; await rm(scratch, { recursive: true, force: true }); };
   try {
     const repository = join(scratch, 'repo');
     for (const [path, text] of Object.entries(fixtureFiles(root))) { await mkdir(join(repository, path, '..'), { recursive: true }); await writeFile(join(repository, path), text); }
@@ -156,9 +177,11 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
     await writeFile(join(repository, '.graphyard/github-app.json'), JSON.stringify({ appId: 99, slug: 'graphyard-owner-fixture', repository: fixtureRepository, privateKey: 'fixture-only', webhookSecret: 'fixture-only', installationId: 7 }), { mode: 0o600 });
     const applied = await run(['init', '--scan', '--apply', '--url', plane.url]);
     const config = JSON.parse(await readFile(join(repository, 'graphyard.json'), 'utf8'));
-    // The install deploys the committed declaration to the plane it serves.
+    // The fixture's front: the plane, and its production deployment under /production/, whose identity the plane reads.
+    front = await startFront(() => plane.url);
+    // The install deploys the committed declaration to the plane it serves, and names production's identity endpoint.
     const { variable, value } = projectDeliveryAssignment((await repositoryDelivery(repository)).policy);
-    await plane.restart({ [variable]: value });
+    await plane.restart({ [variable]: value, GRAPHYARD_PRODUCTION_IDENTITY_URL: `${front.url}/production/identity` });
     // The operator commits what init wrote and pushes it, so the loop's checkout holds the base it previews:
     // the push goes to a bare repository in scratch standing in for origin, whose main the checkout then tracks.
     const origin = join(scratch, 'origin.git');
@@ -168,7 +191,9 @@ export async function createOnboardingFixture({ root = candidateRoot, sha, dashb
     const delivery = loadProjectDelivery({}, repository);
     loop = startPreviewLoop({ url: plane.url, token: plane.coordinatorToken, root: repository, base: join(scratch, 'worktrees'), environment: { ...isolated(host), ...confinedHomes(scratch) }, launcher });
     const settle = (item, options = {}) => settlePreview({ url: plane.url, token: plane.token, item, delivery, ...options });
-    return { url: plane.url, token: plane.token, sha: head, cli, scratch, repository, config, delivery, onboarding: { scanned, applied }, loop, settle, close };
+    releases = startDeliveryLoop({ plane, front, origin, scratch, delivery, launcher, environment: { ...isolated(host), ...confinedHomes(scratch) } });
+    return { url: front.url, plane: plane.url, token: plane.token, sha: head, cli, scratch, repository, config, delivery, onboarding: { scanned, applied }, loop, settle,
+      deliver: item => releases.deliver(item), release: candidate => releases.release(candidate), releases, production: front.production, close };
   } catch (error) { await close(); throw error; }
 }
 
@@ -212,6 +237,186 @@ export function startPreviewLoop({ url, token, root, base, environment, launcher
   };
 }
 
+/**
+ * GY-1906: the fixture's front. Every path is the plane's, forwarded as received, except /production/:
+ * the fixture's production deployment, which serves the promoted build (`deploy`) and answers its own
+ * identity — the release record, source commit and artifact it runs — at /production/identity.
+ * POST /production/redeploy {build} redeploys the same release from another build, so production runs
+ * an artifact nothing promoted: the drift production-exact-verification asks the plane to catch.
+ */
+export async function startFront(planeUrl) {
+  let identity = null, site = null;
+  const production = {
+    get identity() { return identity; },
+    deploy: async (directory, next) => { const previous = site; site = await serveStaticSite(directory, next.sourceSha); identity = next; await previous?.close(); },
+    redeploy: build => { if (identity) identity = { ...identity, artifact: `sha256:${createHash('sha256').update(`${identity.sourceSha} ${build}`).digest('hex')}` }; },
+  };
+  const json = (response, status, body) => { response.writeHead(status, { 'content-type': 'application/json' }); response.end(JSON.stringify(body)); };
+  const forward = (request, response, target) => {
+    const upstream = httpRequest(target, { method: request.method, headers: { ...request.headers, host: new URL(target).host } }, answer => { response.writeHead(answer.statusCode ?? 502, answer.headers); answer.pipe(response); });
+    upstream.on('error', error => { if (!response.headersSent) json(response, 502, { error: `the fixture front could not reach ${new URL(target).origin}: ${error.message}` }); else response.destroy(); });
+    request.pipe(upstream);
+  };
+  const server = createHttpServer(async (request, response) => {
+    const url = new URL(request.url ?? '/', 'http://front.invalid');
+    if (url.pathname === '/production/identity') return identity ? json(response, 200, identity) : json(response, 503, { error: 'nothing is deployed to production yet' });
+    if (url.pathname === '/production/redeploy' && request.method === 'POST') {
+      let text = ''; for await (const chunk of request) text += chunk;
+      let build = 'redeploy'; try { build = String(JSON.parse(text || '{}').build ?? build); } catch { /* the default build label */ }
+      if (!identity) return json(response, 409, { error: 'nothing is deployed to production yet' });
+      production.redeploy(build);
+      return json(response, 200, { redeployed: true, ...identity });
+    }
+    if (url.pathname === '/production' || url.pathname.startsWith('/production/')) return site ? forward(request, response, `${site.url}${url.pathname.slice('/production'.length) || '/'}${url.search}`) : json(response, 503, { error: 'nothing is deployed to production yet' });
+    return forward(request, response, `${planeUrl()}${url.pathname}${url.search}`);
+  });
+  await new Promise(done => server.listen(0, '127.0.0.1', done));
+  return { url: `http://127.0.0.1:${server.address().port}`, production,
+    close: async () => { await site?.close(); site = null; server.closeAllConnections?.(); await new Promise(done => server.close(done)); } };
+}
+
+/** The proof a change cites for each declared application case it exercises, from its criteria. */
+const citedCases = item => [...new Set((item?.criteria ?? []).flatMap(criterion => criterion.proofs).filter(proof => proof.startsWith('e2e:')).map(proof => proof.slice(4)))];
+const escapeHtml = text => text.replace(/[&<>"]/g, c => `&#${c.charCodeAt(0)};`);
+
+/**
+ * GY-1906: the fixture's delivery loop. `deliver(item)` stands in for the implementing worker and the merge
+ * writer alone, for the items a delivery case creates: from the change's own text it edits the declared
+ * application the change cites (a line on the static home, or the Compose app's banner; removing the home
+ * heading when the text asks it), merges that branch with --no-ff on the fixture's main, pushes it, and
+ * records the item delivered with that merge commit, as the merge writer's reconciliation does.
+ * `release(candidate)` is the release drive for a candidate the plane cut: `rc/ID` is tagged at its exact
+ * source, every required case of its own checkout runs against that source (each application started from
+ * it), the verdict is recorded on the plane with the artifact it ran against, and the promoter's gate then
+ * selects a passing candidate, which is deployed to production and swept; a failed candidate is never
+ * promoted, and its members are reverted on main, as the repository's failed-candidate policy does.
+ */
+export function startDeliveryLoop({ plane, front, origin, scratch, delivery, launcher, environment }) {
+  const work = join(scratch, 'delivery');
+  // Initialised and fetched rather than cloned: fetch and push are this fixture's only git network subcommands.
+  execFileSync('git', ['init', '-q', '-b', 'main', work], { stdio: 'ignore' });
+  for (const [key, value] of [['user.name', 'fixture'], ['user.email', 'fixture@example.invalid'], ['commit.gpgsign', 'false'], ['tag.gpgsign', 'false']]) execFileSync('git', ['-C', work, 'config', key, value]);
+  const git = (...args) => execFileSync('git', ['-C', work, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  git('remote', 'add', 'origin', origin); git('fetch', '-q', '--tags', 'origin'); git('checkout', '-q', '-B', 'main', '--track', 'refs/remotes/origin/main');
+  const asyncGit = async args => git(...args);
+  const store = new Store(plane.database);
+  const call = async (method, path, token, body, key) => {
+    const response = await fetch(`${plane.url}/api/${path}`, { method, signal: AbortSignal.timeout(60_000), body: body === undefined ? undefined : JSON.stringify(body),
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(key ? { 'Idempotency-Key': key } : {}) } });
+    const text = await response.text();
+    if (response.status >= 300) throw Object.assign(new Error(text.slice(0, 1000)), { status: response.status });
+    return JSON.parse(text);
+  };
+  let keys = 0, lastCut = 0;
+  const ports = exactCandidatePorts((path, data, requestId) => call('POST', path, plane.coordinatorToken, data, requestId ?? `fixture-${++keys}`), path => call('GET', path, plane.token));
+  const staticApp = delivery.applications.find(application => application.kind === 'static'), composeApp = delivery.applications.find(application => application.kind === 'compose');
+  const delivered = [], released = [];
+  // One change or candidate at a time, in the order the cases asked: main moves under one writer.
+  let queue = Promise.resolve();
+  const serial = task => { const next = queue.then(task); queue = next.catch(() => {}); return next; };
+
+  const implement = async item => {
+    git('fetch', '-q', 'origin'); git('checkout', '-q', '-B', `graphyard/${item.key.toLowerCase()}`, 'refs/remotes/origin/main');
+    const cited = citedCases(item), text = item.criteria.map(criterion => criterion.text).join(' ');
+    const application = cited.map(id => delivery.applications.find(entry => entry.id === delivery.cases[id])).find(Boolean) ?? staticApp;
+    if (application?.kind === 'compose') await writeFile(join(work, application.file, '..', 'app/banner.txt'), `${item.title}\n`);
+    if (staticApp && (application?.kind !== 'compose' || /remove the static site's home heading/i.test(text))) {
+      const home = join(work, staticApp.directory, 'index.html');
+      let page = await readFile(home, 'utf8');
+      if (/remove the static site's home heading/i.test(text)) page = page.replace(/<h1>[^<]*<\/h1>\n?/g, '').replace(/<title>[^<]*<\/title>/g, '<title>Home</title>');
+      else page = `${page}<p>${escapeHtml(item.title)}</p>\n`;
+      await writeFile(home, page);
+    }
+    git('add', '-A'); git('commit', '-q', '-m', `${item.key}: ${item.title}`);
+    git('checkout', '-q', '--detach', 'refs/remotes/origin/main');
+    git('merge', '-q', '--no-ff', `graphyard/${item.key.toLowerCase()}`, '-m', `Merge ${item.key}: ${item.title}`);
+    git('push', '-q', 'origin', 'HEAD:main'); git('fetch', '-q', 'origin');
+    const mergeSha = git('rev-parse', 'HEAD');
+    await store.transaction(async (db, now) => {
+      const current = structuredClone((await lockedWork(db, [item.id])).find(entry => entry.id === item.id));
+      if (!current || current.stage === 'done') return;
+      current.stage = 'done'; current.stageEnteredAt = now.toISOString();
+      current.delivery = { mergedAt: now.toISOString(), mergeSha, authorizationRevision: current.revision };
+      await save(db, current, 'graphyard', 'merge-writer.reconciled', now, { mergeSha, observedTip: mergeSha });
+    });
+    delivered.push({ key: item.key, mergeSha });
+    return mergeSha;
+  };
+
+  /** Every required case of the candidate's own checkout, each run against its application started from that exact source, as one UAT verdict. */
+  const combined = async (record, tree) => {
+    let staticServed = null, stack = null, reports = [];
+    const suites = [{ name: 'e2e', run: async (url, candidate) => {
+      const results = [];
+      for (const [application, target] of [[staticApp, url], [composeApp, stack?.url]]) {
+        if (!application) continue;
+        const suite = projectCaseSuite(tree, '', { launcher, select: entry => entry.definition.required && delivery.cases[entry.definition.id] === application.id, report: value => { reports.push(value); } });
+        results.push(target ? await suite.run(target, candidate) : { name: 'e2e', passed: false, detail: `the ${application.id} application did not start` });
+      }
+      return { name: 'e2e', passed: results.every(result => result.passed), detail: results.map(result => result.detail).join('; ') };
+    } }];
+    try {
+      if (staticApp?.build) { const failed = await buildStaticSite(staticApp.build, tree, 300_000); if (failed) throw new Error(`the static site did not build: ${failed}`); }
+      staticServed = await serveStaticSite(join(tree, staticApp.directory), record.sha);
+      if (composeApp) {
+        const home = join(scratch, `compose-${record.id}`), variables = { GRAPHYARD_PREVIEW_INSTANCE: `rc-${record.id}`, GRAPHYARD_PREVIEW_DATABASE: `rc-${record.id}-db` };
+        const env = { ...previewEnvironment(home, environment), ...variables };
+        await mkdir(env.TMPDIR, { recursive: true });
+        stack = composeStack({ checkout: tree, file: composeApp.file, service: composeApp.service, port: composeApp.port, project: composeProjectName(`rc-${record.id}`, randomBytes(4).toString('hex')),
+          bounds: composeBounds(environment), environment: dockerEnvironment(env, environment), variables, scratch: join(home, 'compose') });
+        try { await stack.start(AbortSignal.timeout(300_000), 300_000); } catch { /* recorded as the application's failed case run */ }
+      }
+      // The combined report: every application's cases, attributed to the static UAT's exact served SHA, as the candidate's own run.
+      const holds = async candidate => {
+        const [first, ...rest] = reports;
+        const report = first && { ...first, cases: reports.flatMap(entry => entry.cases), passed: reports.reduce((sum, entry) => sum + entry.passed, 0), failed: reports.reduce((sum, entry) => sum + entry.failed, 0),
+          flaky: reports.reduce((sum, entry) => sum + (entry.flaky ?? 0), 0), unrun: reports.reduce((sum, entry) => sum + (entry.unrun ?? 0), 0), ...(rest.length && rest.some(entry => entry.runId !== first.runId) ? { runId: null } : {}) };
+        return { e2e: e2eRecord(report ?? null, candidate), holds: [], covered: [], filingError: null, write: async () => {} };
+      };
+      return await validateAndRecord(asyncGit, record.id, staticServed.url, suites, { base: 'main', push: true, timeoutMs: 600_000, holds });
+    } finally { await stack?.close().catch(() => {}); await staticServed?.close(); }
+  };
+
+  const release = async candidate => {
+    git('fetch', '-q', 'origin');
+    const now = new Date(Math.max(Date.now(), lastCut + 1000)); lastCut = now.getTime();
+    const cut = await cutAsync(asyncGit, { base: 'main', trigger: 'manual', now, push: true,
+      exact: { id: candidate.id, identity: candidate.identity, sourceSha: candidate.sourceSha, members: candidate.members.map(member => ({ key: member.key, mergeSha: member.mergeSha, pr: member.pr })) } });
+    if (!cut.cut) throw new Error(`rc for ${candidate.id} was not cut: ${JSON.stringify(cut).slice(0, 500)}`);
+    const record = (await readLedgerAsync(asyncGit)).candidates.find(entry => entry.exact?.id === candidate.id);
+    const tree = join(scratch, `candidate-${record.id}`);
+    git('worktree', 'add', '-q', '--detach', tree, record.sha);
+    try {
+      const run = await combined(record, tree);
+      const artifact = await candidateArtifact(asyncGit, record);
+      await ports.validated(candidate.id, exactValidation({ ...record, exact: record.exact }, run.record, artifact));
+      let promoted = false;
+      if (run.record.result === 'passed') {
+        const moved = await promoteAsync(asyncGit, record.id, { base: 'main', push: true, now: new Date(), gate: entry => exactPromotionGate(ports, asyncGit, entry) });
+        promoted = moved.promoted;
+        if (promoted) {
+          const deployed = join(scratch, `production-${record.id}`);
+          await cp(join(tree, staticApp.directory), deployed, { recursive: true });
+          await front.production.deploy(deployed, { release: record.id, sourceSha: record.sha, artifact });
+          await call('POST', 'delivery/sweep', plane.token, {}, `fixture-sweep-${record.id}`);
+        }
+      } else {
+        // The failed candidate's members leave main, newest first, so the next candidate starts from what passed.
+        git('fetch', '-q', 'origin'); git('checkout', '-q', '--detach', 'refs/remotes/origin/main');
+        for (const member of [...candidate.members].reverse()) git('revert', '--no-edit', '-m', '1', member.mergeSha);
+        git('push', '-q', 'origin', 'HEAD:main'); git('fetch', '-q', 'origin');
+      }
+      released.push({ candidate: candidate.id, release: record.id, result: run.record.result, promoted });
+    } finally { git('worktree', 'remove', '--force', tree); }
+  };
+  return {
+    delivered, released,
+    deliver: item => item?.id && deliveredCases.some(id => item.title?.startsWith(`E2E case ${id} run `)) ? serial(() => implement(item)) : Promise.resolve(null),
+    release: candidate => candidate?.id && candidate.members?.length ? serial(() => release(candidate)) : Promise.resolve(null),
+    close: async () => { await queue; await store.close().catch(() => {}); },
+  };
+}
+
 /** How long a case waits for an item's automatic preview to settle before it reads the item. */
 export const previewSettleMs = 300_000;
 /**
@@ -241,13 +446,16 @@ export async function settlePreview({ url, token, item, delivery, ended = false,
 export const settlingFetcher = (fetcher, target) => async (input, init) => {
   const response = await fetcher(input, init);
   const url = new URL(input instanceof Request ? input.url : String(input));
-  const ended = /^\/api\/work\/[^/]+\/close$/.test(url.pathname);
-  if (!target.settle || (init?.method ?? 'GET').toUpperCase() !== 'POST' || url.origin !== new URL(target.url).origin || response.status !== 200 || (url.pathname !== '/api/work' && !ended)) return response;
+  const ended = /^\/api\/work\/[^/]+\/close$/.test(url.pathname), cut = url.pathname === '/api/candidates';
+  if (!target.settle || (init?.method ?? 'GET').toUpperCase() !== 'POST' || url.origin !== new URL(target.url).origin || response.status !== 200 || (url.pathname !== '/api/work' && !ended && !cut)) return response;
   // The body is read once and answered as received: a clone left unread through a long settle can lose the original's body.
   const body = await response.text();
   let item = null;
   try { item = JSON.parse(body); } catch { /* no item to settle */ }
-  await target.settle(item, { ended });
+  // GY-1906: a cut is answered once the fixture's release drive has validated the candidate and promoted or reverted it;
+  // a created change once its preview settled and, for a delivery case, the change is on main.
+  if (cut) await target.release?.(item);
+  else { await target.settle(item, { ended }); if (!ended) await target.deliver?.(item); }
   return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
 };
 
@@ -259,13 +467,18 @@ export const settlingFetcher = (fetcher, target) => async (input, init) => {
  * a fixture that served another source than UAT is never attributed to the candidate. `targets`
  * names each executed case's own target URL and served SHA, so its recorded runs say where it ran.
  */
-export async function runOnboardingE2e(cases, { url, token, fixture, candidate = null, contract = null, policy, root = candidateRoot, launcher, fetcher, stepTimeoutMs, now = Date.now }) {
+export async function runOnboardingE2e(cases, { url, token, fixture, candidate = null, contract = null, policy, root = candidateRoot, launcher, fetcher, stepTimeoutMs, now = Date.now, sleep }) {
   const selected = cases.filter(entry => entry.definition.target === 'uat');
   const runId = candidate ? `rc-${candidate.id}` : `onboarding-${randomBytes(6).toString('hex')}`;
   const pending = contractPendingCases(contract, candidate?.pendingOutcomes);
-  const pendingCases = policy.e2e.pendingOutcomes === 'blocking' ? [] : pending;
+  // GY-1938: an install that cannot serve deliveries can never satisfy its delivery cases; the run pends them, naming the probe that decided it. The fixture cases run on planes this suite started itself, never on the shared install.
+  const probed = await installServesDeliveries(url, token, fetcher ?? fetch);
+  const suspended = deliverySuspendedCases(selected.filter(entry => !fixtureCases.includes(entry.definition.id)), probed.servesDeliveries);
+  const pendingCases = policy.e2e.pendingOutcomes === 'blocking' ? [] : [...pending, ...suspended];
   const startedAt = new Date(now()).toISOString();
   const outcomes = [], served = new Set(), targets = [];
+  // GY-1938: every case's waits share the run's one deadline, so the run reports inside its command timeout.
+  const waitUntil = releaseWaitUntil(now());
   let stoppedBy = null, open = null;
   try {
     for (const entry of selected) {
@@ -283,8 +496,8 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
         }
       }
       // The step that creates an item on the fixture waits for its preview to settle, so each step there has the settling budget besides its own.
-      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, root, pendingCases: pending, policy, launcher,
-        fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs: target.settle ? (stepTimeoutMs ?? defaultStepTimeoutMs) + previewSettleMs : stepTimeoutMs, now });
+      const report = await runCases([entry], { url: target.url, token: target.token, environment: 'uat', runId, retries: releaseRetries, waitUntil, root, pendingCases: pendingCases, policy, launcher,
+        fetcher: target.settle ? settlingFetcher(fetcher ?? fetch, target) : fetcher, stepTimeoutMs: target.settle ? (stepTimeoutMs ?? defaultStepTimeoutMs) + previewSettleMs : stepTimeoutMs, now, sleep });
       served.add(report.sha);
       const known = targets.find(entry => entry.url === target.url && entry.sha === report.sha);
       if (known) known.cases.push(id); else targets.push({ url: target.url, sha: report.sha, cases: [id] });
@@ -296,7 +509,8 @@ export async function runOnboardingE2e(cases, { url, token, fixture, candidate =
   const sha = served.size === 1 ? [...served][0] : null;
   const tally = verdict => outcomes.filter(outcome => outcome.verdict === verdict).length;
   return { runId, url, environment: 'uat', sha, startedAt, finishedAt: new Date(now()).toISOString(),
-    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, pendingOutcomes: policy.e2e.pendingOutcomes, targets };
+    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, pendingOutcomes: policy.e2e.pendingOutcomes, targets,
+    ...(suspended.length ? { suspendedDeliveries: { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired } } : {}) };
 }
 
 /**
@@ -316,11 +530,14 @@ export function recordingReports(report) {
 /** The suite's verdict over a report, in the e2e suite's own words. */
 export function suiteResult(report, pendingCases, policy) {
   if (!report.cases.length) return { name: 'e2e', passed: false, detail: 'no E2E case targets uat, so the suite exercised nothing' };
-  const verdict = releaseVerdict(report, [], pendingCases, policy), detail = failureDetail(report, pendingCases, policy);
+  // The run's own suspension of its delivery cases (GY-1938) rides the report; the verdict reads it from there, as the hold layer reads it beside its own probe.
+  const judged = [...pendingCases, ...report.suspendedDeliveries?.cases ?? []];
+  const verdict = releaseVerdict(report, [], judged, policy), detail = failureDetail(report, judged, policy);
+  const suspension = report.suspendedDeliveries ? `; the install serves no deliveries (merger ${report.suspendedDeliveries.merger} without a repository wired), so its delivery cases ${report.suspendedDeliveries.cases.join(', ')} are pending, not blocking` : '';
   const executed = report.cases.length - verdict.unrun.length;
   return !verdict.passed
-    ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}` }
-    : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}, ${fixtureCases.join(', ')} on an isolated normally onboarded project${detail ? `; ${detail}` : ''}` };
+    ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}${suspension}` }
+    : { name: 'e2e', passed: true, detail: `${report.passed} E2E case${report.passed === 1 ? '' : 's'} passed against UAT serving ${report.sha ?? 'an unreported commit'}, ${fixtureCases.join(', ')} on an isolated normally onboarded project${suspension}${detail ? `; ${detail}` : ''}` };
 }
 
 /** The suite's fixture factory: the fixture built from the selected checkout `root`, whose HEAD must be CANDIDATE_SHA when set. */

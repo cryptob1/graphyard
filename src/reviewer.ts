@@ -26,6 +26,7 @@ import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type Sessio
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { sessionLiveness, type RuntimeSession, type SessionHandle } from './model/sessions.js';
 import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
+import { repeatingPaths as loopRepeatingPaths, touchesRepeatingPath } from './model/repeating-paths.js';
 import { researchReviewSection } from './research.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, misclassificationAttempts, misclassificationSignal, observeGitHubCommit, planMechanicalFix, readReview, type FreshReadRecord } from './mechanical-findings.js';
@@ -627,13 +628,9 @@ export function readCappedRefusal(config: Pick<MasterConfig, 'url' | 'credential
   };
 }
 
-/**
- * The paths whose changes run on every loop cycle, head and item (GY-404): the loop, the master,
- * the merge queue, the GitHub adapter and review-thread filing. A fault there passes the change's own
- * gates and appears only when the behaviour repeats, so the review asks what repetition does.
- */
-export const repeatingPaths = ['src/daemon/', 'src/master/', 'src/merge-queue.ts', 'src/github.ts', 'src/review-threads.ts'] as const;
-export const touchesRepeatingPath = (files: readonly string[]) => files.some(file => repeatingPaths.some(path => path.endsWith('/') ? file.startsWith(path) : file === path));
+/** The paths whose changes run on every loop cycle (GY-404), shared with the scope rule's soak companion (GY-1892). */
+export const repeatingPaths = loopRepeatingPaths;
+export { touchesRepeatingPath };
 /**
  * The question the review asks of a change to a repeating path: what it does across many cycles,
  * heads and items, and that the soak suites (`tests/soak-*.test.ts`) cover any repeating behaviour it adds. Files

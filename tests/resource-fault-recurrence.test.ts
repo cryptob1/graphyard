@@ -47,10 +47,10 @@ const reviewers = [{ name: 'review-claude-a', agentName: 'review-claude-a' }];
 const inputs = (overrides: Partial<ResourceInputs>): ResourceInputs => ({ now, reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null,
   profiles: { workers, reviewers, producers }, ...overrides });
 const agent = (name: string, status: string, pane: string): HerdrAgent => ({ name, agent_status: status, pane_id: pane, agent: 'claude' } as HerdrAgent);
-/** A worker's implementation session on an item, with no live lease (claimed later, or ended). */
-const workerItem = (principal: string, session: { startedAt: number; endedAt?: number; state: string }, lease?: { expiresAt: number }) => ({
+/** A worker's implementation session on an item, with no live lease (claimed later, or ended). A finished record names the pane its session held: a pane-less one is a launch that failed before its pane landed, and settles no pane (GY-1955). */
+const workerItem = (principal: string, session: { startedAt: number; endedAt?: number; state: string; pane?: string }, lease?: { expiresAt: number }) => ({
   id: randomUUID(), key: 'GY-1', stage: 'build', lease: lease ? { owner: principal, epoch: 1, expiresAt: iso(lease.expiresAt) } : null,
-  sessions: [{ id: `${principal}:1`, kind: 'implementation', principal, epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane: null, agentName: null, role: null, head: null,
+  sessions: [{ id: `${principal}:1`, kind: 'implementation', principal, epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane: session.pane ?? null, agentName: null, role: null, head: null,
     attach: null, transcript: null, subject: 'GY-1', startedAt: iso(session.startedAt), updatedAt: iso(session.endedAt ?? session.startedAt), endedAt: session.endedAt ? iso(session.endedAt) : null, state: session.state, outcome: null }],
 }) as unknown as Work;
 const producerRecord = (agentName: string, state: string, closedAt: number): ProducerRecord => ({ id: randomUUID(), agentName, state, requestedAt: iso(closedAt - 600_000), closedAt: iso(closedAt) } as unknown as ProducerRecord);
@@ -78,7 +78,7 @@ test('manual:fault-class-resources — a finished pane is a resources fault only
   // loop's worker close and the reclaim pass's grace are still running.
   const fresh = inputs({
     agents: [agent('graphyard-opencode-1', 'idle', 'w1V:pC3T'), agent('produce-claude-2', 'idle', 'w1V:pC4H'), agent('review-claude-a', 'done', 'w1V:pC9A')],
-    work: [workerItem('graphyard-opencode-1', { startedAt: now - 3_600_000, endedAt: now - 30_000, state: 'done' })],
+    work: [workerItem('graphyard-opencode-1', { startedAt: now - 3_600_000, endedAt: now - 30_000, state: 'done', pane: 'w1V:pC3T' })],
     producers: [producerRecord('produce-claude-2', 'completed', now - 90_000)], reviews: [reviewRecord('review-claude-a', 'completed', now - 60_000)],
   });
   assert.deepEqual(faults(fresh), []);
@@ -330,7 +330,7 @@ const gy1165Agents = (): HerdrAgent[] => [
   held('produce-claude-1', 'w1V:pG8A', 'working'),
   ...gy1165Workers.map((worker, index) => index % 2 ? held(worker.agentName, worker.pane, 'unknown') : held(worker.agentName, worker.pane, undefined, null)),
 ];
-const gy1165Work = () => gy1165Workers.map(worker => workerItem(worker.principal, { startedAt: t1166 - 3_600_000, endedAt: t1166 - 20 * 60_000, state: 'finished' }));
+const gy1165Work = () => gy1165Workers.map(worker => workerItem(worker.principal, { startedAt: t1166 - 3_600_000, endedAt: t1166 - 20 * 60_000, state: 'finished', pane: worker.pane }));
 /** Runs reclaim passes `gapMs` apart, removing each closed pane from Herdr's next report. */
 async function passes(directory: string, count: number, gapMs: number, agents: HerdrAgent[], work: Work[], profiles = gy1165Profiles, start = t1166) {
   const closed: string[] = [], reports = [];
@@ -610,7 +610,7 @@ test('manual:fault-class-resources — GY-1165: unknown-status worker panes and 
   // Every worker pane reports `unknown` (its runtime stopped reporting) with no live lease, settled
   // well past the bound; the idle producer pane has no ledger record left (reaped at retention).
   const agents = [...held.map(([, principal, pane]) => agent(principal, 'unknown', pane)), agent('produce-claude-2', 'idle', 'w1V:pG8C')];
-  const work = held.map(([, principal]) => workerItem(principal, { startedAt: t0 - 3_600_000, endedAt: t0 - 15 * 60_000, state: 'done' }));
+  const work = held.map(([, principal, pane]) => workerItem(principal, { startedAt: t0 - 3_600_000, endedAt: t0 - 15 * 60_000, state: 'done', pane }));
   const state: ResourceInputs = { now: t0, reviews: [], producers: [], agents, work, plane: null, loop: null, revision: null, disk: null, profiles: config };
   const instances = [...held.map(([name]) => `resource:agent-names:${name}`), 'resource:agent-names:claude-producer-2'].sort();
 
@@ -715,7 +715,7 @@ test('manual:fault-class-resources — GY-1196: the agent-names instance is recl
   const settled = Date.parse('2026-10-04T12:30:00.000Z'), readAt = Date.parse('2026-10-04T12:41:53.835Z');
   const config = { workers: [{ name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch' as const }], reviewers: [], producers: [] };
   const pane = agent('graphyard-claude-1', 'idle', 'w1V:pHAS');
-  const work = [workerItem('graphyard-claude-1', { startedAt: settled - 3_600_000, endedAt: settled, state: 'done' })];
+  const work = [workerItem('graphyard-claude-1', { startedAt: settled - 3_600_000, endedAt: settled, state: 'done', pane: 'w1V:pHAS' })];
   const state = (now: number, agents: HerdrAgent[]): ResourceInputs => ({ now, reviews: [], producers: [], agents, work, plane: null, loop: null, revision: null, disk: null, profiles: config });
 
   // REPRODUCE against base: the full pass ran once per cycle. The cycle that finished at 12:41:19Z
@@ -846,7 +846,7 @@ const gy1198 = (() => {
   const settled = Date.parse('2026-10-04T12:30:00.000Z'), readAt = Date.parse('2026-10-04T12:41:53.835Z'), firstSeen = Date.parse('2026-10-04T12:33:00.000Z');
   const profiles = { workers: [{ name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch' }], reviewers: [], producers: [] };
   const pane = agent('graphyard-claude-1', 'idle', 'w1V:pHAS');
-  const work = [workerItem('graphyard-claude-1', { startedAt: settled - 3_600_000, endedAt: settled, state: 'done' })];
+  const work = [workerItem('graphyard-claude-1', { startedAt: settled - 3_600_000, endedAt: settled, state: 'done', pane: 'w1V:pHAS' })];
   const names = (overrides: Partial<ResourceInputs>): ResourceInputs => ({ now: readAt, reviews: [], producers: [], agents: [pane], work, plane: null, loop: null, revision: null, disk: null, profiles, ...overrides });
   return { sha, cycleMs, revisions, owed, settled, readAt, firstSeen, pane, work, names };
 })();

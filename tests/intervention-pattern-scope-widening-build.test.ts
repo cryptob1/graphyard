@@ -130,9 +130,9 @@ test('manual:pattern-item-owns-scope-widening — the board\'s pattern row names
     [{ key: 'GY-1675', trigger: 'operator-widening', owner: 'GY-1682', requestedAt: '2026-10-10T23:12:05.763Z', cause: 'triage-scope-decision', reworkRounds: 3 }, { key: 'GY-1617', trigger: 'operator-widening', owner: 'GY-1682', requestedAt: '2026-10-09T23:48:58.838Z', cause: 'triage-scope-decision', reworkRounds: 0 }]);
   for (const entry of row.instances) assert.equal(entry.owner, counted.find(([key]) => key === entry.work!.key)![4] ?? 'GY-1682', `${entry.work!.key} is owned by the item whose pattern links it, else by the standing item`);
   assert.deepEqual(buildPattern(fleet, reportAt)!.unlinked.map(entry => entry.work!.key), ['GY-1617', 'GY-1675'], 'the two the threshold judges are the two since GY-1568 landed');
-  // The scan reads the same fold: an item stands for the pair, so `openPatternItems` opens nothing beside it, and master status raises no unfiled pattern.
+  // The scan reads the same fold: an item stands for the pair, and master status raises the crossed pattern as attention, never a filed item.
   assert.equal(buildPattern(fleet, reportAt)!.item, gy1682);
-  assert.deepEqual(await attention(report(fleet)), []);
+  assert.deepEqual((await attention(report(fleet))).map(item => item.text), ['20 scope-widening interventions at the build stage in 7 days crossed the threshold of 3']);
   // Without GY-1682 the row owned 18 and stood for none; the same fold read as 20 counted, no crossing, no item, which is what the master read as a scan that failed.
   const unowned = buildRow(report(owners))!;
   assert.deepEqual({ crossed: unowned.crossed, work: unowned.work, accounted: share(unowned), unowned: unowned.instances.filter(entry => !entry.owner).map(entry => entry.work!.key) }, { crossed: false, work: null, accounted: { 'GY-1388': 14, 'GY-1568': 4 }, unowned: ['GY-1675', 'GY-1617'] });
@@ -250,11 +250,11 @@ test('manual:pattern-item-owns-scope-widening — a refused ask the record shows
   const folded = foldInterventions(rows, [...record, gy1682], late).interventions;
   const pattern = detectPatterns(folded, [...record, gy1682], policy, late).find(entry => entry.kind === 'scope-widening' && entry.stage === 'build')!;
   assert.deepEqual({ count: pattern.count, unlinked: pattern.unlinked.length, item: pattern.item?.key }, { count: 3, unlinked: 3, item: 'GY-1682' }, 'crossed and owned: the scan opens nothing beside GY-1682');
-  assert.deepEqual(await attention(computeInterventionReport({ interventions: folded, judgements: [] }, [...record, gy1682], policy, { days: 7, now: late })), [], 'owned, so master status raises nothing');
+  assert.deepEqual(await attention(computeInterventionReport({ interventions: folded, judgements: [] }, [...record, gy1682], policy, { days: 7, now: late })).then(items => items.length), 1, 'crossed, so master status raises it, owned or not');
   // Without GY-1682 the same fold is crossed with no item for both readers: the status names the scan's promise and the scan would open the item — one fold, one fact.
   const unownedAttention = await attention(computeInterventionReport({ interventions: folded, judgements: [] }, record, policy, { days: 7, now: late }));
   assert.equal(unownedAttention.length, 1);
-  assert.match(unownedAttention[0].text, /3 scope-widening interventions at the build stage in 7 days crossed the threshold of 3 and no item stands for the pattern yet; the server opens one within a minute/);
+  assert.match(unownedAttention[0].text, /^3 scope-widening interventions at the build stage in 7 days crossed the threshold of 3$/);
   assert.deepEqual(detectPatterns(folded, record, policy, late).find(entry => entry.kind === 'scope-widening')!.unlinked.length, 3);
   const open = foldInterventions(rows, record, late).interventions.find(entry => entry.kind === 'scope-widening' && entry.resolvedAt === null)!;
   assert.deepEqual({ requestedAt: open.requestedAt, waitedMs: open.waitedMs }, { requestedAt: ask.at, waitedMs: Date.parse(late) - Date.parse(ask.at) });

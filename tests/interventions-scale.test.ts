@@ -13,7 +13,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import * as interventions from '../src/interventions.js';
-import { interventionLedgerKinds, interventionLedgerLimit, interventionLedgerSince, openPatternItems, readInterventionLedger, reworkGroundsSql, windowOutcomes, type InterventionLedgerRow } from '../src/interventions.js';
+import { interventionLedgerKinds, interventionLedgerLimit, interventionLedgerSince, readInterventionLedger, reworkGroundsSql, windowOutcomes, type InterventionLedgerRow } from '../src/interventions.js';
 import { interventionPolicyDefaults } from '../src/model/interventions.js';
 import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
@@ -325,7 +325,7 @@ test('unit:report-pool-isolated — the report routes run on their own small poo
  * tick, reads the policy window through the (kind, created_at) index, finishes within 2 s, and a
  * claim and a heartbeat started while it runs each finish within 500 ms.
  */
-test('integration:intervention-scan-bounded — openPatternItems reads only the policy window through an index and runs beside the tick: over 500,000 events and 5,000 items one scan completes in under 2 s while a concurrent claim and heartbeat each complete in under 500 ms', async () => {
+test('integration:intervention-scan-bounded — the pattern scan reads only the policy window through an index and runs beside the tick: over 500,000 events and 5,000 items one scan completes in under 2 s while a concurrent claim and heartbeat each complete in under 500 ms', async () => {
   const TOTAL_EVENTS = 500_000, TOTAL_ITEMS = 5_000;
   // The settled deliveries that make up the rest of the fleet.
   const existingItems = (await store.pool.query('SELECT count(*)::int AS n FROM work_items')).rows[0].n as number;
@@ -370,14 +370,14 @@ test('integration:intervention-scan-bounded — openPatternItems reads only the 
   // The server runs the scan on its own timer and the reconciliation tick never awaits it.
   const main = await readFile(new URL('../src/server/main.ts', import.meta.url), 'utf8');
   const tick = main.slice(main.indexOf('startReconciliation(async step =>'), main.indexOf('}, 2000);'));
-  assert.ok(tick.length > 0 && !/openPatternItems|synthesizeRetro/.test(tick), 'the reconciliation tick does not run the pattern scan');
-  assert.match(main, /startPatternScan\(async \(\) => \{\s*const window = await readScanWindow\([^\n]*\n\s*for \(const work of \(await openPatternItems\(/, 'the server starts the pattern scan beside the tick, reading the window once for it and the retro synthesis');
+  assert.ok(tick.length > 0 && !/readScanWindow|synthesizeRetro/.test(tick), 'the reconciliation tick does not run the pattern scan');
+  assert.match(main, /startPatternScan\(async \(\) => \{\s*const window = await readScanWindow\(/, 'the server starts the pattern scan beside the tick, reading the window once for it and the retro synthesis');
 
   // The scan on its own timer, as the server runs it; the test triggers the due run instead of waiting a minute.
-  let opened: Work[] = [], scanMs = 0;
+  let scanMs = 0;
   // Read through the namespace so a base without the export fails as a test case, not at import.
   assert.equal(typeof (interventions as Record<string, unknown>).startPatternScan, 'function', 'the server has a pattern scan of its own beside the tick');
-  const scanner = interventions.startPatternScan(async () => { const started = performance.now(); opened = (await openPatternItems(engine, policy)).opened; scanMs = performance.now() - started; }, { intervalMs: 3_600_000, env: {} });
+  const scanner = interventions.startPatternScan(async () => { const started = performance.now(); await interventions.readScanWindow(engine.store, policy); scanMs = performance.now() - started; }, { intervalMs: 3_600_000, env: {} });
   try {
     const scan = scanner.run();
     assert.ok(scanner.running, 'the scan is running');
@@ -393,9 +393,5 @@ test('integration:intervention-scan-bounded — openPatternItems reads only the 
     assert.ok(claim.ms < 500, `the claim took ${Math.round(claim.ms)}ms beside the scan`);
     assert.ok(heartbeat.ms < 500, `the heartbeat took ${Math.round(heartbeat.ms)}ms beside the scan`);
     assert.ok(scanMs > 0 && scanMs < 2_000, `one scan took ${Math.round(scanMs)}ms over ${sized.events} events and ${sized.items} items`);
-    assert.ok(opened.length > 0, 'the seeded window crosses a pattern and the scan opens its item');
-    // A second scan finds the item standing and opens nothing.
-    await scanner.run();
-    assert.deepEqual(opened, []);
   } finally { await scanner.stop(); }
 });

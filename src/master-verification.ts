@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { implementerIdentities, postDeployProofPrefix, postDeployProofs, type Create, type Work } from './model.js';
-import { followUpOf, observationWindowFor, patternOfProof, postDeployFollowUpId, postDeployMarker, type PatternProjection, type PatternProjections, type PatternReader } from './model/observation-window.js';
+import { observationWindowFor, patternOfProof, postDeployFollowUpId, postDeployMarker, type PatternProjection, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import type { MasterConfig } from './master.js';
 import { observeDeployment, type DeploymentObservation } from './master-daemon.js';
@@ -193,13 +193,6 @@ export interface VerificationEffects {
   record: (work: Work, data: VerificationRecord) => Promise<unknown>;
   /** The managed repository; see `VerificationInput.repository`. */
   repository?: string;
-  /**
-   * `POST work` with an idempotency key, as an identity that may create work — the master's operator
-   * agent, never the coordinator: files the follow-up an owed post-deploy verification needs (GY-1660), returning the created item.
-   */
-  file?: (input: NonNullable<PostDeployCheck['followUp']>['input'], requestId: string) => Promise<{ key?: string } | unknown>;
-  /** Releases a filed follow-up from backlog as the same operator agent (GY-1747): the observation that the release serves the delivery is its release. */
-  releaseWork?: (key: string) => Promise<void>;
   /** The intervention report's under-threshold reading for a pattern (GY-1698): the follow-up's observation window is taken from it. */
   patterns?: PatternReader;
   /** The coordinator checkout's own filer, used only when it is at the observed release's commit (or has none to compare); `postDeployChecks` by default. */
@@ -233,7 +226,7 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   // filer to run (its commit is never in the launcher's store), so the coordinator's Graphyard code is the only filer.
   const isolate = emits && !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
   let release = coordinator, isolated: boolean = false;
-  const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null, postDeploy: Awaited<ReturnType<typeof filePostDeployFollowUps>> = []) => ({
+  const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null, postDeploy: ReportedPostDeployCheck[] = []) => ({
     key: current.key, result: assessment.verifiable ? 'verified' as const : 'refused' as const,
     release: { sha: observation.sha, source: observation.source, observedAt: observation.at, covers: assessment.covers },
     checkout: { sha: coordinator.sha, clean: coordinator.clean }, emittedFrom: emits ? { sha: release.sha, clean: release.clean, isolated } : null,
@@ -247,9 +240,7 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
   let checkout: IsolatedRelease | null = null;
   if (isolate) {
     const materialized = effects.isolate ? await effects.isolate(observation.sha!) : { reason: 'no isolated checkout of the observed release can be made' };
-    // GY-1732 AC-2: without the release's checkout its filer cannot run, so each owed follow-up is deferred, never filed by this checkout's code.
-    if ('reason' in materialized) return result({ ...preflight, verifiable: false, refusals: [materialized.reason] }, null,
-      deferPostDeployFollowUps(current, observation.sha!, snapshot.work, `the observed release ${observation.sha!.slice(0, 12)} could not be checked out to file it at its own identity: ${materialized.reason}`));
+    if ('reason' in materialized) return result({ ...preflight, verifiable: false, refusals: [materialized.reason] }, null);
     // The release's checkout is a clone of the coordinator's, so it is judged as the coordinator's repository.
     checkout = materialized; release = { ...checkout.release, repository: coordinator.repository }; isolated = true;
   }
@@ -257,19 +248,8 @@ export async function verifyDeployment(work: Work, effects: VerificationEffects,
     const emitted = !emits ? undefined : checkout ? await checkout.emit() : await effects.emit();
     const assessment = assessDeploymentVerification(current, { observation, release, emitted, now: now(), freshnessMs, repository: effects.repository });
     if (!assessment.verifiable) return result(assessment, null);
-    // Follow-ups are filed before the observation is recorded: a filing that fails leaves the delivery
-    // unobserved, so the retry files it, where recording first would refuse every retry as already observed.
-    let postDeploy: FiledPostDeployCheck[];
-    try { postDeploy = await filePostDeployFollowUps(current, assessment.record!.sha, snapshot.work, effects.file, new Date(now()), effects.patterns, new Date(observation.at), checkout ? checkout.checks ?? noReleaseFiler : effects.checks); }
-    catch (error) { if (error instanceof ReleaseFilerUnavailable) return result({ ...assessment, verifiable: false, refusals: [error.message] }, null); throw error; }
-    const deferred = postDeploy.filter(check => check.deferred);
-    // A deferred filing leaves the delivery unobserved for the same reason: the attempt that can run the release's filer files it.
-    if (deferred.length) return result({ ...assessment, verifiable: false, refusals: deferred.map(check => `${check.criterion} (${check.proof}) owes its post-deploy follow-up ${check.requestId}, whose filing is deferred: ${check.deferred}`) }, null, postDeploy);
-    // GY-1747: the serving release being observed releases its follow-ups from backlog, before the record, so a failed release retries.
-    const filed = postDeploy.filter(check => check.followUp && !snapshot.work.some(item => item.key === check.followUp && item.ready));
-    // Authority is owed only for a follow-up still unreleased; without it a filed follow-up would stay in backlog once this action is recorded away, so the delivery stays unobserved.
-    if (filed.length && !effects.releaseWork) return result({ ...assessment, verifiable: false, refusals: filed.map(check => `${check.criterion} (${check.proof}) has a filed post-deploy follow-up, and this master has no operator-agent identity to release it from backlog with`) }, null, postDeploy);
-    for (const check of filed) await effects.releaseWork!(check.followUp!);
+    // An unobserved post-deploy criterion is reported in the result, never filed as a work item (2026-10-17).
+    const postDeploy = reportPostDeployChecks(current, assessment.record!.sha, new Date(now()));
     const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
     if (!existing) await effects.record(current, assessment.record!);
     return result(assessment, existing ? 'existing' : 'now', postDeploy);
@@ -346,54 +326,10 @@ export function postDeployChecks(work: Work, release: string, now = new Date(), 
   }));
 }
 
-/** The follow-up's identity: a retried filing replays under it, and an item whose description leads with it is that follow-up. */
-
-/**
- * GY-1660: a verified release checks the delivered item's declared post-deploy verifications on
- * itself. An owed one files its follow-up — once: an item already marked with that follow-up's
- * request id is named instead, the request id makes a retried filing a replay, and checks are filed one after
- * another so none is filed against a snapshot another has just changed — so the live observation
- * the merge never waited for is owned by an item rather than by nobody.
- */
-/** The release's filer failed where this checkout's code sees nothing to defer: what is owed cannot be known, so nothing is recorded (GY-1732). */
-export class ReleaseFilerUnavailable extends Error {}
-/** A check as filed: its follow-up's key, or — deferred (GY-1732) — the request id a later filing keeps and why it waits. */
-export type FiledPostDeployCheck = Omit<PostDeployCheck, 'followUp'> & { followUp: string | null; requestId?: string; deferred?: string };
-export async function filePostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'description'>[], file?: VerificationEffects['file'], now = new Date(), patterns?: PatternReader, servedAt?: Date, filer: PostDeployFiler = localPostDeployChecks) {
-  const known = [...all], results: FiledPostDeployCheck[] = [];
-  let checks: PostDeployCheck[];
-  // GY-1732: the filer is the observed release's code; one that cannot run defers every owed follow-up rather than filing it without the release's window.
-  try { checks = await filer({ work, release, now: now.toISOString(), projections: await patternProjections(work, patterns), ...(servedAt ? { servedAt: servedAt.toISOString() } : {}) }); }
-  catch (error) {
-    const reason = `the observed release ${release.slice(0, 12)}'s own filer could not run: ${message(error)}`.slice(0, 2000), deferred = deferPostDeployFollowUps(work, release, all, reason);
-    // What is owed is the release's code to decide: where this checkout's code sees nothing left to defer, the release may still owe one, so the filing fails rather than reading as nothing owed.
-    if (!deferred.some(check => check.deferred)) throw new ReleaseFilerUnavailable(`${work.key}: whether the release ${release.slice(0, 12)} owes post-deploy follow-ups is its own code's to decide, and ${reason}; the deployment observation waits for it`);
-    return deferred;
-  }
-  for (const { followUp, ...rest } of checks) {
-    if (!followUp) { results.push({ ...rest, followUp: null }); continue; }
-    const filed = known.find(item => followUpOf(item) === followUp.requestId)?.key;
-    if (filed || !file) { results.push({ ...rest, followUp: filed ?? null }); continue; }
-    const created = await file(followUp.input, followUp.requestId) as { key?: string } | undefined;
-    if (created?.key) known.push({ key: created.key, description: followUp.input.description });
-    results.push({ ...rest, followUp: created?.key ?? null });
-  }
-  return results;
-}
-
-/**
- * GY-1732 AC-2: the checks a filing at the release's identity would have filed, when it cannot run —
- * each unobserved declared proof owed under the request id the release files it by (an identity of
- * item, criterion, proof and release, not of any code's window), unfiled, with `reason` naming the
- * deferral. One already filed under that id is named instead: there is nothing left to defer.
- */
-export function deferPostDeployFollowUps(work: Work, release: string, all: readonly Pick<Work, 'key' | 'description'>[], reason: string): FiledPostDeployCheck[] {
-  return postDeployChecks(work, release).map(({ followUp, ...rest }) => {
-    if (!followUp) return { ...rest, followUp: null };
-    const filed = all.find(item => followUpOf(item) === followUp.requestId)?.key;
-    return filed ? { ...rest, followUp: filed } : { ...rest, followUp: null, requestId: followUp.requestId, deferred: reason };
-  });
-}
+/** A post-deploy check as verify-deployment reports it: observed or owed on the serving release; nothing is filed for an owed one. */
+export type ReportedPostDeployCheck = Omit<PostDeployCheck, 'followUp'>;
+export const reportPostDeployChecks = (work: Work, release: string, now = new Date()): ReportedPostDeployCheck[] =>
+  postDeployChecks(work, release, now).map(({ followUp: _followUp, ...check }) => check);
 
 /**
  * The report's reading for every declared intervention-pattern proof the item carries, read once per
@@ -424,7 +360,7 @@ export function patternReader(read: (path: string) => Promise<unknown>): Pattern
 }
 
 /** Effects bound to the real coordinator process, mirroring the daemon's. */
-export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; file?: VerificationEffects['file']; read?: (path: string) => Promise<unknown>; run?: Run }): VerificationEffects {
+export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; read?: (path: string) => Promise<unknown>; run?: Run }): VerificationEffects {
   const run = deps.run ?? defaultRun;
   return {
     snapshot: deps.snapshot, repository: config.repository,
@@ -436,14 +372,5 @@ export function verificationEffects(config: MasterConfig, deps: { root: string; 
     isolate: sha => isolateRelease(config, sha, run),
     record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
     checks: localPostDeployChecks,
-    ...(deps.file ? { file: deps.file } : {}),
-    // GY-1747: a master that can file a follow-up as its operator agent releases it as that agent, so the CLI path releases what the executor's does.
-    ...(deps.file ? { releaseWork: async (key: string) => {
-      const item = (await deps.snapshot()).work.find(entry => entry.key === key);
-      if (!item || item.stage !== 'backlog' || item.ready) return;
-      const { agentToken } = await import('./master/autonomy.js');
-      const response = await fetch(`${config.url}/api/work/${item.id}/ready`, { method: 'POST', body: JSON.stringify({ expectedRevision: item.revision, reason: 'the release serving the delivery is observed deployed' }), headers: { Authorization: `Bearer ${await agentToken(deps.root, config, 'operatorAgent')}`, 'Content-Type': 'application/json', 'Idempotency-Key': `release-${item.id}-${item.revision}` }, signal: AbortSignal.timeout(30_000) });
-      if (!response.ok) { const body = await response.json().catch(() => null) as { error?: unknown } | null; throw new Error(typeof body?.error === 'string' ? body.error : `releasing ${key} returned ${response.status}`); }
-    } } : {}),
   };
 }

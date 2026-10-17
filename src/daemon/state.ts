@@ -11,7 +11,6 @@ import { boundDetail } from './decisions.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
 import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js'; import { unansweredStands } from '../model/fault-record.js';
-import { emptySlowLoopState, slowLoopStateSchema } from './slow-loop-item.js'; // lazy below: it imports this module
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
@@ -389,7 +388,6 @@ export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 /** The release this loop's own process loaded, read once at its startup exactly as an executor reads its (GY-437) and overwritten by every new process: what every action it takes runs, until its supervisor replaces it. */
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
-export type { SlowLoopState } from './slow-loop-item.js'; // the slow-loop run (GY-1775): its schema lives with its rule
 
 /** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault; `snapshot-failed` (GY-1773): the held-cli snapshot a dirty checkout's upgrade restarts onto could not be made; `checkout-dirty` is kept for cursors written before GY-1773. */
 export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged', 'snapshot-failed'] as const;
@@ -525,7 +523,6 @@ export const daemonStateSchema = z.object({
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
-  slowLoop: z.lazy(() => slowLoopStateSchema).default(() => emptySlowLoopState()), // the slow-loop run on that release and the fix item it filed (GY-1775)
   upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),

@@ -271,11 +271,15 @@ function liveOwner(profile: ReturnType<typeof roleProfiles>[number], name: strin
  * records one — a reviewer or producer record is written before its pane, so such a holder has none.
  * A worker session that names its pane settles that pane alone (GY-1547): a pane launched after
  * the snapshot was taken is named by no session in it, and the principal's sessions on other panes
- * settle their own, never the new one. A session naming no pane settles the name as before.
+ * settle their own, never the new one. A session naming no pane settles the name as before — the
+ * name as a whole, never a named pane (GY-1955): a pane-less handle is the record every launch
+ * that failed before its pane landed writes and its open item keeps, so one settling a named pane
+ * would read every later launch-in-flight pane on it long settled, and the unplaced guard that
+ * spares a launch in flight (GY-1547) would never fire again.
  */
-function holderSettledAt(profile: ReturnType<typeof roleProfiles>[number], name: string, input: Pick<ResourceInputs, 'reviews' | 'producers' | 'work'>, pane?: string | null) {
+export function holderSettledAt(profile: ReturnType<typeof roleProfiles>[number], name: string, input: Pick<ResourceInputs, 'reviews' | 'producers' | 'work'>, pane?: string | null) {
   if (profile.role === 'worker') {
-    const times = input.work.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.principal === profile.principal && (!pane || !handle.pane || handle.pane === pane))
+    const times = input.work.flatMap(item => (item.sessions ?? []).filter(handle => handle.kind === 'implementation' && handle.principal === profile.principal && (!pane || handle.pane === pane))
       .map(handle => Date.parse(handle.endedAt ?? handle.updatedAt))).filter(Number.isFinite);
     return times.length ? Math.max(...times) : null;
   }

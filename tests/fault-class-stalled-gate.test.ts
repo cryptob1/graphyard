@@ -446,7 +446,7 @@ test('the wait clause the executor throws is constant, so the unchanged run accu
 
 // ——— The verify-deployment handler at the candidate ———
 
-const work = (key: string) => ({ key, id: `id-${key}`, stage: 'done', delivery: { mergeSha: 'a'.repeat(40), mergedAt: stamp(0) } }) as unknown as Work;
+const work = (key: string) => ({ key, id: `id-${key}`, stage: 'done', criteria: [], workspaces: [], delivery: { mergeSha: 'a'.repeat(40), mergedAt: stamp(0) } }) as unknown as Work;
 /** The executor identity a claim runs under — the handler takes it beside the row. */
 const executorIdentity = { id: 'executor-a', host: 'host-a' };
 const verifyRow = (key: string, mergeSha: string): ActionRow => ({ id: `verify-${key}`, kind: 'verify-deployment', work: `id-${key}`, key,
@@ -464,7 +464,6 @@ function verifyHandlers(observation: unknown, wiring: { promotion?: (mergeSha: s
     observeDeployment: async () => observation as never,
     ...(wiring.promotion ? { promotionCarryingMerge: wiring.promotion } : {}),
     ...(wiring.log ? { log: wiring.log } : {}),
-    postDeployFiler: async () => ({ filer: async () => [], dispose: async () => {} }),
   })['verify-deployment']!;
 }
 

@@ -5,7 +5,8 @@ import { existsSync } from 'node:fs';
 import { chmod, mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { classifyAttention, faultClassOf, faultClassPolicyDefaults, landedAt, predateLanding, recurringClasses, releaseOvertakenLinks, trackFaults } from '../src/model/fault-classes.js';
-import { hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, describeReclaim, tmpErrorPrefix, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
+import { finishedSessionGraceMs, hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, describeReclaim, tmpErrorPrefix, unownedPaneConfirmMs, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
+import * as masterResources from '../src/master-resources.js';
 import { diskThresholdBytes, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { judgeWorktreeDisk, worktreePassCurrentMs } from '../src/master/worktree-disk.js';
@@ -557,4 +558,201 @@ test('unit:fault-class-cover-from-running-fix — the GY-1828 timeline: the inst
   const refiledBoundary = recurringClasses([...gy1830Instances.map(entry => ({ ...entry, linkedTo: 'GY-1828' })), ...boundaryInstances], [observed], policy, gy1830DetectedAt);
   assert.deepEqual(refiledBoundary.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', true, null]], 'an instance first seen between the observation and the write stamp files as before');
   assert.deepEqual(refiledBoundary[0].recent.map(entry => entry.at), boundaryInstances.map(entry => entry.at), 'the boundary filing carries the instances the write stamp would have swallowed');
+});
+
+// ---- GY-1955: the class recurred as three resource-bound agent-names faults on 17 October 2026 --
+//
+// Every instance is the same window, one the loop keeps reopening against itself: a launch whose
+// pane exists and whose agent Herdr has registered but whose runtime has not yet reported
+// (`agent_status 'unknown'`) — the session handle that names the pane lands 1–13 seconds after the
+// fault. The base's holderSettledAt counted an implementation handle with pane null as settling any
+// pane of the principal (`!pane || !handle.pane || handle.pane === pane`), and a pane-less handle
+// is exactly what every launch that failed before its pane landed records, kept on its open item.
+// So each faulting principal carried an older finished pane-less handle, holderSettledAt returned
+// that failed launch's endedAt for the brand-new pane, the GY-1547 unplaced guard (nothing settles
+// it → a launch in flight, never overdue at once) never fired, and the reading called the namespace
+// overdue at its bound off a 'settled ≥ 10 minutes' the pane-less handle supplied — a resource-bound
+// fault against the launch in progress, starving the profile it just chose. The reclaim passes of
+// the same minutes closed nothing (their file shows no sighting of the panes); the fault was the
+// reading's alone.
+//
+// The candidate: a named pane is judged only by handles that name it — a pane-less handle settles
+// the name as a whole, never a named pane — so the guard holds again, while a pane whose own naming
+// handle finished still ages and reclaims exactly as before.
+//
+// The pane-scoped judge itself is proof here, so the candidate exports holderSettledAt and the
+// replays below call it through this lookup: the base did not export it (its pane judgment was the
+// name-wide one), and a missing named import would fail the whole file at the base's load step
+// instead of at the replay the criterion names.
+const holderSettledOf = (masterResources as { holderSettledAt?: typeof masterResources.holderSettledAt }).holderSettledAt;
+
+const gy1955 = [
+  // GY-1872: graphyard-codex-2:5 on w1V:pQFG, handle landed 13.2s after the fault; the principal's
+  // GY-1841:2 failed launch ended 03:37:23.365Z with pane null. Namespace: claude-senary, whose
+  // recorded agent name (GY-1821's instance 1, same profile) is graphyard-opencode-4.
+  { at: '2026-10-17T07:33:17.100Z', profile: { name: 'claude-senary', principal: 'graphyard-codex-2', agentName: 'graphyard-opencode-4' }, agentName: 'graphyard-opencode-4', pane: 'w1V:pQFG', handleLandedAt: '2026-10-17T07:33:30.312Z', priorFailedAt: '2026-10-17T03:37:23.365Z' },
+  // GY-1903: graphyard-claude-1:2 on w1V:pQWD, handle landed 1.1s after the fault; GY-1907:4 ended 12:40:05.485Z.
+  { at: '2026-10-17T15:31:51.149Z', profile: { name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1' }, agentName: 'graphyard-claude-1', pane: 'w1V:pQWD', handleLandedAt: '2026-10-17T15:31:52.287Z', priorFailedAt: '2026-10-17T12:40:05.485Z' },
+  // GY-1942: graphyard-opencode-1:1 on w1V:pQ0H, handle landed 6.7s after the fault; GY-1932:1 ended 18:34:32.140Z. This instance's own line is recorded verbatim.
+  { at: '2026-10-17T20:02:02.167Z', profile: { name: 'opencode-primary', principal: 'graphyard-opencode-1', agentName: 'graphyard-opencode-1' }, agentName: 'graphyard-opencode-1', pane: 'w1V:pQ0H', handleLandedAt: '2026-10-17T20:02:08.859Z', priorFailedAt: '2026-10-17T18:34:32.140Z' },
+];
+
+/** One instance replayed from its recorded detail: the agent registered 'unknown' on the pane, the snapshot predating the naming handle, the older finished pane-less handle, no live lease. */
+const gy1955Reading = (instance: (typeof gy1955)[number]) => {
+  const at = Date.parse(instance.at), profile = { ...instance.profile, mode: 'launch' as const };
+  const priorFailed = {
+    id: randomUUID(), key: 'GY-1932', stage: 'build', lease: null,
+    sessions: [{ id: `${profile.principal}:1`, kind: 'implementation', principal: profile.principal, epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane: null, agentName: null, role: null, head: null, attach: null, transcript: null, subject: 'GY-1932', startedAt: iso(Date.parse(instance.priorFailedAt) - 20 * 60_000), updatedAt: instance.priorFailedAt, endedAt: instance.priorFailedAt, state: 'lost', outcome: null }],
+  } as unknown as Work;
+  const agents = [{ name: instance.agentName, agent_status: 'unknown', pane_id: instance.pane, agent: 'claude' }] as HerdrAgent[];
+  const input = (overrides: Partial<ResourceInputs> = {}): ResourceInputs => ({ now: at, reviews: [], producers: [], agents, work: [priorFailed], plane: null, loop: null, revision: null, disk: null, reclaimSeen: null,
+    profiles: { workers: [profile], reviewers: [], producers: [] }, ...overrides });
+  return { at, profile: { ...profile, role: 'worker' as const }, agents, input };
+};
+
+test('manual:fault-class-resources — GY-1955 lists 3 instances, and every one is replayed below', () => {
+  assert.equal(gy1955.length, 3);
+  assert.ok(gy1955.every(instance => Date.parse(instance.handleLandedAt) > Date.parse(instance.at)), 'each faulting pane is the pane the next session record names, landed after the fault');
+  assert.ok(gy1955.every(instance => Date.parse(instance.at) - Date.parse(instance.priorFailedAt) >= nameReclaimBoundMs), 'each principal carries a pane-less handle older than the 10-minute bound: the settled time the readings printed');
+});
+
+test('unit:agent-names-launch-in-flight-not-overdue — every GY-1953 instance replayed from its recorded detail raises no resources fault at the candidate', () => {
+  for (const instance of gy1955) {
+    const { at, profile, input } = gy1955Reading(instance);
+    // CANDIDATE: the named pane is judged by handles that name it — nothing does, so it is unplaced,
+    // a launch in flight, and the reading raises nothing though the namespace stays at its bound.
+    // At the base this is the instance's own fault: the resource-bound line the class filed, here
+    // replayed at its instant (the assertion fails there with the fault as its actual value).
+    const faultsHere = faults(input());
+    assert.deepEqual(faultsHere, [], `the instance at ${instance.at} raises no resources fault`);
+    // The base judged the named pane by its name-wide fallback: with no handle naming the pane, the
+    // `!handle.pane` clause admitted the failed launch's pane-less handle alone, so the pane-scoped
+    // reading was exactly this name-wide one — the failed launch's endedAt, past the bound.
+    const baseJudged = holderSettledOf!(profile, instance.agentName, { reviews: [], producers: [], work: input().work });
+    assert.ok(baseJudged !== null && at - baseJudged >= nameReclaimBoundMs, 'REPRODUCE against the base: the pane read as settled by the principal\'s pane-less failed launch, past the 10-minute bound');
+    assert.equal(holderSettledOf!(profile, instance.agentName, { reviews: [], producers: [], work: input().work }, instance.pane), null, 'the pane-less handle never settles the named pane');
+    const reading = readResources(input()).find(entry => entry.id === `agent-names:${profile.name}`)!;
+    assert.equal(reading.state, 'exhausted', 'the namespace still reads full: a launch into it is still refused and attributed');
+    assert.equal(reading.overdue, 0);
+    assert.match(reading.detail!, new RegExp(`${instance.agentName} \\(unknown, no live session, reclaim under way \\(no session of this snapshot names the pane; the reclaim pass judges it on its own clock\\), pane ${instance.pane}\\)`));
+    // The launch's own snapshot a moment later: the naming handle landed, the pane is owned.
+    const landed = { id: randomUUID(), key: 'GY-1872', stage: 'build', lease: { owner: profile.principal, epoch: 1, expiresAt: iso(at + 5 * 60_000) },
+      sessions: [{ id: `${profile.principal}:5`, kind: 'implementation', principal: profile.principal, epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane: instance.pane, agentName: instance.agentName, role: null, head: null, attach: null, transcript: null, subject: 'GY-1872', startedAt: instance.handleLandedAt, updatedAt: instance.handleLandedAt, endedAt: null, state: 'running', outcome: null }] } as unknown as Work;
+    assert.deepEqual(faults(input({ work: [input().work[0], landed] })), [], 'the landed handle names the pane and the live lease owns it: nothing to reclaim');
+  }
+});
+
+test('unit:holder-settled-pane-scoped — holderSettledAt judges a named worker pane only by handles that name that pane', () => {
+  const profile = { role: 'worker' as const, name: 'claude-primary', agentName: 'graphyard-claude-1', principal: 'graphyard-claude-1' };
+  const now = Date.parse('2026-10-17T20:02:02.167Z');
+  const session = (id: string, pane: string | null, endedAt: number | null) => ({ id, kind: 'implementation', principal: profile.principal, epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane, agentName: null, role: null, head: null, attach: null, transcript: null, subject: 'GY-1', startedAt: iso(now - 30 * 60_000), updatedAt: iso(endedAt ?? now - 60_000), endedAt: endedAt === null ? null : iso(endedAt), state: endedAt === null ? 'running' : 'lost', outcome: null });
+  const work = [{ id: 'work-1', key: 'GY-1', sessions: [
+    session('graphyard-claude-1:1', 'w1V:pQ0H', now - 12 * 60_000), // the pane's own naming handle, finished
+    session('graphyard-claude-1:2', null, now - 30 * 60_000), // an older failed launch's pane-less record
+    session('graphyard-claude-1:3', 'w1V:pQWD', now - 5 * 60_000), // a session on another pane
+  ] }] as unknown as Work[];
+  const input = { reviews: [] as never, producers: [] as never, work };
+  // A named pane is settled by its own naming handle alone, whatever else the principal carries.
+  assert.equal(holderSettledOf!(profile, 'graphyard-claude-1', input, 'w1V:pQ0H'), now - 12 * 60_000);
+  // A pane no handle names is settled by nothing: not by the pane-less failed launch, not by
+  // another pane's session — a launch in flight stays unplaced (GY-1547) even when the principal
+  // carries pane-less handles from earlier failed launches (GY-1955), however fresh one is.
+  const freshFailed = [{ id: 'work-2', key: 'GY-2', sessions: [session('graphyard-claude-1:4', null, now - 10_000)] }] as unknown as Work[];
+  assert.equal(holderSettledOf!(profile, 'graphyard-claude-1', { reviews: [] as never, producers: [] as never, work: freshFailed }, 'w1V:pNEW'), null, 'a pane-less handle never settles a named pane, however recent');
+  assert.equal(holderSettledOf!(profile, 'graphyard-claude-1', input, 'w1V:pNEW'), null);
+  // The name as a whole keeps the name-wide reading: every handle counts, pane-less ones included.
+  assert.equal(holderSettledOf!(profile, 'graphyard-claude-1', input), now - 5 * 60_000, 'with no pane judged the newest handle settles the name, as before');
+  assert.equal(holderSettledOf!(profile, 'graphyard-claude-1', { reviews: [] as never, producers: [] as never, work: freshFailed }), now - 10_000, 'a pane-less handle settles the name when no pane is judged');
+  // And the reading-level consequence: with only a pane-less finished handle present, a new pane is
+  // unplaced, never overdue — the GY-1547 guard holds where the pane-less handles defeated it.
+  const agents = [{ name: 'graphyard-claude-1', agent_status: 'unknown', pane_id: 'w1V:pNEW', agent: 'claude' }] as HerdrAgent[];
+  const reading: ResourceInputs = { now, reviews: [], producers: [], agents, work: freshFailed, plane: null, loop: null, revision: null, disk: null, reclaimSeen: null,
+    profiles: { workers: [{ ...profile, mode: 'launch' }], reviewers: [], producers: [] } };
+  assert.deepEqual(faults(reading), []);
+});
+
+test('unit:agent-name-stale-holder-still-faults — a pane whose naming handle finished past the bound still raises, and a fresh one still waits', () => {
+  const profile = { name: 'opencode-primary', principal: 'graphyard-opencode-1', agentName: 'graphyard-opencode-1', mode: 'launch' as const };
+  const now = Date.parse('2026-10-17T20:02:02.167Z');
+  const session = (pane: string | null, endedAt: number) => ({ id: 'graphyard-opencode-1:1', kind: 'implementation', principal: profile.principal, epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane, agentName: null, role: null, head: null, attach: null, transcript: null, subject: 'GY-1', startedAt: iso(endedAt - 20 * 60_000), updatedAt: iso(endedAt), endedAt: iso(endedAt), state: 'done', outcome: null });
+  const item = (sessions: unknown[]) => ({ id: randomUUID(), key: 'GY-1', stage: 'build', lease: null, sessions }) as unknown as Work;
+  const agents = (status: string) => [{ name: profile.agentName, agent_status: status, pane_id: 'w1V:pQ0H', agent: 'claude' }] as HerdrAgent[];
+  const readingWith = (work: Work[], status = 'idle'): ResourceInputs => ({ now, reviews: [], producers: [], agents: agents(status), work, plane: null, loop: null, revision: null, disk: null, reclaimSeen: null,
+    profiles: { workers: [profile], reviewers: [], producers: [] } });
+  // The pane's own naming handle finished 11 minutes ago and no live lease holds the principal —
+  // beside an older pane-less failed launch, whose record must not blur the pane's own age. The
+  // fault stands whether Herdr has seen the session finish (idle) or not (unknown): the pane's own
+  // naming handle is what dates it.
+  const stale = [item([session('w1V:pQ0H', now - 11 * 60_000), session(null, now - 90 * 60_000)])];
+  const raised = classifyAttention(resourceAttention(readResources(readingWith(stale)))).filter(entry => entry.subject === 'resource:agent-names:opencode-primary');
+  assert.deepEqual(raised.map(entry => entry.kind), ['resource-bound'], 'a genuinely stale holder still faults');
+  assert.match(raised[0].text, /not reclaimed within 10 minutes of settling/);
+  // The same pane still faults while Herdr has not yet seen the session finish (the runtime's
+  // last report is 'unknown'): its own naming handle's settled time is what dates it, pane-less
+  // handles or not.
+  assert.match(classifyAttention(resourceAttention(readResources(readingWith(stale, 'unknown')))).find(entry => entry.subject === 'resource:agent-names:opencode-primary')!.text, /not reclaimed within 10 minutes of settling/);
+  // A naming handle that finished a moment ago is a close under way, never a fault — the older
+  // pane-less record does not move the pane's clock in either direction.
+  const fresh = [item([session('w1V:pQ0H', now - 30_000), session(null, now - 90 * 60_000)])];
+  assert.deepEqual(faults(readingWith(fresh)), [], 'settled a moment ago: the close is under way');
+});
+
+test('integration:reclaim-closes-finished-worker-pane — the reclaim pass still closes a finished worker pane, off its own naming handle\'s settle time', async () => {
+  const directory = await temporaryDirectory('fault-class-resources-finished-pane');
+  const profiles = { workers: [{ name: 'opencode-primary', principal: 'graphyard-opencode-1', agentName: 'graphyard-opencode-1', mode: 'launch' as const }], reviewers: [], producers: [] };
+  const now = Date.parse('2026-10-17T20:02:02.167Z');
+  const session = (pane: string | null, endedAt: number, state = 'done') => ({ id: 'graphyard-opencode-1:1', kind: 'implementation', principal: 'graphyard-opencode-1', epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane, agentName: null, role: null, head: null, attach: null, transcript: null, subject: 'GY-1', startedAt: iso(endedAt - 20 * 60_000), updatedAt: iso(endedAt), endedAt: iso(endedAt), state, outcome: null });
+  // The pane's naming handle finished 90s ago — past the 60s grace, inside the 10-minute name
+  // bound; the older pane-less failed launch sits beside it.
+  const work = [{ id: randomUUID(), key: 'GY-1', stage: 'build', lease: null, sessions: [session('w1V:pQ0H', now - 90_000), session(null, now - 90 * 60_000)] }] as unknown as Work[];
+  const agents = [{ name: 'graphyard-opencode-1', agent_status: 'idle', pane_id: 'w1V:pQ0H', agent: 'claude' }] as HerdrAgent[];
+  const closes: string[] = [];
+  // First sighting, past the 60s grace: the pass records the pane unowned and closes nothing.
+  const first = await reclaimResources(directory, profiles, { work, agents }, { tmpRoot: directory, now, closePane: pane => { closes.push(pane); } });
+  assert.deepEqual(first.closed, []);
+  assert.equal((await readReclaimState(directory)).seen['w1V:pQ0H'], iso(now), 'the first sighting starts the pass\'s own clock');
+  // Two sightings 120s apart: the second pass closes the finished pane.
+  const second = await reclaimResources(directory, profiles, { work, agents }, { tmpRoot: directory, now: now + unownedPaneConfirmMs, closePane: pane => { closes.push(pane); } });
+  assert.deepEqual(closes, ['w1V:pQ0H']);
+  assert.match(second.closed[0].reason, /its worker session finished and holds no active assignment/);
+  assert.ok(unownedPaneConfirmMs + 90_000 < nameReclaimBoundMs, 'given back 210s after the settle, well inside the 10-minute name bound');
+});
+
+test('integration:reclaim-worker-launch-in-flight-spared — the worker branch spares a launch in flight on the pane-scoped settle time, and closes a genuinely stuck one only off its own sighting clock', async () => {
+  const profiles = { workers: [{ name: 'opencode-primary', principal: 'graphyard-opencode-1', agentName: 'graphyard-opencode-1', mode: 'launch' as const }], reviewers: [], producers: [] };
+  const now = Date.parse('2026-10-17T20:02:02.167Z');
+  const pane = 'w1V:pQ0H';
+  const agent = { name: 'graphyard-opencode-1', agent_status: 'unknown', pane_id: pane, agent: 'claude' } as HerdrAgent;
+  // The principal's earlier failed launch: ended 90 minutes ago, its handle recorded with pane null.
+  const priorFailed = [{ id: randomUUID(), key: 'GY-1932', stage: 'build', lease: null, sessions: [{ id: 'graphyard-opencode-1:1', kind: 'implementation', principal: 'graphyard-opencode-1', epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane: null, agentName: null, role: null, head: null, attach: null, transcript: null, subject: 'GY-1932', startedAt: iso(now - 110 * 60_000), updatedAt: iso(now - 90 * 60_000), endedAt: iso(now - 90 * 60_000), state: 'lost', outcome: null }] }] as unknown as Work[];
+  // The settle time the worker branch judges this pane by: nothing names it, so nothing settles it —
+  // the pane-less failed launch never does (on the base this returned that launch's endedAt).
+  assert.equal(holderSettledOf!({ role: 'worker', ...profiles.workers[0] }, 'graphyard-opencode-1', { reviews: [] as never, producers: [] as never, work: priorFailed }, pane), null);
+
+  // A launch in flight whose record lands inside the window: sighted once on the pass's own clock,
+  // spared every pass after, and its sighting dropped once the pane is owned.
+  const directory = await temporaryDirectory('fault-class-resources-launch-spared');
+  const closes: string[] = [];
+  const first = await reclaimResources(directory, profiles, { work: priorFailed, agents: [agent] }, { tmpRoot: directory, now, closePane: pane => { closes.push(pane); } });
+  assert.deepEqual(first.closed, [], 'the first pass closes nothing: the sighting only starts the clock');
+  assert.equal((await readReclaimState(directory)).seen[pane], iso(now));
+  const second = await reclaimResources(directory, profiles, { work: priorFailed, agents: [agent] }, { tmpRoot: directory, now: now + 70_000, closePane: pane => { closes.push(pane); } });
+  assert.deepEqual(second.closed, [], 'inside the launch bound the pane is spared, never closed off the pane-less handle\'s settled time');
+  // The handle lands (GY-1942's did 6.7s after the fault): the pane is the launch's own, owned.
+  const landed = [{ id: randomUUID(), key: 'GY-1942', stage: 'build', lease: { owner: 'graphyard-opencode-1', epoch: 1, expiresAt: iso(now + 5 * 60_000) },
+    sessions: [{ id: 'graphyard-opencode-1:1', kind: 'implementation', principal: 'graphyard-opencode-1', epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane, agentName: 'graphyard-opencode-1', role: null, head: null, attach: null, transcript: null, subject: 'GY-1942', startedAt: iso(now + 7_000), updatedAt: iso(now + 70_000), endedAt: null, state: 'running', outcome: null }] }] as unknown as Work[];
+  const third = await reclaimResources(directory, profiles, { work: landed, agents: [{ ...agent, agent_status: 'working' }] }, { tmpRoot: directory, now: now + 2 * unownedPaneConfirmMs, closePane: pane => { closes.push(pane); } });
+  assert.deepEqual(third.closed, [], 'the landed handle and the live lease own the pane');
+  assert.deepEqual((await readReclaimState(directory)).seen, {}, 'the sighting goes once the pass reads the pane owned');
+  assert.deepEqual(closes, [], 'a launch in flight is never closed');
+
+  // A launch whose record never lands is GY-1166's stuck pane, and stays so: the close comes at the
+  // 120s sighting confirm, off the pass's own first sighting — never off the pane-less handle's age.
+  const stuck = await temporaryDirectory('fault-class-resources-launch-stuck');
+  await reclaimResources(stuck, profiles, { work: priorFailed, agents: [agent] }, { tmpRoot: stuck, now, closePane: () => {} });
+  const stuckCloses: string[] = [];
+  const stuckReport = await reclaimResources(stuck, profiles, { work: priorFailed, agents: [agent] }, { tmpRoot: stuck, now: now + unownedPaneConfirmMs, closePane: pane => { stuckCloses.push(pane); } });
+  assert.deepEqual(stuckCloses, [pane], 'confirmed unowned past the launch bound, the pass closes it');
+  assert.equal(stuckReport.closed[0].pane, pane);
+  assert.match(stuckReport.closed[0].reason, /holds no active assignment and Herdr reports it unknown/);
 });

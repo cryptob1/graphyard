@@ -12,9 +12,8 @@ import { Store } from '../src/store.js';
 import { standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
 import { interventionKinds, interventionPolicyFromEnv, type Intervention, type InterventionKind, type InterventionReport } from '../src/model/interventions.js';
 import * as interventions from '../src/interventions.js';
-import { detectPatterns, foldInterventions, interventionScan, loopSettledInBound, openPatternItems, readInterventionLedger } from '../src/interventions.js';
+import { detectPatterns, foldInterventions, interventionScan, loopSettledInBound, readInterventionLedger } from '../src/interventions.js';
 import { containmentGraceMs, containmentSettleWaitBoundMs } from '../src/model/containment.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
 import { interventionSummary } from '../src/cli/intervention-status.js';
 import InterventionsPage from '../web/pages/interventions.js';
 import { views } from '../web/pages/index.js';
@@ -270,63 +269,6 @@ test('integration:intervention-report — over a seeded ledger the report answer
     assert.ok(markup.includes(needle), needle);
 });
 
-test('integration:recurring-intervention-becomes-work — when one kind of intervention at one stage crosses the configured threshold in the window, Graphyard opens a work item naming the pattern, its frequency, the items it affected and the attention it cost, linking the instances; once, and not again while it is open', async () => {
-  const policy = interventionPolicyFromEnv({ GRAPHYARD_INTERVENTION_PATTERN_THRESHOLD: '3', GRAPHYARD_INTERVENTION_PATTERN_WINDOW_DAYS: '7' });
-  assert.deepEqual(policy, { threshold: 3, windowDays: 7 });
-  const stage = 'acceptance';
-  const affected = await Promise.all(['pattern-a', 'pattern-b', 'pattern-c'].map(title => created(title)));
-  const nudge = (work: Work, minutes: number) => ok(token(coordinator), 'POST', 'interventions', { kind: 'session-nudge', work: work.key, stage, blocked: `producer session for ${work.key} showed no activity`, since: hoursAgo(minutes / 60), resolution: 're-prompted once' });
-  // Patterns the earlier tests left over the threshold (reworks at review, widenings at build) open their items first.
-  const flushed = (await openPatternItems(engine, policy)).opened;
-  assert.ok(flushed.every(work => work.origin?.pattern?.kind !== 'session-nudge'), flushed.map(work => work.title).join('; '));
-  const before = (await store.list()).length;
-  await nudge(affected[0], 20); await nudge(affected[1], 10);
-  assert.deepEqual((await ok(token(coordinator), 'POST', 'interventions/patterns')).opened, [], 'two is under the threshold');
-  const third = await nudge(affected[2], 30);
-  const crossed = (await report('window=7')).patterns.find(entry => entry.kind === 'session-nudge' && entry.stage === stage)!;
-  assert.deepEqual({ count: crossed.count, crossed: crossed.crossed, work: crossed.work }, { count: 3, crossed: true, work: null }, 'the report shows the threshold crossed before the item exists');
-
-  // The server's own detection (the tick runs openPatternItems every minute) opens exactly one item.
-  const opened = (await openPatternItems(engine, policy)).opened;
-  assert.equal(opened.length, 1);
-  const item = await reload(opened[0].id);
-  assert.equal(item.title, 'Recurring session nudge interventions at the acceptance stage: 3 in 7 days');
-  assert.equal(item.type, 'bug'); assert.equal(item.stage, 'backlog');
-  const origin = item.origin!.pattern!;
-  assert.deepEqual({ kind: origin.kind, stage: origin.stage, threshold: origin.threshold, count: origin.count, days: origin.window.days, items: [...origin.items].sort() },
-    { kind: 'session-nudge', stage, threshold: 3, count: 3, days: 7, items: affected.map(work => work.key).sort() });
-  assert.ok(Math.abs(origin.waitedMs - 60 * 60_000) < 5000, `the attention the instances cost, 20 + 10 + 30 minutes: ${origin.waitedMs}`);
-  assert.deepEqual(origin.instances.map(instance => instance.id).sort(), [...(await report('window=7')).interventions.filter(entry => entry.kind === 'session-nudge' && entry.stage === stage).map(entry => entry.id)].sort(), 'the instances are linked by their ids');
-  assert.ok(origin.instances.every(instance => instance.sources.length === 1 && instance.sources[0].kind === 'intervention.recorded'), 'each instance names its ledger row');
-  assert.ok(origin.instances.some(instance => instance.id === third.id && instance.work === affected[2].key));
-  for (const needle of ['3 session nudge interventions were needed at the acceptance stage', 'Frequency: 3 in 7 days', 'Attention cost: 60 min waited in total, 20 min per intervention', `Items affected: ${origin.items.join(', ')}`, `- ${third.id}: ${affected[2].key}`])
-    assert.ok(item.description.includes(needle), needle);
-  assert.equal((await store.list()).length, before + 1);
-  assert.equal((await store.pool.query("SELECT actor FROM events WHERE work_id=$1 AND kind='create'", [item.id])).rows[0].actor, 'graphyard', 'the control plane opened it');
-  // The report now names the item for the pattern, and master status raises nothing for it.
-  const named = (await report('window=7')).patterns.find(entry => entry.kind === 'session-nudge' && entry.stage === stage)!;
-  assert.equal(named.work?.key, item.key);
-  assert.deepEqual((await interventionSummary(async (path: string) => ok(token(coordinator), 'GET', path))).attentionItems, []);
-
-  // Not again while it is open: the route, the function and a fourth instance all leave it at one.
-  assert.deepEqual((await ok(token(coordinator), 'POST', 'interventions/patterns')).opened, []);
-  await nudge(affected[0], 5);
-  assert.deepEqual((await openPatternItems(engine, policy)).opened, []);
-  assert.equal((await store.list()).filter(work => work.origin?.pattern?.kind === 'session-nudge').length, 1);
-  // Once the item is delivered, the instances it linked never count again: only new ones open the next.
-  await store.pool.query(`UPDATE work_items SET document=document || '{"stage":"done"}' WHERE id=$1`, [item.id]);
-  assert.deepEqual((await openPatternItems(engine, policy)).opened, [], 'one unlinked instance is under the threshold');
-  const delivered = (await report('window=7')).patterns.find(entry => entry.kind === 'session-nudge' && entry.stage === stage)!;
-  assert.deepEqual({ count: delivered.count, crossed: delivered.crossed, work: delivered.work }, { count: 4, crossed: false, work: null }, 'linked instances inside the window do not claim that another item will open');
-  assert.deepEqual((await interventionSummary(async (path: string) => ok(token(coordinator), 'GET', path))).attentionItems, [], 'master status does not nag for a pattern the delivered item already handled');
-  await nudge(affected[1], 5); await nudge(affected[2], 5);
-  const again = (await openPatternItems(engine, policy)).opened;
-  assert.equal(again.length, 1); assert.equal(again[0].origin!.pattern!.count, 3);
-  assert.ok(again[0].origin!.pattern!.instances.every(instance => !origin.instances.some(linked => linked.id === instance.id)), 'no instance is linked twice');
-  assert.equal((await ok(token(reader), 'GET', `work`)).length, before + 2);
-  assert.equal((await call(token(worker), 'POST', 'interventions/patterns')).status, 403);
-});
-
 test('integration:operator-judgement-as-input — the operator records judgement about delivered work against the item or the page it concerns; it appears in the report as first-class input and becomes a work item with the same standing as a failed gate', async () => {
   const shipped = await delivered('judged', hoursAgo(2));
   const aboutItem = await ok(token(operator), 'POST', 'judgements', { work: shipped.key, verdict: 'confusing', text: 'The dashboard shows the merge queue position before the item is even reviewed' });
@@ -403,22 +345,6 @@ const withScan = async <T>(value: string | undefined, run: () => Promise<T>) => 
   try { return await run(); } finally { if (previous === undefined) delete process.env[interventionScanVariable]; else process.env[interventionScanVariable] = previous; }
 };
 
-test('unit:intervention-pattern-attention-reflects-scan — with the scan off the crossed-pattern line says so, names how to enable it and is a configuration fault, not a decision fault; with it on the existing wording stands', async () => {
-  const crossedReport = (scan: { enabled: boolean; variable: string } | undefined) => async () => ({ window: { days: 7 }, deliveries: 1, total: 3, open: 0, waitedMs: 0, ratePerDelivery: 3, byKind: [], byStage: [], costliest: [], judgements: [], ledger: null,
-    patterns: [{ kind: 'session-nudge', stage: 'build', count: 3, threshold: 3, crossed: true, work: null }], ...(scan ? { scan } : {}) });
-  const off = classifyAttention((await interventionSummary(crossedReport({ enabled: false, variable: interventionScanVariable }))).attentionItems);
-  assert.equal(off.length, 1);
-  assert.equal(off[0].text, '3 session-nudge interventions at the build stage in 7 days crossed the threshold of 3 and no item stands for the pattern yet; the automatic pattern scan is off on this server, so nothing opens one on its own: GRAPHYARD_INTERVENTION_PATTERNS=1 on the deployment enables it');
-  assert.doesNotMatch(off[0].text, /within a minute/);
-  assert.equal(off[0].faultClass, 'configuration'); assert.notEqual(off[0].faultClass, 'decision');
-  assert.match(off[0].next, /POST \/api\/interventions\/patterns/);
-  const on = classifyAttention((await interventionSummary(crossedReport({ enabled: true, variable: interventionScanVariable }))).attentionItems);
-  assert.equal(on[0].text, '3 session-nudge interventions at the build stage in 7 days crossed the threshold of 3 and no item stands for the pattern yet; the server opens one within a minute');
-  assert.deepEqual({ kind: on[0].kind, faultClass: on[0].faultClass }, { kind: 'intervention-pattern', faultClass: 'decision' });
-  // A server that predates the field keeps the wording it always had; only `enabled: false` turns it.
-  assert.deepEqual(classifyAttention((await interventionSummary(crossedReport(undefined))).attentionItems).map(item => item.faultClass), ['decision']);
-});
-
 test('integration:intervention-scan-state-reported — the interventions report says whether the server runs the pattern scan, for both settings', async () => {
   // On by default since GY-1381; `=0` turns it off.
   const unset = await withScan(undefined, () => ok(token(coordinator), 'GET', 'interventions?window=7'));
@@ -462,7 +388,7 @@ test('unit:intervention-scan-default-on — the pattern scan runs by default on 
   try { await failing.run(); await failing.run(); } finally { await failing.stop(); }
   assert.equal(attempts, 2); assert.equal(failures.length, 2);
 
-  // The server reports the setting in effect, and master status carries it and words the pattern line by it.
+  // The server reports the setting in effect, and master status carries it; the crossed pattern's line is the same either way.
   const unset = await withScan(undefined, () => ok(token(coordinator), 'GET', 'interventions?window=7'));
   assert.deepEqual(unset.scan, { enabled: true, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
   const statusUnset = await withScan(undefined, () => interventionSummary(async (path: string) => ok(token(coordinator), 'GET', path)));
@@ -471,8 +397,8 @@ test('unit:intervention-scan-default-on — the pattern scan runs by default on 
   assert.deepEqual((statusOff.summary as { scan: unknown }).scan, { enabled: false, variable: 'GRAPHYARD_INTERVENTION_PATTERNS' });
   const crossed = (scan: { enabled: boolean; variable: string }) => async () => ({ window: { days: 7 }, deliveries: 1, total: 3, open: 0, waitedMs: 0, ratePerDelivery: 3, byKind: [], byStage: [], costliest: [], judgements: [], ledger: null,
     patterns: [{ kind: 'session-nudge', stage: 'build', count: 3, threshold: 3, crossed: true, work: null }], scan });
-  assert.match((await interventionSummary(crossed(interventionScan({})))).attentionItems[0].text, /the server opens one within a minute/);
-  assert.match((await interventionSummary(crossed(interventionScan({ GRAPHYARD_INTERVENTION_PATTERNS: '0' })))).attentionItems[0].text, /the automatic pattern scan is off on this server/);
+  for (const scan of [interventionScan({}), interventionScan({ GRAPHYARD_INTERVENTION_PATTERNS: '0' })])
+    assert.equal((await interventionSummary(crossed(scan))).attentionItems[0].text, '3 session-nudge interventions at the build stage in 7 days crossed the threshold of 3');
 });
 
 test('unit:intervention-detect-linear — detectPatterns groups instances in one pass (no per-entry array copy) and finds an existing pattern item through a map, so its cost is linear in the instances and items it reads', () => {

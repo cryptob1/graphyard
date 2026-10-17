@@ -31,7 +31,7 @@ Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits
 
 ## Retro synthesis
 
-Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) files item per crossed pattern, drafting `retro.drafted` changes per recurring cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses; approved: [`retroStanding`](protocol/read-endpoints.md).
+Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) raises each crossed pattern as attention, never an item, drafting `retro.drafted` changes per recurring cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses; approved: [`retroStanding`](protocol/read-endpoints.md).
 
 ## Flaky CI check
 
