@@ -22,7 +22,7 @@ One retry: **passed**; **failed** (both); **flaky** (retry passed at same SHA; `
 
 Flaky required cases block promotion until `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item, another agent approving) accepts; refused unless both attempts recorded at that SHA. `release promote` reads only that run's and SHA's applied decisions, and its workflow's `release promote ID` (`GRAPHYARD_URL`, `GRAPHYARD_TOKEN`) only passing UATs.
 
-`importExternalRun`/`importedRunVerdict` (unwired) keep verdicts: `{"format":"graphyard-external-run-v1","producer":"huck","sha":"<40-hex>","runId":"r7","cases":[{"id":"login","verdict":"blocked","reason":"no-test-account","required":true,"attempts":0,"durationMs":0,"evidence":["https://ci.example/r7"]}]}` (or `digest`; unknown fields refused).
+`importExternalRun`/`importedRunVerdict` (unwired) keep verdicts: `{"format":"graphyard-external-run-v1","producer":"huck","sha":"<40-hex>","runId":"r7","cases":[{"id":"login","verdict":"blocked","reason":"no-test-account","required":true,"attempts":0,"durationMs":0,"evidence":["https://ci.example/r7"]}]}` (or `digest`; unknown fields/non-HTTP(S)/credentialed links refused).
 
 `e2e/contract.json` lists required customer outcomes: `id`, `title`, optional `criteria`, proving `cases` (shareable). Pre-cut `graphyard release contract` refuses `release cut` when a bound case is missing, invalid, not `uat`-targeted, optional, or proves nothing.
 

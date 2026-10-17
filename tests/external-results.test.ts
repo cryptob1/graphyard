@@ -77,6 +77,10 @@ test('unit:external-results-imported — the import refuses what it does not und
   assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'passed', attempts: -1, durationMs: 1 }] }));
   assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: -1 }] }));
   assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: 1, evidence: ['not a url'] }] }));
+  // Evidence links meet the artifact boundary: no other scheme and no credentials, while plain HTTP(S) links stay.
+  for (const link of ['file:///etc/passwd', 'ftp://artifacts.example.test/trace.zip', 'javascript:alert(1)', 'https://user:password@example.com/report', 'https://user@example.com/report'])
+    assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: 1, evidence: [link] }] }), link);
+  assert.deepEqual(importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: 1, evidence: ['http://ci.example.test/log', 'https://artifacts.example.test/trace.zip'] }] }).cases[0].evidence, ['http://ci.example.test/log', 'https://artifacts.example.test/trace.zip']);
   assert.throws(() => importExternalRun({ ...handIn, cases: [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: 1, extra: 1 }] }));
 });
 

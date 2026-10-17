@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 const id = z.string().regex(/^[a-f0-9]{64}$/);
+/** Imported evidence links meet the artifact boundary (src/engine.ts): HTTP(S) and free of credentials. */
+const publicEvidenceUrl = z.string().url().max(2000).refine(value => { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; }, 'evidence links are HTTP(S) and carry no credentials');
 const status = z.enum(['passed', 'failed', 'timedOut', 'skipped', 'interrupted']);
 export const runnerReport = z.object({
   format: z.literal('graphyard-playwright-v1'),
@@ -67,7 +69,7 @@ export const externalRun = z.object({
     /** Why a case could not run: demanded for `blocked`, the precondition or environment it missed. */
     reason: z.string().trim().min(1).max(1000).optional(),
     /** Where the run's own record of the case lives (trace, log, report); public locations only. */
-    evidence: z.array(z.string().url().max(2000)).max(100).optional(),
+    evidence: z.array(publicEvidenceUrl).max(100).optional(),
   }).strict()).max(10_000),
 }).strict().superRefine((run, ctx) => {
   if (!run.sha && !run.digest) ctx.addIssue({ code: 'custom', path: [], message: 'the run names what it tested: give the candidate head `sha` or the deployed `digest`' });
