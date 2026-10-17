@@ -1,9 +1,12 @@
+import { execFileSync } from 'node:child_process';
+import { isAbsolute, relative, resolve } from 'node:path';
 import { fingerprint, Vault } from './secrets.js';
 import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { packageVersion } from '../release.js';
 import { hetznerQuote, spendConsent, type PriceQuote, type QuoteResult } from './pricing.js';
 import { localAdapter } from './local.js';
+import { buildIdentity, cliCommit } from '../protocol-version.js';
 
 /** The versioned release image for the checkout's own version, as .github/workflows/release.yml publishes it. */
 export const DEFAULT_IMAGE = `ghcr.io/cryptob1/graphyard:${packageVersion}`;
@@ -52,6 +55,10 @@ export interface AdapterContext {
   local?: import('./local.js').LocalSettings | null;
   /** `install --observe-only` (GY-1846): observation runs no provider command that prints variable values. */
   observeOnly?: boolean;
+  /** The managed repository's checkout; a Railway upload under --observe-only refuses a source that is it. Defaults to the process cwd. */
+  managedRoot?: string | null;
+  /** The commit a Railway upload stamps as GRAPHYARD_BUILD_SHA (GY-1864); read from the source checkout, else GRAPHYARD_BUILD_SHA, when absent. */
+  sourceCommit?: string | null;
   /** Spend consent for a server this install creates: a monthly cap, or the exact price confirmed. */
   spend: { maxMonthly: number | null; confirmPrice: number | null };
   wait: (ms: number) => Promise<void>;
@@ -636,6 +643,99 @@ async function runRailway(ctx: AdapterContext, args: string[], options: { input?
   return ctx.transport.exec('railway', args, { ...options, cwd: ctx.railwayDir });
 }
 
+/** The native result of the last `railway up` an apply ran (GY-1864): its command, exit code and the CLI's scrubbed message. */
+export interface RailwayUploadReceipt { step: 'provider.deploy'; command: string; cwd: string; code: number; ok: boolean; message: string; buildSha: string | null }
+const railwayUploads = new WeakMap<AdapterContext, RailwayUploadReceipt[]>();
+/** Every upload this context ran, oldest first. */
+export const railwayUploadReceipts = (ctx: AdapterContext): RailwayUploadReceipt[] => [...(railwayUploads.get(ctx) ?? [])];
+
+const insideOrEqual = (path: string, root: string) => { const away = relative(root, path); return away === '' || (!away.startsWith('..') && !isAbsolute(away)); };
+
+/**
+ * The `railway up` arguments for the Graphyard source. The CLI runs from the private link
+ * directory, and without --path-as-root it uploads a path that is not its cwd relative to the
+ * linked directory's repository and fails with "prefix not found"; with it, the named source
+ * becomes the archive root. A source that is the cwd uploads exactly as it always did.
+ */
+export function railwayUploadArgs(ctx: Pick<AdapterContext, 'sourceRoot' | 'service' | 'railwayDir'>) {
+  const args = ['up', ctx.sourceRoot, '--service', ctx.service, '--ci', '--detach'];
+  return resolve(ctx.sourceRoot) === resolve(ctx.railwayDir) ? args : [...args, '--path-as-root'];
+}
+
+/** True when a checkout's tracked or unignored files differ from its HEAD: `railway up` would upload them. */
+export function sourceTreeDirty(root: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): boolean {
+  try { return run('git', ['-C', root, 'status', '--porcelain', '--untracked-files=normal']).trim() !== ''; }
+  catch { return true; }
+}
+
+/**
+ * The commit the uploaded source is at: an upload carries no Git metadata, so the served build
+ * knows its commit only from GRAPHYARD_BUILD_SHA, which the upload stamps first. Null when the
+ * source is a checkout with changes HEAD does not hold (the upload would carry them under HEAD's
+ * name), or no checkout and this process has no build identity either; the upload then refuses.
+ */
+export function railwaySourceCommit(ctx: Pick<AdapterContext, 'sourceRoot' | 'sourceCommit'>, dirty = sourceTreeDirty): string | null {
+  if (ctx.sourceCommit !== undefined) return ctx.sourceCommit;
+  const head = cliCommit(ctx.sourceRoot);
+  if (head) return dirty(ctx.sourceRoot) ? null : head;
+  return buildIdentity().commit;
+}
+
+/**
+ * Uploads the Graphyard source and records the CLI's own result. Under --observe-only the
+ * managed repository's tree (the process cwd the runbook requires, or `ctx.managedRoot`) is
+ * never the upload: a source that is it, or that contains it, is refused before anything runs.
+ * A non-zero exit is the failed deploy step, carrying the exit code and the scrubbed message,
+ * and it stops the apply.
+ */
+export async function railwayUpload(ctx: AdapterContext): Promise<RailwayUploadReceipt> {
+  const managed = resolve(ctx.managedRoot ?? process.cwd());
+  if (ctx.observeOnly && insideOrEqual(managed, resolve(ctx.sourceRoot))) {
+    throw new Error(`provider.deploy refused: under --observe-only the upload source ${ctx.sourceRoot} is the managed repository's tree (${managed}); only the Graphyard source is uploaded`);
+  }
+  // Stamped before the upload, without a deploy of its own: the upload's build then serves its
+  // commit at /healthz, and a rerun on a deployed app restamps and redeploys it. A source whose
+  // commit is unknown is refused: the service would keep an earlier upload's stamp and serve it.
+  const commit = railwaySourceCommit(ctx);
+  if (!commit) throw new Error(`provider.deploy refused: the commit of the upload source ${ctx.sourceRoot} is unknown (no clean Git checkout and no GRAPHYARD_BUILD_SHA), so GRAPHYARD_BUILD_SHA cannot be set and the service would keep a previous upload's commit`);
+  await runRailway(ctx, ['variables', '--service', ctx.service, '--skip-deploys', '--set', `GRAPHYARD_BUILD_SHA=${commit}`], { timeout: 300_000 });
+  const args = railwayUploadArgs(ctx);
+  const result = await runRailway(ctx, args, { allowFailure: true, timeout: 1_800_000 });
+  const message = ctx.vault.scrub((result.code === 0 ? result.stdout.trim() || result.stderr.trim() : result.stderr.trim() || result.stdout.trim()).split('\n').filter(Boolean).slice(-8).join('\n').slice(-2000));
+  const receipt: RailwayUploadReceipt = { step: 'provider.deploy', command: `railway ${args.join(' ')}`, cwd: ctx.railwayDir, code: result.code, ok: result.code === 0, message, buildSha: commit };
+  railwayUploads.set(ctx, [...(railwayUploads.get(ctx) ?? []), receipt]);
+  if (!receipt.ok) throw Object.assign(new Error(`provider.deploy failed: railway up exited with ${result.code}${message ? `: ${message}` : ''}`), { receipt });
+  return receipt;
+}
+
+/** How long the health check waits for the uploaded build to be served: 200 × 3 s, ten minutes. */
+const RAILWAY_SERVE_ATTEMPTS = 200;
+
+/**
+ * Railway's health is the uploaded build's, not the service's: `railway up --detach` returns once
+ * the build is queued, and on a rerun the previous deployment keeps answering /healthz, so a
+ * healthy answer alone would complete the apply while the new upload is still building or has
+ * failed. After an upload, healthy means /healthz is ok and reports the commit that upload
+ * stamped in GRAPHYARD_BUILD_SHA; while it reports another, the check waits, and when the wait
+ * ends without it the deploy step fails, naming what is served instead.
+ */
+export async function railwayHealth(ctx: AdapterContext, url: string): Promise<boolean> {
+  const sha = railwayUploadReceipts(ctx).at(-1)?.buildSha;
+  if (!sha) return httpHealth(ctx, url);
+  let served = 'no answer';
+  for (let attempt = 0; attempt < RAILWAY_SERVE_ATTEMPTS; attempt++) {
+    try {
+      const response = await ctx.fetch(`${url.replace(/\/$/, '')}/healthz`, { signal: AbortSignal.timeout(15_000) });
+      const body = response.ok ? await response.json() as any : null;
+      const commit = typeof body?.commit === 'string' ? body.commit.toLowerCase() : null;
+      if (body?.ok === true && commit === sha.toLowerCase()) return true;
+      served = body?.ok === true ? `commit ${commit ?? 'null'}` : `HTTP ${response.status}`;
+    } catch { served = 'no answer'; }
+    await ctx.wait(3_000);
+  }
+  throw new Error(`provider.deploy failed: ${url} still serves ${served}, not the uploaded commit ${sha}; the upload's build failed or did not finish. Inspect: railway logs --service ${ctx.service}`);
+}
+
 export const railwayAdapter: ProviderAdapter = {
   provider: 'railway',
   async preflight(ctx) {
@@ -692,10 +792,11 @@ export const railwayAdapter: ProviderAdapter = {
   plan(ctx, observation) {
     // Preflight ran first and settled the workspace; a plan built without it shows the bare command.
     const workspace = railwayWorkspaces.get(ctx) ?? chooseRailwayWorkspace(ctx.workspace, []);
+    const commit = railwaySourceCommit(ctx);
     return [
       { id: 'provider.provision.project', target: 'provider', title: `Link or create the Railway project for ${ctx.repository}${workspace.selected ? ` in workspace ${workspace.selected.name}` : ''}, linked from ${ctx.railwayDir}`, state: observation.compute ? 'satisfied' : 'create', command: `railway ${railwayInitArgs(ctx, workspace.selected).join(' ')}`, ...(workspace.selected ? { values: [{ name: 'workspace', value: `${workspace.selected.name} (${workspace.selected.id})`, secret: false }] } : {}) },
       { id: 'provider.provision.database', target: 'provider', title: 'Add the managed Postgres database', state: observation.database ? 'satisfied' : 'create', command: 'railway add --database postgres' },
-      { id: 'provider.provision.app', target: 'provider', title: `Add the ${ctx.service} application service built from the Graphyard checkout's root Dockerfile`, state: observation.app ? 'satisfied' : 'create', command: `railway add --service ${ctx.service}` },
+      { id: 'provider.provision.app', target: 'provider', title: `Add the ${ctx.service} application service built from the Graphyard checkout's root Dockerfile; every upload first sets GRAPHYARD_BUILD_SHA to ${commit ?? 'the source commit, which is unknown here, so the upload is refused'}`, state: observation.app ? 'satisfied' : 'create', command: `railway add --service ${ctx.service}`, values: [{ name: 'GRAPHYARD_BUILD_SHA', value: commit ?? 'unknown', secret: false }] },
     ];
   },
   async provision(ctx, observation) {
@@ -725,7 +826,7 @@ export const railwayAdapter: ProviderAdapter = {
     // The source is the Graphyard checkout the CLI runs from — never the process cwd, which
     // is the managed repository's tree: an implicit `railway up` there would build and
     // deploy the user's application (or its Nixpacks guess) as the Graphyard service.
-    await runRailway(ctx, ['up', ctx.sourceRoot, '--service', ctx.service, '--ci', '--detach'], { timeout: 1_800_000 });
+    await railwayUpload(ctx);
   },
   async url(ctx) {
     const args = ['domain', '--service', ctx.service, '--port', String(SERVER_PORT), ...(ctx.domain ? [ctx.domain] : [])];
@@ -734,7 +835,7 @@ export const railwayAdapter: ProviderAdapter = {
     if (!found) throw new Error('Railway did not return an HTTPS domain for the service');
     return `https://${found[0]}`;
   },
-  health: httpHealth,
+  health: railwayHealth,
   async logs(ctx, lines = 100) {
     const result = await runRailway(ctx, ['logs', '--service', ctx.service, '--lines', String(lines)], { allowFailure: true, timeout: 180_000 });
     return ctx.vault.scrub(result.stdout || result.stderr);

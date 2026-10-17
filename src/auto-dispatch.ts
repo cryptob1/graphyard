@@ -21,7 +21,7 @@ import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
 import { owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, wholeFindings } from './model/post-merge-review.js';
-import { riskOf } from './model/risk-class.js';
+import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
 import { readProjectMemory, recordDecisionInMemory, writeProjectMemory } from './project-memory.js';
 import { agentToken } from './master/autonomy.js';
@@ -680,8 +680,8 @@ export interface DispatchWait { kind: 'review' | 'producer'; work: string; reque
 export type PostMergeOutcome = NonNullable<ReviewRecord['postMergeFollowUps']>;
 /** The wait a normal-risk control-plane head's pre-merge review request reports (GY-1525): it merges on its trial and is reviewed after. */
 export const postMergeWaitReason = 'normal-risk delta in control-plane mode: it merges on its trial and is reviewed after the merge, so no pre-merge reviewer session is launched';
-/** Whether the item's pre-merge review request is answered by a post-merge review instead: a control-plane head whose merge delta reads normal. */
-export const reviewedAfterMerge = (work: Work) => work.observation?.source === 'control-plane' && !!work.policy.review && riskOf(work).risk === 'normal';
+/** Whether the item's pre-merge review request is answered by a post-merge review instead: a control-plane head whose merge delta reads normal, unless the repository reviews normal changes pre-merge (GY-1843). */
+export const reviewedAfterMerge = (work: Work) => work.observation?.source === 'control-plane' && !!work.policy.review && !reviewedBeforeMerge(riskOf(work).risk);
 /**
  * The dispatch request a post-merge review is launched under: one per delivered merge commit, bound
  * to nothing else. Its base is the merge commit's first parent, the tip the merge writer's ledger

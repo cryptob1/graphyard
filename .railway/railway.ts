@@ -26,14 +26,15 @@ export default defineRailway(ctx => {
     // and scripts/configure-integrations.mjs from the deployed principal set (docs/deployment.md,
     // Delegation capacity variables); the same adapters write GRAPHYARD_GENERATED_FILES from the
     // repository's generated-file manifest, and dropping it would make the regression guard treat
-    // every generated page as owned work; RAILWAY_API_TOKEN lets the control plane observe deployments, and
+    // every generated page as owned work, and GRAPHYARD_REPOSITORY_POLICY from graphyard.json's risk, review and e2e
+    // sections (GY-1843), without which the image, carrying no checkout, judges by the generic default; RAILWAY_API_TOKEN lets the control plane observe deployments, and
     // GRAPHYARD_PRODUCTION_ENVIRONMENT names the environment it reads them under (`graphyard / production` here,
     // the install's run field productionEnvironment; docs/deployment.md#production-environment-name).
     env: uat
-      ? { DATABASE_URL: preserve(), GRAPHYARD_PRINCIPALS: preserve(), HOST: preserve(), PORT: preserve(), GRAPHYARD_GENERATED_FILES: preserve() }
+      ? { DATABASE_URL: preserve(), GRAPHYARD_PRINCIPALS: preserve(), HOST: preserve(), PORT: preserve(), GRAPHYARD_GENERATED_FILES: preserve(), GRAPHYARD_REPOSITORY_POLICY: preserve() }
       : { DATABASE_URL: preserve(), GITHUB_REPOSITORY: preserve(), GRAPHYARD_PRINCIPALS: preserve(), HOST: preserve(), PORT: preserve(),
         GITHUB_APP_ID: preserve(), GITHUB_INSTALLATION_ID: preserve(), GITHUB_PRIVATE_KEY: preserve(), GITHUB_WEBHOOK_SECRET: preserve(),
-        GRAPHYARD_MAX_SLICE_LEADS: preserve(), GRAPHYARD_MAX_ENGINEERS_PER_LEAD: preserve(), GRAPHYARD_MIN_REVIEWERS: preserve(), GRAPHYARD_MAX_REVIEWERS: preserve(), GRAPHYARD_GENERATED_FILES: preserve(),
+        GRAPHYARD_MAX_SLICE_LEADS: preserve(), GRAPHYARD_MAX_ENGINEERS_PER_LEAD: preserve(), GRAPHYARD_MIN_REVIEWERS: preserve(), GRAPHYARD_MAX_REVIEWERS: preserve(), GRAPHYARD_GENERATED_FILES: preserve(), GRAPHYARD_REPOSITORY_POLICY: preserve(),
         RAILWAY_API_TOKEN: preserve(), GRAPHYARD_PRODUCTION_ENVIRONMENT: preserve(), GRAPHYARD_DIRECT_MERGE_SINCE: preserve(),
         GRAPHYARD_REVERT_APPROVER_APP_ID: preserve(), GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID: preserve(), GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY: preserve(),
         GRAPHYARD_DATABASE_MAX_BYTES: preserve(), GRAPHYARD_DATABASE_POOL_SIZE: preserve(), GRAPHYARD_ESCALATION_CONTEXT_BUDGET: preserve(),
