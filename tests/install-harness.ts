@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { generateKeyPairSync } from 'node:crypto';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { fakeTransport, type BundleFileRecord, type Transport } from '../src/install/transport.js';
 import type { InstallDependencies } from '../src/install/index.js';
 import type { Provider } from '../src/install/types.js';
@@ -13,6 +14,9 @@ export const REPOSITORY = 'owner/project';
 export const GRAPHYARD_APP_ID = 200_001;
 export const CI_APP_ID = 15_368;
 export const HEAD_SHA = 'a'.repeat(40);
+/** The Graphyard source every harness install uploads: this checkout, never the managed repository, at a fixed commit (GY-1864). */
+export const GRAPHYARD_SOURCE = fileURLToPath(new URL('..', import.meta.url));
+export const GRAPHYARD_SOURCE_SHA = 'c'.repeat(40);
 
 export async function temporaryRepository(repository = REPOSITORY) {
   const root = await temporaryDirectory('install');
@@ -221,7 +225,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   }) as unknown as typeof fetch;
 
   const deps: InstallDependencies = {
-    transport: transport as Transport, ssh, fetch: fetchImpl, configHome, sourceRoot: root,
+    transport: transport as Transport, ssh, fetch: fetchImpl, configHome, sourceRoot: GRAPHYARD_SOURCE, sourceCommit: GRAPHYARD_SOURCE_SHA,
     cliPath: join(root, 'package.json'), hostId: 'install-test-host',
     wait: async () => {}, now: () => Date.now(), log: () => {},
     githubApp: async request => request.reviewer

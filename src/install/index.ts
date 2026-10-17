@@ -44,6 +44,8 @@ export interface InstallDependencies {
   fetch?: typeof fetch;
   configHome?: string;
   sourceRoot?: string;
+  /** The commit a Railway upload stamps as GRAPHYARD_BUILD_SHA; read from sourceRoot's checkout when absent. */
+  sourceCommit?: string | null;
   cliPath?: string;
   hostId?: string;
   now?: () => number;
@@ -480,6 +482,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     observeOnly: !!inputs.observeOnly,
     // The repository this install manages: the observe-only upload guard refuses it as the source.
     managedRoot: root,
+    ...(dependencies.sourceCommit !== undefined ? { sourceCommit: dependencies.sourceCommit } : {}),
     wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))),
     transport, ssh, fetch: dependencies.fetch ?? fetch, vault,
   };
