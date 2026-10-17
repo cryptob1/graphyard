@@ -3,7 +3,7 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: 3 same-signature cycles stall, remedied once, verified (unknown-profile/`review-launch`: profile configured; 401: issued profile credential/deploy key, never coordinator's; merge-record key-reuse), else master woken; retries per 5min. Log: `journalctl --user -u graphyard-master`.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: 3 same-signature cycles stall, remedied once, verified (unknown-profile/`review-launch`: profile configured; 401: issued profile credential/deploy key, never coordinator's; merge-record key-reuse), else master woken; retries per 5min.
 
 ### Perpetual master loop
 
@@ -15,7 +15,7 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Supervisor died leaving a containment quarantine
 
-[`master settle-containment`](operations.md#recovery-recipes) on the worker verifies nothing survives; refused: confirm stop, rework, or `recover-containment` once delivered ([autosettle](protocol/leases.md#watch)).
+[`master settle-containment`](operations.md#recovery-recipes) verifies nothing survives; refused: confirm stop, then rework, or `recover-containment` once delivered ([autosettle](protocol/leases.md#watch)).
 
 ## Submitted implementation needs rework
 
@@ -27,7 +27,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky CI check
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; on main later merges await reruns. Cancelled/timed-out jobs rerun ≤3×, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
+[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); a pass clears it; main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run and step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure, refusal or unconcluded hour reverts.
 
 ## Accepted evidence turns out to be wrong
 
@@ -76,15 +76,15 @@ Below **500 requests** (`GRAPHYARD_GITHUB_RESERVE`), non-merge observations awai
 
 `resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any-name checkout/worktree unheld and unregistered 24h; <25% free: escalates, naming consumers); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
 
-Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`); CI unbounded. Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`, one fault per dip) until 1GB above.
+Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`). Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one fault per dip) until 1GB above.
 
 ## Storage retention
 
-Receipts answer retries day; compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appends `ledger.compacted`.
+Compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appending `ledger.compacted`.
 
 ## Bootstrap mode for a self-proving change
 
-`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; other gates apply; `e2e:` never defer; next item touching those paths owes it (`graphyard obligations`).
+`policy:bootstrap` holders add `"bootstrap":{"reason":"…","contractPaths":["src/herdr/recovery.ts"]}` to criterion; `e2e:` proofs never defer, next item touching those paths owes it (`graphyard obligations`).
 
 ## Delivered with a failed smoke proof
 
@@ -92,7 +92,11 @@ Stays Done, **delivered with failure**; new item reverts.
 
 ## Merge bypass
 
-Ungated merges: permanent violations (never backfilled): repair access, file follow-up. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+Ungated merges are permanent violations: repair access, file follow-up. Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+
+## Merge-intent withdrawal
+
+`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin, loop stopped, managed repository only) dequeues or disarms each item's unmerged pull request, reporting number, head, mode, result; reruns write nothing; failures exit 1; without `--apply`, plans.
 
 ## Credentials
 
@@ -109,7 +113,7 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ## Setup proposals and drift
 
-`graphyard init --scan` writes `.graphyard/setup-proposal.json` (`--apply` applies); rescans and `doctor --profile through-merge|preview-validation|production-verification` report drift, never repair.
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`; rescans and `doctor --profile through-merge|preview-validation|production-verification` report drift, never repair.
 
 ## Scale limits
 
@@ -117,4 +121,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows, all ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (10000), 3× last full pass); ticks >5s log `reconciliation tick took N ms`: moved key+fields/interval, event-loop lag p50/max; own-write moves re-evaluate only readers. Batches evaluate lock-free, yield between items, write each under coordination+row locks; heartbeats lock only their item (renewal ≤1s).
+Reconcile evaluates moved rows, all ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (10000), 3× last full pass); ticks >5s log `reconciliation tick took N ms`: moved key+fields/interval, event-loop lag p50/max. Batches evaluate lock-free, writing each under coordination+row locks; heartbeats lock only their item.
