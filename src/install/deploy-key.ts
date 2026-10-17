@@ -81,6 +81,13 @@ export async function ensureDeployKey(installDir: string, repository: string, gh
   return privateKeyFile;
 }
 
+/** A listed deploy key's read-only flag from gh's `read_only` or `readOnly`, or null when it carries neither as a boolean. */
+export function deployKeyReadOnly(entry: any): boolean | null {
+  if (typeof entry?.read_only === 'boolean') return entry.read_only;
+  if (typeof entry?.readOnly === 'boolean') return entry.readOnly;
+  return null;
+}
+
 export interface MainWriteProtection {
   /** `created`/`updated`: Graphyard wrote its ruleset; `unchanged`: it already held; `operator-protected`: the operator's own protection was found and left as is. */
   state: 'created' | 'updated' | 'unchanged' | 'operator-protected';
@@ -107,12 +114,20 @@ export async function ensureMainWriteProtection(repository: string, gh: GitHubCl
   if (!writer) throw new Error(`The merge writer's public key holds no OpenSSH key, so ${baseBranch} was not protected`);
   const keys = await ghJson(gh, ['repo', 'deploy-key', 'list', '-R', repository, '--json', 'id,key,title,readOnly']);
   if (!Array.isArray(keys)) throw new Error(`The deploy keys of ${repository} could not be read, so ${baseBranch} was not protected`);
-  const writable = keys.filter((entry: any) => entry?.readOnly === false);
-  const others = writable.filter((entry: any) => publicKeyFingerprint(String(entry?.key ?? '')) !== writer).map((entry: any) => String(entry?.title ?? entry?.id)).sort();
+  // GY-1839: gh prints the API's own `read_only` whatever the --json field is called; `readOnly` is read too.
+  const unflagged = keys.filter((entry: any) => deployKeyReadOnly(entry) === null).map((entry: any) => String(entry?.title ?? entry?.id));
+  if (unflagged.length) throw new Error(`The deploy key list of ${repository} carried no read-only flag (read_only or readOnly) for ${unflagged.join(', ')}, so ${baseBranch} was not protected`);
+  const writable = keys.filter((entry: any) => deployKeyReadOnly(entry) === false);
+  const others = writable.filter((entry: any) => publicKeyFingerprint(String(entry?.key ?? '')) !== writer)
+    .map((entry: any) => ({ id: String(entry?.id), title: String(entry?.title ?? entry?.id) }))
+    .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
   const writerListed = writable.length > others.length;
   // The deploy-key bypass names no key, so exclusivity rests on the key list: refuse rather than claim
   // it, and check it before the operator's protection too, which setup accepts only for a key that can push.
-  if (others.length) throw new Error(`Read-write deploy keys ${others.join(', ')} on ${repository} would share the merge writer's bypass, so ${baseBranch} was not protected; remove them (or make them read-only), then rerun`);
+  if (others.length) {
+    const removals = others.map(key => `\`gh repo deploy-key delete ${key.id} -R ${repository}\` (${key.title})`).join(', ');
+    throw new Error(`Read-write deploy keys ${others.map(key => key.title).join(', ')} on ${repository} would share the merge writer's bypass, so ${baseBranch} was not protected; remove them (or make them read-only), then rerun: ${removals}`);
+  }
   if (!writerListed) throw new Error(`The merge writer's deploy key is not registered read-write on ${repository}, so ${baseBranch} was not protected`);
 
   const ours = (await repositoryRulesets(repository, gh, baseBranch)).find(ruleset => ruleset?.name === mainWriteRulesetName);
