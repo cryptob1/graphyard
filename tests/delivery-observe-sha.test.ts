@@ -7,7 +7,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
 import { readFile } from 'node:fs/promises';
-import { Delivery, shaObservationSchema } from '../src/delivery.js';
+import { Delivery } from '../src/delivery.js';
 import { server } from '../src/server.js';
 import { deliveryOutcome, deliveryLabel, shortShas } from '../src/model/format.js';
 import type { Principal, Work, Observation } from '../src/model.js';
@@ -113,6 +113,8 @@ test('unit:sha-observation-marks-deployed — a producer sha observation is idem
   // The documented request is one the schema accepts.
   const guide = await readFile(new URL('../docs/delivery.md', import.meta.url), 'utf8');
   const documented = [...guide.matchAll(/```json\n([\s\S]*?)```/g)].map(match => JSON.parse(match[1])).filter(block => 'sha' in block && 'environment' in block && !('snapshotId' in block));
+  // Imported where used, so the file still loads (and its cases fail) against a base without the schema.
+  const { shaObservationSchema } = await import('../src/delivery.js') as any;
   assert.equal(documented.length, 1); shaObservationSchema.parse(documented[0]);
 });
 
