@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
 import { handSettlementRefusal } from '../../model/containment.js';
-import { agentToken, dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
+import { dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { observeDeployment, readDaemonState } from '../../master-daemon.js';
 import { localPostDeployChecks, verificationEffects, verifyDeployment, type PostDeployChecksInput } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
@@ -205,10 +205,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const snapshot = await masterApi('work-snapshot');
     const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (!work) throw new Error(`Unknown work item ${args[0]}`);
-    // An owed post-deploy verification's follow-up is filed as the master's operator agent: the coordinator credential cannot create work (GY-1660).
-    const file = async (input: unknown, requestId: string) => masterMutation('work', input, requestId, await agentToken(root, master, 'operatorAgent'));
-    // GY-1698: the intervention report's projection gives a windowed follow-up its observation instant.
-    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, file, read: path => masterApi(path) }));
+    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, read: path => masterApi(path) }));
     if (result.result === 'refused') process.exitCode = 1;
     return print(result);
   }

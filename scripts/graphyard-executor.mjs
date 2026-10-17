@@ -162,8 +162,6 @@ export function controlPlaneEffects(modules, context) {
     snapshot, mutate,
     // GY-1831: the handlers' own diagnostics (an unreadable promotion state) go where this executor logs.
     log,
-    // GY-1698: a windowed post-deploy follow-up takes its observation instant from the intervention report's projection.
-    ...(read ? { readPattern: x.patternReader(read) } : {}),
     agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
     workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
     producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
@@ -186,24 +184,6 @@ export function controlPlaneEffects(modules, context) {
       return d.promotionCarryingMerge(state.promotion ?? null, mergeSha, root, config.baseBranch, run, clock());
     },
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    // GY-1660: the one call made beyond the coordinator credential, as the loop files its follow-ups:
-    // the follow-up an unobserved post-deploy verification owes, created as the master's operator agent.
-    // It may create work and nothing else this process needs; absent, verify-deployment fails rather than lose the follow-up.
-    ...(current().operatorAgent ? { fileWork: async (input, requestId) => {
-      const config = current(), operator = await m.agentToken(root, config, 'operatorAgent');
-      const response = await fetch(`${config.url}/api/work`, { method: 'POST', body: JSON.stringify(input), headers: { Authorization: `Bearer ${operator}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, signal: AbortSignal.timeout(30_000) });
-      const body = await response.json();
-      if (!response.ok) throw new Error(typeof body?.error === 'string' ? body.error : JSON.stringify(body));
-      return body;
-    },
-    // GY-1747: a follow-up is released from backlog by the loop once the release serving its delivery is observed.
-    releaseWork: async key => {
-      const config = current(), operator = await m.agentToken(root, config, 'operatorAgent');
-      const item = (await snapshot()).work.find(entry => entry.key === key);
-      if (!item || item.stage !== 'backlog' || item.ready) return;
-      const response = await fetch(`${config.url}/api/work/${item.id}/ready`, { method: 'POST', body: JSON.stringify({ expectedRevision: item.revision, reason: 'the release serving the delivery is observed deployed' }), headers: { Authorization: `Bearer ${operator}`, 'Content-Type': 'application/json', 'Idempotency-Key': `release-${item.id}-${item.revision}` }, signal: AbortSignal.timeout(30_000) });
-      if (!response.ok) { const body = await response.json().catch(() => null); throw new Error(typeof body?.error === 'string' ? body.error : `releasing ${key} returned ${response.status}`); }
-    } } : {}),
   };
 }
 

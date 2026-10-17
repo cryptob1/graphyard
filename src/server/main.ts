@@ -10,7 +10,7 @@ import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
-import { LedgerRowCache, openPatternItems, readScanWindow, startPatternScan } from '../interventions.js';
+import { LedgerRowCache, readScanWindow, startPatternScan } from '../interventions.js';
 import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
@@ -148,14 +148,13 @@ export async function main(options: MainOptions = {}) {
     // recorded merger picks each claim's backend: the checkout while the control plane merges, else GitHub (GY-1675).
     observing = startObservationWorkers(engine, github, capacity.concurrency);
     console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
-    // A recurring intervention becomes work on its own (GY-98), once a minute and beside the tick,
+    // The intervention window is scanned once a minute beside the tick for retro drafts (patterns are reported in master status, never filed as items),
     // never in it (GY-1381): its ledger read held the whole tick on 2026-09-23. On unless
     // GRAPHYARD_INTERVENTION_PATTERNS=0.
     // The window is read once and shared by both, and the rows it projected are kept for the next scan (GY-1749).
     const scanned = new LedgerRowCache();
     scanning = startPatternScan(async () => {
       const window = await readScanWindow(engine.store, http.services.interventionPolicy, { cache: scanned });
-      for (const work of (await openPatternItems(engine, http.services.interventionPolicy, { window })).opened) console.log(`Opened ${work.key} for a recurring intervention pattern: ${work.title}`);
       // The same window read by cause (GY-970): drafts for independent approval, never work items.
       for (const artefact of (await synthesizeRetro(engine.store, http.services.interventionPolicy, { window })).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
     }, { failed: error => console.error('intervention pattern scan failed', error instanceof Error ? error.message : 'unknown') });

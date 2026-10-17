@@ -5,7 +5,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { LedgerRowCache, openPatternItems, readInterventionLedger, readScanWindow } from '../src/interventions.js';
+import { LedgerRowCache, readInterventionLedger, readScanWindow } from '../src/interventions.js';
 import { synthesizeRetro } from '../src/retro-synthesis.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -121,7 +121,7 @@ test('unit:plane-hot-calls-bounded-under-load — decide, requirements and statu
     while (scanning) {
       const began = performance.now();
       const window = await readScanWindow(store, policy, { cache });
-      await openPatternItems(engine, policy, { window }); await synthesizeRetro(store, policy, { window });
+      await synthesizeRetro(store, policy, { window });
       scans++; if (process.env.SCANLOG) console.log('scan', scans, Math.round(performance.now() - began), 'ms');
     }
   })();

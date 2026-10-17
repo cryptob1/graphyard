@@ -17,9 +17,9 @@ import type { MasterConfig } from '../src/master.js';
 // deployment step recorded deployments for smoke items only, and the only remaining path was a
 // master session running `graphyard master verify-deployment GY-N` by hand — forever, one item at
 // a time, while flow-analytics counted each of them pending. The unattended path now records the
-// release for every served delivery, through the executor's verify-deployment handler, which files
-// and releases any owed post-deploy follow-up before the record exactly as it does for a smoke
-// item, however old its merge; a smoke item's raise is unchanged.
+// release for every served delivery, through the executor's verify-deployment handler, which names
+// any owed post-deploy check in its result exactly as it does for a smoke item, however old its
+// merge; a smoke item's raise is unchanged.
 //
 // Deliveries that already were done when this shipped hold no row and are re-evaluated by nothing
 // else: a settled delivery is served as its summary and never visited. Each full reconciliation
@@ -51,7 +51,7 @@ const record = (observedAt: number) => ({ sha: release, mergeSha, source: 'endpo
 const unusable = async (): Promise<never> => { throw new Error('not reached'); };
 
 /** The handlers Graphyard ships, over one in-memory snapshot, with the observation and the calls recorded. */
-function handlers(work: Work, all: Work[], calls: string[], fileWork?: (input: unknown, requestId: string) => Promise<{ key?: string }>) {
+function handlers(work: Work, all: Work[], calls: string[]) {
   return controlPlaneHandlers(() => ({}) as MasterConfig, {
     snapshot: async () => ({ work: all.some(item => item.id === work.id) ? all : [work], now: iso(nowMs) }),
     // The coordinator credential records the observation and never creates work.
@@ -59,14 +59,12 @@ function handlers(work: Work, all: Work[], calls: string[], fileWork?: (input: u
     agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
     dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable,
     observeDeployment: async () => ({ source: 'endpoint', sha: release, at: iso(nowMs - 60_000), reason: null, deployed: [work.key], pending: [] }) as never,
-    releaseWork: async (key: string) => { calls.push(`release ${key}`); },
     now: () => nowMs,
-    ...(fileWork ? { fileWork } : {}),
   });
 }
 const verifyRow = (work: Work) => ({ id: 'row-1', work: work.id, key: work.key, kind: 'verify-deployment', inputs: { kind: 'verify-deployment', mergeSha, mergedAt: work.delivery!.mergedAt, state: 'delivered' } }) as never;
 
-test('unit:unattended-verify-deployment — a served non-smoke delivery is recorded by the executor with no master session, filing and releasing the owed post-deploy follow-up first, and never recorded twice', async () => {
+test('unit:unattended-verify-deployment — a served non-smoke delivery is recorded by the executor with no master session, naming the owed post-deploy check without filing an item, and never recorded twice', async () => {
   const item = delivered('GY-1900', 2 * day);
   // The item is done, unclosed, asks for no smoke proof, and no release observation is recorded: it owes verify-deployment.
   const action = nextAction(item, [item], new Date(nowMs));
@@ -79,21 +77,11 @@ test('unit:unattended-verify-deployment — a served non-smoke delivery is recor
   assert.equal(offered[0].row.kind, 'verify-deployment');
   assert.equal(claimAction([item], { id: 'executor-1', host: 'host-1', principal: 'executor-1' }, new Date(nowMs))!.row.kind, 'verify-deployment');
 
-  // The executor's handler records the observation only after it has filed and released the owed post-deploy follow-up.
+  // The executor's handler records the observation and names the owed post-deploy check; the coordinator never creates work.
   const calls: string[] = [];
-  const filed: string[] = [];
-  const result = await handlers(item, [item], calls, async (input: unknown, requestId: string) => {
-    calls.push(`file ${requestId}`); filed.push(String((input as { title: string }).title)); return { key: 'GY-1901' };
-  })['verify-deployment']!(verifyRow(item), { host: 'host-1', id: 'executor-1' }) as unknown as Promise<string>;
-  assert.match(String(result), /AC-1 owes its post-deploy observation \(GY-1901\)/);
-  assert.deepEqual(calls, [`file post-deploy:${item.id}:AC-1:manual:post-deploy/harness-drift-cleared:${release}`, 'release GY-1901', `work/${item.id}/deployment`]);
-  assert.match(filed[0], /^Post-deploy verification of GY-1900 AC-1/);
-
-  // Without an operator-agent identity to file with, nothing is recorded: the observation waits for the filing.
-  const refused: string[] = [];
-  await assert.rejects(handlers(item, [item], refused)['verify-deployment']!(verifyRow(item), { host: 'host-1', id: 'executor-1' }) as unknown as Promise<string>,
-    /owes its post-deploy follow-up, and this executor has no operator-agent identity/);
-  assert.deepEqual(refused, [], 'nothing is recorded while the follow-up is unfiled');
+  const result = await handlers(item, [item], calls)['verify-deployment']!(verifyRow(item), { host: 'host-1', id: 'executor-1' }) as unknown as Promise<string>;
+  assert.match(String(result), /AC-1 \(manual:post-deploy\/harness-drift-cleared\) is not yet observed on this release/);
+  assert.deepEqual(calls, [`work/${item.id}/deployment`]);
 
   // Once the record is on the delivery it is never raised again: the item is settled, not verified a second time.
   item.delivery!.deployment = record(nowMs - 60_000);

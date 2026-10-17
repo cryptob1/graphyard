@@ -70,7 +70,6 @@ import { readMergeWriter } from '../master/dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import type { ReadingEffects } from './reading-effect.js';
-import type { SlowLoopItemInput } from './slow-loop-item.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -114,8 +113,6 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   requestProof: (work: Work) => void | Promise<void>;
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
-  /** Files the slow-loop fix item (GY-1775) as the operator-agent under the release-and-step idempotency key, so a retry after a lost reply returns the item already filed; absent without that identity, as the throughput owner is. */
-  fileSlowLoopItem?: (input: SlowLoopItemInput, key: string) => Promise<Work | null>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
