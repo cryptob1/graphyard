@@ -166,6 +166,8 @@ export interface AllowlistEntry {
   runs: string;
   /** The credential they reach the remote with. */
   credential: string;
+  /** Why the call cannot go through the merge writer; a reviewed cluster's entries must state it. */
+  why?: string;
 }
 
 /**
@@ -178,14 +180,13 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'scripts/onboarding-delivery-fixture.mjs': { subcommands: ['fetch', 'push'], runs: 'the onboarding preview fixture standing up its scratch origin', credential: 'none: it pushes and fetches a local bare repository in scratch' },
   'scripts/prepare-acceptance.mjs': { subcommands: ['fetch'], runs: 'the trusted acceptance job preparing the exact candidate head and base', credential: 'none stored: an anonymous https fetch of a public repository inside the candidate build context' },
   'src/cli/checkout-restore-release.ts': { subcommands: ['clone', 'fetch'], runs: 'the serving release\'s own CLI answering `master checkout-restore --serve` (the base-tip read and the local snapshot clone)', credential: 'the loop checkout\'s own git credential for the fetch; the --shared clone is local and needs none' },
-  'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)' },
-  'src/cli/planned-files-intent.ts': { subcommands: ['fetch'], runs: 'the worker CLI reading the planned-files intent (`sync`)', credential: 'the worker checkout\'s own git credential' },
-  'src/cli/sync-push.ts': { subcommands: ['fetch'], runs: 'the worker CLI following the control plane\'s push (`sync --push-via-control-plane`)', credential: 'the worker sandbox\'s own git credential, for the local remote-tracking ref only' },
+  'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)', why: 'the push exists only in the PR form, which the engine accepts only while GitHub is the merger (GY-1523) — exactly when the control plane is not the merge writer, so there is no writer queue to hand the push to; the writer\'s one push door (sync-push) carries only a pure base sync of the worker\'s own assigned branch, and the answer to a sandbox that cannot push is `complete --head`, which pushes nothing (GY-1925)' },
+  'src/cli/planned-files-intent.ts': { subcommands: ['fetch'], runs: 'the worker CLI reading the planned-files intent (`sync`)', credential: 'the worker checkout\'s own git credential', why: 'the best-effort fetch refreshes origin/BASE in the coordinator checkout before plannedFiles is derived against its tree — on `master create`, `master requirements` and the loop\'s scope and diagnosis reads; the merge writer runs as a serial queue step and publishes no base read other processes can await, and a failed fetch falls back to the last fetched base' },
   'src/cli/workspace-worktree.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s workspace tools (`handoff`, `restore-branch`)', credential: 'the workspace checkout\'s own git credential' },
   'src/cli/workspace.ts': { subcommands: ['fetch'], runs: '`graphyard sync` in a workspace without a control plane', credential: 'the workspace checkout\'s own git credential' },
   'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential' },
   'src/daemon/acceptance.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s acceptance step drafting a goal\'s acceptance (base read, acceptance-branch push)', credential: 'the coordinator checkout\'s own git credential' },
-  'src/daemon/blocker-probes.ts': { subcommands: ['ls-remote', 'push'], runs: 'the loop\'s blocker probes: the confined credential script (`/bin/sh -c`) and the base-tip read', credential: 'whatever credential the confined worker holds — the probe exists to test it; the base-tip read uses the coordinator checkout\'s own' },
+  'src/daemon/blocker-probes.ts': { subcommands: ['ls-remote', 'push'], runs: 'the loop\'s blocker probes: the confined credential script (`/bin/sh -c`) and the base-tip read', credential: 'whatever credential the confined worker holds — the probe exists to test it; the base-tip read uses the coordinator checkout\'s own', why: 'the confined credential and outage probes exist to test whatever credential the confined worker itself holds against the remote — run through the merge writer they would test the writer\'s credential and pass exactly where the next attempt fails; the base-tip read answers the outside-scope-test-failure probe at diagnosis time, when the plane, the writer or GitHub is itself the fault under test, so it cannot wait on a merge-writer queue' },
   'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)' },
   'src/daemon/cycle-shadow.ts': { subcommands: ['fetch'], runs: 'the loop\'s shadow-gate reads', credential: 'the coordinator checkout\'s own git credential' },
   'src/daemon/deployment.ts': { subcommands: ['fetch'], runs: 'the loop\'s deployment observation and promotion reads (base tip and rc tags)', credential: 'the coordinator checkout\'s own git credential' },
@@ -212,9 +213,12 @@ export const allowlist: Record<string, AllowlistEntry> = {
  * allowlist must equal it on this item's merge — no file added to make the door pass, none
  * silently dropped. A follow-up that moves its cluster's calls behind the merge writer removes its
  * entries here and in the allowlist in the same commit; the set never grows.
- * The four follow-ups, filed unreleased, own these files by cluster: GY-1941 release and
- * promotion, GY-1942 docs-sync and workspace tooling, GY-1943 acceptance and planner, GY-1944
- * worker CLI.
+ * The four follow-ups own these files by cluster: GY-1941 release and promotion, GY-1942
+ * docs-sync and workspace tooling, GY-1943 acceptance and planner, GY-1944 worker CLI — GY-1944
+ * moved the worker CLI's trailing fetch behind the control plane's own push (the route validates
+ * the fast-forward onto the commit the worker built, so the remote-tracking ref follows locally)
+ * and removed that entry here and above in the same commit; its other three entries state why
+ * their calls cannot go through the merge writer.
  */
 export const baseline = [
   'scripts/ci-tests.mjs',
@@ -223,7 +227,6 @@ export const baseline = [
   'src/cli/checkout-restore-release.ts',
   'src/cli/complete.ts',
   'src/cli/planned-files-intent.ts',
-  'src/cli/sync-push.ts',
   'src/cli/workspace-worktree.ts',
   'src/cli/workspace.ts',
   'src/conflicts.ts',
@@ -288,6 +291,28 @@ test('unit:git-network-door — every file that spawns a git network subcommand 
     assert.deepEqual(subcommandsOf(detected.get(path) ?? []), [...entry.subcommands].sort(), `${path}'s entry must name exactly the subcommands it spawns`);
     assert.ok(entry.runs.trim().length >= 15, `${path}'s entry names the process that runs its git network subcommands`);
     assert.ok(entry.credential.trim().length >= 10, `${path}'s entry names the credential its git network subcommands use`);
+  }
+});
+
+/**
+ * GY-1944: the worker CLI cluster. `sync --push-via-control-plane`'s trailing fetch moved behind
+ * that push — the worker already holds the exact commit the route lands (it validates the
+ * fast-forward and patches the branch with force:false), so its remote-tracking ref follows
+ * locally and the entry left the allowlist and the baseline in the same commit. The other three
+ * could not move, and each entry left above states why; a later move leaves both lists too.
+ */
+export const workerCliCluster = [
+  'src/cli/complete.ts',
+  'src/cli/planned-files-intent.ts',
+  'src/cli/sync-push.ts',
+  'src/daemon/blocker-probes.ts',
+];
+
+test('unit:git-network-door — every worker CLI file left on the allowlist states why its call cannot go through the merge writer', () => {
+  for (const path of workerCliCluster) {
+    const entry = allowlist[path];
+    if (!entry) { assert.ok(!baseline.includes(path), `${path} left the allowlist, so it leaves the baseline in the same commit`); continue; }
+    assert.ok((entry.why ?? '').trim().length >= 40, `${path}'s entry states why its call cannot go through the merge writer`);
   }
 });
 
