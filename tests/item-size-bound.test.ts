@@ -1,15 +1,19 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { applyDecompositionEvent, companionScope, decompositionSettings, decompositionTool, decompositionWanted, estimatedLines, plannedSourceFiles, sizeBoundsExceeded, sourceFileBand,
-  timeToMergeBySize, type DecompositionEvent } from '../src/decomposition.js';
+import { applyDecompositionEvent, companionScope, decompositionSettings, decompositionTool, decompositionWanted, estimatedLines, plannedSourceFiles, sizeBoundsExceeded, sourceFileBand, timeToMergeBySize, validateChildSizes,
+  type DecompositionEvent, type ItemSizeReport } from '../src/decomposition.js';
 import { decompositionSettingsSchema, estimatedLinesBound, estimatedLinesPerSourceFile } from '../src/runner/payloads.js';
 import { clearDecompositionRuns, decompositionSettled, decompositionStep } from '../src/decomposition-step.js';
+import { masterStatusReport } from '../src/cli/master-status.js';
+import { masterConfigSchema, masterRunSchema } from '../src/master.js';
 import type { Run, RunOptions, RunResult, Runner } from '../src/runner/types.js';
-import { masterRunSchema } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1858: the decomposition bound is a bound on planned source files — test files, test helpers,
 // docs pages and the timing baseline are companions of the source change and never count toward
@@ -74,6 +78,12 @@ test('unit:item-size-five-source-files — with default settings six planned sou
   assert.equal(decompositionWanted(within, decompositionSettings({})), null, 'an item within the bounds is dispatched unchanged');
   assert.equal(estimatedLines(within), 600, 'companions add nothing to the estimate: five source files and two criteria sit exactly at the scaled bound');
 
+  // The bounds judge the source change, however many criteria carry it: a one-criterion item over
+  // the file bound is sent too, though its session can only keep it whole.
+  const oneCriterion = item('GY-8', { criteria: [{ id: 'AC-1', text: 'Behaviour one holds.', proofs: ['unit:behaviour-one'] }],
+    plannedFiles: ['src/one.ts', 'src/two.ts', 'src/three.ts', 'src/four.ts', 'src/five.ts', 'src/six.ts'] });
+  assert.ok(decompositionWanted(oneCriterion, decompositionSettings({})), 'a one-criterion item planning six source files is over the bound and is sent to decomposition');
+
   // Whoever created it: a planner-driven and a master-created item over the bound are judged the same.
   const plannerCreated = item('GY-4', { plannedFiles: [...over.plannedFiles!] });
   const masterCreated = item('GY-5', { plannedFiles: [...over.plannedFiles!], systemDriven: false, research: false });
@@ -103,7 +113,7 @@ test('unit:item-size-five-source-files — with default settings six planned sou
   assert.deepEqual(items.map(entry => entry.decomposition?.state), ['kept', 'kept', undefined], 'each run is recorded on its item; the within item is untouched');
 });
 
-test('unit:time-to-merge-by-size-reported — master status reports, for deliveries merged in the last seven days, the median first-claim-to-merge minutes and median attempts per planned-source-file band', () => {
+test('unit:time-to-merge-by-size-reported — master status reports, for deliveries merged in the last seven days, the median first-claim-to-merge minutes and median attempts per planned-source-file band', async () => {
   assert.deepEqual([1, 2, 3, 5, 6, 10, 11, 0].map(sourceFileBand), ['1-2', '1-2', '3-5', '3-5', '6-10', '6-10', 'over 10', null], 'the bands are 1-2, 3-5, 6-10 and over 10');
 
   const work = [
@@ -128,8 +138,61 @@ test('unit:time-to-merge-by-size-reported — master status reports, for deliver
   assert.deepEqual(band('6-10'), { band: '6-10', items: 1, measured: 1, medianMinutesToMerge: 200, medianAttempts: 3 });
   assert.deepEqual(band('over 10'), { band: 'over 10', items: 0, measured: 0, medianMinutesToMerge: null, medianAttempts: null }, 'a delivery eight days old is outside the window');
 
-  // And the report is on `master status`: the CLI's builder computes it from the work snapshot.
-  const source = readFileSync(fileURLToPath(new URL('../src/cli/master-status.ts', import.meta.url)), 'utf8');
-  assert.match(source, /timeToMergeBySize\(snapshot\.work/, 'the master status report computes itemSize from the work snapshot');
-  assert.match(source, /\bitemSize,/, 'the master status report carries itemSize');
+  // The bands' contents once more, as the master status report computes them: the report builder is
+  // called on the same snapshot, and its `itemSize` is the report above.
+  const directory = await temporaryDirectory('item-size-status');
+  const credentialFile = join(directory, 'coordinator.token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const root = await temporaryDirectory('item-size-root');
+  execFileSync('git', ['init', '-q', root]);
+  const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), repository: 'owner/project',
+    baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const masterApi = async (path: string) => path === 'work-snapshot' ? { work, now: new Date(NOW).toISOString() } : { decisions: [] };
+  const status = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }) as { itemSize: ItemSizeReport };
+  assert.deepEqual(status.itemSize, timeToMergeBySize(work, NOW), 'the report computes itemSize from the work snapshot on the repository clock');
+  assert.equal(status.itemSize.bands.find(entry => entry.band === '1-2')?.measured, 2, 'the bands are not vacuously empty');
+});
+
+/** A runner whose session proposes `children`: the payload is validated as the loop would. */
+function proposingRunner(children: unknown[], starts: string[]): Runner {
+  return {
+    name: 'pi',
+    start<T>(prompt: string, options: RunOptions<T>): Run<T> {
+      starts.push(prompt);
+      const payload = { reason: 'Splitting by area.', children };
+      let resolve!: (result: RunResult<T>) => void;
+      const result = new Promise<RunResult<T>>(settle => { resolve = settle; });
+      queueMicrotask(() => {
+        try { resolve({ ok: true, tool: decompositionTool, payload: options.validate(payload), payloads: [] } as unknown as RunResult<T>); }
+        catch (error) { resolve({ ok: false, failure: { reason: 'invalid-payload', detail: String(error) }, payloads: [] } as unknown as RunResult<T>); }
+      });
+      return { id: `run-${starts.length}`, events: [], onEvent: () => () => {}, cancel: () => {}, result: () => result };
+    },
+  };
+}
+
+const recordOn = (work: Work) => async (item: Work, event: DecompositionEvent) => { applyDecompositionEvent(item, event, 'graphyard-master', new Date(NOW)); return work; };
+
+test('unit:child-source-file-bound — a split child planning more than the run’s bound of source files is refused, the bound stated in the prompt and carried on the run’s start', async t => {
+  t.after(clearDecompositionRuns);
+  const parent = item('GY-6', { plannedFiles: ['src/'] });
+  // Companions never count toward a child's bound: five source files beside tests and docs are within it.
+  assert.doesNotThrow(() => validateChildSizes([{ title: 'Within', criteria: ['AC-1'], plannedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts', 'tests/within.test.ts', 'docs/page.md'], after: [] }], 5));
+  assert.throws(() => validateChildSizes([{ title: 'Over', criteria: ['AC-1'], plannedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts', 'src/f.ts'], after: [] }], 5),
+    /Child 1 plans 6 source files, over 5/, 'a child over the bound is refused by name');
+
+  const starts: string[] = [];
+  const children = [
+    { title: 'Too broad', criteria: ['AC-1'], plannedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts', 'src/d.ts', 'src/e.ts', 'src/f.ts'], after: [] },
+    { title: 'Rest', criteria: ['AC-2'], plannedFiles: ['src/g.ts'], after: [0] },
+  ];
+  const step = await decompositionStep({ items: [parent], clock: NOW, settings: decompositionSettings({}), config: { repository: 'owner/project' }, cwd: process.cwd(),
+    runner: proposingRunner(children, starts), model: 'm', record: recordOn(parent) });
+  await decompositionSettled();
+  assert.match(starts[0]!, /at most 5 planned source files/, 'the prompt states the per-child source-file bound');
+  assert.match(starts[0]!, /the control plane refuses a child planning more/, 'the prompt says the refusal is the control plane’s');
+  assert.equal(parent.decomposition?.state, 'failed', 'the proposed split is recorded as failed');
+  assert.equal(parent.decomposition?.failure?.reason, 'refused', 'the control plane, not the session, refused it');
+  assert.match(parent.decomposition?.failure?.detail ?? '', /Child 1 plans 6 source files, over 5/, 'the refusal names the child and the bound');
+  assert.deepEqual([...step.held], [parent.id], 'dispatch waited while the run was in progress; the next cycle dispatches the item whole');
 });

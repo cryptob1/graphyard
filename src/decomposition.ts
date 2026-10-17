@@ -45,6 +45,8 @@ export interface DecompositionRecord {
   runtime: string; model: string; timeoutMs: number;
   /** Why the item was judged over the size bounds. */
   bounds: string[];
+  /** The planned-source-file bound the run splits under (GY-1858): the split holds each child to it. A record an older binary started omits it, and its decision then holds the default bound. */
+  maxPlannedFiles?: number;
   reason: string | null;
   children: string[];
   failure: { reason: string; detail: string } | null;
@@ -92,12 +94,15 @@ export const neverDispatched = (work: Work) => work.epoch === 0 && !work.lease &
 
 /**
  * Why the item is split before dispatch, or null when it is dispatched unchanged: it must be open,
- * never dispatched, not opted out, not itself a child or already decided, have at least two
- * criteria to share out, and exceed a size bound (or opt in with `"split": true`).
+ * never dispatched, not opted out, not itself a child or already decided, and exceed a size bound
+ * (or opt in with `"split": true`). The bounds judge the source change, however many criteria
+ * carry it (GY-1858): a one-criterion item planning six source files is over the file bound too,
+ * so it is sent, though its session can only keep it whole — each criterion goes to exactly one
+ * child and a split names at least two children.
  */
 export function decompositionWanted(work: Work, settings: DecompositionSettings): string[] | null {
   if (!settings.enabled || work.split === false || work.stage === 'done' || work.repair || work.parent || work.children?.length || work.decomposition) return null;
-  if (!neverDispatched(work) || work.criteria.length < 2) return null;
+  if (!neverDispatched(work)) return null;
   const exceeded = sizeBoundsExceeded(work, settings);
   return exceeded.length ? exceeded : work.split === true ? ['opted in with "split": true'] : null;
 }
@@ -149,13 +154,25 @@ export function validateChildOrder(children: DecompositionPayload['children']) {
 }
 
 /**
+ * Each child plans at most the run's bound of source files: the parent was split for planning
+ * more, so a child that wide would be put to decomposition itself on arrival (GY-1858).
+ */
+export function validateChildSizes(children: DecompositionPayload['children'], maxPlannedFiles: number) {
+  children.forEach((child, index) => {
+    const sources = child.plannedFiles.filter(path => !companionScope(path));
+    demand(sources.length <= maxPlannedFiles, `Child ${index + 1} plans ${sources.length} source files, over ${maxPlannedFiles}; each child plans at most ${maxPlannedFiles}`, 422);
+  });
+}
+
+/**
  * The child items of a split, before the store numbers them: ordinary open items carrying the
  * parent's release, policy, dependencies, exclusive resources and documentation obligation, and
  * exactly the criteria (text and proofs copied) the payload gives each.
  */
-export function childItems(parent: Work, payload: DecompositionPayload, now: Date): Work[] {
+export function childItems(parent: Work, payload: DecompositionPayload, now: Date, maxPlannedFiles: number): Work[] {
   validateSplitCriteria(parent, payload.children);
   validateChildScopes(parent, payload.children);
+  validateChildSizes(payload.children, maxPlannedFiles);
   validateChildOrder(payload.children);
   const at = now.toISOString(), ids = payload.children.map(() => randomUUID());
   return payload.children.map((child, index) => {
@@ -187,7 +204,7 @@ export function childItems(parent: Work, payload: DecompositionPayload, now: Dat
 
 const line = (max: number) => z.string().trim().min(1).max(max);
 export const decompositionEventSchema = z.discriminatedUnion('event', [
-  z.object({ event: z.literal('started'), runtime: line(40), model: line(200), timeoutMs: z.number().int().positive().max(3_600_000), bounds: z.array(line(300)).min(1).max(10) }).strict(),
+  z.object({ event: z.literal('started'), runtime: line(40), model: line(200), timeoutMs: z.number().int().positive().max(3_600_000), bounds: z.array(line(300)).min(1).max(10), maxPlannedFiles: z.number().int().min(1).max(200).default(5) }).strict(),
   z.object({ event: z.literal('decided'), payload: decompositionPayloadSchema }).strict(),
   z.object({ event: z.literal('failed'), reason: line(40), detail: line(1000) }).strict(),
 ]);
@@ -203,7 +220,7 @@ export function applyDecompositionEvent(work: Work, input: DecompositionEvent, a
   if (event.event === 'started') {
     demand(!work.decomposition, `${work.key} was already put to decomposition (${work.decomposition?.state}); one run per item`);
     demand(neverDispatched(work) && !work.parent && work.split !== false, `${work.key} is a child, opted out, or already dispatched; only an item before its first dispatch is split`);
-    work.decomposition = { state: 'running', startedAt: at, endedAt: null, runtime: event.runtime, model: event.model, timeoutMs: event.timeoutMs, bounds: event.bounds,
+    work.decomposition = { state: 'running', startedAt: at, endedAt: null, runtime: event.runtime, model: event.model, timeoutMs: event.timeoutMs, bounds: event.bounds, maxPlannedFiles: event.maxPlannedFiles,
       reason: null, children: [], failure: null, recordedBy: actor };
     return [];
   }
@@ -220,7 +237,8 @@ export function applyDecompositionEvent(work: Work, input: DecompositionEvent, a
   // A worker may have claimed it since the run started: a split then would race the attempt.
   demand(neverDispatched(work), `${work.key} was dispatched while it was being split; it is built whole`);
   demand(work.split !== false, `${work.key} was opted out of splitting while it was being split; it is built whole`);
-  const children = childItems(work, event.payload, now);
+  // A record an older binary started carries no bound; the default bound is what such a run split under.
+  const children = childItems(work, event.payload, now, record!.maxPlannedFiles ?? decompositionSettingsSchema.parse({}).maxPlannedFiles);
   work.decomposition = { ...record!, state: 'split', endedAt: at, reason: event.payload.reason };
   return children;
 }
