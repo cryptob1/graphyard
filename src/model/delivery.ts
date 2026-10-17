@@ -59,7 +59,9 @@ export function deliveryState(work: Work): DeliveryState | null {
   if (!deployment) return 'awaiting-deployment';
   // A smoke result only counts for the deployed commit Graphyard recorded for this delivery.
   if (!smoke || smoke.sha !== deployment.sha || smoke.mergeSha !== work.delivery.mergeSha) return 'awaiting-smoke';
-  return smoke.result === 'pass' ? 'smoke-passed' : 'delivered-with-failure';
+  if (smoke.result === 'fail') return 'delivered-with-failure';
+  // GY-1912: skips never verify — a pass that executed nothing or skipped a case leaves the release unverified.
+  return smoke.executed > 0 && smoke.skipped === 0 ? 'smoke-passed' : 'awaiting-smoke';
 }
 
 /**

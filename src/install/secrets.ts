@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, readFile, rename, writeFile } from 'node:fs/promis
 import { homedir } from 'node:os';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
-import { principalGrants, type PrincipalGrant } from '../server/principals.js';
+import { observeShaGrant, principalGrants, type PrincipalGrant } from '../server/principals.js';
 import { REDACTED, type DeclaredSessionKind, type PlannedPrincipal, type Role } from './types.js';
 
 /** 32 random bytes rendered base64url: 43 characters, far above the 32-character floor. */
@@ -31,7 +31,8 @@ export class Vault {
 
 /**
  * A roster entry (GY-1879): a planned principal with the lane grants it holds — each names one
- * lane the server checks by name (`external-runs:import` for POST /api/validation/import) and is
+ * lane the server checks by name (`external-runs:import` for POST /api/validation/import,
+ * `delivery:observe-sha` for POST /api/delivery/observe-sha, GY-1912) and is
  * never a proof pattern — and, for one `graphyard principal add` registered, `source`, which every
  * later apply keeps; the installer's own entries carry none.
  */
@@ -196,6 +197,7 @@ export function rosterEntry(input: { id: string; role?: string; sessionKind?: st
   if (unknown.length) throw new Error(`Unknown grant ${unknown.join(', ')}; --grant takes ${principalGrants.join(', ')}`);
   if (role === 'producer' && !grants.length) throw new Error(`A producer is created only with an explicit grant (--grant ${principalGrants.join('|')}): an ungranted producer would be a standing credential with no lane, and widening it later is never automatic`);
   if (role !== 'producer' && grants.length) throw new Error(`A grant names a producer lane; ${role} ${input.id} holds none. Use --role producer`);
+  if (grants.includes(observeShaGrant) && grants.length > 1) throw new Error(`${observeShaGrant} is held by a dedicated observer principal, beside no other grant; add a separate principal for it`);
   return { id: input.id, role, sessionKind, ...(grants.length ? { grants } : {}), source: 'principal' };
 }
 const installersOwn = (roster: RosterPrincipal[], id: string) => {
@@ -207,6 +209,10 @@ const installersOwn = (roster: RosterPrincipal[], id: string) => {
 export function upsertRosterEntry(roster: RosterPrincipal[], entry: RosterPrincipal) {
   const existing = installersOwn(roster, entry.id);
   if (existing && JSON.stringify(principalFields(existing)) === JSON.stringify(principalFields(entry))) return { roster, changed: false };
+  // GY-1912: the observer lane never moves onto, or off, a standing credential: an import-only principal is never widened into an observer.
+  const lanes = (principal: RosterPrincipal) => (principal.grants ?? []).join(',');
+  if (existing && lanes(existing) !== lanes(entry) && [existing, entry].some(principal => principal.grants?.includes(observeShaGrant)))
+    throw new Error(`${entry.id} holds ${existing.grants?.length ? existing.grants.join(', ') : 'no grant'}; ${observeShaGrant} is held by a dedicated principal, so add the observer under its own id rather than changing this one's grants`);
   return { roster: existing ? roster.map(principal => principal.id === entry.id ? entry : principal) : [...roster, entry], changed: true };
 }
 /** `roster` without `id`; `changed` is false when it held no such principal. */
