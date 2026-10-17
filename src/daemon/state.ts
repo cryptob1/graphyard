@@ -154,6 +154,7 @@ export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
  * gap. GY-1488: `cutSha` is the tip the newest candidate cut; one concluded unpromoted is not re-cut.
  * GY-1491: `candidates`, the newest (merges each carries, merges on main behind it); `candidateAtDispatch`, the newest at the last dispatch.
  */
+const sealCheckSchema = z.object({ mayseal: z.boolean(), role: z.string().max(64), needed: z.array(z.string().max(64)).max(8), at: z.string().max(64), secret: z.string().max(100), environment: z.string().max(100) }).strict();
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
   mainSha: z.string().nullable(),
@@ -177,7 +178,12 @@ export const promotionStateSchema = z.object({
     queued: z.number().int().min(0).nullable(),
     /** GY-1513: the advisory soak's verdict as the candidate's record (rc-soak/ID) keeps it, once its run recorded one. */
     soak: z.object({ result: z.string().max(32), at: z.string().max(64), run: z.string().max(500).nullable() }).strict().nullable().optional(),
+    /** GY-1882: the candidate's newest seal check (rc-seal-check/ID.AT): whether the uat release credential may seal its imports. */
+    sealCheck: sealCheckSchema.optional(),
   }).strict()).max(5).optional(),
+  /** GY-1882: the newest candidates' seal checks, read on their own while the drive reads no ledger (promotion off, or no local ports). */
+  sealChecks: z.array(z.object({ id: z.string().max(100), sealCheck: sealCheckSchema.optional() }).strict()).max(5).optional(),
+  sealChecksReadAt: z.string().nullable().optional(),
   /** GY-1513: the newest advisory soak runs (release-candidate-soak.yml), by the SHA each soaks; never holds promotion back. */
   soaks: z.array(z.object({
     sha: z.string().max(64),
@@ -466,6 +472,41 @@ export function masterSummary(master: MasterSessionState, now: number) {
 }
 
 export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict(); export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
+/** GY-1854: one attempt of the remedy a stalled loop-step signature binds to, recorded on the stall. */
+export const stepStallRemedyRecordSchema = z.object({
+  kind: z.string().max(40), at: z.string(),
+  /** `started` is the attempt written before its mutation runs: a process that ends during it leaves the run remedied, never applied twice. */
+  outcome: z.enum(['started', 'applied', 'unchanged', 'refused']), verified: z.boolean(), detail: z.string().max(2000),
+}).strict();
+export type StepStallRemedyRecord = z.infer<typeof stepStallRemedyRecordSchema>;
+/**
+ * GY-1854: one run of consecutive cycles a loop step or dispatcher call failed with one normalised
+ * signature, and the stall three of them are — recorded once, its bound remedy applied once and
+ * verified, and its call backed off to once per five minutes. The rules live in
+ * ./step-stalls.ts, which also bounds the record a cycle that fails nowhere clears.
+ */
+export const stepStallSchema = z.object({
+  signature: z.string().max(800),
+  /** The failing call: a cycle step's action kind, the dispatcher's `dispatch`, or `cycle` for a whole failed cycle. */
+  step: z.string().max(100),
+  count: z.number().int().min(1),
+  /** The loop cycle the run was last seen failing in: a cycle that ends without the step failing clears the run. */
+  lastCycle: z.number().int().min(0),
+  firstAt: z.string(), lastAt: z.string(), lastError: z.string().max(1000),
+  /** When the run reached three consecutive cycles and was recorded as this stall; null until then. */
+  stalledAt: z.string().nullable(),
+  /** The one attempt of its bound remedy, or null while none was applied. */
+  remedy: stepStallRemedyRecordSchema.nullable().default(null),
+  /** When the stalled call may be attempted next: once per five minutes while the stall stands. */
+  nextAttemptAt: z.string().nullable().default(null),
+  /** When the held call admitted its window's one attempt, until that attempt's failure is counted; null otherwise. */
+  attemptAt: z.string().nullable().default(null),
+  /** The loop effects whose thrown failure the run's failed actions carry, whether each failed as a promise, and the resource the failing invocation named (its first argument's key, pane or id; null when it named none): the invocations its window holds. */
+  calls: z.array(z.object({ call: z.string().max(100), async: z.boolean(), resource: z.string().max(200).nullable().default(null) }).strict()).max(8).default(() => []),
+  /** Whether the run is a failed cycle's own call (the snapshot read a cycle fails on): the loop holds the whole next cycle to its window. */
+  cycle: z.boolean().default(false),
+}).strict();
+export type StepStall = z.infer<typeof stepStallSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
@@ -556,6 +597,12 @@ export const daemonStateSchema = z.object({
    * Cleared by a launch that lands and once the blocker naming the cause is recorded.
    */
   dispatchFailures: z.record(z.string(), dispatchFailureRunSchema).default(() => ({})),
+  /**
+   * Per normalised signature (GY-1854), the run of consecutive cycles a loop step or dispatcher
+   * call failed with it, and the stall three of them are. src/daemon/step-stalls.ts owns the rules
+   * and bounds the record (retainedStepStalls).
+   */
+  stepStalls: z.record(z.string(), stepStallSchema).default(() => ({})),
   /** The item keys the decisions step reached past its time budget last cycle, which this cycle reaches first (GY-1286). */
   decisionsDeferred: z.array(z.string().max(200)).max(5000).default(() => []),
   /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */

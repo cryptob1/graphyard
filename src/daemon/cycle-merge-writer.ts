@@ -62,6 +62,12 @@ export interface MergeWriterReads extends MergePorts {
    * no advisory run is made.
    */
   advisory?(mergeSha: string): Promise<{ build: 'pass' | 'fail'; failed: string[] }>;
+  /**
+   * GY-1854: whether a new merge may start now, asked only when one is due. A stalled merge call
+   * is admitted once per five-minute window; settling, replays and owed reworks never ask. Absent,
+   * every due merge starts.
+   */
+  admit?(): boolean;
 }
 /** The idempotency key one recorded step keeps across retries. */
 export { mergeRecordKey } from '../merge-writer/executor.js';
@@ -483,7 +489,8 @@ export async function mergeWriterStep(cycle: Cycle) {
         const summary = queue.queue.slice(0, mergeWriterKeptQueue);
         if (JSON.stringify(summary) !== JSON.stringify(writer.queue)) { writer.queue = summary; changed = true; }
         // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
-        const due = writer.reworks.length >= mergeWriterKeptReworks ? null : queue.next;
+        const next = writer.reworks.length >= mergeWriterKeptReworks ? null : queue.next;
+        const due = next?.candidate && (reads.admit?.() ?? true) ? next : null;
         if (due?.candidate) {
           const head = due.candidate.sha.toLowerCase();
           const entry: Flight = { key: due.key, id: due.id, head, startedAt: at(), settled: null };
