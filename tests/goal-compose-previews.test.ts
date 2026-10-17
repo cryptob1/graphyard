@@ -1,8 +1,9 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer as netServer, type AddressInfo } from 'node:net';
+import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
@@ -16,7 +17,7 @@ import type { Principal, Work } from '../src/model.js';
 import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState } from '../src/daemon/state-cursor.js';
 import { mergeWriterReads, mergeWriterStep } from '../src/daemon/cycle-merge-writer.js';
-import { mergeRecordKey, type MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { mergeRecordKey, previewRecordEvent, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { composeLeftovers, composeMountProblems, composePreviewConfig, composeProjectName, composeProjectPrefix, sweepComposePreviews, composeBounds, currentOwner, defaultDocker, removeComposeProject, snapshotComposeSite, type Docker } from '../src/compose-preview.js';
 import { previewPath, type ItemPreview } from '../src/project-previews.js';
 import { defaultChildRun } from '../src/child-runner.js';
@@ -71,6 +72,8 @@ async function fixture() {
   await change('envfile', () => compose(web, `${web}    env_file: ${join(outside, 'production.env')}\n`));
   await change('symlink', async () => { await symlink(join(outside, 'credentials'), join(repo, 'credential-dir')); await compose('      - state:/state\n', '      - state:/state\n      - ./credential-dir:/credentials:ro\n'); });
   await change('socket', () => compose(web, `${web}    use_api_socket: true\n`));
+  // The checkout's own .env, which Compose would interpolate from, linking to the host's production env file.
+  await change('dotenv', async () => { await symlink(join(outside, 'production.env'), join(repo, '.env')); git('add', '-f', '.env'); await compose('      APP_STATE:', '      PREVIEW_LEAK: ${PREVIEW_LEAK:-unset}\n      APP_STATE:'); });
   git('checkout', '-q', 'main');
 }
 
@@ -142,6 +145,14 @@ async function until(run: ReturnType<typeof loop>, ids: string[], target: string
 }
 const open = async (key: string, path = '/') => fetch(`${url}${previewPath(key)}${path}`);
 const project = (item: Work, preview: ItemPreview) => composeProjectName(item.key, preview.id);
+/** Brings up `name` from the main fixture as a preview a gone process owned. */
+async function leaveAbandoned(name: string) {
+  const resolved = JSON.parse(execFileSync('docker', ['compose', '-f', 'compose.yml', '-p', name, 'config', '--format', 'json'], { cwd: repo, encoding: 'utf8' }));
+  const directory = await temporaryDirectory('compose-abandoned');
+  await writeFile(join(directory, 'compose.json'), JSON.stringify(composePreviewConfig(resolved, { project: name, service: 'web', port: 8080, bounds: composeBounds(bounds), variables: {}, owner: { pid: spawnSync('true').pid!, startedAt: 1, pidNamespace: processPidNamespace(), at: new Date().toISOString() } })));
+  execFileSync('docker', ['compose', '-f', join(directory, 'compose.json'), '-p', name, '--project-directory', repo, 'up', '--detach', '--wait'], { stdio: 'ignore' });
+  assert.equal((await composeLeftovers(name)).containers.length, 2);
+}
 const nothingLeft = async (name: string) => assert.deepEqual(await composeLeftovers(name), { containers: [], volumes: [], networks: [] }, `${name} left nothing behind`);
 
 test('integration:goal-declared-application-previews — a declared static site and a declared Compose application each get a real local preview of the exact change: the item names the local runner, the link serves the changed page, and the declared cases\' results are on the item', { timeout: 300_000 }, async t => {
@@ -184,8 +195,10 @@ test('integration:goal-compose-preview-isolation-cleanup — two simultaneous Co
   if (!docker) { assert.ok(!process.env.CI, 'CI runs the Compose previews'); t.skip('no Docker Compose or alpine:3 image on this host'); return; }
   // The daemon refuses removals while `failing`: cleanup must not be recorded until a later removal succeeds.
   let failing = false;
-  const run = loop((args, options) => failing && (args[0] === 'rm' || (['volume', 'network'].includes(args[0]!) && args[1] === 'rm') || args.includes('down'))
-    ? Promise.reject(new Error(`docker ${args.slice(0, 2).join(' ')} failed: injected daemon failure`)) : defaultDocker(args, options));
+  const flaky: Docker = (args, options) => failing && (args[0] === 'rm' || (['volume', 'network'].includes(args[0]!) && args[1] === 'rm') || args.includes('down'))
+    ? Promise.reject(new Error(`docker ${args.slice(0, 2).join(' ')} failed: injected daemon failure`))
+    : defaultDocker(args, options).catch(error => { console.error(`docker ${args.join(' ')}: ${error.message}`); throw error; });
+  const run = loop(flaky);
   const first = await change('First compose change', 'fixture-compose-app'), second = await change('Second compose change', 'fixture-compose-app');
   await submit(first, 'compose'); await submit(second, 'compose');
   const a = await until(run, [first.id, second.id], first.id, preview => preview?.state === 'running');
@@ -220,13 +233,8 @@ test('integration:goal-compose-preview-isolation-cleanup — two simultaneous Co
   }
 
   // Restart recovery: a preview whose owner still runs is kept; one a gone process left is removed, volumes and networks with it.
-  const gone = spawnSync('true').pid!;
   const abandoned = `${composeProjectPrefix}abandoned-${process.pid}`;
-  const resolved = JSON.parse(execFileSync('docker', ['compose', '-f', 'compose.yml', '-p', abandoned, 'config', '--format', 'json'], { cwd: repo, encoding: 'utf8' }));
-  const directory = await mkdtemp(join(scratch, 'abandoned-'));
-  await writeFile(join(directory, 'compose.json'), JSON.stringify(composePreviewConfig(resolved, { project: abandoned, service: 'web', port: 8080, bounds: composeBounds(bounds), variables: {}, owner: { pid: gone, startedAt: 1, pidNamespace: processPidNamespace(), at: new Date().toISOString() } })));
-  execFileSync('docker', ['compose', '-f', join(directory, 'compose.json'), '-p', abandoned, '--project-directory', repo, 'up', '--detach', '--wait'], { stdio: 'ignore' });
-  assert.equal((await composeLeftovers(abandoned)).containers.length, 2);
+  await leaveAbandoned(abandoned);
   const removed = await sweepComposePreviews();
   assert.ok(removed.includes(abandoned), 'the abandoned preview is removed');
   assert.ok(!removed.includes(project(first, a)) && !removed.includes(project(second, b)), 'live previews are kept');
@@ -266,8 +274,19 @@ test('integration:goal-compose-preview-isolation-cleanup — two simultaneous Co
     assert.ok(!outcome.detail.includes(outsideCredential), 'the credential is never read into the record');
     await nothingLeft(project(item, outcome));
   }
+
+  // The checkout's own .env linking to the host's production env file is never interpolated: the preview runs, and the credential reaches no container.
+  const dotenv = await change('A compose change whose .env links outside', 'fixture-compose-app');
+  await submit(dotenv, 'dotenv');
+  const linked = await until(run, [second.id, dotenv.id], dotenv.id, preview => preview?.state === 'running' || preview?.state === 'failed');
+  const linkedLeft = await composeLeftovers(project(dotenv, linked));
+  assert.ok(linkedLeft.containers.length, `the preview ran: ${linked.detail}`);
+  assert.ok(linkedLeft.containers.some(id => dockerJson('inspect', id)[0].Config.Env.includes('PREVIEW_LEAK=unset')), 'interpolation read no .env');
   for (const id of execFileSync('docker', ['ps', '-aq'], { encoding: 'utf8' }).split('\n').filter(Boolean))
     assert.ok(!JSON.stringify(dockerJson('inspect', id)).includes(outsideCredential), `container ${id} never holds the outside credential`);
+  await close(dotenv, 'Checked');
+  await until(run, [second.id, dotenv.id], dotenv.id, preview => preview?.state === 'cleaned' || preview?.state === 'failed');
+  await nothingLeft(project(dotenv, linked));
 
   // Cancellation while it starts: the item closes before its preview is up; it is stopped, cleaned and leaves nothing.
   const early = await change('Cancelled while its compose preview starts', 'fixture-compose-app');
@@ -289,6 +308,27 @@ test('integration:goal-compose-preview-isolation-cleanup — two simultaneous Co
   assert.equal((await until(run, [second.id], second.id, preview => preview?.state === 'cleaned')).endReason, 'cancelled');
   await nothingLeft(project(second, b));
   assert.equal((await fetch(`${b.origin}/`).catch(() => null)), null, 'its loopback origin no longer answers');
+
+  // Restart with a preview the gone loop left running while the daemon refuses removal: it is neither recorded cleaned nor replaced until its project is removed.
+  const lost = await change('A compose preview a restart lost', 'fixture-compose-app');
+  await submit(lost, 'compose');
+  const record: ItemPreview = { id: randomUUID(), path: previewPath(lost.key), state: 'starting', runner: 'local', application: 'app', sha: shas.compose!, source: 'head', origin: null, cases: [{ case: 'fixture-compose-app', result: 'unrun' }],
+    detail: '', startedAt: new Date().toISOString(), readyAt: null, cleanedAt: null, endReason: null, instance: `preview-${lost.key}`, database: `preview-${lost.key}-db`, secrets: [] };
+  const event = previewRecordEvent(record), seeded = await call('POST', `work/${lost.id}/merge-record`, 'coordinator', event, mergeRecordKey(lost, event));
+  assert.equal(seeded.status, 200, JSON.stringify(seeded.body));
+  const lostProject = composeProjectName(lost.key, record.id);
+  await leaveAbandoned(lostProject);
+  const restarted = loop(flaky);
+  failing = true;
+  for (let round = 0; round < 3; round++) await restarted.step([lost.id]);
+  assert.deepEqual((({ id, state, cleanedAt }) => ({ id, state, cleanedAt }))((await read(lost.id)).preview!), { id: record.id, state: 'starting', cleanedAt: null }, 'not recorded cleaned, and nothing replaces it, while its project remains');
+  assert.equal((await composeLeftovers(lostProject)).containers.length, 2);
+  failing = false;
+  const replaced = await until(restarted, [lost.id], lost.id, preview => preview?.id !== record.id && preview?.state === 'running');
+  await nothingLeft(lostProject);
+  await close(lost, 'Recovered');
+  await until(restarted, [lost.id], lost.id, preview => preview?.state === 'cleaned');
+  await nothingLeft(project(lost, replaced));
 });
 
 test('unit:compose-preview-config — the resolved configuration is refused for host mounts and privileges, and rewritten without host ports or container names, bounded and labelled', () => {

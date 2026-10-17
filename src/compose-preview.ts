@@ -11,7 +11,7 @@ import { processPidNamespace, processStartTicks, tempOwnerGone, tempOwnerJudgeab
 // `graphyard-preview-KEY-ID`, so its containers, network and named volumes — the application's
 // state and database — are fresh and unique to the item and the preview, never shared with another
 // preview or the host's own stack. The repository's file is resolved by `docker compose config` in
-// the preview's credential-free environment, its env files left unread until their paths are checked, (`composeMountProblems`) and rewritten
+// the preview's credential-free environment (never the checkout's .env), its env files left unread until their paths are checked (`composeMountProblems`), and rewritten
 // (`composePreviewConfig`): every host port removed and the HTTP service published on an ephemeral
 // loopback port only, CPU, memory and process count bounded, the preview's identity given to every
 // service, and each container and network labelled with this process as its owner. `close` removes
@@ -152,16 +152,20 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
     project: options.project, url: null,
     async start(signal, timeoutMs) {
       const deadline = Date.now() + timeoutMs, left = () => Math.max(1_000, deadline - Date.now());
-      // Env files stay declared, unread, until composeMountProblems has checked where they are.
-      const resolved = JSON.parse(await docker(['compose', '-f', options.file, '-p', options.project, 'config', '--no-env-resolution', '--format', 'json'], { env, cwd: options.checkout, signal, timeoutMs: left() })) as Json;
+      // Interpolation reads only the preview's environment and this empty file, never the checkout's
+      // own .env (which may link to a host file); env files stay declared, unread, until composeMountProblems has checked where they are.
+      await mkdir(options.scratch, { recursive: true });
+      const dotenv = join(options.scratch, 'preview.env');
+      await writeFile(dotenv, '');
+      const compose = (file: string) => ['compose', '--env-file', dotenv, '-f', file, '-p', options.project];
+      const resolved = JSON.parse(await docker([...compose(options.file), 'config', '--no-env-resolution', '--format', 'json'], { env, cwd: options.checkout, signal, timeoutMs: left() })) as Json;
       const problems = composeMountProblems(resolved, options.checkout, options.service);
       if (problems.length) throw new Error(`the Compose application cannot be previewed in isolation: ${problems.join('; ')}`);
       const generated = join(options.scratch, 'compose.preview.json');
-      await mkdir(options.scratch, { recursive: true });
       await writeFile(generated, JSON.stringify(composePreviewConfig(resolved, { ...options, owner: currentOwner() })));
       started = true;
-      await docker(['compose', '-f', generated, '-p', options.project, '--project-directory', options.checkout, 'up', '--detach', '--build', '--wait', '--wait-timeout', String(Math.ceil(left() / 1000))], { env, cwd: options.checkout, signal, timeoutMs: left() });
-      const published = (await docker(['compose', '-f', generated, '-p', options.project, 'port', options.service, String(options.port)], { env, signal, timeoutMs: left() })).trim().split('\n')[0] ?? '';
+      await docker([...compose(generated), '--project-directory', options.checkout, 'up', '--detach', '--build', '--wait', '--wait-timeout', String(Math.ceil(left() / 1000))], { env, cwd: options.checkout, signal, timeoutMs: left() });
+      const published = (await docker([...compose(generated), 'port', options.service, String(options.port)], { env, signal, timeoutMs: left() })).trim().split('\n')[0] ?? '';
       const port = /^127\.0\.0\.1:(\d{1,5})$/.exec(published)?.[1];
       if (!port) throw new Error(`service ${options.service} published no loopback port for ${options.port} (${published || 'none'})`);
       const url = `http://127.0.0.1:${port}`;
@@ -190,14 +194,20 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
 export async function removeComposeProject(project: string, options: { docker?: Docker; env?: Record<string, string> } = {}) {
   if (!project.startsWith(composeProjectPrefix)) throw new Error(`${project} is not a preview's Compose project`);
   const docker = options.docker ?? defaultDocker, env = options.env ?? dockerEnvironment({ PATH: process.env.PATH ?? '' });
-  try { await docker(['compose', '-p', project, 'down', '--volumes', '--remove-orphans', '--rmi', 'local', '--timeout', '5'], { env, timeoutMs: 120_000 }); } catch { /* what remains is removed below */ }
-  const left = await composeLeftovers(project, { docker, env });
-  if (left.containers.length) await docker(['rm', '--force', '--volumes', ...left.containers], { env, timeoutMs: 60_000 }).catch(() => '');
-  if (left.volumes.length) await docker(['volume', 'rm', '--force', ...left.volumes], { env, timeoutMs: 60_000 }).catch(() => '');
-  if (left.networks.length) await docker(['network', 'rm', ...left.networks], { env, timeoutMs: 60_000 }).catch(() => '');
-  const still = await composeLeftovers(project, { docker, env });
-  const named = [...still.containers.map(id => `container ${id}`), ...still.volumes.map(id => `volume ${id}`), ...still.networks.map(id => `network ${id}`)];
-  if (named.length) throw new Error(`${project} was not removed: ${named.join(', ')} remain`);
+  // Run from `/`: by its project name alone, never reading a Compose file or .env where this process happens to be.
+  const failures: string[] = [], note = (error: unknown) => { failures.push(error instanceof Error ? error.message : String(error)); return ''; };
+  await docker(['compose', '-p', project, 'down', '--volumes', '--remove-orphans', '--rmi', 'local', '--timeout', '5'], { env, cwd: '/', timeoutMs: 120_000 }).catch(note);
+  // What `down` left is removed by id; a network still detaching from a removed container is tried again.
+  for (let pass = 0; ; pass++) {
+    const left = await composeLeftovers(project, { docker, env });
+    const named = [...left.containers.map(id => `container ${id}`), ...left.volumes.map(id => `volume ${id}`), ...left.networks.map(id => `network ${id}`)];
+    if (!named.length) return;
+    if (pass === 3) throw new Error(`${project} was not removed: ${named.join(', ')} remain (${failures.slice(-3).join('; ').slice(0, 600)})`);
+    if (left.containers.length) await docker(['rm', '--force', '--volumes', ...left.containers], { env, timeoutMs: 60_000 }).catch(note);
+    if (left.volumes.length) await docker(['volume', 'rm', '--force', ...left.volumes], { env, timeoutMs: 60_000 }).catch(note);
+    if (left.networks.length) await docker(['network', 'rm', ...left.networks], { env, timeoutMs: 60_000 }).catch(note);
+    if (pass) await new Promise(accept => setTimeout(accept, 500 * pass));
+  }
 }
 
 const lines = (text: string) => text.split('\n').map(line => line.trim()).filter(Boolean);

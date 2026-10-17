@@ -10,7 +10,7 @@ import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
 import { serveStaticSite, type ReleaseCandidate, type StaticUat } from '../release-candidate.js';
 import { hostPassthrough } from '../e2e/steps.js';
 import { buildStaticSite, projectCaseSuite, type StaticBuildShell } from '../release-project.js';
-import { composeBounds, composeProjectName, composeStack, dockerEnvironment, snapshotComposeSite, sweepComposePreviews, type ComposeBounds, type Docker } from '../compose-preview.js';
+import { composeBounds, composeLeftovers, composeProjectName, composeStack, dockerEnvironment, snapshotComposeSite, sweepComposePreviews, type ComposeBounds, type Docker } from '../compose-preview.js';
 import { previewDatabase, previewDemand, previewEnded, previewEndReason, previewInstance, previewPath, previewSiteByteLimit, previewSiteFileLimit, previewSitePathSchema, type ItemPreview, type PreviewCaseResult, type PreviewEndReason, type PreviewSiteFile } from '../project-previews.js';
 import type { Application, ProjectDelivery } from '../project-applications.js';
 import type { Work } from '../model/work.js';
@@ -448,7 +448,8 @@ const caseResults = (verdict: PreviewVerdict): PreviewCaseResult[] => verdict.ca
  * A preview whose item moves to a new head is `superseded`, and one whose item is closed, delivered
  * or no longer cites such a case is ended: a starting one is cancelled, a served one's server closed
  * and checkout removed, and then it is recorded `cleaned` with why. A record this process does not
- * back (the loop restarted) is recorded `cleaned` (`restarted`) before a new preview starts. A failed
+ * back (the loop restarted) is recorded `cleaned` (`restarted`) before a new preview starts, a Compose one only once
+ * the daemon holds nothing of its project. A failed
  * preview is not retried on the same commit. Answers what it did, one line each.
  */
 export async function itemPreviewStep(live: Map<string, LivePreview>, work: readonly Work[], ports: ItemPreviewPorts): Promise<string[]> {
@@ -502,6 +503,10 @@ export async function itemPreviewStep(live: Map<string, LivePreview>, work: read
     // A record no preview of this process backs: the loop that served it is gone, so it is recorded ended before anything new starts.
     const stale = recorded && !previewEnded(recorded) ? recorded : null;
     if (stale) {
+      // A Compose record is recorded cleaned, and replaced, only once the daemon holds nothing of its project; until then the next step sweeps again.
+      const project = stale.database || delivery?.applications.find(application => application.id === stale.application)?.kind === 'compose' ? composeProjectName(item.key, stale.id) : null;
+      const left = project ? await composeLeftovers(project, { docker: ports.docker, env: dockerEnvironment({ PATH: (ports.hostEnvironment ?? process.env).PATH ?? '' }, ports.hostEnvironment ?? process.env) }).catch(() => null) : null;
+      if (project && (!left || left.containers.length + left.volumes.length + left.networks.length)) { composeSwept = false; notes.push(`${item.key}'s stale Compose preview ${project} is not removed yet; it stays recorded until it is`); continue; }
       try { await ports.record(item, ended(stale, reason ?? 'restarted', `${reason ? 'ended' : 'no live preview backs it after a restart'}`)); notes.push(`Recorded ${item.key}'s preview ${stale.id} cleaned: ${reason ?? 'restarted'}`); }
       catch (error) { notes.push(`Could not record ${item.key}'s stale preview cleaned: ${error instanceof Error ? error.message : String(error)}`); continue; }
     }
