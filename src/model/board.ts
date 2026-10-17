@@ -212,16 +212,7 @@ export function actorRole(work: Work, group: Group | null, who: string): ActorRo
 const escalation = /^Unresolved \S+ escalation requires operator resolution/;
 const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.name === gate && !entry.passed)?.reasons ?? [];
 
-/**
- * The exact command that takes the next step, when there is one to run: a scope refusal is the
- * approver's decision while it holds the ask (GY-1388), else `master scope` — or `master
- * requirements` where no fold represents the ask under the cap, which the plain union `master
- * scope` posts cannot carry (GY-936) — a recorded blocker `master unblock`,
- * an escalation `master decide … resolve`, a merged item production does not serve
- * `master verify-deployment`, a review `master review`, backlog `master release`, and a human-only decision the
- * answer its row names. Null where the next step is a session already running or a turn nobody can
- * take early.
- */
+/** The exact command that takes the next step, when there is one to run: a scope refusal is the approver's decision while it holds the ask (GY-1388), else `master scope` — or `master requirements` where no fold represents the ask under the cap, which the plain union `master scope` posts cannot carry (GY-936) — a recorded blocker `master unblock`, an escalation `master decide … resolve`, a merged item production does not serve `master verify-deployment`, a review `master review`, backlog `master release`, and a human-only decision the answer its row names. Null where the next step is a session already running or a turn nobody can take early. */
 export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow, now = Date.now(), scopeDecisions?: readonly RoutedScopeDecision[]): string | null {
   const key = work.key;
   if (actor === 'human-only') return humanRow?.answer.cli ?? (work.humanRequest ? answerCommand(key, work.humanRequest) : null);
@@ -249,12 +240,7 @@ export interface BoardItem {
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
   overdue: boolean;
-  /**
-   * GY-1845: a done row's outcome, the production state it headlines (`deliveryOutcome`) — one of
-   * 'Merged, awaiting deployment', 'Deployed, awaiting verification', 'Production verified' or
-   * 'Deployed with a failure', with the serving release when known; never the word Done, never
-   * Merged alone. Absent on open rows, which have no outcome yet.
-   */
+  /** GY-1845: a done row's outcome — the production state `deliveryOutcome` headlines ('Merged, awaiting deployment', 'Deployed, awaiting verification', 'Production verified' or 'Deployed with a failure', with the serving release when known), never the word Done, never Merged alone; absent on open rows, which have no outcome yet. */
   outcome?: string;
   /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008); `summary` is the one plain sentence a Work page row shows for it (GY-1739), and `until` the instant a wait names. */ blocker?: BlockerView & { summary: string; until?: string };
 }
@@ -281,8 +267,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
     const view = blockerView(entry), wait = view && blockerSummary(entry.blocker!, now, entry, 'UTC'), blocker = view && wait && { ...view, summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
-    // GY-1845: a done row headlines its production state, so the board never reads a merged item as merely shipped.
-    const outcome = entry.stage === 'done' && !isClosed(entry) ? deliveryOutcome(entry) : null;
+    const outcome = entry.stage === 'done' && !isClosed(entry) ? deliveryOutcome(entry) : null; // GY-1845: a done row headlines its production state, never a bare merge.
     return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
       actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(outcome ? { outcome } : {}), ...(blocker ? { blocker } : {}) };
   };
