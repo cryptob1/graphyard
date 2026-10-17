@@ -166,6 +166,8 @@ export interface AllowlistEntry {
   runs: string;
   /** The credential they reach the remote with. */
   credential: string;
+  /** GY-1941 onward: why the file's calls cannot go through the merge writer; a follow-up that keeps an entry must record it. */
+  door?: string;
 }
 
 /**
@@ -186,22 +188,22 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential' },
   'src/daemon/acceptance.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s acceptance step drafting a goal\'s acceptance (base read, acceptance-branch push)', credential: 'the coordinator checkout\'s own git credential' },
   'src/daemon/blocker-probes.ts': { subcommands: ['ls-remote', 'push'], runs: 'the loop\'s blocker probes: the confined credential script (`/bin/sh -c`) and the base-tip read', credential: 'whatever credential the confined worker holds — the probe exists to test it; the base-tip read uses the coordinator checkout\'s own' },
-  'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)' },
-  'src/daemon/cycle-shadow.ts': { subcommands: ['fetch'], runs: 'the loop\'s shadow-gate reads', credential: 'the coordinator checkout\'s own git credential' },
-  'src/daemon/deployment.ts': { subcommands: ['fetch'], runs: 'the loop\'s deployment observation and promotion reads (base tip and rc tags)', credential: 'the coordinator checkout\'s own git credential' },
+  'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)', door: 'it is the merge writer: its base fetch and leased push are the door itself' },
+  'src/daemon/cycle-shadow.ts': { subcommands: ['fetch'], runs: 'the loop\'s shadow-gate reads', credential: 'the coordinator checkout\'s own git credential', door: 'the shadow gate trials a submitted head before it is queued, so it fetches the worker\'s branch, which the merge writer never reads, and runs while the writer is busy with another merge' },
+  'src/daemon/deployment.ts': { subcommands: ['fetch'], runs: 'the loop\'s deployment observation and promotion reads (base tip and rc tags)', credential: 'the coordinator checkout\'s own git credential', door: 'deployment observation must read the base tip and rc/* records fresh every cycle, including while the merge writer is stalled or disabled (github delivery mode runs none), and it writes nothing' },
   'src/daemon/held-cli.ts': { subcommands: ['clone'], runs: 'the loop pinning a held CLI snapshot', credential: 'none: a --shared clone of the checkout\'s own object store' },
-  'src/daemon/release-ports.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s async release and promotion ports (ledger sync, leased push, the replay\'s guard)', credential: 'the merge writer\'s deploy key alone (deployKeySshCommand, pushEnvironment)' },
-  'src/daemon/step-stalls.ts': { subcommands: ['ls-remote'], runs: 'the loop diagnosing a stalled merge step', credential: 'the merge writer\'s deploy key alone (pushEnvironment)' },
-  'src/daemon/upgrade.ts': { subcommands: ['fetch'], runs: 'the loop\'s self-upgrade reading the base tip', credential: 'the coordinator checkout\'s own git credential' },
+  'src/daemon/release-ports.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s async release and promotion ports (ledger sync, leased push, the replay\'s guard)', credential: 'the merge writer\'s deploy key alone (deployKeySshCommand, pushEnvironment)', door: 'the release, promotion and revert steps run outside the merge queue (one candidate per release, not one merge per item), so they reach the remote beside the writer with its deploy key alone rather than through its queue' },
+  'src/daemon/step-stalls.ts': { subcommands: ['ls-remote'], runs: 'the loop diagnosing a stalled merge step', credential: 'the merge writer\'s deploy key alone (pushEnvironment)', door: 'the probe diagnoses whether the merge writer\'s deploy key still reaches the remote while the writer is stalled; routing it through the stalled writer would make the diagnosis wait on the fault it diagnoses' },
+  'src/daemon/upgrade.ts': { subcommands: ['fetch'], runs: 'the loop\'s self-upgrade reading the base tip', credential: 'the coordinator checkout\'s own git credential', door: 'the self-upgrade decides whether to restart the loop that runs the merge writer, so it must read the base tip without it, from a writer that may be the one owed the restart' },
   'src/docs-sync.ts': { subcommands: ['fetch'], runs: 'the loop\'s docs-sync (branch and base reads)', credential: 'the coordinator checkout\'s own git credential' },
   'src/executor.ts': { subcommands: ['fetch'], runs: 'the loop\'s scope reads (currentBaseTree, autoscope and dispatch)', credential: 'the coordinator checkout\'s own git credential' },
   'src/install/host.ts': { subcommands: ['clone', 'fetch'], runs: 'the installer driving the host shell over ssh (`sh -c`): the managed checkout and the Graphyard source checkout', credential: 'a one-shot App installation token passed on standard input for the managed clone (never stored, never an argument); the source checkout\'s remote is public and needs none' },
   'src/master/autonomy.ts': { subcommands: ['clone', 'fetch'], runs: 'the master cloning the approver\'s own copy (approverClone) and fetching its bound sha', credential: 'the coordinator checkout\'s own git credential for the bound-sha fetch; the clone itself is local' },
-  'src/master/branch-release.ts': { subcommands: ['fetch', 'push'], runs: 'the master preparing a rework workspace (submittedBranchRefusal)', credential: 'the coordinator checkout\'s own git credential' },
+  'src/master/branch-release.ts': { subcommands: ['fetch', 'push'], runs: 'the master preparing a rework workspace (submittedBranchRefusal)', credential: 'the coordinator checkout\'s own git credential', door: 'it runs in the `worktree` CLI preparing a rework workspace on the submitted PR branch, not the base branch; the merge writer runs in the loop, holds the base lease alone and never touches worker branches' },
   'src/master/worktrees.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s cycle preparation (cycleBaseTip, one fetch per cycle)', credential: 'the coordinator checkout\'s own git credential' },
-  'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts and release-ports.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on' },
-  'src/release-candidate.ts': { subcommands: ['fetch', 'ls-remote', 'push'], runs: 'the release candidate cut, ledger sync and remote-tip reads (`graphyard release`, the loop\'s ports)', credential: 'the caller\'s own git credential: the operator\'s for the CLI, the coordinator\'s or the deploy key in the loop' },
-  'src/release-project.ts': { subcommands: ['push'], runs: 'the loop\'s async promotion replaying the hold records\' tag writes', credential: 'the merge writer\'s deploy key, through the AsyncGit the release ports hand it' },
+  'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts and release-ports.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on', door: 'it is the merge writer: pushArgs is the door\'s own leased push, defined here and executed only by the writer\'s ports' },
+  'src/release-candidate.ts': { subcommands: ['fetch', 'ls-remote', 'push'], runs: 'the release candidate cut, ledger sync and remote-tip reads (`graphyard release`, the loop\'s ports)', credential: 'the caller\'s own git credential: the operator\'s for the CLI, the coordinator\'s or the deploy key in the loop', door: 'the release ledger library also serves `graphyard release` on the operator\'s machine and the release workflow in CI, where no merge writer runs; its pushes write rc/* tags and leased release/* branches, never the base branch the writer leases, and it spawns only through the git runner its caller hands it' },
+  'src/release-project.ts': { subcommands: ['push'], runs: 'the loop\'s async promotion replaying the hold records\' tag writes', credential: 'the merge writer\'s deploy key, through the AsyncGit the release ports hand it', door: 'it spawns nothing itself: the guard only admits a hold record\'s tag push into the replay, which the release ports then run through their deploy-key git' },
   'src/review-scope.ts': { subcommands: ['fetch'], runs: 'the loop\'s review-scope reads', credential: 'the coordinator checkout\'s own git credential' },
   'src/server/routes/goals.ts': { subcommands: ['fetch'], runs: 'the server\'s land route judging a merge-writer landing', credential: 'none of its own: a compose container holds no SSH credential (GY-1922), so a failed fetch answers retryable 503 and records nothing' },
   'src/up.ts': { subcommands: ['fetch', 'push'], runs: '`graphyard up` publishing onboarding and moving the host checkout to the installed ref', credential: 'the operator\'s own git credential on the installing machine' },
@@ -250,6 +252,15 @@ export const baseline = [
   'src/up.ts',
 ];
 
+/**
+ * GY-1941: the release and promotion cluster. Each file either left the allowlist and the baseline
+ * (its calls moved behind the merge writer) or keeps its entry with `door`, the reason it cannot.
+ */
+export const releaseCluster = [
+  'src/release-candidate.ts', 'src/release-project.ts', 'src/daemon/release-ports.ts', 'src/daemon/deployment.ts', 'src/daemon/step-stalls.ts',
+  'src/daemon/upgrade.ts', 'src/master/branch-release.ts', 'src/daemon/cycle-merge-writer.ts', 'src/daemon/cycle-shadow.ts', 'src/merge-writer/executor.ts',
+];
+
 const spoken = (subcommands: string[]) => subcommands.length <= 1 ? subcommands.join('') : `${subcommands.slice(0, -1).join(', ')} and ${subcommands[subcommands.length - 1]}`;
 /** The subcommands a file's findings reach the remote with, sorted, deduplicated. */
 export const subcommandsOf = (findings: SpawnFinding[]) => [...new Set(findings.flatMap(finding => finding.subcommands))].sort();
@@ -288,6 +299,13 @@ test('unit:git-network-door — every file that spawns a git network subcommand 
     assert.deepEqual(subcommandsOf(detected.get(path) ?? []), [...entry.subcommands].sort(), `${path}'s entry must name exactly the subcommands it spawns`);
     assert.ok(entry.runs.trim().length >= 15, `${path}'s entry names the process that runs its git network subcommands`);
     assert.ok(entry.credential.trim().length >= 10, `${path}'s entry names the credential its git network subcommands use`);
+  }
+});
+
+test('unit:git-network-door — every release and promotion cluster file is off the door or its entry states why its call cannot go through the merge writer', () => {
+  for (const path of releaseCluster) {
+    if (!Object.hasOwn(allowlist, path)) { assert.ok(!baseline.includes(path), `${path} left the allowlist, so it leaves the baseline in the same commit`); continue; }
+    assert.ok((allowlist[path].door ?? '').trim().length >= 40, `${path} keeps its allowlist entry, so the entry states why its call cannot go through the merge writer`);
   }
 });
 
