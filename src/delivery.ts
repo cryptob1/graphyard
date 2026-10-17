@@ -91,7 +91,8 @@ export const rollbackSettleSchema = z.object({ rollbackId: z.uuid(), operationId
 export const rollbackResolveSchema = z.object({ rollbackId: z.uuid(), operationId: z.uuid().optional(), outcome: z.enum(['applied', 'failed', 'cancelled']), reason: z.string().trim().min(1).max(2000), evidence: z.url().max(2000).optional() }).strict();
 export interface EnvironmentDelivery {
   environmentId: string; generation: number;
-  expected: { releaseId: string; releaseRevision: number; manifestHash: string; buildId: string; policyRevision: number; approvalId: string | null; selectedAt: string; selectedBy: string } | null;
+  /** The selected release; `sourceSha` (GY-1905) names the commit it was built from, so the expected release reads as the exact merge it ships. */
+  expected: { releaseId: string; releaseRevision: number; sourceSha?: string; manifestHash: string; buildId: string; policyRevision: number; approvalId: string | null; selectedAt: string; selectedBy: string } | null;
   history: ReleaseSelection[];
   /** Folded from the current generation's authoritative observations only. `segments` is matched history; `latest` is the most recently observed state. */
   coverage: Record<string, { segments: Interval[]; latest: { observationId: string; observedAt: string; validTo: string; state: ServiceState; reasons: string[] } | null }>;
@@ -353,7 +354,7 @@ export class Delivery {
       }
     }
     state.generation += 1;
-    state.expected = { releaseId: release.id, releaseRevision: release.revision, manifestHash: release.manifestHash, buildId: release.buildId, policyRevision: environment.revision, approvalId: approval?.id ?? null, selectedAt: at, selectedBy: actor };
+    state.expected = { releaseId: release.id, releaseRevision: release.revision, sourceSha: release.sourceSha, manifestHash: release.manifestHash, buildId: release.buildId, policyRevision: environment.revision, approvalId: approval?.id ?? null, selectedAt: at, selectedBy: actor };
     state.history.push({ generation: state.generation, releaseId: release.id, releaseRevision: release.revision, policyRevision: environment.revision, selectedAt: at, selectedBy: actor, outcome: 'selected' });
     if (state.history.length > historyLimit) state.history.splice(0, state.history.length - historyLimit);
     state.coverage = {};

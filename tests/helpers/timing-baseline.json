@@ -969,6 +969,7 @@
     "tests/fault-class-loop.test.ts": 630,
     "tests/slow-tick-repeat-receipt.test.ts": 600,
     "tests/goal-exact-candidates.test.ts": 3000,
-    "tests/soak-exact-candidates.test.ts": 20000
+    "tests/soak-exact-candidates.test.ts": 20000,
+    "tests/goal-candidate-promotion.test.ts": 4000
   }
 }

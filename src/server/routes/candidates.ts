@@ -6,6 +6,7 @@ import { candidateIdentityText, candidateSource, candidateValidationKind, exactC
 import { assessExactCut } from '../../daemon/candidate-cut.js';
 import { defaultCandidateIdleMinutes, maxCandidateIdleMinutes } from '../../master/merge-writer-settings.js';
 import { maxCandidateChanges, projectDelivery } from '../../project-applications.js';
+import { uatValidationWindowMs } from '../../release-candidate.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 
 /**
@@ -32,16 +33,37 @@ const cutSchema = z.object({
   sinceSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
 }).strict();
 const sha = z.string().regex(/^[0-9a-f]{40}$/, 'a full 40-character lower-case commit SHA');
+const identity = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+/** GY-1905: what the validated candidate was built into — its build's artifact digests, or its source tree when it ships by commit. */
+const artifact = z.string().regex(/^(sha256:[0-9a-f]{64}|tree:[0-9a-f]{40})$/, 'sha256:<64 hex> for a build, or tree:<40 hex> for a source tree');
+const caseIds = z.array(z.string().min(1).max(100)).max(500);
 const validationSchema = z.object({
-  release: z.string().min(1).max(100), sha, identity: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  release: z.string().min(1).max(100), sha, identity,
   result: z.enum(['pass', 'fail']),
   cases: z.array(z.object({ id: z.string().min(1).max(100), result: z.string().min(1).max(40) }).strict()).max(500).default([]),
   failed: z.array(z.string().min(1).max(200)).max(500).default([]),
+  /** GY-1905: the cases the run held required, and the artifact it ran against. */
+  required: caseIds.optional(), artifact: artifact.optional(),
 }).strict();
+/**
+ * GY-1905: a request to select a validated candidate for an environment. It names exactly what the
+ * promoter is about to deploy — the `rc/ID` record, its source, identity and artifact — and the
+ * required cases the candidate's own checkout declares.
+ */
+const promotionSchema = z.object({ environment: z.string().regex(/^[a-z][a-z0-9-]{0,39}$/), release: z.string().min(1).max(100), sha, identity, artifact, required: caseIds }).strict();
+export type PromotionRequest = z.infer<typeof promotionSchema>;
+export type GatedValidation = CandidateValidation & { required?: string[]; artifact?: string };
+/** GY-1905: the selection recorded once a candidate passed every promotion gate (`release.candidate.promotion`, append-only). */
+export interface CandidatePromotion { environment: string; releaseId: string; sourceSha: string; identity: string; artifact: string; required: string[]; at: string; by: string }
+export type PromotedCandidate = Omit<ExactCandidate, 'validation'> & { validation: GatedValidation | null; promotion?: CandidatePromotion | null };
+export const candidatePromotionKind = 'release.candidate.promotion';
+/** A required case passes when it ran and passed, or ran as pending under its outcome's pending contract (GY-1802). */
+const passing = new Set(['passed', 'pending']);
 const cutLock = `${exactCandidateKind}:cut`;
 const candidatePath = /^\/api\/candidates\/([^/]+)$/;
 const validationPath = /^\/api\/candidates\/([^/]+)\/validation$/;
-const immutable = 'Candidate records are immutable: a candidate is only cut (POST /api/candidates), validated once (POST /api/candidates/ID/validation) and read; nothing edits, deletes or moves one through a lifecycle';
+const promotionPath = /^\/api\/candidates\/([^/]+)\/promotion$/;
+const immutable = 'Candidate records are immutable: a candidate is only cut (POST /api/candidates), validated once (POST /api/candidates/ID/validation), promoted once per environment (POST /api/candidates/ID/promotion) and read; nothing edits, deletes or moves one through a lifecycle';
 
 function cutter({ actor, services }: RouteContext) {
   if (actor.role === 'operator-agent') return operatorCapability(actor, 'intent:create', undefined, services.repository);
@@ -58,12 +80,13 @@ const visible = (actor: Principal, candidate: Pick<ExactCandidate, 'members'>) =
 export const candidateCap = () => Math.min(projectDelivery().delivery?.candidateMaxChanges ?? maxCandidateChanges, maxCandidateChanges);
 
 const newest = async (db: pg.PoolClient | pg.Pool) => (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL ORDER BY seq DESC LIMIT 1', [exactCandidateKind])).rows[0]?.payload as ExactCandidate | undefined;
-/** Each candidate with the validation appended for it, if any. */
-async function withValidation(db: pg.PoolClient | pg.Pool, candidates: ExactCandidate[]): Promise<ExactCandidate[]> {
-  if (!candidates.length) return candidates;
-  const rows = (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>\'candidate\' = ANY($2::text[]) ORDER BY seq', [candidateValidationKind, candidates.map(candidate => candidate.id)])).rows;
-  const found = new Map(rows.map(row => [row.payload.candidate as string, row.payload.validation as CandidateValidation]));
-  return candidates.map(candidate => ({ ...candidate, validation: found.get(candidate.id) ?? null }));
+/** Each candidate with the validation appended for it and its production promotion, if any. */
+async function withValidation(db: pg.PoolClient | pg.Pool, candidates: ExactCandidate[]): Promise<PromotedCandidate[]> {
+  if (!candidates.length) return [];
+  const rows = (await db.query('SELECT kind, payload FROM events WHERE kind = ANY($1::text[]) AND work_id IS NULL AND payload->>\'candidate\' = ANY($2::text[]) ORDER BY seq', [[candidateValidationKind, candidatePromotionKind], candidates.map(candidate => candidate.id)])).rows;
+  const found = new Map(rows.filter(row => row.kind === candidateValidationKind).map(row => [row.payload.candidate as string, row.payload.validation as GatedValidation]));
+  const promoted = new Map(rows.filter(row => row.kind === candidatePromotionKind && row.payload.promotion?.environment === 'production').map(row => [row.payload.candidate as string, row.payload.promotion as CandidatePromotion]));
+  return candidates.map(candidate => ({ ...candidate, validation: found.get(candidate.id) ?? null, promotion: promoted.get(candidate.id) ?? null }));
 }
 
 /**
@@ -128,8 +151,8 @@ export async function cutExactCandidate(db: pg.PoolClient, actor: Principal, now
 }
 
 /** Submitted validation content excluding server-owned `at`/`by`, for identical-replay comparison. */
-const validationContent = (value: Omit<CandidateValidation, 'at' | 'by'> | z.infer<typeof validationSchema>) =>
-  JSON.stringify({ release: value.release, sha: value.sha, identity: value.identity, result: value.result, cases: value.cases, failed: value.failed });
+const validationContent = (value: Omit<GatedValidation, 'at' | 'by'> | z.infer<typeof validationSchema>) =>
+  JSON.stringify({ release: value.release, sha: value.sha, identity: value.identity, result: value.result, cases: value.cases, failed: value.failed, required: value.required ?? null, artifact: value.artifact ?? null });
 
 /**
  * Append the UAT verdict for candidate `id`, once. It must name the candidate's exact source and
@@ -137,7 +160,7 @@ const validationContent = (value: Omit<CandidateValidation, 'at' | 'by'> | z.inf
  * second, different verdict is refused: the first one recorded is the candidate's. An operator
  * agent's work-item scope must cover every member before a validation is written.
  */
-export async function recordCandidateValidation(db: pg.PoolClient, actor: Principal, now: Date, id: string, input: z.infer<typeof validationSchema>): Promise<ExactCandidate> {
+export async function recordCandidateValidation(db: pg.PoolClient, actor: Principal, now: Date, id: string, input: z.infer<typeof validationSchema>): Promise<PromotedCandidate> {
   await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [cutLock]);
   const row = (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>\'id\' = $2 LIMIT 1', [exactCandidateKind, id])).rows[0];
   demand(row, `Candidate ${id} not found`, 404);
@@ -150,16 +173,79 @@ export async function recordCandidateValidation(db: pg.PoolClient, actor: Princi
       `Candidate ${id} already holds ${candidate.validation.result} from ${candidate.validation.release}; a validation is recorded once`, 409);
     return candidate;
   }
-  const validation: CandidateValidation = { ...input, at: now.toISOString(), by: actor.id };
+  const validation: GatedValidation = { ...input, at: now.toISOString(), by: actor.id };
   await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, candidateValidationKind, JSON.stringify({ candidate: id, validation })]);
   return { ...candidate, validation };
+}
+
+/**
+ * GY-1905: why `candidate` may not be selected for `ask.environment` at `now` — empty when it may.
+ * Only the exact candidate that passed every combined required case promotes: its recorded
+ * validation passed, names this source, identity and artifact, was run as the very `rc/ID` being
+ * promoted, is no older than the UAT window, and holds a passing verdict for every required case
+ * the candidate's checkout declares and the run held required. Anything absent fails closed, and a
+ * candidate older than one already promoted there is superseded.
+ */
+export function promotionRefusals(candidate: PromotedCandidate, ask: PromotionRequest, now: Date, newest: { id: string; sequence: number } | null): string[] {
+  const validation = candidate.validation, refusals: string[] = [];
+  if (ask.sha !== candidate.sourceSha) refusals.push(`the source ${ask.sha.slice(0, 12)} is not candidate ${candidate.id}'s ${candidate.sourceSha.slice(0, 12)}`);
+  if (ask.identity !== candidate.identity) refusals.push(`the identity ${ask.identity.slice(0, 19)} is not candidate ${candidate.id}'s membership ${candidate.identity.slice(0, 19)}`);
+  if (!validation) return [...refusals, `candidate ${candidate.id} holds no validation; it promotes only after its combined required cases pass`];
+  if (validation.result !== 'pass') refusals.push(`candidate ${candidate.id} failed its combined required cases${validation.failed.length ? `: ${validation.failed.join(', ')}` : ''}`);
+  if (validation.sha !== candidate.sourceSha || validation.identity !== candidate.identity) refusals.push(`the validation of ${candidate.id} was run on another source or membership`);
+  if (!validation.artifact) refusals.push(`the validation of ${candidate.id} names no artifact, so nothing binds what it tested to what would deploy`);
+  else if (validation.artifact !== ask.artifact) refusals.push(`the artifact ${ask.artifact} is not the ${validation.artifact} the validation of ${candidate.id} tested`);
+  if (validation.release !== ask.release) refusals.push(`the validation of ${candidate.id} was run as ${validation.release}, not ${ask.release}`);
+  const age = now.getTime() - Date.parse(validation.at);
+  if (!(age <= uatValidationWindowMs)) refusals.push(`the validation of ${candidate.id} recorded at ${validation.at} is stale: older than ${uatValidationWindowMs / 3_600_000} hours`);
+  const required = [...new Set([...ask.required, ...validation.required ?? []])].sort();
+  if (!required.length) refusals.push(`no required case is named for ${candidate.id}; a candidate promotes only on its combined required cases`);
+  const verdicts = new Map(validation.cases.map(entry => [entry.id, entry.result]));
+  const missing = required.filter(id => !verdicts.has(id)), failing = required.filter(id => verdicts.has(id) && !passing.has(verdicts.get(id)!));
+  if (missing.length) refusals.push(`required case${missing.length > 1 ? 's' : ''} ${missing.join(', ')} never ran on ${candidate.id}`);
+  if (failing.length) refusals.push(`required case${failing.length > 1 ? 's' : ''} ${failing.map(id => `${id} (${verdicts.get(id)})`).join(', ')} did not pass on ${candidate.id}`);
+  if (newest && newest.id !== candidate.id && newest.sequence > candidate.sequence) refusals.push(`candidate ${candidate.id} is superseded: the later ${newest.id} is already promoted to ${ask.environment}`);
+  return refusals;
+}
+
+/**
+ * GY-1905: select candidate `id` for an environment, once, after `promotionRefusals` finds nothing:
+ * the selection is appended as one `release.candidate.promotion` event the promoter deploys after.
+ * A refused candidate writes nothing, so a failed one stays failed and the environment keeps the
+ * candidate it last selected. The same request again answers the recorded selection.
+ */
+export async function recordCandidatePromotion(db: pg.PoolClient, actor: Principal, now: Date, id: string, ask: PromotionRequest): Promise<PromotedCandidate> {
+  await db.query('SELECT pg_advisory_xact_lock(hashtext($1))', [cutLock]);
+  const row = (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>\'id\' = $2 LIMIT 1', [exactCandidateKind, id])).rows[0];
+  demand(row, `Candidate ${id} not found`, 404);
+  const [candidate] = await withValidation(db, [row.payload as ExactCandidate]);
+  demand(visible(actor, candidate), `Candidate ${id} names work outside operator agent ${actor.id}'s scope`, 403);
+  const existing = (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->>\'candidate\' = $2 AND payload->\'promotion\'->>\'environment\' = $3 LIMIT 1', [candidatePromotionKind, id, ask.environment])).rows[0];
+  if (existing) {
+    const recorded = existing.payload.promotion as CandidatePromotion;
+    demand(recorded.sourceSha === ask.sha && recorded.identity === ask.identity && recorded.artifact === ask.artifact && recorded.releaseId === ask.release,
+      `Candidate ${id} is already promoted to ${ask.environment} as ${recorded.releaseId} (${recorded.artifact}); a promotion is recorded once`, 409);
+    return candidate;
+  }
+  const newest = await promotedTo(db, ask.environment);
+  const refusals = promotionRefusals(candidate, ask, now, newest && { id: newest.candidate, sequence: newest.sequence });
+  demand(!refusals.length, `Candidate ${id} is not promoted: ${refusals.join('; ')}`, 409);
+  const promotion: CandidatePromotion = { environment: ask.environment, releaseId: ask.release, sourceSha: ask.sha, identity: ask.identity, artifact: ask.artifact, required: [...new Set([...ask.required, ...candidate.validation!.required ?? []])].sort(), at: now.toISOString(), by: actor.id };
+  await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, candidatePromotionKind, JSON.stringify({ candidate: id, sequence: candidate.sequence, promotion })]);
+  return { ...candidate, ...(ask.environment === 'production' ? { promotion } : {}) };
+}
+
+/** The candidate an environment last selected — the release it keeps through any later failed candidate — or null. */
+export async function promotedTo(db: pg.PoolClient | pg.Pool, environment: string): Promise<{ candidate: string; sequence: number; promotion: CandidatePromotion } | null> {
+  const row = (await db.query('SELECT payload FROM events WHERE kind=$1 AND work_id IS NULL AND payload->\'promotion\'->>\'environment\' = $2 ORDER BY seq DESC LIMIT 1', [candidatePromotionKind, environment])).rows[0];
+  return row ? { candidate: row.payload.candidate, sequence: Number(row.payload.sequence), promotion: row.payload.promotion } : null;
 }
 
 /**
  * The listing, newest first: the newest 20 and every candidate still without a verdict however old,
  * so a loop resuming untagged cuts always sees the oldest one and never tags a later one past it.
  */
-export async function listCandidates(db: pg.PoolClient | pg.Pool): Promise<ExactCandidate[]> {
+export async function listCandidates(db: pg.PoolClient | pg.Pool): Promise<PromotedCandidate[]> {
   return withValidation(db, (await db.query(`SELECT payload FROM events c WHERE c.kind=$1 AND c.work_id IS NULL
       AND (c.seq >= COALESCE((SELECT min(seq) FROM (SELECT seq FROM events WHERE kind=$1 AND work_id IS NULL ORDER BY seq DESC LIMIT 20) newest), 0)
         OR NOT EXISTS (SELECT 1 FROM events v WHERE v.kind=$2 AND v.work_id IS NULL AND v.payload->>'candidate' = c.payload->>'id'))
@@ -190,18 +276,25 @@ export const candidateRoutes = defineRoutes('candidates', [
     const pool = context.services.engine.store.pool;
     const listed = await listCandidates(pool);
     const waiting = await candidateBacklog(pool, listed[0] ? listed[0].floor ?? null : null, candidateCap());
+    const production = await promotedTo(pool, 'production');
     return { candidates: listed.filter(candidate => visible(context.actor, candidate)), waiting: waiting.total,
-      next: waiting.members.filter(member => operatorScopeIncludes(context.actor, { id: member.workId, key: member.key })), cap: candidateCap() };
+      next: waiting.members.filter(member => operatorScopeIncludes(context.actor, { id: member.workId, key: member.key })), cap: candidateCap(),
+      production: production ? { candidate: production.candidate, ...production.promotion } : null };
   } },
   { method: 'POST', path: '/api/candidates', handle: async context => {
     cutter(context);
     const input = parsed(cutSchema.safeParse(await parseJson(context, 10_000, '{}')), 'A cut takes only {trigger: manual|schedule, waitMinutes?, since?, sinceSha?}');
-    return once(context, input, (db, now) => cutExactCandidate(db, context.actor, now, input));
+    return once(context, input, async (db, now) => ({ ...await cutExactCandidate(db, context.actor, now, input), promotion: null }));
   } },
   { method: 'POST', path: validationPath, handle: async (context, [id]) => {
     cutter(context);
     const input = parsed(validationSchema.safeParse(await parseJson(context, 200_000, '{}')), 'A validation takes only {release, sha, identity, result: pass|fail, cases?, failed?}');
     return once(context, input, (db, now) => recordCandidateValidation(db, context.actor, now, decodeURIComponent(id), input));
+  } },
+  { method: 'POST', path: promotionPath, handle: async (context, [id]) => {
+    cutter(context);
+    const input = parsed(promotionSchema.safeParse(await parseJson(context, 50_000, '{}')), 'A promotion takes only {environment, release, sha, identity, artifact, required}');
+    return once(context, input, (db, now) => recordCandidatePromotion(db, context.actor, now, decodeURIComponent(id), input));
   } },
   { method: 'GET', path: candidatePath, handle: async (context, [id]) => {
     reader(context);
