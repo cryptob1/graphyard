@@ -117,7 +117,13 @@ test('unit:railway-upload-stamps-build-sha — the upload sets GRAPHYARD_BUILD_S
   // The commit defaults to the source checkout's HEAD: this repository is one.
   const head = (await import('../src/protocol-version.js')).cliCommit(process.cwd());
   assert.ok(head, 'this checkout has no readable HEAD');
-  assert.equal(railwaySourceCommit({ sourceRoot: process.cwd() }), head);
+  assert.equal(railwaySourceCommit({ sourceRoot: process.cwd() }, () => false), head);
+  // A checkout with changes its HEAD does not hold is refused: the upload would carry them under HEAD's name.
+  assert.equal(railwaySourceCommit({ sourceRoot: process.cwd() }, () => true), null);
+  const { sourceTreeDirty } = await adapters();
+  assert.equal(sourceTreeDirty('/repo', () => ''), false);
+  assert.equal(sourceTreeDirty('/repo', () => ' M src/server.ts\n'), true);
+  assert.equal(sourceTreeDirty('/repo', () => '?? notes.txt\n'), true);
 
   // The plan names the variable and the commit it will carry.
   const app = railwayAdapter.plan(ctx, { ...emptyObservation(), compute: true, database: true, app: true, installed: true })

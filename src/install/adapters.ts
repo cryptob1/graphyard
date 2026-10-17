@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { fingerprint, Vault } from './secrets.js';
 import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
@@ -661,14 +662,23 @@ export function railwayUploadArgs(ctx: Pick<AdapterContext, 'sourceRoot' | 'serv
   return resolve(ctx.sourceRoot) === resolve(ctx.railwayDir) ? args : [...args, '--path-as-root'];
 }
 
+/** True when a checkout's tracked or unignored files differ from its HEAD: `railway up` would upload them. */
+export function sourceTreeDirty(root: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): boolean {
+  try { return run('git', ['-C', root, 'status', '--porcelain', '--untracked-files=normal']).trim() !== ''; }
+  catch { return true; }
+}
+
 /**
  * The commit the uploaded source is at: an upload carries no Git metadata, so the served build
  * knows its commit only from GRAPHYARD_BUILD_SHA, which the upload stamps first. Null when the
- * source is no checkout and this process has no build identity either; the upload then refuses.
+ * source is a checkout with changes HEAD does not hold (the upload would carry them under HEAD's
+ * name), or no checkout and this process has no build identity either; the upload then refuses.
  */
-export function railwaySourceCommit(ctx: Pick<AdapterContext, 'sourceRoot' | 'sourceCommit'>): string | null {
+export function railwaySourceCommit(ctx: Pick<AdapterContext, 'sourceRoot' | 'sourceCommit'>, dirty = sourceTreeDirty): string | null {
   if (ctx.sourceCommit !== undefined) return ctx.sourceCommit;
-  return cliCommit(ctx.sourceRoot) ?? buildIdentity().commit;
+  const head = cliCommit(ctx.sourceRoot);
+  if (head) return dirty(ctx.sourceRoot) ? null : head;
+  return buildIdentity().commit;
 }
 
 /**
@@ -687,7 +697,7 @@ export async function railwayUpload(ctx: AdapterContext): Promise<RailwayUploadR
   // commit at /healthz, and a rerun on a deployed app restamps and redeploys it. A source whose
   // commit is unknown is refused: the service would keep an earlier upload's stamp and serve it.
   const commit = railwaySourceCommit(ctx);
-  if (!commit) throw new Error(`provider.deploy refused: the commit of the upload source ${ctx.sourceRoot} is unknown (no Git checkout and no GRAPHYARD_BUILD_SHA), so GRAPHYARD_BUILD_SHA cannot be set and the service would keep a previous upload's commit`);
+  if (!commit) throw new Error(`provider.deploy refused: the commit of the upload source ${ctx.sourceRoot} is unknown (no clean Git checkout and no GRAPHYARD_BUILD_SHA), so GRAPHYARD_BUILD_SHA cannot be set and the service would keep a previous upload's commit`);
   await runRailway(ctx, ['variables', '--service', ctx.service, '--skip-deploys', '--set', `GRAPHYARD_BUILD_SHA=${commit}`], { timeout: 300_000 });
   const args = railwayUploadArgs(ctx);
   const result = await runRailway(ctx, args, { allowFailure: true, timeout: 1_800_000 });

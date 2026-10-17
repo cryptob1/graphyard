@@ -19,7 +19,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 
 ### Providers
 
-- `railway`: `npm i -g @railway/cli`, `railway login`. Sets `GRAPHYARD_BUILD_SHA` (unknown: refuses), uploads `--path-as-root`; failure stops `provider.deploy`.
+- `railway`: `npm i -g @railway/cli`, `railway login`. Sets `GRAPHYARD_BUILD_SHA` (unknown/dirty: refuses), uploads `--path-as-root`; failure stops `provider.deploy`.
 - `hetzner`: `brew install hcloud`, `hcloud context create graphyard`; `--ssh-key NAME`, `--domain`. `manual:…install…-live` coordinators need `HCLOUD_TOKEN`, `HETZNER_SPEND_CAP_USD_MONTHLY` in repo-root `.env` (`0600`, uncommitted); optional `HETZNER_SSH_KEY` (else throwaway).
 - `docker-host`: `ssh USER@HOST 'curl -fsSL https://get.docker.com | sh'`; `--ssh-host`, `--domain`.
 - `compose` (local): `curl -fsSL https://get.docker.com | sh`. Polls GitHub, skipping webhook steps; publishes `127.0.0.1:4310`, else first free port ≤4329, kept on reruns (`up`, `master init` use it); a taken `--port N` fails preflight. Under `up`, a failed step's `next` carries its last 20 redacted lines. A stale `already exists in network` endpoint is disconnected, `up` retried once; others stand.
