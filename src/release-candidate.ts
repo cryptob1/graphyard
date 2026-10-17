@@ -321,9 +321,12 @@ export function assessUat(candidate: ReleaseCandidate, input: { deployedSha: str
  * one production already runs is a rollback, which goes through recovery, not promotion. A
  * candidate whose only blockers were flaky required cases is promotable once an evidence decision
  * accepts each of them for its release run at the candidate's exact SHA (GY-1378); an acceptance at
- * any other SHA or run counts for nothing.
+ * any other SHA or run counts for nothing. External runs imported for the candidate (GY-1860,
+ * `POST /api/validation/import`) hold it too: while any required case's newest imported verdict is
+ * failed, blocked, unrun or skipped the candidate is refused, and a hold that could not be read
+ * refuses it as well — an unread hold is never read as released. `imported` left out reads no import.
  */
-export function assessPromotion(candidate: ReleaseCandidate, uat: UatRecord | null, current: ProductionRecord | null, acceptances: readonly FlakyAcceptance[] = []) {
+export function assessPromotion(candidate: ReleaseCandidate, uat: UatRecord | null, current: ProductionRecord | null, acceptances: readonly FlakyAcceptance[] = [], imported?: PromotionImports) {
   const refusals: string[] = [];
   if (!uat) refusals.push(`Candidate ${candidate.id} has no UAT validation record; deploy it to UAT and validate it first`);
   else {
@@ -335,9 +338,14 @@ export function assessPromotion(candidate: ReleaseCandidate, uat: UatRecord | nu
     if (flaky?.length) refusals.push(`Candidate ${candidate.id}'s required E2E case${flaky.length > 1 ? 's' : ''} ${flaky.join(', ')} ${flaky.length > 1 ? 'were' : 'was'} flaky at ${candidate.sha} in run ${uat.e2e!.runId}; an evidence decision must accept ${flaky.length > 1 ? 'each' : 'it'} at that exact SHA before promotion`);
     else if (!flaky && uat.result !== 'passed') refusals.push(`Candidate ${candidate.id} failed UAT (${failingSuites(uat).map(suite => suite.name).join(', ')}); cut a newer candidate after the fix`);
   }
+  if (imported && 'unread' in imported) refusals.push(`Candidate ${candidate.id}'s imported external runs could not be read (${imported.unread}); promotion waits until their hold is known`);
+  else if (imported?.held) refusals.push(`Candidate ${candidate.id} is held by imported external runs at ${candidate.sha}: ${imported.cases.map(entry => `${entry.id} (${entry.verdict} in run ${entry.runId})`).join(', ')}; import a run that passes ${imported.cases.length > 1 ? 'each' : 'it'} at that exact SHA before promotion`);
   if (current && current.id > candidate.id) refusals.push(`Production already runs newer candidate ${current.id}; an older candidate is a rollback, not a promotion`);
   return { promotable: refusals.length === 0, refusals, sha: candidate.sha, already: current?.sha === candidate.sha };
 }
+
+/** The hold a candidate's imported external runs leave (src/validation-import.ts), or why it could not be read. */
+export type PromotionImports = { held: boolean; cases: readonly { id: string; verdict: string; runId: string }[] } | { unread: string };
 
 /**
  * For a candidate that failed UAT only because required E2E cases were flaky — the e2e suite the
@@ -445,6 +453,14 @@ export const findCandidate = (ledger: Ledger, id: string) => {
   if (!candidate) throw new Error(id === 'latest' ? 'No release candidate has been cut' : `Unknown release candidate ${id}`);
   return candidate;
 };
+/**
+ * The release candidate whose head is exactly `sha` (GY-1860): the newest one, when several were cut
+ * at the same commit, or null when no candidate was cut there. An imported external run binds to a
+ * candidate this way — by the head it tested, never by a candidate id the producer names — so a run
+ * at a commit no candidate holds binds to nothing and is refused.
+ */
+export const candidateAtHead = <T extends Pick<ReleaseCandidate, 'id' | 'sha' | 'cutAt'>>(candidates: readonly T[], sha: string): T | null =>
+  [...candidates].filter(candidate => candidate.sha === sha).sort((a, b) => b.cutAt.localeCompare(a.cutAt))[0] ?? null;
 export const latestPromoted = (ledger: Ledger) => {
   const record = ledger.production[0];
   return record ? ledger.candidates.find(candidate => candidate.id === record.id) ?? null : null;
@@ -942,7 +958,7 @@ export async function validateAndRecord(sourceGit: AnyGit, id: string, url: stri
 }
 
 /**
- * Promote a candidate: `release/production` moves to its exact SHA, only after UAT passed on it.
+ * Promote a candidate: `release/production` moves to its exact SHA, only after UAT passed on it and no imported run holds it.
  * A candidate with a recorded build and a `deployDigests` port (GY-1844) is promoted by digest
  * instead: the port deploys exactly the recorded build artifacts — the digests UAT tested, refused
  * unless the UAT record names them — and nothing triggers a rebuild; the result names them with
@@ -952,12 +968,12 @@ export async function validateAndRecord(sourceGit: AnyGit, id: string, url: stri
  * every deployment — a retry of the same candidate by another mode included — is recorded as what
  * it was, and a concurrent promotion that took the generation first refuses this one.
  */
-export function promote(git: Git, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: DigestDeploy }) {
+export function promote(git: Git, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: DigestDeploy; imported?: PromotionImports }) {
   syncLedger(git, options.base);
   const ledger = readLedger(git);
   const candidate = findCandidate(ledger, id);
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
-  const assessment = assessPromotion(candidate, uat, ledger.production[0] ?? null, options.acceptances);
+  const assessment = assessPromotion(candidate, uat, ledger.production[0] ?? null, options.acceptances, options.imported);
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
   const digests = options.deployDigests && candidate.build?.artifacts?.length ? [...candidate.build.artifacts] : undefined;
   const refusal = digests ? digestPromotionRefusal(candidate, uat) : null;
@@ -968,12 +984,12 @@ export function promote(git: Git, id: string, options: { base: string; push: boo
   return { promoted: true as const, candidate: candidate.id, sha: candidate.sha, branch: productionBranch, ...(digests ? { mode: 'digest' as const, digests } : {}) };
 }
 /** Async promote for the loop's local ports (GY-1526). */
-export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: AsyncDigestDeploy }) {
+export async function promoteAsync(git: AsyncGit, id: string, options: { base: string; push: boolean; now: Date; acceptances?: readonly FlakyAcceptance[]; deployDigests?: AsyncDigestDeploy; imports?: (candidate: ReleaseCandidate) => Promise<PromotionImports> }) {
   await syncLedgerAsync(git, options.base);
   const ledger = await readLedgerAsync(git);
   const candidate = findCandidate(ledger, id);
   const uat = ledger.uat.find(record => record.id === candidate.id) ?? null;
-  const assessment = assessPromotion(candidate, uat, ledger.production[0] ?? null, options.acceptances);
+  const assessment = assessPromotion(candidate, uat, ledger.production[0] ?? null, options.acceptances, options.imports ? await options.imports(candidate) : undefined);
   if (!assessment.promotable) return { promoted: false as const, candidate: candidate.id, refusals: assessment.refusals };
   const digests = options.deployDigests && candidate.build?.artifacts?.length ? [...candidate.build.artifacts] : undefined;
   const refusal = digests ? digestPromotionRefusal(candidate, uat) : null;
