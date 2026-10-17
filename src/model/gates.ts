@@ -11,7 +11,7 @@ import { mechanicalReviewHold } from '../mechanical-findings.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
 import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 import { isDelivered } from './closure.js';
-import { riskOf } from './risk-class.js';
+import { reviewedBeforeMerge, riskOf } from './risk-class.js';
 import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
@@ -107,14 +107,17 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   // Review by risk (GY-1525): a head the control plane observed itself is judged by the class of its
   // merge delta (model/risk-class.ts), not by the path lane. A sensitive delta needs the exact-head
   // approval before it merges; a normal one passes here and owes one post-merge review
-  // (model/post-merge-review.ts), which the evaluation marks on the item. GitHub mode is untouched.
+  // (model/post-merge-review.ts), which the evaluation marks on the item — unless the repository
+  // declares `review.normalChanges: pre-merge` (GY-1843), when a normal one needs its approval too
+  // and owes none after. GitHub mode is untouched.
   const byRisk = current && obs!.source === 'control-plane' && work.policy.review ? riskOf(work) : null;
-  const riskRefusal = byRisk ? byRisk.risk === 'sensitive' && !reviewPassed ? [sensitiveReviewRefusal(byRisk.reasons)] : [] : !reviewPassed ? [reviewRefusal] : [];
-  const postMerge = byRisk ? postMergeReviewMark(work, byRisk.risk, reviewPassed) : {};
-  // A change request holds only when this mode still requires a pre-merge review: github mode, or a
-  // sensitive control-plane delta. A normal-risk control-plane change request is attention for the
-  // post-merge pass, never a merge gate (GY-1525).
-  const changeRequestHold = changesRequested && byRisk?.risk !== 'normal'
+  const beforeMerge = byRisk ? reviewedBeforeMerge(byRisk.risk) : true;
+  const riskRefusal = reviewPassed || !beforeMerge ? [] : byRisk?.risk === 'sensitive' ? [sensitiveReviewRefusal(byRisk.reasons)] : [reviewRefusal];
+  const postMerge = byRisk ? postMergeReviewMark(work, beforeMerge ? 'sensitive' : byRisk.risk, reviewPassed) : {};
+  // A change request holds only when this mode still requires a pre-merge review: github mode, a
+  // sensitive control-plane delta, or any delta under a pre-merge repository. A normal-risk change
+  // request reviewed after merge is attention for the post-merge pass, never a merge gate (GY-1525).
+  const changeRequestHold = changesRequested && beforeMerge
     ? ['Outstanding change requests must be resolved through a new review'] : [];
   add('review', work.policy.review ? [
     ...riskRefusal,

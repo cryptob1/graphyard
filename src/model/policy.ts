@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { deploySmokeProof, proofSchema } from './proof.js';
 import { postDeployCriterionRefusal, postDeployOnlyRefusal, postDeployProof, postMergeProofRefusal } from './post-merge-proofs.js';
 import { distinct, reviewProviders, reviewerProfileSchema } from './review.js';
+import { compiledRules, repositoryPolicy, type CompiledRule, type RepositoryPolicy } from './repository-policy.js';
 
 // ---- Risk lanes (GY-883) -------------------------------------------------------------------------
 
@@ -15,29 +16,25 @@ export const lanes = ['low', 'medium', 'high'] as const;
 export type Lane = typeof lanes[number];
 
 /**
- * The shipped high-risk path policy: any changed path under one of these makes the change high.
- * The installation and deployment surfaces are the repository's own: installation changes go
- * through `src/install/` and deployment through the `deploy/` tree, the Dockerfile and
- * compose.yaml. The schema and credential surfaces are the repository's real ones: the database
- * schema and its persistence layer under `src/store/`, authentication and principals under
- * `src/server/`, beside the public-API routes and the assembler that wires them
- * (`src/server/index.ts`); the server bootstrap that loads credentials (`src/server/main.ts`), the
- * operator agent's credential handling (`src/operator-agent.ts`) and the proof-authority grants
- * (`src/proof-grants.ts`).
+ * The high-risk paths are the repository's own (GY-1843): the `risk.sensitive` entries its
+ * graphyard.json declares for the lane (every entry not marked `only: "risk"`), or the generic
+ * default's surfaces when it declares none (model/repository-policy.ts). Any changed path matching
+ * one makes the change high; Graphyard's own graphyard.json declares its installation, deployment,
+ * schema and credential surfaces here like any other repository.
  */
-export const highRiskPaths = [
-  /^migrations\/schema/, /^auth\/credentials/,
-  /^src\/store\//, /^src\/server\/(routes|auth|principals|index|main)/,
-  /^src\/operator-agent\.ts$/, /^src\/proof-grants\.ts$/,
-  /^src\/install\//, /^deploy\//, /^Dockerfile(\.|$)/, /^compose\.ya?ml$/,
-] as const;
+const laneRulesOf = new WeakMap<RepositoryPolicy, CompiledRule[]>();
+export function highRiskRules(policy: RepositoryPolicy = repositoryPolicy()): readonly CompiledRule[] {
+  let rules = laneRulesOf.get(policy);
+  if (!rules) laneRulesOf.set(policy, rules = compiledRules(policy, 'lane'));
+  return rules;
+}
 
 /** The shipped low-risk path policy: a change only of tests or of docs is low. */
 export const testOnlyPaths = /(^|\/)(tests?|__tests__)\/|\.test\.[A-Za-z]+$|\.spec\.[A-Za-z]+$/;
 export const docsOnlyPaths = /^docs\/|(^|\/)README\.md$|^AGENTS\.md$|\.mdx?$/;
 
 /**
- * The lane one change rides in, from the shipped path policy: any high-risk path makes the change
+ * The lane one change rides in, from the repository's path policy: any high-risk path makes the change
  * high; a change only of tests or only of docs is low; a change kept inside one module — every
  * path sharing the same leading segments, such as `src/model/` — is low; everything else is
  * medium. An unknown change (no paths at all) is high: until the policy can see what a change
@@ -45,10 +42,10 @@ export const docsOnlyPaths = /^docs\/|(^|\/)README\.md$|^AGENTS\.md$|\.mdx?$/;
  * where the paths diverge: `src/model/index.ts` and `src/cli/index.ts` share `src/` and nothing
  * past it, so they are two modules, not one.
  */
-export function determineLane(paths: readonly string[]): Lane {
+export function determineLane(paths: readonly string[], policy: RepositoryPolicy = repositoryPolicy()): Lane {
   const changed = [...new Set(paths)];
   if (!changed.length) return 'high';
-  if (changed.some(path => highRiskPaths.some(pattern => pattern.test(path)))) return 'high';
+  if (changed.some(path => highRiskRules(policy).some(({ pattern }) => pattern.test(path)))) return 'high';
   if (changed.every(path => testOnlyPaths.test(path) || docsOnlyPaths.test(path))) return 'low';
   const segments = changed.map(path => path.split('/').filter(Boolean));
   const first = segments[0];

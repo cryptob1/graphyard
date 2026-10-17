@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { documentationGlobMatches } from './documentation-glob.js';
 import { documentationScopes } from './scope.js';
 import { deliveryPolicySchema } from './delivery-policy.js';
+import { repositoryPolicySchema } from './repository-policy.js';
 
 // ---------------------------------------------------------------------------
 // Every ticket keeps its project's documentation current (GY-215).
@@ -43,7 +44,8 @@ export const documentationPolicySchema = z.object({
   }).strict().optional(),
 }).strict();
 export type DocumentationPolicy = z.infer<typeof documentationPolicySchema>;
-export const repositoryConfigSchema = z.object({ documentation: documentationPolicySchema, delivery: deliveryPolicySchema.optional() }).strict();
+/** The whole committed file: documentation, delivery, and the repository's own risk, review and E2E policy (model/repository-policy.ts, GY-1843). */
+export const repositoryConfigSchema = z.object({ documentation: documentationPolicySchema, delivery: deliveryPolicySchema.optional(), ...repositoryPolicySchema.shape }).strict();
 export type RepositoryConfig = z.infer<typeof repositoryConfigSchema>;
 
 /** The policy of a repository that configures none: Graphyard's own historical layout. */
@@ -92,6 +94,16 @@ export function documentationDrift(committed: DocumentationPolicy | null, deploy
   const assignment = documentationAssignment(committed);
   return { committed, deployed, variable: assignment.variable,
     attention: `${repositoryConfigFile} declares documentation ${JSON.stringify(committed)} but the control plane serves ${JSON.stringify(deployed)}: set ${assignment.line} on the deployment` };
+}
+
+/**
+ * Doctor's documentation entry (GY-293): the committed policy (or why it could not be read) beside
+ * the deployed one, and their drift: the control plane reads only GRAPHYARD_DOCUMENTATION, so an
+ * unredeployed graphyard.json edit is drift.
+ */
+export function doctorDocumentation(committed: DocumentationPolicy | null | { error: string }, deployed: DocumentationPolicy | null) {
+  if (committed && 'error' in committed) return { committed: null, deployed, drift: null, error: committed.error };
+  return { committed, deployed, drift: deployed ? documentationDrift(committed, deployed)?.attention ?? null : null };
 }
 
 /** The standard criterion's short name, as the control plane stamps it on every feature and bug. */
