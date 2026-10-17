@@ -1,0 +1,10 @@
+{
+  "id": "fixture-compose-app",
+  "title": "The compose app serves its own state and database, with no production credential",
+  "tags": ["fixture", "preview"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "http", "name": "read the status", "method": "GET", "path": "/status.json", "status": 200, "expect": [{ "path": "heading", "equals": "Fixture compose app" }, { "path": "credentials", "equals": "none" }] }
+  ]
+}

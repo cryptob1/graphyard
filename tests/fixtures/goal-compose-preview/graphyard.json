@@ -1,0 +1,10 @@
+{
+  "delivery": {
+    "mode": "local",
+    "applications": [
+      { "id": "site", "kind": "static", "directory": "dist", "build": "mkdir -p dist && cp -R site/. dist/ && printf '<p>%s</p>\\n' \"$GRAPHYARD_PREVIEW_TITLE\" >> dist/index.html" },
+      { "id": "app", "kind": "compose", "file": "compose.yml", "service": "web", "port": 8080 }
+    ],
+    "cases": { "fixture-static-home": "site", "fixture-compose-app": "app" }
+  }
+}

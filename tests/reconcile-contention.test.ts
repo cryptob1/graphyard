@@ -21,6 +21,11 @@ let database: EmbeddedPostgres, store: Store, engine: Engine;
 let items: Work[] = [], leased: { work: Work; actor: Principal }[] = [];
 
 const shuffled = <T>(values: T[]) => values.map(value => ({ value, key: Math.random() })).sort((a, b) => a.key - b.key).map(entry => entry.value);
+/**
+ * The ticks recorded since `earlier` was taken. The engine keeps only its last 20 ticks, so a mark
+ * by length stops moving once that many ran (as earlier rounds do on a slow runner); one by identity does not.
+ */
+const ticksSince = (earlier: Set<unknown>) => engine.reconcileTicks.filter(recorded => !earlier.has(recorded));
 const lapsed = () => ({ owner: 'gone-worker', epoch: 1, expiresAt: new Date(Date.now() - 60_000).toISOString() });
 /** Make `ids` hold a lapsed lease, so the next tick writes them, and a submission, so it wakes their jobs too. */
 const lapse = async (ids: string[]) => {
@@ -71,12 +76,12 @@ for (const batchMs of [20, 250]) test(`unit:reconcile-tick-bounded-under-content
   let stop!: () => void; const stopped = new Promise<void>(resolve => { stop = resolve; });
   const load = traffic(stopped, errors);
   await new Promise(resolve => setTimeout(resolve, 300));
-  const before = engine.reconcileTicks.length;
+  const earlier = new Set(engine.reconcileTicks);
   const started = performance.now();
   try { await engine.reconcile(); } finally { stop(); await load; engine.reconcileBatchMs = 250; }
   const elapsedMs = performance.now() - started;
   // The resyncs ran ticks of their own; every tick in the window, the measured one included, keeps the bound.
-  const ticks = engine.reconcileTicks.slice(before);
+  const ticks = ticksSince(earlier);
   assert.ok(ticks.length >= 1, 'the tick was recorded');
   assert.ok(elapsedMs < 30_000, `the tick took ${Math.round(elapsedMs)} ms under contention, over the 30 s bound`);
   // A tick evaluates what moved (GY-1124, GY-1898): the lapsed thirty and the items the raw face
@@ -133,7 +138,7 @@ test('unit:reconcile-leaves-pool-headroom — while a tick runs, heartbeats, cla
   const free = await engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { title: 'Claimed while the tick runs', plannedFiles: ['src/headroom.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID())).id, {}, randomUUID());
   const timings: { what: string; ms: number }[] = [];
   const timed = async (what: string, run: () => Promise<unknown>) => { const started = performance.now(); await run(); timings.push({ what, ms: performance.now() - started }); };
-  const before = engine.reconcileTicks.length;
+  const earlier = new Set(engine.reconcileTicks);
   try {
     const tick = engine.reconcile();
     const resyncs = items.slice(0, 10).map(work => engine.resyncWork(operator, work.id, {}));
@@ -153,7 +158,7 @@ test('unit:reconcile-leaves-pool-headroom — while a tick runs, heartbeats, cla
   }
   // The measured tick is the lapsed one; the resyncs' trailing tick is small and quick, so the
   // window is judged on its slowest tick, not its last.
-  assert.ok(engine.reconcileTicks.slice(before).some(recorded => recorded.ms > 1000), 'the tick ran for over a second while the requests were made');
+  assert.ok(ticksSince(earlier).some(recorded => recorded.ms > 1000), 'the tick ran for over a second while the requests were made');
   for (const timing of timings) assert.ok(timing.ms < 1000, `a ${timing.what} took ${Math.round(timing.ms)} ms while the tick ran`);
   assert.ok(peakBackground <= 1, `reconciliation held ${peakBackground} background connections at once; ten resyncs must share one tick`);
 });

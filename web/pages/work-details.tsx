@@ -52,6 +52,7 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
       <div><dt>State</dt><dd>{previewWords[preview.state]}{preview.endReason ? ` · ${preview.endReason}` : ''}{preview.cleanedAt ? ` · cleaned ${new Date(preview.cleanedAt).toLocaleString()}` : ''}</dd></div>
       <div><dt>Commit</dt><dd><span className="mono">{preview.sha.slice(0, 8)}</span>{preview.source === 'base' ? ' · the base branch, until a pull request is submitted' : ''}</dd></div>
       <div><dt>Application</dt><dd>{preview.application} · {preview.runner} runner</dd></div>
+      {preview.instance && <div><dt>Isolation</dt><dd>state <span className="mono">{preview.instance}</span>{preview.database ? <> · database <span className="mono">{preview.database}</span></> : null} · {preview.secrets?.length ? preview.secrets.join(', ') : 'no production credentials'}</dd></div>}
     </dl>
     <ul className="proof-markers">{preview.cases.map(entry => <li key={entry.case} className={`marker-${caseMarks[entry.result].tone}`}>{caseMarks[entry.result].symbol} {entry.case} {caseMarks[entry.result].word}{entry.reason ? ` · ${entry.reason}` : ''}</li>)}</ul>
     {preview.detail && <p className="muted">{preview.detail}</p>}

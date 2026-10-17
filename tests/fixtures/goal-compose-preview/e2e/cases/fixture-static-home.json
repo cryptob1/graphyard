@@ -1,0 +1,10 @@
+{
+  "id": "fixture-static-home",
+  "title": "The fixture static site's home shows the change",
+  "tags": ["fixture", "preview"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "http", "name": "read the heading", "method": "GET", "path": "/home.json", "status": 200, "expect": [{ "path": "heading", "equals": "Fixture static site" }] }
+  ]
+}

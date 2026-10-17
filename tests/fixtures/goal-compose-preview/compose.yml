@@ -1,0 +1,31 @@
+# The fixture Compose application (GY-1903): `web` answers HTTP and reads its own database `db`
+# over the project's network; each keeps its state in a named volume. `db` is built, under a custom
+# tag the preview replaces with its own, from alpine:3 alone, so nothing is pulled beyond the image CI already holds.
+services:
+  web:
+    image: alpine:3
+    command: ["sh", "/app/web-start.sh"]
+    environment:
+      APP_STATE: ${GRAPHYARD_PREVIEW_INSTANCE:-local}
+      APP_DATABASE_URL: ${DATABASE_URL:-}
+      APP_UAT_TOKEN: ${GRAPHYARD_UAT_TOKEN:-}
+    volumes:
+      - ./app:/app:ro
+      - state:/state
+    ports:
+      - "8080:8080"
+    depends_on: [db]
+  db:
+    image: fixture/compose-db:custom
+    build:
+      context: ./app
+      dockerfile: db.Dockerfile
+    command: ["sh", "/app/db-start.sh"]
+    environment:
+      DATABASE_NAME: ${GRAPHYARD_PREVIEW_DATABASE:-app-db}
+    volumes:
+      - ./app:/app:ro
+      - data:/data
+volumes:
+  state: {}
+  data: {}
