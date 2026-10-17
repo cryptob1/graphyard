@@ -5,8 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { candidateTagPrefix, contractPendingCases, gitIn, readRecords, servedRevision, type ReleaseCandidate } from '../release-candidate.js';
 import { contractFile, describeStep, loadCases, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
+import { checkoutRepositoryPolicy, repositoryPolicy, type RepositoryPolicy } from '../model/repository-policy.js';
 import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type ProcessRunner, type StepRecord } from './steps.js';
-import type { ExternalRunResult, ExternalVerdict } from '../runner-report.js';
+import type { ExternalEvidence, ExternalRunResult, ExternalVerdict } from '../runner-report.js';
 import { importedEvidenceArtifacts, type EvidenceArtifact } from '../model/evidence.js';
 
 /**
@@ -73,6 +74,8 @@ export interface CaseOutcome {
 export interface E2eReport {
   runId: string; url: string; environment: string; sha: string | null; startedAt: string; finishedAt: string;
   passed: number; failed: number; flaky?: number; unrun?: number; cases: CaseOutcome[];
+  /** GY-1843: the `e2e.pendingOutcomes` rule the run was judged under, when its caller named the repository's policy: the release holds judge its pending cases by the same rule. */
+  pendingOutcomes?: RepositoryPolicy['e2e']['pendingOutcomes'];
 }
 export interface RunOptions {
   url: string; token: string; environment?: string; runId?: string;
@@ -81,6 +84,8 @@ export interface RunOptions {
   stopOnRequiredFailure?: boolean;
   /** GY-1802: the required case ids bound to an outcome still pending on the candidate (`contractPendingCases`): their failure records as pending, never blocking. */
   pendingCases?: readonly string[];
+  /** GY-1843: the repository's policy; under `e2e.pendingOutcomes: blocking` no case is pending. The one in force by default. */
+  policy?: RepositoryPolicy;
   fetcher?: typeof fetch; launcher?: E2eLauncher; now?: () => number;
   /** The candidate checkout command steps run in (the working directory by default). */
   root?: string;
@@ -269,7 +274,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   const now = options.now ?? Date.now, signal = options.signal, fetcher = signal ? cancellable(options.fetcher ?? fetch, signal) : options.fetcher ?? fetch;
   const runId = options.runId ?? randomUUID();
   const retries = options.retries ?? 0, stepTimeoutMs = options.stepTimeoutMs ?? defaultStepTimeoutMs;
-  const pendingCases = options.pendingCases ?? [];
+  const pendingCases = pendingUnder(options.pendingCases ?? [], options.policy);
   const root = options.root ?? process.cwd();
   let secretsDirectory = options.secretsDirectory;
   const general = { root, artifactsDirectory: options.artifactsDirectory ?? join(tmpdir(), `graphyard-e2e-${runId}`), hostEnvironment: options.hostEnvironment ?? process.env, processRunner: options.processRunner ?? runProcess,
@@ -301,8 +306,12 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   }
   const tally = (verdict: CaseVerdict) => outcomes.filter(outcome => outcome.verdict === verdict).length;
   return { runId, url: options.url, environment: options.environment ?? new URL(options.url).host, sha, startedAt, finishedAt: new Date(now()).toISOString(),
-    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes };
+    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, ...(options.policy ? { pendingOutcomes: options.policy.e2e.pendingOutcomes } : {}) };
 }
+
+/** The cases a run treats as pending under the repository's `e2e.pendingOutcomes` (GY-1843): all of them when non-blocking (GY-1802), none when blocking. */
+export const pendingUnder = (pendingCases: readonly string[], policy: RepositoryPolicy = repositoryPolicy()) =>
+  policy.e2e.pendingOutcomes === 'blocking' ? [] : pendingCases;
 
 /** An accepted flaky result (GY-1378): the evidence decision that accepted one case of one run at one exact SHA. */
 export interface FlakyAcceptance { case: string; runId: string; sha: string; decision: string }
@@ -314,9 +323,12 @@ export interface FlakyAcceptance { case: string; runId: string; sha: string; dec
  * block. A report naming no served SHA can bind no acceptance. `pendingCases` (GY-1802) names the
  * required cases bound to an outcome still pending on the candidate: such a case keeps its verdict
  * in the report, but is listed as pending instead of blocking — it ran, and its failure counts
- * against nothing until a candidate cut after its outcome is delivered.
+ * against nothing until a candidate cut after its outcome is delivered — unless the repository
+ * declares `e2e.pendingOutcomes: blocking` (GY-1843), when no case is pending and each blocks like
+ * any required case.
  */
-export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'>, acceptances: readonly FlakyAcceptance[] = [], pendingCases: readonly string[] = []) {
+export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'>, acceptances: readonly FlakyAcceptance[] = [], pending: readonly string[] = [], policy?: RepositoryPolicy) {
+  const pendingCases = pendingUnder(pending, policy);
   const accepted = (id: string) => !!report.sha && acceptances.some(entry => entry.case === id && entry.runId === report.runId && entry.sha === report.sha);
   const of = (verdict: CaseVerdict) => report.cases.filter(outcome => outcome.verdict === verdict);
   const wouldBlock = (outcome: CaseOutcome) => outcome.required && (outcome.verdict === 'failed' || (outcome.verdict === 'flaky' && !accepted(outcome.id)));
@@ -329,8 +341,11 @@ export function releaseVerdict(report: Pick<E2eReport, 'runId' | 'sha' | 'cases'
   };
 }
 
-/** One blocking case of an imported run: its verdict as given, why a blocked one could not run, and where its own record lives. */
-export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; reason?: string; evidence: EvidenceArtifact[] }
+/**
+ * One blocking case of an imported run: its verdict as given, why a blocked one could not run, and
+ * where its own record lives — its links as external artifacts, its opaque pointers (GY-1860) as given.
+ */
+export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; reason?: string; evidence: EvidenceArtifact[]; evidencePointers?: Exclude<ExternalEvidence, string>[] }
 
 /**
  * The release verdict of an imported run (GY-1842, `graphyard-external-run-v1`). The import keeps
@@ -341,16 +356,20 @@ export interface ImportedBlockingCase { id: string; verdict: ExternalVerdict; re
  * required `blocked` case blocks like a failed one: it did not run to a pass, and its missing
  * precondition is the producer's own record of why. A required `unrun` case blocks on its own
  * too: an import has no `stoppedBy` chain, so the run that stopped before reaching it would have
- * carried the required failure it stopped at, and either way the head is not releasable. A case
+ * carried the required failure it stopped at, and either way the head is not releasable. A
+ * `skipped` case (GY-1860) follows the required-case rule the runner's own inventory holds
+ * (`verifyRunnerReport` fails a required inventory that skips): required and skipped blocks,
+ * optional and skipped does not, and the verdict stays skipped on the record either way. A case
  * bound to a still-pending outcome (`pendingCases`, GY-1802) is listed apart and never blocks, as in
  * `releaseVerdict`.
  */
 export function importedRunVerdict(run: ExternalRunResult, acceptances: readonly FlakyAcceptance[] = [], pendingCases: readonly string[] = []) {
   const accepted = (id: string) => !!run.sha && acceptances.some(entry => entry.case === id && entry.runId === run.runId && entry.sha === run.sha);
-  const wouldBlock = (outcome: ExternalRunResult['cases'][number]) => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun'
+  const wouldBlock = (outcome: ExternalRunResult['cases'][number]) => outcome.required && (outcome.verdict === 'failed' || outcome.verdict === 'blocked' || outcome.verdict === 'unrun' || outcome.verdict === 'skipped'
     || (outcome.verdict === 'flaky' && !accepted(outcome.id)));
   const listed = (outcome: ExternalRunResult['cases'][number]): ImportedBlockingCase => ({ id: outcome.id, verdict: outcome.verdict,
-    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence) });
+    ...(outcome.reason ? { reason: outcome.reason } : {}), evidence: importedEvidenceArtifacts(outcome.evidence.filter(entry => typeof entry === 'string')),
+    ...(outcome.evidence.some(entry => typeof entry !== 'string') ? { evidencePointers: outcome.evidence.filter(entry => typeof entry !== 'string') } : {}) });
   const blocking = run.cases.filter(outcome => wouldBlock(outcome) && !pendingCases.includes(outcome.id));
   return { passed: blocking.length === 0, blocking: blocking.map(listed), pending: run.cases.filter(outcome => wouldBlock(outcome) && pendingCases.includes(outcome.id)).map(listed) };
 }
@@ -423,8 +442,8 @@ const caseFailure = (outcome: CaseOutcome) => outcome.verdict === 'flaky'
   ? `case ${outcome.id} was flaky: it failed at step ${outcome.failingStep!.index + 1} (${outcome.failingStep!.name}) and passed on attempt ${outcome.attempts}; it blocks until an evidence decision accepts it`
   : `case ${outcome.id} failed at step ${outcome.failingStep!.index + 1} (${outcome.failingStep!.name}): ${outcome.failingStep!.reason}`;
 /** A failing report in one line, for a release validation suite's detail and its follow-up item: the blocking cases, then the unrun and pending ones apart. */
-export const failureDetail = (report: E2eReport, pendingCases: readonly string[] = []) => {
-  const verdict = releaseVerdict(report, [], pendingCases);
+export const failureDetail = (report: E2eReport, pendingCases: readonly string[] = [], policy?: RepositoryPolicy) => {
+  const verdict = releaseVerdict(report, [], pendingCases, policy);
   return [verdict.blocking.filter(outcome => outcome.failingStep).map(caseFailure).join('; '),
     verdict.unrun.length ? `unrun after required case ${verdict.unrun[0].stoppedBy} stopped the run: ${verdict.unrun.map(outcome => outcome.id).join(', ')}` : '',
     verdict.pending.length ? `pending, not blocking: ${verdict.pending.map(caseFailure).join('; ')}` : '',
@@ -456,16 +475,19 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   /** Run every selected case even after a required one fails, so each records its own result (GY-1535). */
   runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv;
   /** The checkout's release contract: a candidate outcome still pending on the record it was cut with (GY-1802) runs its failing cases as pending, never blocking. */
-  contract?: ReleaseContract | null } = {}) => ({
+  contract?: ReleaseContract | null;
+  /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending case blocks: by default the graphyard.json of `root`, the candidate's own checkout, never the plane's installed GRAPHYARD_REPOSITORY_POLICY; with no root, the policy in force. */
+  policy?: RepositoryPolicy } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string; pendingOutcomes?: readonly string[] } | null) => {
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
-    const pendingCases = contractPendingCases(options.contract, candidate?.pendingOutcomes);
+    const policy = options.policy ?? (options.root ? checkoutRepositoryPolicy(options.root) : repositoryPolicy());
+    const pendingCases = pendingUnder(contractPendingCases(options.contract, candidate?.pendingOutcomes), policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases });
+      root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });
     await options.report?.(report);
-    const verdict = releaseVerdict(report, [], pendingCases), detail = failureDetail(report, pendingCases);
+    const verdict = releaseVerdict(report, [], pendingCases, policy), detail = failureDetail(report, pendingCases, policy);
     const executed = report.cases.length - verdict.unrun.length;
     return !verdict.passed
       ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}` }

@@ -11,10 +11,11 @@ import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentat
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
 import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
-import { asUser, existingMachineAdapter, generateHostSecrets, hostHerdrOnly, hostLayout, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
+import { asUser, existingMachineAdapter, generateHostSecrets, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { applyProtection, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
+import { repositoryPolicyAssignment } from '../model/repository-policy.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalsVariable, readInstallRecord, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
@@ -134,7 +135,7 @@ export function installRequestFromArgs(args: string[]) {
     'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
     target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
     'github-app': { type: 'string' }, 'reuse-app': { type: 'string', multiple: true }, 'no-github-app': { type: 'boolean' },
-    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' }, 'fresh-cursor': { type: 'boolean' },
+    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' }, 'profiles-only': { type: 'boolean' }, 'fresh-cursor': { type: 'boolean' },
     'observe-only': { type: 'boolean' },
   }, allowPositionals: false });
   if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
@@ -192,7 +193,7 @@ export function installRequestFromArgs(args: string[]) {
 
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {
   const given = (name: string) => Array.isArray(values[name]) ? (values[name] as string[]).length > 0 : !!values[name];
-  return [...['github-app', 'reuse-app', 'reviewer', 'workers', 'producer-proof', 'create-environments', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only'].filter(given).map(name => `--${name}`),
+  return [...['github-app', 'reuse-app', 'reviewer', 'workers', 'producer-proof', 'create-environments', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only', 'profiles-only'].filter(given).map(name => `--${name}`),
     ...(values.target || provider === 'host' ? ['--target'] : []),
     // The local provider runs the control plane as a systemd user unit on this machine, a supervisor unit observation-only never installs.
     ...(provider === 'local' ? ['--provider local'] : [])];
@@ -218,6 +219,14 @@ export interface InstallSession {
    * none), or the refusal a declared manifest that failed or did not parse produced.
    */
   generatedFiles: { assignment: GeneratedFilesAssignment | null; error: string | null };
+  /**
+   * The managed repository's graphyard.json `risk`, `review` and `e2e` policy (GY-1843) as the
+   * GRAPHYARD_REPOSITORY_POLICY assignment the installer sets beside GRAPHYARD_PRINCIPALS: the
+   * runtime image carries no repository, so without it the deployed gates judge by the generic
+   * default. Or the refusal a declaration that does not parse produced. Absent on sessions built
+   * before it existed.
+   */
+  repositoryPolicy?: { assignment: ReturnType<typeof repositoryPolicyAssignment> | null; error: string | null };
   /** The App registration this install reuses instead of the browser step, or why the named one cannot be. */
   savedApp: { app: SavedApp | null; error: string | null };
   /** Every App registration saved on this host (GY-1442): what --reuse-app and the App page's reuse choose from. */
@@ -434,6 +443,11 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
   let generatedFiles: InstallSession['generatedFiles'];
   try { generatedFiles = { assignment: generatedFilesAssignment(root), error: null }; }
   catch (error: any) { generatedFiles = { assignment: null, error: error.message }; }
+  let repositoryPolicy: InstallSession['repositoryPolicy'];
+  try {
+    const text = await readFile(resolve(root, repositoryConfigFile), 'utf8').catch((error: any) => { if (error.code === 'ENOENT') return null; throw error; });
+    repositoryPolicy = { assignment: repositoryPolicyAssignment(text === null ? null : JSON.parse(text)), error: null };
+  } catch (error: any) { repositoryPolicy = { assignment: null, error: `${repositoryConfigFile}'s risk, review and e2e policy does not parse: ${error.message}` }; }
   const reviewPolicy = rawInputs.reviewPolicy ?? 'github';
   const delivery = await repositoryDelivery(root);
   let detectedBase = rawInputs.baseBranch;
@@ -514,7 +528,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     : delivery.committed ? requiredPullRequestChecks(delivery.policy) : detected.proposedChecks;
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
-    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, savedApp, registrations,
+    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, repositoryPolicy, savedApp, registrations,
     delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment },
     reviewPolicy, requiredChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
@@ -591,6 +605,9 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     // a regenerated docs index instead of refusing it as an out-of-scope rewrite. A repository
     // that declares none leaves the variable unset, which is its correct deployment state.
     ...(session.generatedFiles.assignment ? [{ name: session.generatedFiles.assignment.variable, value: session.generatedFiles.assignment.value, secret: false }] : []),
+    // The repository's sensitive paths, review timing and pending-outcome rule (GY-1843): the image
+    // carries no graphyard.json, so the deployed gates read them from here.
+    ...(session.repositoryPolicy?.assignment ? [{ name: session.repositoryPolicy.assignment.variable, value: session.repositoryPolicy.assignment.value, secret: false }] : []),
     ...(context.repoCheckout ? [{ name: 'GRAPHYARD_REPOSITORY_ROOT', value: '/repo', secret: false }] : []),
   ];
 }
@@ -852,6 +869,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   preflight.push(session.generatedFiles.error
     ? { name: 'Generated-file manifest', ok: false, detail: session.generatedFiles.error, fix: `Fix ${generatedManifestScript} so \`node ${generatedManifestScript} --manifest\` prints the generated files as JSON, then rerun` }
     : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
+  // Deploying the generic default over a declaration that does not parse would silently weaken every gate.
+  if (session.repositoryPolicy?.error) preflight.push({ name: 'Repository policy', ok: false, detail: session.repositoryPolicy.error, fix: `Correct the risk, review and e2e sections of ${repositoryConfigFile} (docs/delivery.md), then rerun` });
   // --no-github-app never strips a live App: refuse before any write when the install record
   // already binds one (GY-1550). Orphaned deployment variables are judged after observe below.
   if (noApp && record?.github) preflight.push({ name: 'GitHub App', ok: false, detail: `this installation already binds GitHub App ${record.github.slug} (app ${record.github.appId}); --no-github-app does not strip a live App`, fix: `Rerun without --no-github-app to keep that App, or remove its binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment before installing without one` });
@@ -1077,6 +1096,19 @@ export async function installHerdrOnly(session: InstallSession) {
   if (!url) throw new Error(`--herdr-only needs an installed host, and no install of ${session.inputs.repository} is recorded here; run install --apply first`);
   try { return { herdr: await hostHerdrOnly(session.context, url), herdrFailure: null }; }
   catch (error) { if (!(error instanceof HerdrSetupFailure)) throw error; return { herdr: null, herdrFailure: { step: error.step, message: session.vault.scrub(error.message) } }; }
+}
+/**
+ * `install --target host --profiles-only` (GY-1850): the reviewer and worker profiles written on an
+ * installed self-contained host, nothing else applied (with --apply, as every write). `graphyard up`'s accounts step runs it there,
+ * as it runs `master environments --apply` on this machine for every other provider.
+ */
+export async function installProfilesOnly(session: InstallSession) {
+  // The write runs on the host, so a --plan session (any run without --apply) refuses before any transport.
+  if (session.mode !== 'apply') throw new Error('--profiles-only writes the profiles on the host; pass --apply (--plan sessions change nothing)');
+  if (!session.context.host) throw new Error('--profiles-only writes the profiles on a self-contained host (--target host or hetzner); for any other install, run graphyard master environments --apply in the configured checkout');
+  if (!session.record?.url) throw new Error(`--profiles-only needs an installed host, and no install of ${session.inputs.repository} is recorded here; run install --apply first`);
+  const { host, report } = await hostProfilesOnly(session.context);
+  return { host, profiles: report };
 }
 /** Herdr on this machine and the server its graphyard plugin is bound to, when it is. */
 async function observeHerdr(session: InstallSession) {

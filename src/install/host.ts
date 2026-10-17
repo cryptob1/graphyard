@@ -810,6 +810,25 @@ export async function hostHerdrOnly(ctx: AdapterContext, url: string): Promise<H
 }
 
 /**
+ * `install --target host --profiles-only` (GY-1850): the reviewer and worker profiles written where
+ * the loop runs. `graphyard up`'s accounts step runs it for a self-contained host, as it runs
+ * `master environments --apply` on this machine for every other provider: the login homes under
+ * <install>/accounts and the loop's master.json are on the host, so only a write there gives its
+ * first review a profile. The report is `master environments --apply`'s own, counts included.
+ */
+export async function hostProfilesOnly(ctx: AdapterContext): Promise<{ host: string; report: any }> {
+  const layout = ctx.host!.layout;
+  const remote = await hostRemote(ctx);
+  const hostName = (await remote.exec('hostname', [], { allowFailure: true, timeout: 60_000 })).stdout.trim() || ctx.sshHost || ctx.service;
+  const environment = Object.entries(hostEnvironment(layout)).map(([name, value]) => `${name}=${value}`);
+  const written = await asUser(remote, layout.checkout, 'env', [...environment, 'node', layout.cli, 'master', 'environments', '--apply'], { allowFailure: true });
+  if (written.code !== 0) throw new Error(`master environments --apply did not complete on ${hostName}: ${failure(ctx, written)}`);
+  let report: any;
+  try { report = JSON.parse(written.stdout); } catch { throw new Error(`master environments --apply on ${hostName} printed no report`); }
+  return { host: hostName, report };
+}
+
+/**
  * Everything after the server is healthy and GitHub is connected: runtimes, Herdr, the managed
  * checkout, the loop and executors, account homes, and the registry placing each account here.
  */

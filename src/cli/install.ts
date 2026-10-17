@@ -6,14 +6,14 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, readDocumentationConfig, readSetupStatus, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { protectionRun } from '../protection.js';
-import { appCommand, applyInstall, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installRequestFromArgs, prepareInstall } from '../install/index.js';
+import { appCommand, applyInstall, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installProfilesOnly, installRequestFromArgs, prepareInstall } from '../install/index.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
 import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
-import { documentationDrift } from '../model/documentation.js';
+import { doctorDocumentation } from '../model/documentation.js'; import { doctorRepositoryPolicy } from '../model/repository-policy.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 import { mergerDoctorLine } from './merger.js'; import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js'; import { coordinatorDoctor } from '../master/known-good.js';
@@ -98,7 +98,7 @@ export const installCommands = defineCommands([
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
       '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
-      '          [--github-app FILE] [--reuse-app SLUG]... [--herdr-only]',
+      '          [--github-app FILE] [--reuse-app SLUG]... [--herdr-only | --profiles-only]',
       '                                Self-contained host: server, Postgres, loop, executors,',
       '                                Herdr and agent runtimes on one machine (hetzner creates it',
       '                                and needs its monthly price confirmed). --migrate moves an',
@@ -113,7 +113,8 @@ export const installCommands = defineCommands([
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with --create-environments.',
-      '                                A Herdr plugin bound elsewhere is repointed only with --herdr-rebind; --herdr-only sets up Herdr alone.',
+      '                                A Herdr plugin bound elsewhere is repointed only with --herdr-rebind; --herdr-only sets up Herdr alone;',
+      '                                --profiles-only (with --apply) writes the reviewer and worker profiles on the host (master environments --apply there).',
       '                                An App step nobody confirms within 900 s (under up: its --wait,',
       '                                plus a minute) exits 1 with a JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
@@ -128,6 +129,7 @@ export const installCommands = defineCommands([
       }, values.apply ? 'apply' : 'plan');
       if (values.logs) return console.log(await session.adapter.logs(session.context));
       if (values['herdr-only']) { const result = await installHerdrOnly(session); context.print(result); if (!result.herdr) process.exitCode = 1; return; }
+      if (values['profiles-only']) return context.print(await installProfilesOnly(session));
       const plan = await buildPlan(session);
       if (!values.apply) return context.print(plan);
       try { return context.print(await applyInstall(session, plan)); }
@@ -235,11 +237,7 @@ export const installCommands = defineCommands([
       const setup = await readSetupStatus(root).catch((error: any) => ({ error: error.message }));
       const stored = await loadProposal(root).catch(() => null);
       const appPermissions = live?.appPermissions ?? null;
-      // The committed documentation policy against the deployed one (GY-293): the control plane
-      // reads only GRAPHYARD_DOCUMENTATION, so an unredeployed graphyard.json edit is drift.
-      const committedDocumentation = await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string }));
-      const documentation = committedDocumentation && 'error' in committedDocumentation ? { committed: null, deployed: live?.documentation ?? null, drift: null, error: committedDocumentation.error }
-        : { committed: committedDocumentation, deployed: live?.documentation ?? null, drift: live?.documentation ? documentationDrift(committedDocumentation, live.documentation)?.attention ?? null : null };
+      const documentation = doctorDocumentation(await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string })), live?.documentation ?? null);
       // Capacity drift and production lag, which a deploy can break silently: the server reports both.
       const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
       // Validation definitions are readable by operators and readers; every other credential
@@ -276,6 +274,7 @@ export const installCommands = defineCommands([
         delegationLimits: delegationLimits ? { limits: delegationLimits.limits, deployed: delegationLimits.deployed, drift: delegationLimits.drift, attention: delegationLimits.attention } : null,
         production: production ? { provider: production.provider, serving: production.serving, running: production.running, aheadBy: production.ahead?.by ?? null, incidents: production.incidents, attention: production.attention, error: production.error } : null,
         documentation,
+        repositoryPolicy: doctorRepositoryPolicy(root),
         setupFromZero,
         readiness,
         next,

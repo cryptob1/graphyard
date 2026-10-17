@@ -1,8 +1,12 @@
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 const id = z.string().regex(/^[a-f0-9]{64}$/);
-/** Imported evidence links meet the artifact boundary (src/engine.ts): HTTP(S) and free of credentials. */
-const publicEvidenceUrl = z.string().url().max(2000).refine(value => { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; }, 'evidence links are HTTP(S) and carry no credentials');
+/**
+ * Imported evidence links meet the artifact boundary (src/engine.ts): HTTP(S) and free of credentials.
+ * A link names where the producer's record lives, which may need its own sign-in (a GitHub Actions
+ * run of a private repository): it is never public proof.
+ */
+const evidenceLink = z.string().url().max(2000).refine(value => { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password; }, 'evidence links are HTTP(S) and carry no credentials');
 const status = z.enum(['passed', 'failed', 'timedOut', 'skipped', 'interrupted']);
 export const runnerReport = z.object({
   format: z.literal('graphyard-playwright-v1'),
@@ -29,7 +33,7 @@ export function verifyRunnerReport(inventory: unknown, execution: unknown) {
   return { passed: reasons.length === 0, inventoryComplete: !reasons.some(r => /inventory|missing|duplicated|inconsistent/.test(r)), executed: actual.executions.filter(t => t.status !== 'skipped').length, skipped: actual.executions.filter(t => t.status === 'skipped').length, reasons, report: actual };
 }
 
-// --- External run results (GY-1842) ---------------------------------------------------
+// --- External run results (GY-1842, GY-1860) --------------------------------------------------
 
 /**
  * The one documented format an external test system — Huck Engineer, a CI collector, a manual
@@ -37,16 +41,29 @@ export function verifyRunnerReport(inventory: unknown, execution: unknown) {
  * tested, and per case its id, verdict, attempts, duration and evidence links. A case's verdict is
  * one of `externalVerdicts`; `blocked` — the case could not run because a precondition or
  * environment was missing — is its own verdict carrying its reason, distinct from `unrun` (the run
- * never reached it) and `failed` (it ran and failed). Like `runnerReport` the schema refuses what
- * it does not understand: unknown fields, an unknown verdict, a blocked case without its reason,
- * a case id or producer name with control characters, and a run naming neither a head nor a
- * digest are refused, never guessed or dropped.
+ * never reached it), `skipped` (the producer chose not to run it; GY-1860) and `failed` (it ran and
+ * failed). Beside the verdicts the format carries the run's provenance (GY-1860): the producer's
+ * tool version, the catalog or source commit it ran from, and per run and per case the original
+ * result value the tool reported, kept beside the verdict it was mapped to. Like `runnerReport` the
+ * schema refuses what it does not understand: unknown fields, an unknown verdict, a blocked case
+ * without its reason, a case id or producer name with control characters, and a run naming neither
+ * a head nor a digest are refused, never guessed or dropped.
  */
 export const externalRunFormat = 'graphyard-external-run-v1';
-export const externalVerdicts = ['passed', 'failed', 'flaky', 'blocked', 'unrun'] as const;
+export const externalVerdicts = ['passed', 'failed', 'flaky', 'blocked', 'unrun', 'skipped'] as const;
 export type ExternalVerdict = (typeof externalVerdicts)[number];
 
 const externalName = z.string().trim().min(1).max(200).refine(value => !/[\x00-\x1f\x7f]/.test(value));
+/** A result value the producer's tool reported: refused when blank or carrying control characters, else kept byte for byte. */
+const externalResult = z.string().max(200).refine(value => value.trim().length > 0 && !/[\x00-\x1f\x7f]/.test(value));
+/** A commit the producer names as provenance: hex, abbreviated or full, kept exactly as given. */
+const provenanceCommit = z.string().regex(/^[a-f0-9]{7,64}$/);
+/**
+ * An opaque, authenticated pointer to evidence the producer keeps (GY-1860 N3): its evidence id and
+ * the storage key it lives under, kept exactly as given and never turned into a URL.
+ */
+const evidencePointer = z.object({ evidenceId: externalName.optional(), storageKey: z.string().min(1).max(1000).refine(value => !/[\x00-\x1f\x7f]/.test(value)).optional() }).strict()
+  .refine(pointer => pointer.evidenceId !== undefined || pointer.storageKey !== undefined, 'an evidence pointer names its evidence id or storage key');
 
 export const externalRun = z.object({
   format: z.literal(externalRunFormat),
@@ -59,17 +76,34 @@ export const externalRun = z.object({
   /** The deployed digest the run tested (an image or bundle digest), when it tested a deployment. */
   digest: externalName.optional(),
   environment: externalName.optional(),
+  /** The version of the producer's tool that measured the run. */
+  toolVersion: externalName.optional(),
+  /**
+   * The commit of the case catalog or source the producer ran from. Provenance only: it says where
+   * the cases came from, never which case-definition version executed — that is each case's own
+   * `caseVersion`, null when the producer does not know it, and nothing is inferred from this.
+   */
+  catalogCommitSha: provenanceCommit.optional(),
+  /** The run's overall result exactly as the producer's tool reported it, before any mapping. */
+  result: externalResult.optional(),
   cases: z.array(z.object({
     id: externalName,
     verdict: z.enum(externalVerdicts),
-    attempts: z.number().int().min(0).max(1000),
-    durationMs: z.number().finite().min(0),
+    /** How many times the case was tried; omitted or null when the producer does not know (N1/N2), never filled in. */
+    attempts: z.number().int().min(0).max(1000).nullable().optional(),
+    durationMs: z.number().finite().min(0).nullable().optional(),
+    /** How many rows the producer's report held for the case; a count of its own, never read as attempts. */
+    reportRows: z.number().int().min(0).max(1_000_000).nullable().optional(),
     /** Required cases decide the release verdict; a case without the flag is optional. */
     required: z.boolean().optional(),
     /** Why a case could not run: demanded for `blocked`, the precondition or environment it missed. */
     reason: z.string().trim().min(1).max(1000).optional(),
-    /** Where the run's own record of the case lives (trace, log, report); public locations only. */
-    evidence: z.array(publicEvidenceUrl).max(100).optional(),
+    /** Where the run's own record of the case lives (trace, log, report): HTTP(S) links or opaque pointers. */
+    evidence: z.array(z.union([evidenceLink, evidencePointer])).max(100).optional(),
+    /** The case's result exactly as the producer's tool reported it, kept beside the verdict it maps to. */
+    result: externalResult.optional(),
+    /** The executed case-definition version, when the producer knows it. */
+    caseVersion: externalName.optional(),
   }).strict()).max(10_000),
 }).strict().superRefine((run, ctx) => {
   if (!run.sha && !run.digest) ctx.addIssue({ code: 'custom', path: [], message: 'the run names what it tested: give the candidate head `sha` or the deployed `digest`' });
@@ -77,15 +111,23 @@ export const externalRun = z.object({
     ctx.addIssue({ code: 'custom', path: ['cases', index, 'reason'], message: `blocked case ${entry.id} names why it could not run` });
 });
 
-/** One imported case, with the import's defaults filled in: optional unless declared, no links. */
-export interface ExternalCaseResult { id: string; verdict: ExternalVerdict; attempts: number; durationMs: number; required: boolean; reason?: string; evidence: string[] }
-export interface ExternalRunResult { producer: string; runId: string; sha?: string; digest?: string; environment?: string; cases: ExternalCaseResult[] }
+/**
+ * One imported case, with the import's defaults filled in: optional unless declared, no evidence,
+ * and its provenance explicit — `result`, `caseVersion`, `attempts`, `durationMs` and `reportRows`
+ * are null when the producer gave none, so a reader never mistakes an absent value for one.
+ */
+export interface ExternalCaseResult { id: string; verdict: ExternalVerdict; attempts: number | null; durationMs: number | null; reportRows: number | null; required: boolean; reason?: string; evidence: ExternalEvidence[]; result: string | null; caseVersion: string | null }
+/** One piece of a case's evidence as the producer gave it: a link, or an opaque pointer (never a URL). */
+export type ExternalEvidence = string | { evidenceId?: string; storageKey?: string };
+export interface ExternalRunResult { producer: string; runId: string; sha?: string; digest?: string; environment?: string; toolVersion: string | null; catalogCommitSha: string | null; result: string | null; cases: ExternalCaseResult[] }
 
 /**
  * Parse and normalise one external hand-in. Every verdict is kept exactly as the producer gave it;
- * nothing is read as anything else. A run without its own `runId` takes one derived from the
- * document's content, so handing the same run in twice binds to the same id and a changed one does
- * not: the flaky acceptance of an imported run binds to case, run id and exact head.
+ * nothing is read as anything else, and `skipped` stays skipped — never blocked or unrun. A run
+ * without its own `runId` takes one derived from the document's content, so handing the same run in
+ * twice binds to the same id and a changed one does not: the flaky acceptance of an imported run
+ * binds to case, run id and exact head. `catalogCommitSha` is kept as provenance and never read
+ * into a case's `caseVersion`.
  */
 export function importExternalRun(input: unknown): ExternalRunResult {
   const run = externalRun.parse(input);
@@ -93,7 +135,8 @@ export function importExternalRun(input: unknown): ExternalRunResult {
     producer: run.producer,
     runId: run.runId ?? `external-${createHash('sha256').update(JSON.stringify(run)).digest('hex').slice(0, 16)}`,
     ...(run.sha ? { sha: run.sha } : {}), ...(run.digest ? { digest: run.digest } : {}), ...(run.environment ? { environment: run.environment } : {}),
-    cases: run.cases.map(entry => ({ id: entry.id, verdict: entry.verdict, attempts: entry.attempts, durationMs: entry.durationMs, required: entry.required ?? false,
-      ...(entry.reason ? { reason: entry.reason } : {}), evidence: entry.evidence ?? [] })),
+    toolVersion: run.toolVersion ?? null, catalogCommitSha: run.catalogCommitSha ?? null, result: run.result ?? null,
+    cases: run.cases.map(entry => ({ id: entry.id, verdict: entry.verdict, attempts: entry.attempts ?? null, durationMs: entry.durationMs ?? null, reportRows: entry.reportRows ?? null, required: entry.required ?? false,
+      ...(entry.reason ? { reason: entry.reason } : {}), evidence: entry.evidence ?? [], result: entry.result ?? null, caseVersion: entry.caseVersion ?? null })),
   };
 }
