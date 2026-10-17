@@ -351,6 +351,7 @@
     "tests/dispatch-collision.test.ts": 1679,
     "tests/dispatch-failure-reclaim.test.ts": 12438,
     "tests/dispatch-overlap.test.ts": 1364,
+    "tests/dispatch-rework-first.test.ts": 761,
     "tests/dispatch-race-guard.test.ts": 34959,
     "tests/dispatch-recovers-from-jam.test.ts": 998,
     "tests/dispatch-reservation-followups.test.ts": 268,
@@ -524,6 +525,7 @@
     "tests/loop-faults-dispatch-wake.test.ts": 2375,
     "tests/loop-faults.test.ts": 2260,
     "tests/loop-liveness-namespace.test.ts": 500,
+    "tests/loop-step-stalls.test.ts": 1000,
     "tests/loop-observation-waits-for-loop-recording.test.ts": 1500,
     "tests/loop-recorded-pass-closes.test.ts": 3000,
     "tests/loop-records-due-observation-reading.test.ts": 3000,
@@ -603,6 +605,8 @@
     "tests/pi-narrow-roles.test.ts": 2899,
     "tests/pi-payload-validation-detail.test.ts": 686,
     "tests/promotion-hold-seal.test.ts": 2500,
+    "tests/seal-authority-check.test.ts": 2500,
+    "tests/soak-seal-check.test.ts": 44000,
     "tests/pi-runner.test.ts": 1021,
     "tests/pi-worker-dispatch.test.ts": 53571,
     "tests/pipeline-doctor.test.ts": 1087,
@@ -736,6 +740,7 @@
     "tests/session-liveness-launch-window.test.ts": 3365,
     "tests/session-liveness-model.test.ts": 3250,
     "tests/session-liveness.test.ts": 2811,
+    "tests/session-out-of-credits.test.ts": 1500,
     "tests/session-reconcile.test.ts": 1396,
     "tests/setup-checks-consistent.test.ts": 1400,
     "tests/setup-guide-no-operator-token.test.ts": 300,
@@ -800,6 +805,7 @@
     "tests/soak-merge-writer.test.ts": 4000,
     "tests/soak-observation-window.test.ts": 45000,
     "tests/soak-orphan-supervisor.test.ts": 1500,
+    "tests/soak-out-of-credits-failover.test.ts": 20000,
     "tests/soak-session-liveness-deaf.test.ts": 1500,
     "tests/soak-pages-environment-and-branch-recovery.test.ts": 61453,
     "tests/soak-pi-provider-limit.test.ts": 80000,
@@ -942,6 +948,7 @@
     "tests/evaluator-recovery.test.ts": 4000,
     "tests/sync-timing-baseline.test.ts": 4000,
     "tests/file-durations-status.test.ts": 257,
-    "tests/event-loop-lag-pending.test.ts": 729
+    "tests/event-loop-lag-pending.test.ts": 729,
+    "tests/install-worker-credentials.test.ts": 900
   }
 }
