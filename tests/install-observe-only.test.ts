@@ -7,7 +7,8 @@ import type { LocalSupervisor } from '../src/install/local.js';
 import { fingerprint } from '../src/install/secrets.js';
 import { deliveryPolicySchema } from '../src/model/delivery-policy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { allText, harness, REPOSITORY } from './install-harness.js';
+import { principalCommand } from '../src/cli/install.js';
+import { allText, deployedRoster, harness, REPOSITORY } from './install-harness.js';
 
 // The repository's own Railway variables, as a value-printing listing would show them: none may
 // reach a recorded command, the plan or the apply output, by value or by fingerprint.
@@ -175,22 +176,21 @@ test('unit:install-observe-only-redacted-resumable — an existing Railway servi
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:install-observe-only-changes-nothing — an existing installation whose roster authenticates workers or producers is refused before any write, so redeploying without them revokes no credential', async () => {
+test('unit:install-observe-only-changes-nothing — an existing installation whose roster authenticates a worker or producer registered with principal add keeps them, with their credentials, through an observation-only apply that plans none of its own (GY-1879)', async () => {
   const { fixture, prepare } = await observeOnlyFixture();
   try {
     const first = await prepare('apply');
     await applyInstall(first, await buildPlan(first));
-    const file = join(first.directory, 'install.json');
-    const record = JSON.parse(await readFile(file, 'utf8'));
-    record.principals.push({ id: 'owner-project-worker-1', role: 'worker', fingerprint: record.principals[0].fingerprint }, { id: 'owner-project-producer', role: 'producer', proofs: ['unit'], fingerprint: record.principals[0].fingerprint });
-    await writeFile(file, JSON.stringify(record));
-    const before = fixture.allCommandLines().length;
+    for (const args of [['add', 'huck-runner', '--role', 'worker'], ['add', 'huck-engineer', '--role', 'producer', '--grant', 'external-runs:import']]) await principalCommand(args, { ...fixture.deps, cwd: fixture.root });
+    const record = JSON.parse(await readFile(join(first.directory, 'install.json'), 'utf8'));
+    assert.deepEqual(record.principals.map((principal: { id: string; role: string }) => [principal.id, principal.role]), [['owner-project-operator', 'admin'], ['owner-project-master', 'coordinator'], ['owner-project-dashboard', 'reader'], ['huck-runner', 'worker'], ['huck-engineer', 'producer']]);
+    const deployed = deployedRoster(fixture.transport);
     const session = await prepare('apply');
     const plan = await buildPlan(session);
-    const refusal = plan.preflight.find(item => item.name === 'Principals')!;
-    assert.equal(refusal.ok, false);
-    assert.match(refusal.detail, /already authenticates owner-project-worker-1, owner-project-producer/);
-    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
-    assert.ok(!fixture.allCommandLines().slice(before).some(line => /^railway (variables|variable set|up|redeploy)/.test(line)), 'the refused apply wrote the deployment');
+    assert.ok(!plan.preflight.some(item => item.name === 'Principals'), 'the recorded worker and producer are reconciled in, not refused');
+    assert.ok(plan.preflight.every(item => item.ok), JSON.stringify(plan.preflight.filter(item => !item.ok)));
+    assert.deepEqual(plan.principals.map(principal => principal.id), deployed.map(principal => principal.id), 'the plan keeps every registered principal and adds no worker or producer of its own');
+    await applyInstall(session, plan);
+    assert.deepEqual(deployedRoster(fixture.transport), deployed, 'the roster is redeployed with every credential unchanged');
   } finally { await fixture.cleanup(); }
 });

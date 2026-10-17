@@ -32,7 +32,8 @@ const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-
 /** Valid operator-agent for another repository: auth 403s before seal-authority runs (AC-2). */
 const otherRepoFiler: Principal = { id: 'other-repo-release-filer', role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['other/repo'], workItems: [] } };
 const reader: Principal = { id: 'stale-release-token', role: 'reader' };
-const producer: Principal = { id: 'huck-producer', role: 'producer' };
+/** Importing needs external-runs:import (GY-1879); proofs keep it off the import-only lane so seal-authority still answers mayseal:false. */
+const producer: Principal = { id: 'huck-producer', role: 'producer', grants: ['external-runs:import'], proofs: ['unit:*'] };
 const principals = [admin, releaseFiler, otherRepoFiler, reader, producer];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 const needed = ['admin', 'operator-agent'];
