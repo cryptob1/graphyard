@@ -10,7 +10,7 @@ import { message, type DaemonAction, type DaemonState, type StepStall } from './
 import type { DaemonEffects } from './effects.js';
 import { record } from './preserve.js';
 import { readyToRetry } from './sessions.js';
-import { stallCycleBound, stallNeedsMaster, stallSubjectKey, stallUpstreamCycles } from './step-stalls.js';
+import { retainedStepStalls, stallCycleBound, stallNeedsMaster, stallSubjectKey, stallUpstreamCycles } from './step-stalls.js';
 import { type AttentionItem, agentOwner } from '../master/attention.js';
 
 /** Whether a standing stall files its one upstream item (GY-1855 AC-2): it still needs the master session and stood past `stallUpstreamCycles`. */
@@ -78,8 +78,12 @@ export function stallUpstreamFiler(config: MasterConfig, root: string): StallUps
   };
 }
 
-/** At most this many filings wait on the cursor for the plane, and this many filed keys are remembered. */
-export const retainedStallFilings = 20, retainedStallFiled = 200;
+/**
+ * At most this many filings wait on the cursor for the plane — as many as the stall cursor holds runs —
+ * and this many filed keys are remembered. A waiting filing is never evicted: it leaves only when the
+ * plane files it, so a stall that falls due while the ledger is full waits on its own run to be admitted.
+ */
+export const retainedStallFilings = retainedStepStalls, retainedStallFiled = 200;
 
 /**
  * Whether a filing is asked again now: a failed ask on the daemon's backoff (`readyToRetry`), and an
@@ -94,7 +98,7 @@ export function stallUpstreamAskReady(previous: DaemonAction | undefined, cycle:
 const oldest = <T extends { at: string }>(entries: [string, T][], bound: number) =>
   entries.length > bound ? entries.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, entries.length - bound) : [];
 
-async function askStallUpstream(state: DaemonState, filer: StallUpstreamFiler, now: () => number, persist: DaemonEffects['persist'], subject: string, again: boolean): Promise<DaemonAction> {
+async function askStallUpstream(state: DaemonState, filer: StallUpstreamFiler, now: () => number, persist: DaemonEffects['persist'], subject: string, again: boolean): Promise<{ action: DaemonAction; unanswered: boolean }> {
   const pending = state.stallUpstream.pending[subject]!, key = stallUpstreamActionKey(pending.signature), previous = state.actions[key];
   const attempts = (previous?.attempts ?? 0) + 1, short = pending.signature.slice(0, 160), idempotency = stallUpstreamIdempotencyKey(pending.signature);
   await record(state, key, { kind: 'fault', work: null, principal: null, state: 'started', detail: again
@@ -105,18 +109,18 @@ async function askStallUpstream(state: DaemonState, filer: StallUpstreamFiler, n
   const parsed = stallUpstreamItemSchema.safeParse(body);
   if (!parsed.success) {
     delete state.stallUpstream.pending[subject];
-    return record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the upstream item for the loop-step stall on the ${pending.step} call: the body does not parse as the create command reads it: ${parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ').slice(0, 500)}`, attempts, cycle: state.cycle }, now(), persist);
+    return { unanswered: false, action: await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the upstream item for the loop-step stall on the ${pending.step} call: the body does not parse as the create command reads it: ${parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ').slice(0, 500)}`, attempts, cycle: state.cycle }, now(), persist) };
   }
   try {
     const filed = await filer(parsed.data, idempotency);
     delete state.stallUpstream.pending[subject];
     state.stallUpstream.filed[subject] = { key: filed.key, at: new Date(now()).toISOString() };
     for (const [dropped] of oldest(Object.entries(state.stallUpstream.filed), retainedStallFiled)) delete state.stallUpstream.filed[dropped];
-    return record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the loop-step stall on the ${pending.step} call (${idempotency}); the same signature never files a second item, and a later ask returns this one`, attempts, cycle: state.cycle }, now(), persist);
+    return { unanswered: false, action: await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the loop-step stall on the ${pending.step} call (${idempotency}); the same signature never files a second item, and a later ask returns this one`, attempts, cycle: state.cycle }, now(), persist) };
   } catch (error) {
     // The body stays pending whatever the refusal: a later ask resends it unchanged under the same key, on backoff.
     const unanswered = planeWideRefusal(error);
-    return record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the upstream item for the loop-step stall on the ${pending.step} call; it is asked again on a later cycle${unanswered ? ' (the control plane did not answer)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), persist, unanswered ? null : undefined);
+    return { unanswered, action: await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the upstream item for the loop-step stall on the ${pending.step} call; it is asked again on a later cycle${unanswered ? ' (the control plane did not answer)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), persist, unanswered ? null : undefined) };
   }
 }
 
@@ -132,15 +136,21 @@ export async function fileStalledStepsUpstream(state: DaemonState, filer: StallU
   const ledger = state.stallUpstream;
   for (const [subject, pending] of Object.entries(ledger.pending).sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at))) {
     if (!stallUpstreamAskReady(state.actions[stallUpstreamActionKey(pending.signature)], state.cycle)) continue;
-    last = await askStallUpstream(state, filer, now, persist, subject, true);
+    // A plane that did not answer ends this cycle's asks: every other one is asked on a later cycle, on its own backoff.
+    const asked = await askStallUpstream(state, filer, now, persist, subject, true);
+    last = asked.action;
+    if (asked.unanswered) return last;
   }
   const due = Object.values(state.stepStalls).filter(run => run.stalledAt && stallFilesUpstream(run)).sort((a, b) => Date.parse(a.stalledAt!) - Date.parse(b.stalledAt!));
   for (const stall of due) {
-    const subject = stallSubjectKey(stall.signature);
-    if (ledger.filed[subject] || ledger.pending[subject] || state.actions[stallUpstreamActionKey(stall.signature)]?.state === 'done') continue;
+    const subject = stallSubjectKey(stall.signature), previous = state.actions[stallUpstreamActionKey(stall.signature)];
+    if (ledger.filed[subject] || ledger.pending[subject] || previous?.state === 'done' || !stallUpstreamAskReady(previous, state.cycle)) continue;
+    // A full ledger admits nothing: the stall still stands, so it is admitted on a later cycle once a waiting filing settles.
+    if (Object.keys(ledger.pending).length >= retainedStallFilings) break;
     ledger.pending[subject] = { signature: stall.signature, step: stall.step, at: new Date(now()).toISOString(), body: JSON.stringify(stallUpstreamItem(stall)) };
-    for (const [dropped] of oldest(Object.entries(ledger.pending).filter(([entry]) => entry !== subject), retainedStallFilings - 1)) delete ledger.pending[dropped];
-    last = await askStallUpstream(state, filer, now, persist, subject, false);
+    const asked = await askStallUpstream(state, filer, now, persist, subject, false);
+    last = asked.action;
+    if (asked.unanswered) return last;
   }
   return last;
 }

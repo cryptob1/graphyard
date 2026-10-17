@@ -887,6 +887,37 @@ test('unit:loop-step-stall-upstream-retries — an interrupted filing, a failed 
   assert.equal(asks.length, 2, 'one item per signature, even after the done row is pruned');
 });
 
+test('unit:loop-step-stall-upstream-ledger-full — a full ledger of waiting filings evicts none: a newly due stall waits on its run until one is filed, and a plane that does not answer ends the cycle\u2019s asks', async () => {
+  const { S, U } = await load();
+  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
+  const loop = state();
+  for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1)); }
+  const [stall] = Object.values(loop.stepStalls);
+  const body = JSON.stringify(U.stallUpstreamItem({ ...stall!, signature: 'waiting' }));
+  for (let index = 0; index < U.retainedStallFilings; index++)
+    loop.stallUpstream.pending[`stall:waiting${index}`] = { signature: `waiting filing ${index}`, step: 'refresh', at: new Date(clock).toISOString(), body };
+  for (let index = 0; index < U.retainedStallFilings; index++)
+    loop.actions[U.stallUpstreamActionKey(`waiting filing ${index}`)] = { kind: 'fault', work: null, principal: null, state: 'failed', detail: 'refused', attempts: 5, cycle: loop.cycle, at: new Date(clock).toISOString(), epoch: null };
+  const asks: string[] = [];
+  const filer = async (_input: unknown, key: string) => { asks.push(key); return { key: 'GY-STALL-3' } as never; };
+  assert.equal(await U.fileStalledStepsUpstream(loop, filer, () => clock, async () => {}), null, 'the full ledger admits nothing and its waiting filings are on backoff');
+  assert.equal(Object.keys(loop.stallUpstream.pending).length, U.retainedStallFilings, 'no waiting filing was evicted');
+  assert.equal(asks.length, 0);
+  // One waiting filing is filed: its place admits the stall, which still stands.
+  delete loop.actions[U.stallUpstreamActionKey('waiting filing 0')];
+  assert.equal((await U.fileStalledStepsUpstream(loop, filer, () => clock, async () => {}))?.state, 'done');
+  assert.deepEqual(asks, [U.stallUpstreamIdempotencyKey('waiting filing 0'), U.stallUpstreamIdempotencyKey(stall!.signature)]);
+  assert.equal(loop.stallUpstream.filed[S.stallSubjectKey(stall!.signature)]?.key, 'GY-STALL-3');
+
+  // A plane that does not answer: one ask this cycle, the rest wait for a later one.
+  for (let index = 1; index < 4; index++) delete loop.actions[U.stallUpstreamActionKey(`waiting filing ${index}`)];
+  asks.length = 0;
+  const down = async (_input: unknown, key: string) => { asks.push(key); throw new Error('The operation was aborted due to timeout'); };
+  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, async () => {}))?.state, 'failed');
+  assert.equal(asks.length, 1, 'the unanswered ask ends the cycle\u2019s asks');
+  assert.equal(Object.keys(loop.stallUpstream.pending).length, U.retainedStallFilings - 1, 'the unanswered filing still waits');
+});
+
 test('unit:stall-signature-overflow-invocations-held — ten panes sharing one signature from one effect are all held after the third cycle, every invocation past the eighth included, and the record stays within its bound', async () => {
   const { S } = await load();
   const { stepStallSchema } = await import('../src/daemon/state.js');
