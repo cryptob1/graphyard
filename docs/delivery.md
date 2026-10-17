@@ -8,22 +8,22 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (moved by `graphyard release`) to candidate SHAs.
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`=10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*`); refused while an unjudged <4h candidate serves.
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites (`GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; [pending](validation.md#release-verdicts) blocks only if `e2e.pendingOutcomes: blocking`.
+- `release uat ID` deploys `uat`; refused while an unjudged <4h candidate serves.
+- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([validation](validation.md#release-verdicts); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; [pending](validation.md#release-verdicts) blocks only if `e2e.pendingOutcomes: blocking`.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
-- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` (`GRAPHYARD_DEPLOY_ENVIRONMENT`/`_MANIFEST`/`_GENERATION`) `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it. `verify`/UAT `digests` check `GRAPHYARD_INSTANCE_DIGESTS`. Deploys take `rc-deploy/ENV/N`, then `rc-deployed/ENV/N`.
+- `GRAPHYARD_RELEASE_BUILD` records cuts' per-service digests; with `GRAPHYARD_DEPLOY_DIGESTS` (`GRAPHYARD_DEPLOY_ENVIRONMENT`/`_MANIFEST`/`_GENERATION`) `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it — a verdict the UAT `digests` suite observed, else none and promotion refuses. `verify`/UAT `digests` check `GRAPHYARD_INSTANCE_DIGESTS`. Deploys take `rc-deploy/ENV/N`, then `rc-deployed/ENV/N`.
 - Failures file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` ([filing credential](#release-filing-credential)).
-- `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID` (advisory).
+- `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
 
-**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: a failing or secret-declaring required one, or none runnable, fails; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists; `release GY-N EPOCH` leases; needs `vars.UAT_URL`/`PRODUCTION_URL`.
+**The master loop promotes** (`promote=true`) once main differs from the last `rc-production/`/cut SHAs, nothing queued, `run.promoteEveryMinutes` (`graphyard master config promoteEveryMinutes=N`; 10, `0` off) passed; failures raise `promotion:failed`. Under a `control-plane` merger the loop cuts (`run.candidates.everyMerges` 10, `idleMinutes` 15), validates, promotes and verifies (`GRAPHYARD_UAT_URL`/`GRAPHYARD_PRODUCTION_URL`; no workflow; managed repositories run [required cases](validation.md)); a failed required E2E case reverts the newest candidate item a matching verification map covers (`candidateReverts`; reopened); a main-watch freeze holds all. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: a failing or secret-declaring required one, or none runnable, fails; timeouts re-queue (`mergeLedger.trial.preview`). `release status` lists; `release GY-N EPOCH` leases.
 
 ### Release filing credential
 
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it (issues/rotates/stores); else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `doctor`: `FAIL release-filing`. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
+UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, work items `*`). The loop's hourly `master setup --apply` keeps it (issues/rotates/stores); else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`, FILE `{"id":"graphyard-release-follow-up","displayName":"Release follow-up","capabilities":["intent:create"],"scope":{"repositories":["OWNER/REPO"],"workItems":["*"]},"reason":"..."}`). `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin.
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test` (`ci.yml`); per candidate `releaseCandidateTests`/container/chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`) merges a first item unaided.
+Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/chart, soak/timing (advisory); UAT's `zero-touch` suite (`up --agent --goal`) merges a first item; human steps block.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
@@ -33,7 +33,7 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard
 
 ### Main guard
 
-Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure`: an attention row/P0 item name them; later merges failing only that set are `coveredBy` until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures (per case) hold 30min, file P0; no rework/proof loss.
+Every 30s the guard reruns, reverting merges failing checks parents passed; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon (`approval-refused`). A revert failing the merge's named tests closes `base-failure` (delivery kept): an attention row/P0 item name them; later merges failing only that set are covered (`coveredBy`) until main passes. Failing trial files rerun on merge, then base: [flakes](validation.md#flake-ledger) land; base failures (per case) hold 30min, file P0; no rework/proof loss.
 
 ## Managed repositories
 
@@ -75,7 +75,7 @@ Every 30s the guard reruns, reverting merges failing checks parents passed; the 
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-`POST /api/delivery/observe-sha` (producer; idempotent; all production services; paged) deploys merges:
+`POST /api/delivery/observe-sha` (producer; idempotent; paged) deploys merges:
 
 ```json
 {"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z"}
@@ -83,7 +83,7 @@ Every 30s the guard reruns, reverting merges failing checks parents passed; the 
 
 Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows state.
 
-`master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` (2h; 45min deployed) alerts.
+`master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` alerts.
 
 `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`).
 

@@ -329,8 +329,35 @@ jobs:
         env:
           GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
           GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_E2E_RECORD_TOKEN }}
-  promote:
+  imports:
     needs: [candidate, uat]
+    if: needs.uat.result == 'success' && (github.event_name == 'schedule' || inputs.promote)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The production job holds no plane credential, so the hold the candidate's imported external runs
+    # leave (GY-1860) is read here, in the uat environment that holds it, and handed to promotion; a released
+    # hold is sealed as it is read, so no import binds to the candidate before the production job promotes.
+    environment: uat
+    outputs:
+      hold: ${{ steps.read.outputs.hold }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main, fetch-depth: 0 }
+      - uses: actions/setup-node@v4
+        with: { node-version: '24', cache: npm }
+      - run: npm ci
+      - name: Read, and seal once released, the hold the candidate's imported external runs leave
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          node bin/graphyard.mjs release imports "${{ needs.candidate.outputs.id }}" | tee imports.json
+          echo "hold=$(node -p "JSON.stringify(require('./imports.json'))")" >> "$GITHUB_OUTPUT"
+        env:
+          GRAPHYARD_URL: ${{ vars.GRAPHYARD_URL }}
+          GRAPHYARD_TOKEN: ${{ secrets.GRAPHYARD_RELEASE_TOKEN }}
+  promote:
+    needs: [candidate, uat, imports]
     if: needs.uat.result == 'success' && (github.event_name == 'schedule' || inputs.promote)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -345,6 +372,9 @@ jobs:
       - run: npm ci
       - name: Promote the UAT-passed candidate to production by its exact SHA
         run: node bin/graphyard.mjs release promote "${{ needs.candidate.outputs.id }}"
+        env:
+          # A hold that is missing, read for another candidate, or released but unsealed refuses promotion.
+          GRAPHYARD_PROMOTION_IMPORTS: ${{ needs.imports.outputs.hold }}
       - name: Confirm production serves the promoted SHA
         run: node bin/graphyard.mjs release verify --url "$PRODUCTION_URL" --wait 1200
         env:

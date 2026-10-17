@@ -9,14 +9,17 @@ import { pendingAtCut } from '../release-pending.js';
 import { installIdFor } from '../install/types.js';
 import { candidateSettings, mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
 import { parseVerificationMap, type VerificationMap } from '../model/verification-maps.js';
-import { contractFile, parseContract } from '../e2e/case.js';
+import { contractFile, loadContract, parseContract } from '../e2e/case.js';
+import type { E2eReport } from '../e2e/runner.js';
 import { deployKeySshCommand, firstParentHolds, pushArgs, pushEnvironment, runMergeTrial, staleLeaseRejection } from '../merge-writer/executor.js';
 import { trialAuthor } from '../merge-writer/trial.js';
 import {
-  awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, syncLedgerAsync, uatValidationWindowMs,
-  findCandidate, uatServedDigests, validateAndRecord, type AsyncGit, type ReleaseCandidate, type UatRecord,
+  awaitServing, cutAsync, deployToUatAsync, promoteAsync, readLedgerAsync, recordsArguments, syncLedgerAsync, uatValidationWindowMs,
+  findCandidate, uatServedDigests, validateAndRecord, type AsyncGit, type Git, type HoldOutcome, type ReleaseCandidate, type UatRecord,
 } from '../release-candidate.js';
-import { validateProjectCandidate } from '../release-project.js';
+import { promotionImports } from '../validation-import.js';
+import { projectCaseSuite, validateProjectCandidate } from '../release-project.js';
+import { holdTagPrefix, releaseHolds } from '../release-holds.js';
 import { commandDigestAdapter, digestCommandTimeoutMs, uatDigestSuite, verifyProductionDigests } from '../release-digests.js';
 import { revertCandidateItem, type CandidateItemDelta, type RevertContract, type RevertOutcome, type RevertPorts, type RevertRecordEvent } from '../release-revert.js';
 import { checkoutRepositoryPolicy } from '../model/repository-policy.js';
@@ -78,7 +81,11 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     /** Files a failed managed candidate's follow-up or hold item, answering its key (GY-1535). */
     file?: (item: object, requestId: string) => Promise<string>;
     /** The plane's open goals and each work item's stage, so a cut records the outcomes whose plan is not delivered yet as pending (GY-1802). */
-    plane?: { goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined> } }): LocalReleasePorts | null {
+    plane?: { goals: () => Promise<readonly Goal[]>; stage: (key: string) => Promise<string | undefined>;
+      /** An authenticated `GET /api/PATH`, through which promotion reads the candidate's imported-run hold (GY-1860). */
+      read?: (path: string) => Promise<any> };
+    /** UAT itself, for tests: run only for a candidate with no passing UAT verdict recorded. */
+    validation?: Pick<LocalReleasePorts, 'uat' | 'validate'> }): LocalReleasePorts | null {
   const environment = options.environment ?? process.env;
   const uatUrl = environment[localReleaseVariables.uatUrl], productionUrl = environment[localReleaseVariables.productionUrl], uatStatic = environment[localReleaseVariables.uatStatic];
   if (!uatUrl && !uatStatic) return null;
@@ -133,22 +140,50 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
     record: options.record,
   };
   // GY-1535: a managed repository's candidate, validated in-process from a checkout of its exact SHA.
+  // The release holds over async git, as a managed repository's validation runs them: the hold
+  // records are read ahead and answered to the holds' own sync read, and the hold tags they write
+  // are kept in order and written through `git` when the outcome's `write` runs.
+  const asyncHolds = (options: Parameters<typeof releaseHolds>[1]) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
+    const read = recordsArguments(holdTagPrefix), listed = await git(read), writes: string[][] = [];
+    const replay: Git = args => {
+      if (args.join('\0') === read.join('\0')) return listed;
+      if (!args.includes('tag') && args[0] !== 'push') throw new Error(`the release holds ran git ${args.join(' ')}, which is not a hold record's read or write`);
+      writes.push(args);
+      return '';
+    };
+    const outcome = await releaseHolds(replay, options)(candidate, record);
+    return { ...outcome, write: async () => { outcome.write(); for (const args of writes) await git(args); } };
+  };
   const validateManaged = async (id: string): Promise<LocalValidation> => {
     await syncLedgerAsync(git, base);
     const ledger = await readLedgerAsync(git), candidate = findCandidate(ledger, id);
-    // GY-1844: a candidate UAT serves by digest is attested first, like the CLI's validate: an instance on any other digest records
-    // the candidate's UAT verdict failed on that suite, so its cases never pass digests they did not test.
+    // GY-1844: a candidate UAT serves by digest is attested first, like the CLI's validate: an
+    // instance on any other digest records the candidate's UAT verdict failed on that suite, so its
+    // cases never pass digests they did not test. GY-1868: a matched attestation rides the
+    // validating call as its own suite, so the recorded verdict names exactly the digests the
+    // observation backed; with no observer the verdict names none and digest promotion refuses,
+    // naming GRAPHYARD_INSTANCE_DIGESTS, instead of accepting digests nothing observed.
     const served = uatServedDigests(ledger, candidate);
-    if (served && digests.instances && uatUrl) {
-      const suite = uatDigestSuite(served, digests.instances);
-      if (!(await suite.run(uatUrl, candidate)).passed) {
-        const result = await validateAndRecord(git, id, uatUrl, [suite], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file });
-        return { record: result.record, followUp: result.followUp ?? null };
-      }
+    const attested = served && digests.instances && uatUrl ? { url: uatUrl, suite: uatDigestSuite(served, digests.instances) } : null;
+    if (attested && !(await attested.suite.run(attested.url, candidate)).passed) {
+      const result = await validateAndRecord(git, id, attested.url, [attested.suite], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file });
+      return { record: result.record, followUp: result.followUp ?? null };
     }
     const checkout = mkdtempSync(join(options.base, 'candidate-cases-'));
     try {
       await git(['worktree', 'add', '--detach', checkout, candidate.sha]);
+      if (attested) {
+        // GY-1868: the attested candidate validates with its attestation among the suites, composed
+        // exactly as a managed repository's validation composes them, so its verdict records the
+        // observed digests and the cases ran under them.
+        const contract = existsSync(join(checkout, contractFile)) ? await loadContract(checkout).catch(error => { console.error(`No release holds: ${error.message}`); return null; }) : null;
+        let report: E2eReport | null = null;
+        const result = await validateAndRecord(git, id, attested.url, [
+          projectCaseSuite(checkout, environment[localReleaseVariables.uatToken] ?? '', { contract, report: value => { report = value; } }), attested.suite,
+        ], { base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file,
+          holds: asyncHolds({ contract, push: true, file: options.file, report: async () => report }) });
+        return { record: result.record, followUp: result.followUp ?? null };
+      }
       const result = await validateProjectCandidate(git, id, { checkout, base, push: true, timeoutMs: localServeWaitSeconds * 1000, file: options.file,
         token: environment[localReleaseVariables.uatToken] ?? '',
         uat: uatUrl ? { url: uatUrl } : { static: { directory: uatStatic!, build: environment[localReleaseVariables.uatBuild] ?? null } } });
@@ -157,6 +192,8 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       try { await git(['worktree', 'remove', '--force', checkout]); } catch { rmSync(checkout, { recursive: true, force: true }); }
     }
   };
+  /** The passing UAT verdict already recorded for candidate `id`, which a resumed promotion retry reuses (GY-1860). */
+  const passedUat = async (id: string) => { await syncLedgerAsync(git, base); return (await readLedgerAsync(git)).uat.find(record => record.id === id && record.result === 'passed') ?? null; };
   return {
     settings,
     release,
@@ -165,6 +202,12 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       const ledger = await readLedgerAsync(git), newest = ledger.candidates[0];
       // A candidate cut and never judged — a run that crashed between the cut and its record — is resumed, not cut past.
       if (newest && !ledger.uat.some(record => record.id === newest.id) && now() - Date.parse(newest.cutAt) < uatValidationWindowMs) return { cut: false, resume: toCandidate(newest) };
+      // GY-1860: a candidate that passed UAT and is not in production — its promotion refused by an imported hold, or
+      // by a hold the plane could not answer — is resumed while no cut is due, so the cycle retries its promotion
+      // with a fresh hold read once a promotion interval; `uat` and `validate` answer its recorded verdict and never
+      // rerun UAT. A due cut supersedes it, and the UAT window bounds the retries.
+      if (newest && !due && ledger.uat.some(record => record.id === newest.id && record.result === 'passed') && !ledger.production.some(record => record.id >= newest.id)
+        && now() - Date.parse(newest.cutAt) < uatValidationWindowMs) return { cut: false, resume: toCandidate(newest) };
       // The cut rule (candidate-cut.ts) alone decides a cut: not due, nothing is tagged or pushed.
       if (!due) return { cut: false, reason: `the cut rule is not due (${settings.everyMerges} merges or ${settings.idleMinutes} idle minutes)` };
       const plane = options.plane;
@@ -172,8 +215,16 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       const result = await cutAsync(git, { base, trigger: 'manual', now: new Date(now()), push: true, maxPrs: settings.everyMerges, pendingOutcomes, build: digests.build });
       return result.cut ? { cut: true, candidate: toCandidate(result.candidate) } : { cut: false, reason: result.reason };
     },
-    uat: async id => { const deployed = await deployToUatAsync(git, id, base, new Date(now()), digests.deploy); return { sha: deployed.sha }; },
+    uat: async id => {
+      const passed = await passedUat(id);
+      if (passed) return { sha: passed.sha };
+      if (options.validation) return options.validation.uat(id);
+      const deployed = await deployToUatAsync(git, id, base, new Date(now()), digests.deploy); return { sha: deployed.sha };
+    },
     validate: async id => {
+      const passed = await passedUat(id);
+      if (passed) return { record: passed, followUp: passed.followUp ?? null };
+      if (options.validation) return options.validation.validate(id);
       if (!uatUrl || !graphyardCheckout(root)) return validateManaged(id);
       const scratch = mkdtempSync(join(options.base, 'candidate-validate-'));
       try {
@@ -184,7 +235,8 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       } finally { rmSync(scratch, { recursive: true, force: true }); }
     },
     promote: async id => {
-      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()), deployDigests: digests.deploy });
+      const read = options.plane?.read;
+      const result = await promoteAsync(git, id, { base, push: true, now: new Date(now()), deployDigests: digests.deploy, imports: read ? candidate => promotionImports(read, candidate) : undefined });
       return result.promoted ? { promoted: true, sha: result.sha } : { promoted: false, refusals: result.refusals };
     },
     verify: async sha => {

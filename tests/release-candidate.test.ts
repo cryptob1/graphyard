@@ -283,7 +283,7 @@ test('unit:release-candidate-e2e-suite — UAT runs every case targeted at uat a
   assert.match(validateStep, /--suite 'e2e=node --import tsx --eval "import\(\\"\.\/src\/e2e\/runner\.ts\\"\)\.then\(m => m\.runE2eSuite\(\)\)"'/, 'the uat job runs the e2e suite inside release validate');
   assert.match(validateStep, /GRAPHYARD_UAT_TOKEN: \$\{\{ secrets\.GRAPHYARD_UAT_TOKEN \}\}/, 'the runner reads UAT\'s token from the uat environment secret');
   assert.match(validateStep, /UAT_URL: \$\{\{ vars\.UAT_URL \}\}/);
-  const recordStep = workflow.slice(workflow.indexOf('- name: Record the E2E case runs'), workflow.indexOf('\n  promote:\n'));
+  const recordStep = workflow.slice(workflow.indexOf('- name: Record the E2E case runs'), workflow.indexOf('\n  imports:\n'));
   assert.match(recordStep, /e2e record "\$RUNNER_TEMP\/e2e-report\.json"/, 'a later step records the report');
   // GY-1614: the release filing credential holds only intent:create, which /api/scenarios refuses, so recording holds its own.
   assert.match(recordStep, /GRAPHYARD_TOKEN: \$\{\{ secrets\.GRAPHYARD_E2E_RECORD_TOKEN \}\}/, 'recording uses its own credential');
@@ -637,7 +637,7 @@ test('unit:release-candidate-zero-touch-suite — every release candidate runs t
   const validate = uat.slice(uat.indexOf('node bin/graphyard.mjs release validate'), uat.indexOf('- name: Record the E2E case runs'));
   assert.match(validate, /--suite 'zero-touch=node --import tsx --eval "import\(\\"\.\/src\/release-candidate\.ts\\"\)\.then\(m => m\.runZeroTouchSuite\(\)\)"'/, 'release validate runs the zero-touch suite');
   assert.doesNotMatch(uat.slice(0, uat.indexOf('node bin/graphyard.mjs release validate')), /continue-on-error/);
-  assert.match(workflow.slice(workflow.indexOf('\n  promote:\n')), /needs: \[candidate, uat\]\n\s+if: needs\.uat\.result == 'success'/, 'promotion follows only a passed UAT validation');
+  assert.match(workflow.slice(workflow.indexOf('\n  promote:\n')), /needs: \[candidate, uat, imports\]\n\s+if: needs\.uat\.result == 'success'/, 'promotion follows only a passed UAT validation, after its import hold is read');
   assert.equal(zeroTouchScenario, 'tests/zero-touch-onboarding.test.ts');
   assert.match(await readFile(new URL(`../${zeroTouchScenario}`, import.meta.url), 'utf8'), /test\('unit:zero-touch-onboarding — /, 'the suite runs the zero-touch scenario');
 
@@ -905,7 +905,7 @@ test('unit:soak-runs-outside-release-run — release-candidate-soak.yml runs the
   assert.match(starter, /gh workflow run release-candidate-soak\.yml --repo "\$GITHUB_REPOSITORY" --ref main -f sha="\$CANDIDATE_SHA" -f candidate="\$\{\{ needs\.candidate\.outputs\.id \}\}"/);
   for (const id of ['uat', 'promote']) assert.doesNotMatch(workflowJob(release, id).match(/^ {4}needs: .*$/m)![0], /soak/, `${id} never waits for the soak`);
   // So the release run concludes with promote, the last job whose verdict counts.
-  assert.match(workflowJob(release, 'promote'), /^ {4}needs: \[candidate, uat\]$/m);
+  assert.match(workflowJob(release, 'promote'), /^ {4}needs: \[candidate, uat, imports\]$/m);
 
   // The soak workflow: dispatched with a sha, never on a pull request, push or schedule, in a group of its own per SHA.
   const on = soak.slice(soak.indexOf('\non:\n') + 1, soak.indexOf('\npermissions:'));
