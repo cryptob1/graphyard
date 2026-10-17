@@ -8,9 +8,9 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (moved only by `graphyard release`) to candidates' SHAs.
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch (cron fallback).
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*`); refused while an unjudged candidate <4h old serves, digest deploys (`rc-uat-deploy/ID`) included.
+- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*`); refused while an unjudged candidate <4h old serves, digest deploys (`rc-uat-deploy/ID/AT`) included.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; a [pending](validation.md#release-verdicts) case never blocks.
-- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. A candidate's recorded build (one digest per service) promotes by those digests, never a rebuild.
+- `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms. A candidate's recorded build (one digest per service) promotes by those digests, never a rebuild, once UAT names them.
 - Failed candidates file a [hold](validation.md#release-holds) per outcome, else `release follow-up ID` as the [filing credential](#release-filing-credential).
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID` (advisory).
 

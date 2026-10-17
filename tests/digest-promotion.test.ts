@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  assessPromotion, assessUat, candidateTagPrefix, cut, deployToUat, deployToUatAsync, ledgerStatus, productionBranch, promote, promoteAsync,
+  assessPromotion, assessUat, candidateTagPrefix, cut, deployToUat, digestPromotionRefusal, deployToUatAsync, ledgerStatus, productionBranch, promote, promoteAsync,
   recordCandidateBuild, uatBranch, uatDeployTagPrefix, uatTagPrefix, uatValidationWindowMs, validate, validateAndRecord,
   type AsyncGit, type CandidateBuild, type Git, type Ledger, type ReleaseCandidate, type Suite, type UatDeployRecord, type UatRecord,
 } from '../src/release-candidate.js';
@@ -112,7 +112,7 @@ test('unit:candidate-promotes-recorded-digests — a candidate records one build
   const uatResult = deployToUat(uatRepo.git, candidate.id, 'main', now, () => { uatDeploys++; });
   assert.deepEqual(uatResult, { candidate: candidate.id, sha: tip, branch: uatBranch, mode: 'digest', digests: built.artifacts });
   assert.equal(uatDeploys, 1);
-  assert.deepEqual(uatRepo.pushes(), [`push origin refs/tags/${uatDeployTagPrefix}${candidate.id}`], 'the digest deploy publishes its record — the trace a branch move would leave — and pushes nothing else');
+  assert.deepEqual(uatRepo.pushes(), [`push origin refs/tags/${uatDeployTagPrefix}${candidate.id}/19700101T000000000Z`], 'the digest deploy publishes its record — the trace a branch move would leave — and pushes nothing else');
 
   // Without a digest deployer the adapter keeps sha promotion: the branch move names no mode.
   const shaRepo = ledgerGit({ candidates: [candidate], uat: [passedUat] });
@@ -223,4 +223,44 @@ test('unit:sha-promotion-leases-past-digest-promotions — a sha promotion after
   assert.ok(branchPush.includes(`--force-with-lease=refs/heads/${productionBranch}:${branchSha}`), `the lease names the branch's last sha-mode position (${branchSha.slice(0, 8)}…), not the digest record's SHA (${digestSha.slice(0, 8)}…), which the branch never held`);
   assert.ok(!branchPush.includes(digestSha));
   assert.ok(!('digests' in repo.tags().find(entry => entry.id === next.id)), 'a sha promotion still records no digests');
+});
+
+/* The digest-bound UAT review finding: a digest promotion deploys the recorded build, so a UAT
+ * record that names no digests (taken by SHA, or without them) never validated those artifacts. */
+test('unit:digest-promotion-needs-digest-uat — promotion by digest is refused unless the UAT record names the recorded build\'s digests, and nothing is deployed', async () => {
+  const shaOnlyUat: UatRecord = { ...passedUat, digests: undefined };
+  assert.match(digestPromotionRefusal(candidate, shaOnlyUat) ?? '', /names no digests/);
+  assert.equal(digestPromotionRefusal(candidate, passedUat), null);
+  assert.equal(digestPromotionRefusal({ ...candidate, build: undefined }, shaOnlyUat), null, 'a candidate without a build has no digests to bind');
+  let deploys = 0;
+  const repo = ledgerGit({ candidates: [candidate], uat: [shaOnlyUat] });
+  const refused = promote(repo.git, candidate.id, { base: 'main', push: false, now, deployDigests: () => { deploys++; } });
+  assert.equal(refused.promoted, false);
+  assert.match(refused.refusals!.join(' '), /names no digests/);
+  const asyncRefused = await promoteAsync(ledgerGit({ candidates: [candidate], uat: [shaOnlyUat] }).asyncGit, candidate.id, { base: 'main', push: false, now, deployDigests: async () => { deploys++; } });
+  assert.equal(asyncRefused.promoted, false);
+  assert.equal(deploys, 0, 'nothing UAT never named is deployed');
+  assert.deepEqual(repo.pushes(), [], 'and no record is written or pushed');
+  // Without a digest deployer the same record keeps sha promotion: it validated the SHA.
+  assert.equal(promote(ledgerGit({ candidates: [candidate], uat: [shaOnlyUat] }).git, candidate.id, { base: 'main', push: false, now }).promoted, true);
+});
+
+/* The redeploy review finding: a tag never moves, so one record per candidate made a second digest
+ * deploy of it throw after the deployer ran; and records read by refname order by candidate ID,
+ * not by when UAT took them. */
+test('unit:uat-digest-redeploy-records-again — redeploying a candidate by digest records a new rc-uat-deploy/ID/AT record, and the guard judges the latest-deployed record', () => {
+  const later = { ...candidate, id: '20261001T130000Z', sha: 'd'.repeat(40) };
+  const repo = ledgerGit({ candidates: [later, candidate] });
+  let deploys = 0;
+  deployToUat(repo.git, candidate.id, 'main', now, () => { deploys++; });
+  deployToUat(repo.git, candidate.id, 'main', new Date(60_000), () => { deploys++; });
+  assert.equal(deploys, 2);
+  const tags = repo.calls.filter(args => args[4] === 'tag' && args[5] === '-a').map(args => args[6]);
+  assert.deepEqual(tags, [`${uatDeployTagPrefix}${candidate.id}/19700101T000000000Z`, `${uatDeployTagPrefix}${candidate.id}/19700101T000100000Z`], 'each deploy records its own tag, so a redeploy never collides');
+
+  // The older candidate redeployed after the later one serves UAT now; its pending validation is fenced
+  // even though the later candidate's record sorts first by refname.
+  const fenced = ledgerGit({ candidates: [later, candidate], uatDeploys: [digestServed(later, iso), digestServed(candidate, new Date(60_000).toISOString())] });
+  assert.throws(() => deployToUat(fenced.git, later.id, 'main', new Date(120_000), () => { deploys++; }), new RegExp(`UAT serves candidate ${candidate.id}'s recorded digests`));
+  assert.equal(deploys, 2);
 });
