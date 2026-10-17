@@ -57,7 +57,7 @@ Skip with `--no-github-app` until an App binds; else dispatch a [small item](onb
 
 `--target host --ssh-host HOST` (or `--target hetzner`): server, Postgres, loop, executors, Herdr, runtimes on one systemd machine; credentials in `~graphyard/.config/graphyard/<install>/`. Public IPv4 serves `<ip>.sslip.io`; else `--domain`. Unpullable images build there at the installer's commit. Workers push, open PRs as the App (one-hour tokens).
 
-Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, `.graphyard/github-app.json`) are reused if they mint a token; `--reuse-app SLUG` (or the App page) reuses a host-saved App. `--migrate` stops the loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
+Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, `.graphyard/github-app.json`) are reused if they mint a token; `--reuse-app SLUG` (or App page) reuses host-saved Apps. `--migrate` stops the loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL` (`db fence`), restores; logins move.
 
 ## Upgrading an existing installation
 
@@ -76,7 +76,7 @@ Price: `--confirm-price`, `--max-monthly`. Saved Apps (`--github-app FILE`, `.gr
 | `Branch protection could not be applied` | admin `gh auth login`
 | `already binds` / `still holds GITHUB_APP_` / `could not be read` | remove binding/variables or drop `--no-github-app`
 | `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
-| fresh database (401) | `up` re-issues credentials, archives cursor (`.archived-`)
+| fresh database (401) | `up` re-issues credentials, refiles onboarding/goal, archives stopped-loop cursor
 
 ## Agent execution contract
 

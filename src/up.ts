@@ -231,11 +231,15 @@ export interface UpDependencies {
    * coordinator, operator-agent and approver) at a status read; one that drew no answer is left out.
    * Absent, nothing is judged stale; the real dependencies read recordedCredentialAnswers.
    */
-  credentialAnswers?(): Promise<{ identity: string; status: number }[]>;
-  /** GY-1851: set the loop's cursor aside beside itself (archiveDaemonCursor); null when there was none. */
-  archiveCursor?(): Promise<{ file: string; cycle: number } | null>;
-  /** GY-1851: the cycle the loop's cursor has reached, or null when there is none. */
-  cursorCycle?(): Promise<number | null>;
+  credentialAnswers?(adminToken: string | null): Promise<{ identity: string; status: number; listed?: boolean }[]>;
+  /**
+   * GY-1851: stop the master loop and wait until its process has exited, so nothing holds the old
+   * cursor in memory to write it again; answers the systemd unit it stopped, or null for a loop run
+   * outside one (or none running). Defaults to stopRecordedLoop.
+   */
+  stopLoop?(): Promise<{ unit: string | null }>;
+  /** GY-1851: start the stopped unit again; defaults to `systemctl --user start UNIT`. */
+  startUnit?(unit: string): Promise<void>;
   pollMs?: number;
   /** How long a step waits on a person before the run stops (resumable); Infinity interactively. */
   humanWaitMs?: number;
@@ -438,38 +442,70 @@ const childStop = (step: string, args: string[], result: { code: number; stdout:
   new ChildStop(childFailure(step, args, result, more), exitCode, args.map(redactLine), childFirstStderr(result));
 
 export const signInAt = (link: string, base: string) => { const at = link.indexOf('#'); return at < 0 ? link : `${base.replace(/\/+$/, '')}/${link.slice(at)}`; };
-/** The steps a reinstall onto a fresh database runs again (GY-1851): the install, master init, the merger, the agent identities, the accounts and the loop. */
-const reissueSteps: readonly UpStep[] = ['control-plane', 'host-supervisor', 'merger-setting', 'master-autonomy', 'accounts', 'master-loop'];
+/** The steps a reinstall onto a fresh database runs again (GY-1851): the install, master init, the merger, the agent identities, the onboarding item, the accounts, the loop and the goal. */
+const reissueSteps: readonly UpStep[] = ['control-plane', 'host-supervisor', 'merger-setting', 'master-autonomy', 'onboarding', 'accounts', 'master-loop', 'goal'];
 const masterJson = (root: string) => readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
 /**
  * GY-1851: GET /api/status at SERVER with each credential master.json records (the coordinator's,
  * the operator-agent's and the approver's), answering the HTTP status of each. A credential with no
  * readable file, or a request that drew no answer, is left out: only the plane's answer judges it.
+ * With ADMIN, a refused agent identity the plane still lists (revoked, say) is marked `listed`: its
+ * database row stands, so the database is not fresh.
  */
-export async function recordedCredentialAnswers(root: string, server: string, fetcher: typeof fetch = fetch) {
+export async function recordedCredentialAnswers(root: string, server: string, fetcher: typeof fetch = fetch, admin: string | null = null) {
   const config = await masterJson(root);
-  const recorded = [['coordinator', config?.credentialFile], ['operator-agent', config?.operatorAgent?.credentialFile], ['approver', config?.approver?.credentialFile]] as const;
-  const answers: { identity: string; status: number }[] = [];
-  for (const [identity, file] of recorded) {
+  const recorded = [['coordinator', null, config?.credentialFile], ['operator-agent', config?.operatorAgent?.id, config?.operatorAgent?.credentialFile], ['approver', config?.approver?.id, config?.approver?.credentialFile]] as const;
+  const call = (path: string, token: string) => fetcher(`${server.replace(/\/+$/, '')}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });
+  const answers: { identity: string; status: number; listed?: boolean }[] = [];
+  let listing: unknown[] | null | undefined;
+  for (const [identity, id, file] of recorded) {
     if (typeof file !== 'string') continue;
     const token = await readFile(resolve(file), 'utf8').then(text => text.trim(), () => '');
     if (token.length < 32) continue;
-    const status = await fetcher(`${server.replace(/\/+$/, '')}/api/status`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) }).then(response => response.status, () => null);
-    if (status !== null) answers.push({ identity, status });
+    const status = await call('status', token).then(response => response.status, () => null);
+    if (status === null) continue;
+    if (status === 401 && admin && typeof id === 'string') {
+      listing ??= await call('operator-agents', admin).then(async response => response.ok ? await response.json() as unknown[] : null, () => null);
+      if (Array.isArray(listing)) { answers.push({ identity, status, listed: listing.some((entry: any) => entry?.id === id) }); continue; }
+    }
+    answers.push({ identity, status });
   }
   return answers;
 }
-/** GY-1851: the master loop's cursor, found from the coordinator credential master.json records. */
+/** GY-1851: the master loop's cursor file, found from the coordinator credential master.json records. */
 const recordedCursor = async (root: string) => { const file = (await masterJson(root))?.credentialFile; return typeof file === 'string' ? { credentialFile: resolve(file) } : null; };
 export async function archiveRecordedCursor(root: string) {
   const config = await recordedCursor(root);
   return config ? (await import('./daemon/state.js')).archiveDaemonCursor(config) : null;
 }
-export async function recordedCursorCycle(root: string) {
-  const config = await recordedCursor(root);
-  if (!config) return null;
-  const cursor = parseJson(await readFile((await import('./daemon/state.js')).daemonStatePath(config as any), 'utf8').catch(() => ''));
-  return typeof cursor?.cycle === 'number' ? cursor.cycle : null;
+const recordedCursorExists = async (root: string) => { const config = await recordedCursor(root); return !!config && existsSync((await import('./daemon/state.js')).daemonStatePath(config as any)); };
+const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
+/**
+ * GY-1851: stop this install's master loop and wait for its process to exit: its systemd unit is
+ * stopped (systemd waits out the loop's shutdown write), and a loop the cursor's lock names on this
+ * host outside the unit is sent SIGTERM and waited on (SIGKILL past the unit's stop bound). Answers
+ * the unit stopped, to start again once the cursor is archived.
+ */
+export async function stopRecordedLoop(root: string): Promise<{ unit: string | null }> {
+  const { loadStoredMasterConfig } = await import('./master.js');
+  const { supervisingUnit } = await import('./master/loop-restart.js');
+  const { loopStopTimeoutSeconds } = await import('./supervisor.js');
+  const { defaultChildRun } = await import('./child-runner.js');
+  const config = await loadStoredMasterConfig(root);
+  const unit = (await supervisingUnit(root, config))?.unit ?? null;
+  if (unit) await defaultChildRun('systemctl', ['--user', 'stop', unit], { timeoutMs: (loopStopTimeoutSeconds + 60) * 1000 });
+  const cursor = await recordedCursor(root);
+  const lock = cursor ? parseJson(await readFile((await import('./daemon/state.js')).daemonStatePath(cursor as any), 'utf8').catch(() => ''))?.lock : null;
+  if (lock && lock.host !== config.hostId && Date.now() - Date.parse(lock.heartbeatAt) < 3 * config.run.intervalSeconds * 1000) throw new Error(`the master loop runs on ${lock.host} (pid ${lock.pid}); stop it there before its cursor is archived`);
+  if (lock && lock.host === config.hostId && Number.isInteger(lock.pid) && lock.pid !== process.pid && processAlive(lock.pid)) {
+    process.kill(lock.pid, 'SIGTERM');
+    const deadline = Date.now() + loopStopTimeoutSeconds * 1000;
+    while (processAlive(lock.pid)) {
+      if (Date.now() > deadline) { try { process.kill(lock.pid, 'SIGKILL'); } catch { /* gone */ } }
+      await new Promise(done => setTimeout(done, 200));
+    }
+  }
+  return { unit };
 }
 
 /** Both of the master's agent identities are recorded in master.json and their credential files are readable. */
@@ -770,12 +806,18 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // GY-1851: an install whose recorded credentials the control plane refuses (401) is a fresh
     // database behind a kept install directory: a new installation. Its credentials are re-issued
     // through the install, master init and master autonomy, and the loop starts a fresh cursor.
-    if (state.completed.includes('control-plane') && !state.reissue?.length) {
-      const answers = await (deps.credentialAnswers?.() ?? Promise.resolve([])).catch(() => []);
+    // An identity the plane still lists (revoked, say) is no fresh database, and is left to master autonomy's own refusal.
+    if (state.completed.includes('control-plane') && !state.reissue?.length && deps.credentialAnswers) {
+      const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
+      const answers = await deps.credentialAnswers(admin).catch(() => []);
       const refused = answers.filter(answer => answer.status === 401).map(answer => answer.identity);
-      if (refused.length) {
+      const listed = answers.filter(answer => answer.status === 401 && answer.listed).map(answer => answer.identity);
+      if (listed.length) deps.emit({ kind: 'note', text: `The control plane refused the recorded ${listed.join(', ')} credential${listed.length > 1 ? 's' : ''} (401) but still lists the identit${listed.length > 1 ? 'ies' : 'y'}: its database is not fresh (a revoked or rotated identity), so nothing is re-issued; restore it through the operator-agent API or choose another identity in .graphyard/master.json.` });
+      else if (refused.length) {
         state.reissue = refused;
         state.completed = state.completed.filter(name => !reissueSteps.includes(name));
+        // The onboarding item and the goal lived in the old database: they are filed again on the fresh one.
+        state.onboardingWork = null; state.onboardingRequest = null; state.goal = null; state.goalRequest = null;
         await writeState(deps.root, state);
         deps.emit({ kind: 'note', text: `The control plane refused the recorded ${refused.join(', ')} credential${refused.length > 1 ? 's' : ''} (401): it serves a fresh database, so this run re-issues the coordinator, operator-agent and approver credentials and starts the master loop on a fresh cursor, archiving the old one beside itself.` });
       }
@@ -966,16 +1008,14 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       await cleanCli('master-loop');
       let fresh: string | undefined;
       if (state.reissue?.length) {
-        // GY-1851: the old cursor is set aside, never deleted, and the loop restarts onto a fresh one.
-        // A loop still running the old cursor may write it again before the restart stops it: then
-        // that copy, at or past the archived cycle, is set aside too and the loop restarted once more.
-        const archiveCursor = deps.archiveCursor ?? (() => archiveRecordedCursor(deps.root));
-        const archived = await archiveCursor();
-        await run('master-loop', ['master', 'restart']);
-        if (archived && (await (deps.cursorCycle ?? (() => recordedCursorCycle(deps.root)))() ?? -1) >= archived.cycle) {
-          await archiveCursor();
-          await run('master-loop', ['master', 'restart']);
-        }
+        // GY-1851: stop, archive, start, in that order: a running loop holds the old cursor in memory
+        // and writes it again as it stops, so the cursor is set aside (never deleted) only once the
+        // loop has exited, and the loop starts again reading no cursor at all.
+        const stopped = await (deps.stopLoop ?? (() => stopRecordedLoop(deps.root)))().catch((error: any) => { throw new UpStop(`master-loop: stopping the master loop before archiving its cursor failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun ${rerun()}`, upExitCodes.failed); });
+        const archived = await archiveRecordedCursor(deps.root);
+        if (await recordedCursorExists(deps.root)) throw new UpStop(`master-loop: the master loop's cursor was written again after the loop stopped, so a loop still runs on the old database's cursor; stop it, then rerun ${rerun()}`, upExitCodes.failed);
+        if (stopped.unit) await (deps.startUnit ?? (async (unit: string) => { await (await import('./child-runner.js')).defaultChildRun('systemctl', ['--user', 'start', unit], { timeoutMs: 120_000 }); }))(stopped.unit);
+        else await run('master-loop', ['master', 'restart']);
         fresh = archived ? `the loop started a fresh cursor; the old one (cycle ${archived.cycle}) is archived at ${archived.file}` : 'the loop started a fresh cursor';
         deps.emit({ kind: 'note', text: `Re-issued the coordinator, operator-agent and approver credentials for the fresh database; ${fresh}.` });
       } else if (!(await checklist()).find(item => item.id === 'master-loop')?.done) await run('master-loop', ['master', 'restart']);
@@ -1658,8 +1698,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       });
       child.stdin.end(options.stdin ?? '');
     }),
-    credentialAnswers: async () => { const url = await serverUrl(); return url ? recordedCredentialAnswers(root, url) : []; },
-    archiveCursor: () => archiveRecordedCursor(root), cursorCycle: () => recordedCursorCycle(root),
+    credentialAnswers: async admin => { const url = await serverUrl(); return url ? recordedCredentialAnswers(root, url, fetch, admin) : []; },
     status: async () => {
       const url = await serverUrl(), token = await masterToken();
       return url && token ? planeRequest(url, token)('status') : null;
