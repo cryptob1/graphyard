@@ -32,7 +32,7 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 
 ## Reusing an App
 
-`--reuse-app SLUG` needs a locally saved key (GitHub returns it once); otherwise generate one on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it by App JWT, saves it `0600` (`imported-app-SLUG.json`, install directory), refusing a control-plane App whose webhook serves another install; `graphyard app list` names each saved App's reusable roles or why not.
+`--reuse-app SLUG` needs a saved key (GitHub returns it once); otherwise generate one on its settings page, then `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it by App JWT, saves it `0600` (`imported-app-SLUG.json`, install directory), refusing a control-plane App whose webhook serves another install; `graphyard app list` names each saved App's reusable roles or why not.
 
 Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT fast-forwarded and merged with `origin/BASE` (`sync.workflow-push`).
 
