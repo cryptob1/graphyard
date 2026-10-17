@@ -1475,9 +1475,12 @@ export class GitHub {
       // `strict` must be off: a candidate that merges cleanly merges on the base it was built on (GY-191).
       const verified = (!requireNativeReview || p.required_pull_request_reviews?.required_approving_review_count >= 1 && p.required_pull_request_reviews?.dismiss_stale_reviews && p.required_pull_request_reviews?.require_last_push_approval) && p.required_status_checks?.strict === false && !!p.enforce_admins?.enabled && !p.allow_force_pushes?.enabled && !p.allow_deletions?.enabled
         && p.required_status_checks.checks?.some((c: any) => c.context === CHECK_NAME && c.app_id === this.config.appId);
-      const classic = [...(p.required_status_checks?.checks ?? []).map((c: any) => ({ name: c?.context, appId: c?.app_id ?? null })),
-        ...(p.required_status_checks?.contexts ?? []).map((name: any) => ({ name, appId: null }))];
-      return { protected: !!verified, conversationResolution: p.required_conversation_resolution?.enabled === true, requiredChecks: mergeRequiredChecks(classic) };
+      // GitHub lists every classic required check twice: in `checks` with the app it is bound to, and
+      // by name alone in the legacy `contexts`. A context is read as unbound only when no `checks`
+      // entry names it, so the legacy echo never loosens an App binding to any source (GY-1884).
+      const bound = (p.required_status_checks?.checks ?? []).map((c: any) => ({ name: c?.context, appId: c?.app_id ?? null }));
+      const classic = [...bound, ...(p.required_status_checks?.contexts ?? []).filter((name: any) => !bound.some((check: { name: unknown }) => check.name === name)).map((name: any) => ({ name, appId: null }))];
+      return { protected: !!verified, conversationResolution: p.required_conversation_resolution?.enabled === true, requiredChecks: listedRequiredChecks(classic) };
     } catch { return { protected: false, conversationResolution: false, requiredChecks: [] }; }
   }
   /**
@@ -1490,7 +1493,7 @@ export class GitHub {
       const path = `/rules/branches/${this.config.base.split('/').map(encodeURIComponent).join('/')}`;
       const rules = shared ? await this.sharedProtectionRead(path) : await this.request(path);
       if (!Array.isArray(rules)) return [];
-      return mergeRequiredChecks(rules.filter((rule: any) => rule?.type === 'required_status_checks')
+      return listedRequiredChecks(rules.filter((rule: any) => rule?.type === 'required_status_checks')
         .flatMap((rule: any) => (rule.parameters?.required_status_checks ?? []).map((check: any) => ({ name: check?.context, appId: check?.integration_id ?? null }))));
     } catch { return []; }
   }
@@ -1740,8 +1743,12 @@ export class GitHub {
     // Review threads are never a merge blocker in Graphyard's gate: the reviewer reads them itself
     // at launch and judges them in its verdict. The observation spends its one GraphQL read on them
     // only while protection still requires conversation resolution (drift, which GitHub enforces).
-    const requiredChecks = mergeRequiredChecks([...protection.requiredChecks, ...rulesetChecks]);
-    const statuses = pr.state === 'open' && !pr.merged ? await this.requiredStatuses(pr.head.sha, requiredChecks, work.policy.checks, checks, ciAppIdsOf(work)) : [];
+    // The record names every check GitHub requires, Graphyard's own App-bound two included, each with
+    // its app (GY-1884); `protectionChecks` keeps the entries as GitHub listed them, so master status
+    // can name any disagreement between the two. The gates never wait on Graphyard's own checks.
+    const protectionChecks = [...protection.requiredChecks, ...rulesetChecks];
+    const requiredChecks = recordedRequiredChecks(protectionChecks);
+    const statuses = pr.state === 'open' && !pr.merged ? await this.requiredStatuses(pr.head.sha, mergeRequiredChecks(requiredChecks), work.policy.checks, checks, ciAppIdsOf(work)) : [];
     const conversations = { required: protection.conversationResolution, unresolved: protection.conversationResolution && !pr.merged && pr.state === 'open' ? await this.unresolvedThreads(pr.number) : [] };
     const latest = new Map<string, any>();
     for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
@@ -1811,7 +1818,7 @@ export class GitHub {
       ...(pr.mergeable === null && pr.state === 'open' && !pr.merged ? { mergeabilityUnknown: true } : {}),
       // GitHub's merge state (clean, unstable, blocked, behind, dirty, unknown...), read from the same response: a base move wakes every item it is not clean or unstable for (GY-1231).
       ...(typeof pr.mergeable_state === 'string' ? { mergeableState: pr.mergeable_state } : {}),
-      protected: protection.protected, requiredChecks, conversations, files: files.map(f => f.filename), at: startedAt,
+      protected: protection.protected, requiredChecks, protectionChecks, conversations, files: files.map(f => f.filename), at: startedAt,
       baseTip: branch.tip, baseTree: branch.tree, baseTipContained: contained, baseTipAncestor: contained, scopeFiles,
       ...(landing ? { landing } : {}), ...(revertedDelivery ? { revertedDelivery } : {}),
       ...(baseBreak ? { baseBreak } : {}),
@@ -2564,10 +2571,19 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
     this.cacheLandableBody(body.head_sha, body);
   }
-  async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}) {
+  /**
+   * Publish the `Graphyard / merge` verdict on the candidate's head and answer the run that now
+   * stands there: `{ id, conclusion }` of the App's latest run of the check. The newest of the App's
+   * runs is updated in place; when GitHub's answer to that update still carries another conclusion
+   * (a completed run it would not change), a new run is created with the verdict, so the latest
+   * run at the head is the verdict either way (GY-1884). The merge gate requests a merge only when
+   * the answer is success.
+   */
+  async publish(work: Work, forcedReason?: string, beforeWrite: () => Promise<void> = async () => {}): Promise<{ id: number | null; conclusion: string | null } | undefined> {
     if (!work.candidate) return;
     const reasons = [...work.gates.flatMap(g => g.reasons), ...work.violations, ...(forcedReason ? [forcedReason] : [])];
-    const existing = (await this.pages(`/commits/${work.candidate.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(c => c.app.id === this.config.appId);
+    const existing = (await this.pages(`/commits/${work.candidate.sha}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=all`, 'check_runs'))
+      .filter(c => c?.app?.id === this.config.appId).sort((a, b) => Number(b.id) - Number(a.id))[0];
     const body = { name: CHECK_NAME, head_sha: work.candidate.sha, status: 'completed', conclusion: reasons.length ? 'failure' : 'success', external_id: work.id,
       output: { title: reasons.length ? 'REFUSED' : 'All required gates passed', summary: (reasons.length ? reasons.map(r => `- ${r}`).join('\n') : `Candidate ${work.candidate.sha}; base ${work.candidate.baseSha}; policy ${work.policyRevision}`).slice(0, 60000) } };
     const pr = await this.request(`/pulls/${work.candidate.pr}`);
@@ -2575,9 +2591,33 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
     if (!reasons.length) requireCurrent(pr.state === 'open' && !pr.draft && pr.base.ref === this.config.base, 'PR is closed, draft, or retargeted; refusing success');
     await beforeWrite();
     if (existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id
-      && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return;
-    await this.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
+      && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary) return { id: existing.id ?? null, conclusion: existing.conclusion };
+    const answered = (run: any, fallback: number | null) => ({ id: typeof run?.id === 'number' ? run.id : fallback, conclusion: typeof run?.conclusion === 'string' ? run.conclusion : body.conclusion });
+    if (existing) {
+      const updated = answered(await this.request(`/check-runs/${existing.id}`, 'PATCH', body), existing.id ?? null);
+      if (updated.conclusion === body.conclusion) return updated;
+    }
+    return answered(await this.request('/check-runs', 'POST', body), null);
   }
+}
+/** Required-check entries as GitHub listed them, each a named check with its app id or null; malformed entries are dropped. */
+export function listedRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
+  return checks.flatMap(check => typeof check.name === 'string' && check.name ? [{ name: check.name, appId: Number.isSafeInteger(check.appId) ? check.appId as number : null }] : []);
+}
+/**
+ * Every check the base branch requires, by name, deduplicated, Graphyard's own App-bound
+ * `Graphyard / merge` and `graphyard/landable` included (GY-1884): what the observation records
+ * as the protection GitHub enforces.
+ */
+export function recordedRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
+  const merged = new Map<string, { name: string; appId: number | null }>();
+  for (const check of listedRequiredChecks(checks)) {
+    const appId = check.appId;
+    const known = merged.get(check.name);
+    // A check some rule binds to no app is satisfied by any source, so the looser binding stands.
+    merged.set(check.name, { name: check.name, appId: known && (known.appId === null || known.appId !== appId) ? null : appId });
+  }
+  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 /**
  * Required checks by name, deduplicated, without Graphyard's own merge check (GY-430) or its
@@ -2585,15 +2625,7 @@ Use \`verdict:changes-requested\` with the findings, or \`verdict:usage-limit\` 
  * refuse every candidate forever once protection lists it.
  */
 export function mergeRequiredChecks(checks: { name: unknown; appId: unknown }[]): { name: string; appId: number | null }[] {
-  const merged = new Map<string, { name: string; appId: number | null }>();
-  for (const check of checks) {
-    if (typeof check.name !== 'string' || !check.name || check.name === CHECK_NAME || check.name === LANDABLE_CHECK) continue;
-    const appId = Number.isSafeInteger(check.appId) ? check.appId as number : null;
-    const known = merged.get(check.name);
-    // A check some rule binds to no app is satisfied by any source, so the looser binding stands.
-    merged.set(check.name, { name: check.name, appId: known && (known.appId === null || known.appId !== appId) ? null : appId });
-  }
-  return [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+  return recordedRequiredChecks(checks).filter(check => check.name !== CHECK_NAME && check.name !== LANDABLE_CHECK);
 }
 
 /**
@@ -2838,13 +2870,17 @@ export async function gateMerge(github: MergeGateClient, work: Work, request: Me
   demand(work.candidate, `${work.key} has no candidate to gate`);
   // Failure is written before a dequeue, success before an enqueue: GitHub never holds a head for
   // merging whose published verdict says otherwise.
-  await github.publish(work, undefined, beforeWrite);
+  const published = await github.publish(work, undefined, beforeWrite);
   // The queue step never fails the observation: a withdrawn head already carries a failing required
   // check, which GitHub will not merge, and the next observation retries the queue step.
   let state: GitHubMergeQueueState;
   try { state = await github.mergeQueueState(work.candidate.pr); }
   catch (error) { return { action: { kind: 'hold', reason: `GitHub's merge queue could not be read for ${work.key}: ${error instanceof Error ? error.message : String(error)}` }, state: null }; }
-  const action = mergeQueueAction(work, state, request);
+  // The merge is requested only once the latest `Graphyard / merge` run at the head reads success
+  // (GY-1884): a head whose standing run still reads REFUSED is held, never handed to GitHub.
+  const decided = mergeQueueAction(work, state, request);
+  const action: MergeQueueAction = decided.kind === 'enqueue' && published && published.conclusion !== 'success'
+    ? { kind: 'hold', reason: `${work.key}: the latest ${CHECK_NAME} run at ${work.candidate.sha.slice(0, 12)} reads ${published.conclusion ?? 'no conclusion'}, not success; the merge is not requested until it does` } : decided;
   // The current request's time goes on the record, so a merge left pending on a mergeable head is named (GY-344).
   state = { ...state, requestedAt: enqueueRequestCurrent(work, request) ? request!.at : null };
   try {
