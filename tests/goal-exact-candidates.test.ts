@@ -56,7 +56,7 @@ before(async () => {
   const created = await call('POST', 'operator-agents', 'operator', { id: scopedAgent.id, displayName: scopedAgent.id, capabilities: ['intent:create'], scope: { repositories: ['owner/fixture'], workItems: ['GY-1'] }, token: scopedAgent.token, reason: 'A scoped agent' });
   assert.equal(created.status, 200, JSON.stringify(created.body));
 });
-after(async () => { if (http) await stop().catch(() => {}); if (database) await database.stop(); });
+after(async () => { if (http) await new Promise<void>(done => http.close(() => done())); if (store) await store.close().catch(() => {}); if (database) await database.stop(); });
 
 let keys = 0;
 const call = async (method: string, path: string, as: keyof typeof tokens | 'scoped', body?: unknown, key: string | null = `key-${++keys}`) => {

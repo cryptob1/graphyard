@@ -90,4 +90,4 @@ An observation never yields Production verified: smoke-required work needs an `e
 
 `master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` alerts.
 
-`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation never dispatches: verification reads it; pass closes `delivered-observation`, fail escalates; no-smoke backfill five per pass.
+`POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`). A loop-owned post-deploy observation item never dispatches: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates; no-smoke deliveries backfill five per pass.

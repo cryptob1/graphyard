@@ -44,7 +44,7 @@ const days: (number | 'crash' | 'restart')[][] = [
 test('unit:soak-exact-candidates — two simulated days of the real promotion cycle cut exact candidates of at most five through the plane, tag each rc at its source, wait out partial batches, resume a crashed cut, survive a plane restart and record one verdict a candidate', { timeout: 300_000 }, async () => {
   const root = await realpath(await temporaryDirectory('soak-exact-candidates'));
   const pgPort = await freePort();
-  const database = new EmbeddedPostgres({ databaseDir: join(root, 'pg'), user: 'graphyard', password: 'testing-only', port: pgPort, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-exact-candidates-pg'), user: 'graphyard', password: 'testing-only', port: pgPort, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('soak_exact');
   let store: Store, http: ReturnType<typeof server>, url = '';
   const startPlane = async () => {
