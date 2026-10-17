@@ -153,6 +153,14 @@ export function loadRepositoryPolicy(env?: Record<string, string | undefined>, r
   return { policy: resolveRepositoryPolicy(policySections(config as Record<string, unknown>)), source: 'graphyard.json' };
 }
 
+/**
+ * The policy a checkout itself declares, read from its own graphyard.json and never from the
+ * process's GRAPHYARD_REPOSITORY_POLICY: a release candidate's checkout at its exact SHA is the
+ * policy that candidate is validated under, though the plane validating it was installed with
+ * another (an older declaration, or Graphyard's own).
+ */
+export const checkoutRepositoryPolicy = (root: string): RepositoryPolicy => loadRepositoryPolicy({}, root).policy;
+
 /** The nearest directory from `start` up holding `.git` (a directory, or a worktree's file); `start` when none does. */
 function gitToplevel(fs: any, path: any, start: string): string {
   for (let directory = start; ; directory = path.dirname(directory)) {

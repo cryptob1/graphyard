@@ -142,11 +142,12 @@ export function holdItem(record: HoldRecord, candidate: ReleaseCandidate) {
  * candidate's follow-up still names it, as it names every failure no case explains.
  */
 export const releaseHolds = (git: Git, options: { contract: ReleaseContract | null; report: () => Promise<E2eReport | null>; push: boolean; now?: () => Date;
-  /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending outcome holds; the one in force by default. */
+  /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending outcome holds: by default the rule the report was judged under (the candidate checkout's own), else the one in force. */
   policy?: RepositoryPolicy;
   file?: (item: ReturnType<typeof holdItem>, requestId: string) => Promise<string> }) => async (candidate: ReleaseCandidate, record: UatRecord): Promise<HoldOutcome> => {
-  const policy = options.policy ?? repositoryPolicy();
-  const e2e = e2eRecord(await options.report(), candidate, options.contract, policy);
+  const report = await options.report(), inForce = repositoryPolicy();
+  const policy = options.policy ?? (report?.pendingOutcomes ? { ...inForce, e2e: { ...inForce.e2e, pendingOutcomes: report.pendingOutcomes } } : inForce);
+  const e2e = e2eRecord(report, candidate, options.contract, policy);
   const planned = options.contract ? assessHolds(options.contract, candidate, { deployedSha: record.deployedSha, e2e }, foldHolds(readRecords<HoldRecord>(git, holdTagPrefix)), (options.now ?? (() => new Date()))().toISOString(), policy) : [];
   let filingError: string | null = null;
   for (const entry of planned.filter(entry => entry.kind === 'open' && options.file)) {

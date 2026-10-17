@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { candidateTagPrefix, contractPendingCases, gitIn, readRecords, servedRevision, type ReleaseCandidate } from '../release-candidate.js';
 import { contractFile, describeStep, loadCases, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
-import { loadRepositoryPolicy, repositoryPolicy, type RepositoryPolicy } from '../model/repository-policy.js';
+import { checkoutRepositoryPolicy, repositoryPolicy, type RepositoryPolicy } from '../model/repository-policy.js';
 import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type ProcessRunner, type StepRecord } from './steps.js';
 
 /**
@@ -72,6 +72,8 @@ export interface CaseOutcome {
 export interface E2eReport {
   runId: string; url: string; environment: string; sha: string | null; startedAt: string; finishedAt: string;
   passed: number; failed: number; flaky?: number; unrun?: number; cases: CaseOutcome[];
+  /** GY-1843: the `e2e.pendingOutcomes` rule the run was judged under, when its caller named the repository's policy: the release holds judge its pending cases by the same rule. */
+  pendingOutcomes?: RepositoryPolicy['e2e']['pendingOutcomes'];
 }
 export interface RunOptions {
   url: string; token: string; environment?: string; runId?: string;
@@ -302,7 +304,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   }
   const tally = (verdict: CaseVerdict) => outcomes.filter(outcome => outcome.verdict === verdict).length;
   return { runId, url: options.url, environment: options.environment ?? new URL(options.url).host, sha, startedAt, finishedAt: new Date(now()).toISOString(),
-    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes };
+    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, ...(options.policy ? { pendingOutcomes: options.policy.e2e.pendingOutcomes } : {}) };
 }
 
 /** The cases a run treats as pending under the repository's `e2e.pendingOutcomes` (GY-1843): all of them when non-blocking (GY-1802), none when blocking. */
@@ -439,13 +441,13 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv;
   /** The checkout's release contract: a candidate outcome still pending on the record it was cut with (GY-1802) runs its failing cases as pending, never blocking. */
   contract?: ReleaseContract | null;
-  /** The repository's policy (GY-1843): the checkout's graphyard.json by default, whose `e2e.pendingOutcomes` decides whether a pending case blocks. */
+  /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending case blocks: by default the graphyard.json of `root`, the candidate's own checkout, never the plane's installed GRAPHYARD_REPOSITORY_POLICY; with no root, the policy in force. */
   policy?: RepositoryPolicy } = {}) => ({
   name: 'e2e',
   run: async (url: string, candidate: { id: string; pendingOutcomes?: readonly string[] } | null) => {
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
-    const policy = options.policy ?? loadRepositoryPolicy(undefined, options.root).policy;
+    const policy = options.policy ?? (options.root ? checkoutRepositoryPolicy(options.root) : repositoryPolicy());
     const pendingCases = pendingUnder(contractPendingCases(options.contract, candidate?.pendingOutcomes), policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
       root: options.root, retries: releaseRetries, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });

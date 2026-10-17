@@ -306,3 +306,38 @@ test('unit:repo-risk-policy — the item page shows the risk the server\'s polic
   const statusRoute = await readFile(new URL('../src/server/routes/status.ts', import.meta.url), 'utf8');
   assert.match(statusRoute, /repositoryPolicy: repositoryPolicy\(\)/, '/api/status serves the policy in force');
 });
+
+test('unit:repo-review-and-pending-policy — a candidate validates under its own checkout\'s e2e.pendingOutcomes, not the plane\'s installed GRAPHYARD_REPOSITORY_POLICY: a failing pending case fails the suite and opens a hold', async () => {
+  const { repositoryPolicy, repositoryPolicyVariable, setRepositoryPolicy } = await policyModule();
+  const { projectCaseSuite } = await import('../src/release-project.js');
+  const { releaseHolds } = await import('../src/release-holds.js');
+  const checkout = await temporaryDirectory('candidate-policy');
+  await writeFile(join(checkout, 'graphyard.json'), `${JSON.stringify({ e2e: { pendingOutcomes: 'blocking' } })}\n`);
+  await mkdir(join(checkout, 'e2e', 'cases'), { recursive: true });
+  await writeFile(join(checkout, 'e2e', 'cases', 'pending-case.json'), JSON.stringify({ id: 'pending-case', title: 'A pending outcome', tags: ['api'], target: 'uat', required: true,
+    steps: [{ kind: 'http', name: 'read /level', method: 'GET', path: '/level', status: 200, expect: [] }] }));
+  const fetcher = (async (input: string | URL) => new URL(String(input)).pathname === '/healthz'
+    ? new Response(JSON.stringify({ ok: true, commit: H }), { headers: { 'content-type': 'application/json' } }) : new Response('not yet', { status: 503 })) as typeof fetch;
+  const candidate = { id: '20261008T120000Z', sha: H, pendingOutcomes: ['outcome-a'] } as unknown as Parameters<ReturnType<typeof releaseHolds>>[0];
+  const contract = { outcomes: [{ id: 'outcome-a', title: 'Outcome A', cases: ['pending-case'], criteria: [] }] } as unknown as Parameters<typeof releaseHolds>[1]['contract'];
+  // The plane was installed with a policy that keeps pending outcomes non-blocking, as the installer's variable carries it.
+  const saved = process.env[repositoryPolicyVariable];
+  process.env[repositoryPolicyVariable] = JSON.stringify({ e2e: { pendingOutcomes: 'non-blocking' } });
+  setRepositoryPolicy(null);
+  try {
+    assert.equal(repositoryPolicy().e2e.pendingOutcomes, 'non-blocking', 'the process serves the installed variable');
+    {
+      let report: E2eReport | null = null;
+      const result = await projectCaseSuite(checkout, '', { fetcher, stepTimeoutMs: 1_000, contract, report: value => { report = value; } }).run('https://uat.example.test', candidate);
+      assert.equal(result.passed, false, `the candidate's blocking rule fails the suite: ${result.detail}`);
+      assert.doesNotMatch(result.detail, /pending, not blocking/);
+      assert.equal(report!.pendingOutcomes, 'blocking', 'the report names the rule it was judged under');
+      const filed: string[] = [];
+      const outcome = await releaseHolds(() => '', { contract, push: false, now: () => new Date(at), report: async () => report, file: async item => { filed.push(item.title); return 'GY-99'; } })(candidate, { deployedSha: H } as Parameters<ReturnType<typeof releaseHolds>>[1]);
+      assert.deepEqual([outcome.e2e?.blocking, outcome.holds.map(entry => entry.kind), filed.length], [['pending-case'], ['open'], 1], 'the holds judge by the same rule');
+    }
+  } finally {
+    setRepositoryPolicy(null);
+    if (saved === undefined) delete process.env[repositoryPolicyVariable]; else process.env[repositoryPolicyVariable] = saved;
+  }
+});
