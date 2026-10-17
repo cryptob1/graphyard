@@ -5,10 +5,10 @@ Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s bui
 
 ## Release candidates
 
-Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`, `release/production` (moved only by `graphyard release`) to candidates' SHAs.
+Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`, `release/production` (moved by `graphyard release`) to candidates' SHAs.
 
 - `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N new first-parent merges (`GRAPHYARD_RC_MAX_PRS`, 10; rest queue); `.github/workflows/release-candidate.yml` cuts on loop dispatch.
-- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged candidate <4h old serves.
+- `release uat ID` deploys `uat` (own Postgres, no `GITHUB_*` credentials); refused while an unjudged <4h candidate serves.
 - `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`; runs endpoint, API (`GRAPHYARD_UAT_TOKEN`), `browser`, suites ([below](#pre-merge-gate-and-release-candidate-validation); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`; a [pending](validation.md#release-verdicts) case never blocks.
 - `release promote ID` (needs that or [accepted flakes](validation.md#release-verdicts)) deploys production as `rc-production/ID`; `release verify --url URL` confirms.
 - Failed candidates file a [hold](validation.md#release-holds) per outcome, else a `release follow-up ID` as the [filing credential](#release-filing-credential).
@@ -72,7 +72,7 @@ Every 30 s the guard reruns, then reverts merges failing checks parents passed; 
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"expectedGeneration":4,"snapshotId":"railway:snapshot:01J8Q4Z0Y3","observedAt":"2026-09-18T20:15:07Z","validFrom":"2026-09-18T20:12:31Z","validTo":"2026-09-18T20:15:07Z","services":[{"service":"api","complete":true,"deployment":{"id":"dep-a1","status":"success","deployedAt":"2026-09-18T20:12:31Z"},"instances":[{"instance":"api-1","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","measurement":"host-attestation","healthy":true}]},{"service":"web","complete":true,"deployment":{"id":"dep-w7","status":"success","deployedAt":"2026-09-18T20:12:40Z"},"instances":[{"instance":"web-1","digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","measurement":"host-attestation","healthy":true}]}]}
 ```
 
-`POST /api/delivery/observe-sha` (an observer registration's lease; idempotent) marks every contained item deployed, for production (`GRAPHYARD_PRODUCTION_ENVIRONMENT`) and all its services only:
+`POST /api/delivery/observe-sha` (observer lease; production, every service; idempotent) deploys contained items:
 
 ```json
 {"registration":{"id":"production-observer","revision":1},"epoch":4,"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z"}
@@ -84,4 +84,4 @@ Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery swee
 
 `POST /api/validation/result` binds manifest, signature, measurements; mismatches void passes as `attribution-undermined` (`GET /api/analytics/attribution`).
 
-A loop-owned post-deploy observation item is never dispatched: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates. No-smoke deliveries backfill five per pass.
+A loop-owned post-deploy observation is never dispatched: deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates. No-smoke deliveries backfill five per pass.
