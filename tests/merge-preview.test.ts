@@ -372,6 +372,37 @@ test('unit:preview-sweep-judges-unjudgeable-markers-as-ownerless — a foreign-n
   for (const gone of [foreignMarked, namespaceless]) { assert.equal(existsSync(gone), false); assert.equal(existsSync(tempOwnerMarker(gone)), false, 'the marker goes with it'); }
 });
 
+test('unit:preview-sweep-keeps-held-checkout-under-symlinked-base — an old unjudgeable marker under a symlink base stays while a live holder names only the resolved path', { timeout: 30_000 }, async () => {
+  // GY-1896 review of 919ad4662aad: heldEntries(real, all) recorded the resolved candidate, but the
+  // membership check used only join(base, name). With base a symlink, a holder whose cwd/fd is the
+  // resolved checkout never matched, so the age-and-holder fallback deleted a live preview.
+  const root = await scratch('preview-sweep-symlink'), real = join(root, 'real'), link = join(root, 'link');
+  await mkdir(real); symlinkSync(real, link);
+  const proc = await scratch('preview-sweep-symlink-proc');
+  mkdirSync(join(proc, 'self', 'ns'), { recursive: true });
+  const reader = readlinkSync('/proc/self/ns/pid');
+  symlinkSync(reader, join(proc, 'self', 'ns', 'pid'));
+  const foreign = reader === 'pid:[4026531836]' ? 'pid:[4026539999]' : 'pid:[4026531836]';
+  const name = `${previewCheckoutPrefix}held-through-realpath`;
+  const throughLink = join(link, name), resolved = join(real, name);
+  await mkdir(join(resolved, 'checkout'), { recursive: true });
+  await writeFile(join(resolved, 'checkout', 'index.html'), 'in use');
+  await writeFile(tempOwnerMarker(throughLink), `${JSON.stringify({ pid: 4_194_002, startedAt: 1, pidNamespace: foreign, at: new Date().toISOString() })}\n`);
+  const past = new Date(Date.now() - tmpReclaimMinAgeMs - 3_600_000);
+  for (const path of [resolved, join(resolved, 'checkout'), join(resolved, 'checkout', 'index.html')]) await utimes(path, past, past);
+  // A live process holds the checkout only under its resolved spelling — what /proc reports for cwd.
+  const holderPid = 4_194_100;
+  mkdirSync(join(proc, String(holderPid)), { recursive: true });
+  symlinkSync(resolved, join(proc, String(holderPid), 'cwd'));
+  assert.deepEqual(await sweepPreviewCheckouts(link, { procRoot: proc }), []);
+  assert.ok(existsSync(resolved) && existsSync(tempOwnerMarker(throughLink)), 'a live holder through the resolved path keeps the checkout');
+  // Drop the holder: the same old unjudgeable marker then goes, as an unheld ownerless directory would.
+  await rm(join(proc, String(holderPid)), { recursive: true, force: true });
+  assert.deepEqual(await sweepPreviewCheckouts(link, { procRoot: proc }), [throughLink]);
+  assert.equal(existsSync(resolved), false);
+  assert.equal(existsSync(tempOwnerMarker(throughLink)), false);
+});
+
 test('unit:preview-holds-no-coordinator-credential — the merge\'s build runs with the host basics only, its cases with a throwaway token whose requests stay on the served origin, and a cancelled preview kills its command steps\' processes', { timeout: 60_000 }, async () => {
   // The build and the cases' processes: a candidate's script sees PATH and a throwaway HOME, never the coordinator's credentials, home or runtime sockets.
   const seen = join(await scratch('preview-seen'), 'environment');

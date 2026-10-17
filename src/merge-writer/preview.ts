@@ -78,13 +78,14 @@ export async function sweepPreviewCheckouts(base: string, options: { root?: stri
   const removed: string[] = [], procRoot = options.procRoot ?? '/proc';
   // The holder census runs once, and only when an unjudgeable marker's checkout reaches its age
   // bound: a sweep that judges every marker by pid never pays for it.
-  let held: Set<string> | null = null;
+  let held: Set<string> | null = null, realBase: string | null = null;
   const holders = async () => {
     if (held) return held;
-    const all = await heldOpenPaths(procRoot), real = await realpath(base).catch(() => base);
+    const all = await heldOpenPaths(procRoot);
+    realBase = await realpath(base).catch(() => base);
     // /proc names a holder by its resolved path, so a base reached through a symlink is matched by
     // its realpath; a command line names the path as it was typed, so its own spelling matches too.
-    return held = new Set([...heldEntries(real, all), ...(real === base ? [] : heldEntries(base, all))]);
+    return held = new Set([...heldEntries(realBase, all), ...(realBase === base ? [] : heldEntries(base, all))]);
   };
   for (const name of names.filter(entry => entry.startsWith(previewCheckoutPrefix) && !entry.endsWith('.owner')).sort()) {
     const directory = join(base, name), owner = await readTempOwner(directory);
@@ -97,7 +98,10 @@ export async function sweepPreviewCheckouts(base: string, options: { root?: stri
       const info = await lstat(directory).catch(() => null);
       if (!info) continue;
       if (Date.now() - await treeLastWritten(directory, info.mtimeMs) < tmpReclaimMinAgeMs) continue;
-      if ((await holders()).has(directory)) continue;
+      // Match both spellings, as reclaimRoot does: heldEntries under realpath records the resolved
+      // candidate, while the sweep walks join(base, name) through a symlink (GY-1896 review).
+      const open = await holders();
+      if (open.has(directory) || open.has(join(realBase!, name))) continue;
     }
     await rm(directory, { recursive: true, force: true });
     await rm(tempOwnerMarker(directory), { force: true });
