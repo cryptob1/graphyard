@@ -124,12 +124,16 @@ test('unit:loop-reports-cli-checkout-commit — a loop run from a separate CLI c
   state.release = { commit: managed.commit, dirty: false };
   const d = deps(managed.root);
   const outcome = await performSelfUpgrade(master, state, d);
-  // The pass runs from the CLI checkout, finds the checkout's own commit there, and corrects the cursor durably.
-  assert.equal(outcome.outcome, 'skipped');
+  // GY-1958: the managed repository shares nothing with the CLI checkout's project, so the pass
+  // refuses the alignment and names the command upgrade. The cursor correction still runs before
+  // that gate: the pass reads the CLI checkout, finds its own commit there, corrects the cursor,
+  // records the refusal, and writes all of it durably.
+  assert.equal(outcome.outcome, 'refused');
+  assert.match(outcome.reason, /graphyard upgrade/);
   assert.equal(state.release.commit, cli.loaded);
   assert.notEqual(state.release.commit, managed.commit);
   assert.equal(state.release.dirty, false);
-  assert.equal(d.calls.persists, 1, 'the corrected release is written to the cursor');
+  assert.equal(d.calls.persists, 3, 'the corrected release and the refusal are written to the cursor');
 });
 
 test('unit:loop-reports-cli-checkout-commit — with the repository and the CLI checkout in one directory the loop keeps reporting that directory\u2019s commit, and a commit the checkout holds is never rewritten away', async () => {
@@ -166,9 +170,12 @@ test('unit:loop-reports-cli-checkout-commit — loopCodeRoot names the launcher\
 });
 
 test('unit:upgrade-acts-on-cli-checkout-only — the upgrade fetches, diffs and moves the CLI checkout and leaves the managed repository\u2019s HEAD and working tree untouched', async () => {
-  const managed = await managedRepository();
-  await writeFile(join(managed.root, 'notes.txt'), 'work in progress\n');
+  // GY-1958: the managed repository is another clone of the checkout's own origin — the fork shape
+  // the upgrade still aligns — so the pass fetches and moves the CLI checkout, and the managed
+  // repository's HEAD and working tree stand exactly as found.
   const cli = await cliCheckout();
+  const managed = await managedCloneOf(cli.origin, cli.loaded);
+  await writeFile(join(managed.root, 'notes.txt'), 'work in progress\n');
   const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'));
   const state = emptyDaemonState(master);
   state.release = { commit: cli.loaded, dirty: false };
@@ -185,7 +192,7 @@ test('unit:upgrade-acts-on-cli-checkout-only — the upgrade fetches, diffs and 
   assert.equal(standing.detached, true);
   assert.equal(standing.dirty, false);
   // The managed repository's HEAD and working tree are exactly as the pass found them.
-  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.commit);
+  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
   assert.ok(existsSync(join(managed.root, 'notes.txt')));
   assert.match(git(managed.root, 'status', '--porcelain'), /notes\.txt/);
   assert.ok(!existsSync(join(managed.root, '.graphyard', 'held-cli.json')), 'no pin or snapshot lands on the managed repository');
@@ -195,15 +202,22 @@ test('unit:upgrade-acts-on-cli-checkout-only — the upgrade fetches, diffs and 
 });
 
 test('unit:upgrade-acts-on-cli-checkout-only — the restarted loop\u2019s cursor is corrected to the CLI checkout\u2019s commit, and up\u2019s master-loop check passes against the commit the loop now reports', async () => {
-  const managed = await managedRepository();
   const cli = await cliCheckout();
   const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'));
   const state = emptyDaemonState(master);
   state.release = { commit: cli.loaded, dirty: false };
   state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: cli.tip, at, reason: null, deployed: ['GY-1'], pending: [] });
+  // GY-1958: the managed repository is another clone of the checkout's own origin — the fork shape
+  // the upgrade still aligns — so the first pass upgrades the checkout as before.
+  const managed = await managedCloneOf(cli.origin, cli.loaded);
   assert.equal((await performSelfUpgrade(master, state, deps(managed.root))).outcome, 'upgraded');
+  // The clone now stands past what the checkout has fetched: its HEAD is a commit the checkout's
+  // repository does not hold, exactly what a startup read of the wrong root writes.
+  const newer = await cli.advance(3);
+  git(managed.root, 'fetch', '-q', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main');
+  git(managed.root, 'checkout', '-q', '--detach', newer);
   // The restarted process's startup reading recorded the managed repository's HEAD again.
-  state.release = { commit: managed.commit, dirty: false };
+  state.release = { commit: newer, dirty: false };
   const again = await performSelfUpgrade(master, state, deps(managed.root));
   assert.equal(again.outcome, 'skipped');
   assert.equal(state.release.commit, cli.tip, 'the loop reports the checkout it runs, not the managed repository\u2019s HEAD');
@@ -212,7 +226,7 @@ test('unit:upgrade-acts-on-cli-checkout-only — the restarted loop\u2019s curso
   // launcher, and the cursor records loading the commit that checkout stands at.
   const reading = judgeLoopCode({
     cli: { root: cli.checkout, commit: cli.tip },
-    primary: managed.root, primaryCommit: managed.commit,
+    primary: managed.root, primaryCommit: newer,
     repository: master.repository,
     loop: { unit: 'graphyard-master-owner-managed.service', path: '/etc/systemd/user/graphyard-master-owner-managed.service', checkout: cli.checkout, launcher: cli.checkout },
     cursor: JSON.stringify({ release: { commit: state.release.commit, dirty: state.release.dirty } }),

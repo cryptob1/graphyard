@@ -2703,10 +2703,21 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const coordinatorGit = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git');
     // GY-1899: every git command the self-upgrade runs reads or moves the CLI checkout, never the managed repository.
-    codeRootDay.gitRoots.add(args[1]);
-    if (args[0] !== '-C' || args[1] !== codeRoot) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) git ${args.slice(2).join(' ')} ran in ${args[1]}, not the CLI checkout ${codeRoot}`);
+    // GY-1958: the two reads that identify which project the checkout tracks may name the managed
+    // repository — the common directory and the origin — and write, fetch and move nothing there.
+    const identification = args[0] === '-C' && args[1] === managedRoot
+      && ((args[2] === 'rev-parse' && args[3] === '--path-format=absolute' && args[4] === '--git-common-dir') || (args[2] === 'remote' && args[3] === 'get-url' && args[4] === 'origin'));
+    // GY-1958: the identification reads are the one git the self-upgrade may run beside the CLI
+    // checkout, in the managed repository; the set records every other command's root, and the
+    // violations above police the identification reads to their two exact shapes.
+    if (!identification) codeRootDay.gitRoots.add(args[1]);
+    if (args[0] !== '-C' || (args[1] !== codeRoot && !identification)) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) git ${args.slice(2).join(' ')} ran in ${args[1]}, not the CLI checkout ${codeRoot}`);
     const [op, ...operands] = args.slice(2);
     if (op === 'fetch') { upgrades.fetches++; checkout.origin = github.tip; return ''; }
+    // GY-1958: the identification reads answer as two clones of one origin do — separate common
+    // directories, one shared origin — so the checkout's project is recognized and the day aligns.
+    if (op === 'rev-parse' && operands[0] === '--path-format=absolute') return `${args[1]}/.git\n`;
+    if (op === 'remote' && operands[0] === 'get-url' && operands[1] === 'origin') return `${checkout.origin}\n`;
     if (op === 'rev-parse') return `${operands[0] === 'HEAD' ? checkout.head : checkout.origin}\n`;
     if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: ref HEAD is not a symbolic ref'), { status: 1 });
     if (op === 'status') return checkout.dirty ? ' M src/master.ts\n' : '';
