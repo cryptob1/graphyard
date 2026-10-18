@@ -55,7 +55,7 @@ No App: skip; else dispatch [small item](onboarding.md#4-prove-the-first-pr); on
 
 ## Principal roster
 
-`principal add ID --role ROLE [--grant external-runs:import|delivery:observe-sha]`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply` (planned-ID collisions refuse); writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant` ([lanes](validation.md#release-verdicts)). `delivery:observe-sha` is held alone by a dedicated principal (`principal add huck-observer --role producer --grant delivery:observe-sha`); existing principals' grants never gain/lose it. Server+CLI need GY-1912; older refuse it.
+`principal add ID --role ROLE [--grant external-runs:import|delivery:observe-sha] [--proof unit:*|…] [--token-file PATH]`/`principal remove ID`: one non-installer `install.json` entry, kept by `--apply` (planned-ID collisions refuse); writes only `GRAPHYARD_PRINCIPALS`, reads back, idempotent, under `apply.lock`; producers need `--grant`/`--proof` ([lanes](validation.md#release-verdicts)); `--proof` needs its recorded grant (`grants grant`); `--token-file` reuses a credential (recorded IDs: fingerprint-matched; not self-contained). `delivery:observe-sha`: one dedicated principal, never moved (GY-1912+).
 
 ## Self-contained host
 
