@@ -12,7 +12,6 @@ import { unhandled, type MasterSession } from './session.js';
 import { masterHarnessDrift } from './fleet.js';
 import { readSecretFromStdin } from '../context.js';
 import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.js';
-import { shadowGateSummary } from '../../daemon/cycle-shadow.js';
 import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../../child-runner.js';
 import { installDirectory } from '../../install/secrets.js';
@@ -66,26 +65,13 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
     const harness = await masterHarnessDrift(root, master);
     // GY-1519: each commit on the base branch the main watch cannot explain is one attention line, report-only.
-    type Standing = { key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed'; mergeSha: string | null; build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; conflict?: string[]; at: string; explained: boolean; cause?: string | null };
-    const shadowStatus = await masterApi('shadow-disagreements').then(
-      (body: { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }) => body ?? {},
-      () => ({} as { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }),
-    );
-    const explanations = shadowStatus.explanations ?? [];
-    const standing = shadowStatus.disagreements ?? [];
     // GY-1603: a loop holding the lock outside this install's unit, which the unit's own run is refused on.
     const refusal = await readLockRefusal(root);
     const holder = refusal && state?.lock ? unsupervisedHolderAttention({ refusal, lock: state.lock, hostId: master.hostId, unit: await supervisingUnit(root, master, { host: effects.host }).catch(() => null) }) : null;
     const added = [...(harness ? [harness] : []), ...(holder ? [holder] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch)];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
-    // `shadowGate`: outcome counts and trial times from the cursor; unexplained/explained counts from the ledger so eviction cannot hide a standing pair.
     // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
-    const shadowGate = {
-      ...shadowGateSummary(state?.shadow ?? [], explanations),
-      unexplainedDisagreements: standing.filter(entry => !entry.explained).length,
-      explainedDisagreements: standing.filter(entry => entry.explained).length,
-    };
-    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
   // GY-1658: the loop restores a dirty coordinator checkout to a named ref and restarts itself; this files the request and reports the outcome.
   if (id === 'checkout-restore') return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master')));

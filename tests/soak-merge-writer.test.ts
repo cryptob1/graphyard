@@ -146,7 +146,7 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: reads, decide: world.decide } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, mergeWriter: reads, decide: world.decide } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   const invariantNames = new Set<string>();
   let failedCycles = 0;

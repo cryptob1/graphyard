@@ -194,7 +194,7 @@ test('unit:soak-merge-preview — a simulated day on the real loop with the real
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(), decide: world.decide } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), decide: world.decide } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * cycleMs;
