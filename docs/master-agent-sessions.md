@@ -27,7 +27,7 @@ A rework worktree starts from the submission head Graphyard registered in the sh
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it; `run.masterHeartbeatMinutes` (30) sends heartbeat (`daemon.master`); undeliverable wakes rotate it (`deaf`, ≤3 straight). The watchdog's `master status` lines — no progress 60min, merges unreleased 90min — judge, never file.
+`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it; `run.masterHeartbeatMinutes` (30) sends heartbeat (`daemon.master`); undeliverable wakes rotate it (`deaf`, ≤3 straight).
 
 ### The request is the session's first message
 
