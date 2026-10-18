@@ -587,10 +587,11 @@ test('unit:ui-review-polish — step names sit over their segments, commits show
   const phone = css.slice(css.indexOf('/* Phone: the sidebar folds into a menu'));
   assert.match(phone, /\.tiles\{flex-wrap:wrap;/);
   assert.doesNotMatch(/\.tiles\{[^}]*\}/.exec(phone)![0], /overflow-x|nowrap/);
-  // Requirements stay below the first screen (the summary: where it is now) and after what is left; each criterion is one
-  // line there (GY-171 AC-1), and its full text is collapsed behind a closed <details>.
+  // Requirements stay below the first screen (the summary: where it is now) and after what is left, folded with the
+  // description under a closed Details (GY-2011); each criterion is one line there (GY-171 AC-1), and its full text is
+  // collapsed behind a closed <details>.
   const item = itemPage('GY-16');
-  assert.match(item, /<section class="panel requirements" aria-label="Requirements"><h2>Requirements <small>3 · 2 of 3 proofs passed<\/small><\/h2>/);
+  assert.match(item, /<details class="panel item-details-fold" aria-label="Details"><summary>Details<\/summary><p class="item-description">[^<]*<\/p><section class="requirements" aria-label="Requirements"><h2>Requirements <small>3 · 2 of 3 proofs passed<\/small><\/h2>/);
   assert.ok(item.indexOf('aria-label="Where it is now"') < item.indexOf('aria-label="What is left"') && item.indexOf('aria-label="What is left"') < item.indexOf('aria-label="Requirements"'));
   const summary = visibleWords(item.slice(0, item.indexOf('aria-label="What is left"'))).join(' ');
   for (const ac of find('GY-16').criteria) assert.ok(!summary.split(' ').includes(ac.id), `${ac.id} is below the first screen`);

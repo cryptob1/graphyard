@@ -4,6 +4,7 @@ import { riskOf } from '../model/risk-class.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { criterionProofs, failureIsBase, mergeOne, trialFailureReason, trialFlaked, type MergeOutcome, type MergePorts } from './executor.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
+import { TrialTimeoutError } from './trial.js';
 
 /** How many queued heads one batch merges (GY-2088): one trial and one push for all of them. */
 export const defaultMergeBatch = 4;
@@ -28,7 +29,7 @@ const alone = async (ports: MergePorts, items: readonly Work[]) => {
  * with every head's proofs) and previewed; when it passes, every head is recorded intent and trial,
  * the tip is pushed once with a lease on the tip it was tested on, and every head is recorded pushed
  * and reconciled at its own merge commit. A failing trial or preview, a hold that arrives during the
- * trial or a rejected push trials the heads one at a time with `mergeOne`, so only a failing head is
+ * trial, a trial timeout or a rejected push trials the heads one at a time with `mergeOne`, so only a failing head is
  * refused. A single head is `mergeOne`'s alone.
  */
 export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Promise<BatchResult[]> {
@@ -54,7 +55,9 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
   const works = batch.map(entry => entry.work);
   if (batch.length < 2) return [...results, ...await alone(ports, works)];
   try {
-    const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) });
+    // A batch trial that times out is trialled one head at a time, so a timeout counts only on the head it is its own (GY-2079).
+    const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
+    if (!run) return [...results, ...await alone(ports, works)];
     let failed = failureIsBase(run) || !!trialFailureReason({ run }), preview: PreviewVerdict | null = null;
     // A preview that could not run is no pass: each head is then previewed alone, as `mergeOne` previews it.
     if (!failed && ports.preview) preview = await ports.preview(tip, [...files], works[0]!).catch(() => { failed = true; return null; });
