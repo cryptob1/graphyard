@@ -75,7 +75,7 @@ export const faultCatalogue = {
   'proof': ['proof-gap', 'timing-failure', 'nonexercising-proof', 'fix-item', 'escalation:evidence-policy-conflict', 'action:proof'],
   'capacity': ['reviewer-exhausted', 'role-capacity', 'concurrency-starved', 'fleet-capacity', 'action:failover', 'action:capacity'],
   'resources': ['disk-pressure', 'memory-pressure', 'resource-bound', 'docs-headroom', 'ledger-refusal', 'action:reclaim'],
-  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'stalled-step'],
+  'loop': ['loop-liveness', 'loop-cost', 'loop-failures', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped', 'stalled-step'],
   'human-decision': ['human-request', 'sudo', 'action:human'],
   'stalled-gate': ['gate', 'blocker', 'stalled-item', 'stalled-action', 'actorless', 'unsubmitted-attempt', 'action:blocker'],
   'unclassified': ['unclassified', 'action:fault', 'action:diagnosis'], // GY-1338: these name a step, not a cause
@@ -157,16 +157,17 @@ export function attentionKind(item: { subject: string; text: string; kind?: stri
   if (item.subject === 'installation' && item.human) return 'sudo';
   return signatures.find(([, match]) => match(item.subject, item.text))?.[0] ?? 'unclassified';
 }
-/** Every attention item with its kind and class set. */
-export function classifyAttention<T extends { subject: string; text: string; kind?: string | null; human?: boolean }>(items: T[]): (T & Classified)[] {
-  return items.map(item => ({ ...item, ...classified(attentionKind(item)) }));
+/** Every attention item with its kind and class set; a faultless line (the GY-1980 watchdog) stays as built, in no class or group. */
+export function classifyAttention<T extends { subject: string; text: string; kind?: string | null; human?: boolean; faultless?: true }>(items: T[]): (T & Classified)[] {
+  return items.map(item => item.faultless ? item as T & Classified : { ...item, ...classified(attentionKind(item)) });
 }
 
 /** Open problems grouped by class with a count, largest first; each group names its subjects. */
 export interface FaultGroup { faultClass: FaultClass; count: number; meaning: string; kinds: Partial<Record<FaultKind, number>>; subjects: string[] }
-export function groupFaults(items: readonly { subject: string; kind: FaultKind; faultClass: FaultClass }[]): FaultGroup[] {
+export function groupFaults(items: readonly { subject: string; kind: FaultKind; faultClass: FaultClass; faultless?: true }[]): FaultGroup[] {
   const groups = new Map<FaultClass, FaultGroup>();
   for (const item of items) {
+    if (item.faultless) continue;
     const group = groups.get(item.faultClass) ?? { faultClass: item.faultClass, count: 0, meaning: faultClassMeaning[item.faultClass], kinds: {}, subjects: [] };
     group.count += 1; group.kinds[item.kind] = (group.kinds[item.kind] ?? 0) + 1;
     if (!group.subjects.includes(item.subject)) group.subjects.push(item.subject);

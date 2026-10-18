@@ -2956,7 +2956,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       /** The cycle ran: the loop's wait is the one `runDaemon` takes after it. */
       ran(result: Awaited<ReturnType<typeof runCycle>>) {
         // GY-1622: as runDaemon, a docs-sync hold left standing ends the wait at its bound.
-        const held = holdBoundWait(state, cycleDelay(config.run.intervalSeconds * 1000, result.silence), clock.now());
+        const held = holdBoundWait(state, cycleDelay(config.run.intervalSeconds * 1000, result.actionable.length), clock.now());
         day.waitMs = held.wait; if (held.bound !== null) day.holdWakes.push({ elapsed: day.lastCycle, bound: held.bound, waitMs: held.wait });
       },
     };

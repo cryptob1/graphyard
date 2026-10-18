@@ -1110,7 +1110,7 @@ test('integration:recurring-resources-idle-cadence-files-nothing — idle/action
   let completedAt = Date.parse('2026-10-05T10:00:00.000Z'), cycle = 12494, priorPastLine = 0;
   const opened: string[] = [];
   for (const [index, count] of actionable.entries()) {
-    const readAt = completedAt + cycleDelay(livenessIntervalMs, { actionable: count }) + 1_500;
+    const readAt = completedAt + cycleDelay(livenessIntervalMs, count) + 1_500;
     const loop = loopLiveness({ lock: livenessLock, cycle, lastCycleAt: iso(completedAt) }, readAt, livenessIntervalMs);
     assert.equal(loop.state, 'running');
     if (loop.lagMs! > loop.stalledAfterMs / 2) priorPastLine += 1;

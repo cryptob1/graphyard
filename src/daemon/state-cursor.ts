@@ -188,7 +188,6 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
   for (const clock of Object.values(state.clocks)) clock.key = cut(clock.key, 40);
   for (const sample of state.latency) sample.work = cut(sample.work, 40);
-  for (const subject of Object.values(state.silence.subjects)) Object.assign(subject, { work: cut(subject.work, 40), kind: cut(subject.kind, 40), detail: cut(subject.detail, 500) });
   for (const entry of state.scope) entry.work = cut(entry.work, 200);
   for (const orphan of Object.values(state.orphans)) Object.assign(orphan, { owner: cut(orphan.owner, 200), unit: cut(orphan.unit, 200) });
   for (const watch of Object.values(state.approvals)) {

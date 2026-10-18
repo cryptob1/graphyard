@@ -1,8 +1,9 @@
 import { test } from 'node:test';
+import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { dependencyMap, listTestFiles, mergeDurations, readDurations, selectAffected, selectForRun, shardFiles, shardImbalance } from '../scripts/ci-tests.mjs';
+import { baselineSentinel, dependencyMap, listTestFiles, mergeDurations, readDurations, selectAffected, selectForRun, shardFiles, shardImbalance } from '../scripts/ci-tests.mjs';
 import { nestedFirst, nestedPortGap, nodeTestArgs, runTests } from './helpers/run-tests.js';
 import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -65,7 +66,7 @@ test('unit:ci-sharded — the required test check aggregates a matrix of eight d
 
   // A shard's measured durations refresh the baseline, and the rest of the record is kept.
   const merged = mergeDurations({ schema: 1, files: { 'tests/a.test.ts': 5, 'tests/gone.test.ts': 9 } }, ['{"file":"tests/b.test.ts","durationMs":1234.4,"passed":true}\n'], ['tests/a.test.ts', 'tests/b.test.ts']);
-  assert.deepEqual(merged, { schema: 1, files: { 'tests/a.test.ts': 5, 'tests/b.test.ts': 1234 } });
+  assert.deepEqual(merged, { schema: 1, files: { 'tests/a.test.ts': 5, 'tests/b.test.ts': 1234, [baselineSentinel]: 0 } });
 });
 
 async function fixture(files: Record<string, string>) {
@@ -136,4 +137,24 @@ test('a test run started inside another test run reserves its ports above the pa
   const run = await runTests({ cwd: project, args: ['tests/port.test.ts'], stdio: 'pipe', ports: { span: 20 } });
   assert.equal(run.code, 0, run.stdout + run.stderr);
   assert.ok(run.base >= parent + nestedPortGap, `nested window ${run.base} lies above the parent's ${parent} and its offsets`);
+});
+
+test('unit:timing-baseline-merges — two changes appending timing lines at the same spot merge into valid JSON with no conflict, and the sentinel stays last', async () => {
+  const written = mergeDurations({ files: { 'tests/a.test.ts': 1 } }, ['{"file":"tests/b.test.ts","durationMs":2}'], ['tests/a.test.ts', 'tests/b.test.ts']);
+  assert.equal(Object.keys(written.files).at(-1), baselineSentinel, 'the writer keeps the sentinel last');
+  assert.equal(readDurations()[baselineSentinel], undefined, 'readers never see the sentinel');
+  const attributes = await readFile(new URL('../.gitattributes', import.meta.url), 'utf8');
+  assert.match(attributes, /^tests\/helpers\/timing-baseline\.json merge=union$/m);
+  const directory = await temporaryDirectory('baseline-union');
+  const git = (...args: string[]) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim();
+  git('init', '-q', '-b', 'main'); git('config', 'user.email', 't@t'); git('config', 'user.name', 't');
+  const baseline = (extra: Record<string, number>) => `${JSON.stringify({ files: { 'tests/a.test.ts': 1, ...extra, [baselineSentinel]: 0 } }, null, 2)}\n`;
+  const target = join(directory, 'tests/helpers/timing-baseline.json');
+  await mkdir(dirname(target), { recursive: true }); await writeFile(join(directory, '.gitattributes'), attributes); await writeFile(target, baseline({}));
+  git('add', '-A'); git('commit', '-qm', 'base'); git('checkout', '-qb', 'x');
+  await writeFile(target, baseline({ 'tests/x.test.ts': 5 })); git('commit', '-qam', 'x'); git('checkout', '-q', 'main');
+  await writeFile(target, baseline({ 'tests/y.test.ts': 7 })); git('commit', '-qam', 'y');
+  const tree = git('merge-tree', '--write-tree', 'main', 'x').split('\n')[0];
+  const merged = JSON.parse(git('cat-file', '-p', `${tree}:tests/helpers/timing-baseline.json`)).files;
+  assert.deepEqual([merged['tests/x.test.ts'], merged['tests/y.test.ts']], [5, 7], 'both appended lines survive');
 });

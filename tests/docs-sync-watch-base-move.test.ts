@@ -207,7 +207,6 @@ test('integration:held-conflict-no-decision-subject — through the loop\'s cycl
   assert.ok(wait, 'the hold is recorded as the item\'s wait');
   assert.equal(wait.attempts, 1, 'once: the wait is stable across cycles');
   for (const part of [run.record.agents[0], reviewed.slice(0, 12), tip.slice(0, 12), new Date(clock + docsSyncHoldMs).toISOString()]) assert.ok(wait.detail.includes(part), `the wait names ${part}: ${wait.detail}`);
-  assert.ok(!Object.values(run.state.silence.subjects).some(subject => subject.detail.includes('needs a rework decision requested and approved')), 'no decision silence subject while the hold stands');
 });
 
 test('unit:conflict-route-reread-on-base-move — a moved base is classified again for the new head-and-base pair: still docs-only keeps the hold, anything else ends it', async () => {
@@ -313,5 +312,4 @@ test('integration:docs-sync-stall-named-attention — a hold past half its bound
   assert.ok(attention && attention.kind === 'escalation' && attention.detail.includes(name), `an attention names ${name}`);
   assert.equal(attention.attempts, 1, 'raised once');
   assert.deepEqual(run.decided, []);
-  assert.ok(!Object.values(run.state.silence.subjects).some(subject => subject.work === 'GY-42' && subject.kind === 'decision'), 'no decision silence subject while the hold is inside its bound');
 });
