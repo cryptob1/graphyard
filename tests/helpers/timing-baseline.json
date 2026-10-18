@@ -939,7 +939,7 @@
     "tests/upgrade-slot-restart.test.ts": 1800,
     "tests/upgrade-external-install.test.ts": 2000,
     "tests/upgrade-from-stable.test.ts": 500,
-    "tests/upgrade-stamped-health.test.ts": 500,
+    "tests/upgrade-stamped-health.test.ts": 6000,
     "tests/user-manager-faults.test.ts": 9309,
     "tests/validation.test.ts": 34631,
     "tests/vanished-reviewer-slot.test.ts": 1500,
