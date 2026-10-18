@@ -210,11 +210,11 @@ test('unit:planner-waits-for-acceptance — the planner never plans a goal whose
 
   const runs: string[] = [];
   let goals: Goal[] = [recorded, drafted, accepted];
-  const item = { ref: 'play', title: 'Start the game', description: 'The page starts the game', outcomes: ['play'], cases: ['play'],
+  const item = { ref: 'play', title: 'Start the game', plain: 'Players can start the game.', description: 'The page starts the game', outcomes: ['play'], cases: ['play'],
     criteria: [{ id: 'AC-1', text: 'The game starts', proofs: ['unit:game-starts'] }], plannedFiles: ['src/game.ts'], dependsOn: [] };
   const planner: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: fixture, goals: async () => goals,
-    runner: async (_role, attempt) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => ({ goal: 'GOAL-9', note: 'A static page.', items: [item] }), runs) }),
+    runner: async (_role, attempt) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => ({ goal: 'GOAL-9', summary: 'Players can play. A static page starts the game. One item ships it.', note: 'A static page.', items: [item] }), runs) }),
     plan: async goal => goal, invalid: async goal => goal, judge: async goal => goal, release: async goal => goal, deliver: async goal => goal,
   };
   const config = masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
@@ -227,7 +227,7 @@ test('unit:planner-waits-for-acceptance — the planner never plans a goal whose
   await tick();
   assert.deepEqual(runs, ['planner'], 'planned once its acceptance change merged');
   // Every planned item names the outcome ids it serves: an item serving none is no plan.
-  assert.throws(() => planPayloadSchema.parse({ goal: 'GOAL-9', note: 'A static page.', items: [{ ...item, outcomes: [] }] }));
+  assert.throws(() => planPayloadSchema.parse({ goal: 'GOAL-9', summary: 'Players can play. A static page starts the game. One item ships it.', note: 'A static page.', items: [{ ...item, outcomes: [] }] }));
   const { outcomes: _dropped, ...unnamed } = item;
-  assert.throws(() => planPayloadSchema.parse({ goal: 'GOAL-9', note: 'A static page.', items: [unnamed] }));
+  assert.throws(() => planPayloadSchema.parse({ goal: 'GOAL-9', summary: 'Players can play. A static page starts the game. One item ships it.', note: 'A static page.', items: [unnamed] }));
 });

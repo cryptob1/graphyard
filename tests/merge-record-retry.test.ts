@@ -77,7 +77,7 @@ function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    shadow: null, mergeWriter: reads,
+    mergeWriter: reads,
     decide: async (item: Work, kind: string) => { decisions.push({ kind, head: item.candidate?.sha }); reworked = true; return { id: `decision-${decisions.length}` }; },
   } as unknown as DaemonEffects;
   return { effects, sent, decisions, ledger: () => ledger, pushes: () => pushes };

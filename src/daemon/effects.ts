@@ -62,7 +62,6 @@ import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effe
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
 import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
-import { shadowReads, shadowVerdictBody, shadowVerdictKey, type ShadowReads } from './cycle-shadow.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import { localReleasePorts } from './release-ports.js';
 import { revertRecordKey } from '../release-revert.js';
@@ -160,8 +159,6 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   promotion?: PromotionReads | null;
   /** The main watch's reads (GY-1519, main-watch.ts): the checkout's history and the control plane's acknowledgements; absent, the watch does not run. */
   mainWatch?: MainWatchReads | null;
-  /** The shadow merge gate's reads (GY-1522, cycle-shadow.ts): the coordinator checkout's trial merge, build and tests, and the verdict post; absent, the gate does not run. */
-  shadow?: ShadowReads | null;
   /** The control-plane merge executor's reads (GY-1524, cycle-merge-writer.ts): git in the coordinator checkout, the leased deploy-key push, the merge-record post and the recorded merger; absent, the executor does not run. */
   mergeWriter?: MergeWriterReads | null;
   /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */

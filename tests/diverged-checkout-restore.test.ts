@@ -108,11 +108,11 @@ test('unit:diverged-checkout-doctor-files-request — the escalation for a diver
   const merged = (await guard.betweenCycles()).refusal;
   assert.ok(merged && !merged.includes('This HEAD is diverged'), merged ?? 'no refusal');
 
-  // The doctor is told to file the request for it.
+  // The resolver's charter keeps the restore one command away; the recipe prose (the diverged-HEAD
+  // handling, the named refs) lives in the command, not in the prompt (GY-2004 deleted it).
   const prompt = doctorPrompt({ repository: 'owner/project', cliPath: '/cli/graphyard.mjs' }, { items: [], faults: [] });
   assert.match(prompt, /master checkout-restore with a quoted reason/);
-  assert.match(prompt, /escalation naming a diverged HEAD \(neither on the base branch nor a descendant of the commit the loop runs\)/);
-  assert.match(prompt, /refs\/graphyard\/checkout-restore\/diverged-\*/);
+  assert.doesNotMatch(prompt, /diverged-\*/, 'the checkout-restore recipe prose is gone from the prompt; the command carries it');
 });
 
 test('unit:units-file-recorded-from-running-unit — with .graphyard/units.json absent and the loop running under a supervisor unit that runs the checkout, the loop records the file from that unit; with no unit it records the waiting row as today', async () => {

@@ -266,3 +266,27 @@ test('unit:docs-word-budget — docs/coordination.md and docs/development.md eac
     for (const named of ['plannedFiles', 'sync restore', 'scope hook', 'producer sessions', 'budget-test blockers', 'normal-risk rework approvers']) assert.ok(sentences[0]!.includes(named), `${page} names ${named}`);
   }
 });
+
+test('unit:merge-writer-waits-out-upgrade — the cycle in which a merge lands starts no new trial, so the loop\'s upgrade between cycles kills none; the next cycle starts it', async () => {
+  const passed = ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: true, reasons: [] }));
+  const head2 = sha('head2'), candidate2 = { sha: head2, baseSha: base, pr: 8, branch: 'graphyard/gy-2-1', author: 'worker' };
+  const work = [item('control-plane', ['src/app.ts'], { gates: passed, stageEnteredAt: iso(start - 120_000) }),
+    item('control-plane', ['src/app.ts'], { id: 'w2', key: 'GY-2', gates: passed, stageEnteredAt: iso(start - 60_000), candidate: candidate2, observation: { ...observation('control-plane', ['src/app.ts']), candidate: candidate2 } })];
+  const trialled: string[] = [];
+  const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
+    trial: async (_mergeSha: string, _files: string[], target: Work) => { trialled.push(target.key); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; },
+    push: async () => 'pushed', holds: async () => false, record: async () => {}, merger: async () => 'control-plane', advisory: async () => ({ build: 'pass', failed: [] }) } as unknown as MergeWriterReads;
+  const state = emptyDaemonState(config);
+  const cycle = () => ({ state, effects: { mergeWriter: reads, persist: async () => {}, fileFaultClass: async () => ({ key: 'GY-900' }) } as unknown as DaemonEffects, now: () => start, snapshot: { work, now: iso(start) }, performed: [] as any[] }) as unknown as Cycle;
+  await mergeWriterStep(cycle());
+  await mergeWriterIdle(state);
+  assert.deepEqual(trialled, ['GY-1']);
+  const landed = cycle();
+  await mergeWriterStep(landed);
+  assert.ok(landed.performed.some(action => /^Merged GY-1 head/.test(action.detail)));
+  assert.equal(state.mergeWriter.inFlight, null, 'nothing is in flight when the cycle that merged ends');
+  work[0] = { ...work[0]!, stage: 'done', observation: { ...work[0]!.observation!, merged: true, mergeSha: sha(`merge:${head}`) } } as Work;
+  await advisoryIdle(state);
+  await mergeWriterStep(cycle());
+  assert.equal((state.mergeWriter.inFlight as { key: string } | null)?.key, 'GY-2', 'the next cycle starts the next trial');
+});

@@ -192,11 +192,11 @@ test('a master-role blocker routes the item\'s attention to the master identity 
   assert.match(owner.next, /master unblock GY-1674 REASON/);
 });
 
-test('the doctor\'s shipped blocked check carries the master-role hand-off: it takes the step itself, then unblocks', () => {
+test('the resolver\'s charter acts on blocked items itself: unblock with a quoted reason, never a person (GY-2004)', () => {
   const prompt = doctorPrompt({ repository: 'owner/project', cliPath: '/outside/graphyard.mjs' }, { items: [], faults: [] });
-  assert.match(prompt, /blocked: an item blocked for more than 10 min; a blocker naming the master-role refusal/);
-  assert.match(prompt, /run the master command it names from this checkout yourself/);
+  assert.match(prompt, /a blocked item whose blocker no longer holds/);
   assert.match(prompt, /master unblock GY-N with a quoted reason/);
+  assert.match(prompt, /never ask a person/);
 });
 
 // GY-1831's instances: a delivered item's verify-deployment action failed only because the running

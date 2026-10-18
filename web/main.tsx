@@ -12,6 +12,7 @@ import TopBar from './components/top-bar';
 import { useFeatures } from './features';
 import LoginPage, { REJECTED_NOTICE } from './pages/login';
 import WorkDetails, { useOpenedWork } from './pages/work-details';
+import GoalPage, { goalPathKey } from './pages/goal';
 import CreateWork from './pages/create-work';
 import { readsFlowAnalytics, useStepMoves } from './step-moves';
 import { initialView } from './pages/setup';
@@ -90,9 +91,11 @@ function App() {
   const dashboard: Dashboard = { token, work, board, status, error, connected, lastUpdated, view, setView, filter, setFilter, selected, setSelected, creating, setCreating, busy, setBusy, observedAt, jobs, query, setQuery, operatorAgents, operatorAgentsError, features, events, editingRequirements, setEditingRequirements, codexAvailable, stepMoves, sessionEpoch, api, refresh, action, setError, signOut };
   if (!token || !status) return <LoginPage token={token} error={error} signOut={signOut} setError={setError} sessionEpoch={sessionEpoch} setToken={setToken} draftToken={draftToken} setDraftToken={setDraftToken} host={location.host} onVerified={firstLoad}/>;
   // One page at a time: an open item replaces the page it was opened from, and "← Back" returns to it.
+  // `/goals/KEY` is the goal's picture page (GY-2011); Back returns to the Work list.
+  const goalKey = goalPathKey(location.pathname);
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>
     <main className="main">{error && <div role="alert" className="notice danger">{error}</div>}
-      {item ? <WorkDetails {...dashboard} item={item}/> : <><TopBar {...dashboard}/>{viewFor(view).render(dashboard)}</>}</main>
+      {item ? <WorkDetails {...dashboard} item={item}/> : goalKey ? <GoalPage goalKey={decodeURIComponent(goalKey)} token={token} work={work} api={api} setSelected={setSelected} onBack={() => { history.pushState(null, '', '/'); setView('work'); }}/> : <><TopBar {...dashboard}/>{viewFor(view).render(dashboard)}</>}</main>
     {creating && <CreateWork {...dashboard}/>}
   </div>;
 }
