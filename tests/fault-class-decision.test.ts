@@ -1289,8 +1289,8 @@ test('manual:fault-class-decision — owed-decision|GY-1834|2026-10-16T22:35:33.
 // behind it counted, and the front head's merge-gate push refusal (`merge writer has not pushed
 // …`, pushRefusal) had never been held at all, because the hold required the test gate. The hold
 // now covers both control-plane refusals of a head the queue holds or has in flight, and the
-// bound is the writer's own configured worst case for one flight ((retrials + 1) × shadow
-// timeoutMinutes plus a cycle, mergeWriterFlightBoundMs) with the attempt progress (a retrial's
+// bound is the writer's own configured worst case for one flight ((retrials + 1) × the
+// trial timeout plus a cycle, mergeWriterFlightBoundMs) with the attempt progress (a retrial's
 // intent, a trial verdict, a push, a reconcile) recorded beside every ledger write keeping the
 // movement fresh inside a multi-attempt flight — a hold expires only when no flight is in progress
 // and no movement stands inside that bound.
@@ -1336,7 +1336,7 @@ function pushRefused(subject: string, requestedAt: string, heads: Record<string,
   return work;
 }
 
-/** The writer's own motion bound, as the loop now holds it: the configured worst case for one flight at the default settings — (3 retrials + 1) × 20-minute shadow timeout plus a 20-second cycle — inside which GY-2011's 37-minute flight stays in motion. Read lazily, so the base exercise loads this file. */
+/** The writer's own motion bound, as the loop now holds it: the configured worst case for one flight at the default settings — (3 retrials + 1) × 20-minute trial timeout plus a 20-second cycle — inside which GY-2011's 37-minute flight stays in motion. Read lazily, so the base exercise loads this file. */
 const gy2015MotionBound = () => mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 });
 
 /** The writer state the loop held while the instance stood: the serial queue with all three heads, one trial in flight, the last delivery recorded. */
@@ -1448,7 +1448,7 @@ const gy2053Flight = '2026-10-18T09:01:17.024Z', gy2053Pass = '2026-10-18T09:32:
  * The writer as the 09:32:04Z shape held it: the serial queue oldest first with GY-2011 at the front
  * and its flight 30m47s in, no progress named yet (a flight of one attempt names none until its first
  * retrial), the bound the writer's own summary now carries — its configured worst case for one flight
- * at the default settings, (3 retrials + 1) × 20-minute shadow timeout plus a 20-second cycle.
+ * at the default settings, (3 retrials + 1) × 20-minute trial timeout plus a 20-second cycle.
  */
 function writer2053(at: string, overrides: Partial<MergeWriterSummary> = {}): MergeWriterSummary {
   const now = Date.parse(at);

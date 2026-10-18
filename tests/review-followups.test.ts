@@ -65,7 +65,7 @@ test('unit:review-criteria-only-prompt — the reviewer launch prompt states the
     // Each criterion, by id and text, judged met or unmet.
     '[AC-1] The widget counts every frob.', '[AC-2] The count is shown on the dashboard.', 'Judge each acceptance criterion met or unmet',
     // Each finding and thread classified by the definitions.
-    'as BLOCKING or FOLLOW-UP', 'BLOCKING: anything worth fixing before this merges', 'The same worker fixes BLOCKING findings on this pull request; nothing is deferred to another item',
+    'as BLOCKING or FOLLOW-UP', 'BLOCKING: a real defect a user or operator would hit with this change', 'anything else is at most a Nit', 'The same worker fixes BLOCKING findings on this pull request; nothing is deferred to another item',
     'FOLLOW-UP: nits only', 'Graphyard files no backlog item for a nit',
     // When to approve, and what a change request may cite.
     'APPROVE when every criterion is met and no finding or thread is BLOCKING',

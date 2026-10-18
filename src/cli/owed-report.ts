@@ -111,7 +111,7 @@ export function humanNeededAttention(snapshot: { work: Work[]; now: string }, wr
 /**
  * GY-2015. How long a merge writer's newest demonstrated movement may stand before a trial wait it
  * owns counts as a decision fault. The writer's trials are one at a time (mergeQueue: oldest first,
- * an open intent blocks the queue), each bounded by the shadow gate's timeout, so a head refused
+ * an open intent blocks the queue), each bounded by the trial timeout, so a head refused
  * `merge writer has not trialled …` waits for the writer to reach it, not for a judgment; the bound
  * covers a settled trial plus the next cycle's start at the default timeout, and an install
  * that lengthens the timeout keeps a trial in flight, which is movement on its own.
@@ -122,7 +122,7 @@ export const mergeWriterMotionBoundMs = 30 * 60_000;
 
 /**
  * GY-2053: the motion bound a held head is judged inside, as the writer's own summary holds it —
- * the configured worst case for one flight, (retrials + 1) × shadow timeoutMinutes plus a cycle
+ * the configured worst case for one flight, (retrials + 1) × the trial timeout plus a cycle
  * (state.mergeWriter.motionBoundMs, `mergeWriterFlightBoundMs`) — so a hold lasts through however
  * long a legal flight runs, however the install configures it, and expires only when no flight is
  * in progress and no movement stands inside that bound. A summary that names no bound (an older
