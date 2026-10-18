@@ -12,9 +12,9 @@ import { parkCommand, parkInput } from './park-command.js';
 export { parkArgs, parkCommand } from './park-command.js';
 
 /**
- * The commands a session runs about its own item, rather than about the fleet: the worker's live
- * scope request, and the two halves of a human-only wait — the worker parks the item, the human
- * lists what waits and answers it. `master status` reports on them; none of them is a master
+ * The commands a session runs about its own item, rather than about the fleet: the retired
+ * scope-request no-op, and the two halves of a human-only wait — the worker parks the item, the
+ * human lists what waits and answers it. `master status` reports on them; none of them is a master
  * command, so they live beside it rather than in it.
  */
 

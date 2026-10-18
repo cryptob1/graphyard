@@ -23,7 +23,7 @@ export { installUnderLease };
 
 const quietBranch = () => spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).stdout.trim();
 
-export async function syncWork({ api, print, base: serverUrl, args }: CliContext, work: any) {
+export async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) {
   // The canonical way to take the base branch: a merge keeps the worker's history and makes every
   // resolution visible. Files the repository declares generated are rendered afresh from the
   // merged sources rather than merged by hand; every other conflict is the worker's, reported with
