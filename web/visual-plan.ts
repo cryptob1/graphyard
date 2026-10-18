@@ -6,7 +6,9 @@ export type PlanState = 'Todo' | 'Doing' | 'Checking' | 'Done';
 
 export interface PlanFlowItem {
   ref: string;
-  plain: string;
+  /** Absent on plans saved before GY-2011; the box then shows the item's title. */
+  plain?: string;
+  title?: string;
   dependsOn: string[];
 }
 
@@ -65,7 +67,7 @@ export function planFlowchart(
   const boxes: FlowBox[] = ordered.map((item, index) => {
     const work = workByRef.get(item.ref);
     return {
-      ref: item.ref, plain: item.plain, key: work?.key, id: work?.id, state: planItemState(work?.stage),
+      ref: item.ref, plain: item.plain ?? item.title ?? item.ref, key: work?.key, id: work?.id, state: planItemState(work?.stage),
       x: padX, y: padY + index * (boxHeight + gapY), width: boxWidth, height: boxHeight,
     };
   });

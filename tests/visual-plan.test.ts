@@ -107,6 +107,9 @@ test('unit:item-plain-summary — planItemInput copies plain onto summary; maste
   assert.ok(flow.arrows.some(arrow => arrow.from === 'api' && arrow.to === 'page'));
   assert.ok(flow.arrows.some(arrow => arrow.from === 'billing' && arrow.to === 'notify'));
   assert.equal(flow.boxes.length, 4);
+  // A plan saved before GY-2011 has no plain sentence: its boxes show the item title instead of throwing.
+  const legacy = planFlowchart([{ ref: 'old', title: 'Old item', dependsOn: [] }, { ref: 'bare', dependsOn: ['old'] }]);
+  assert.deepEqual(legacy.boxes.map(box => box.plain), ['Old item', 'bare']);
   // The browser suite's own case (AC-2): loads /goals/KEY, checks boxes, arrows, colours, Play and the item Details fold.
   const spec = await readFile(new URL('../browser-tests/visual-plan.spec.ts', import.meta.url), 'utf8');
   assert.match(spec, /integration:goal-visual-plan/);
