@@ -39,7 +39,7 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; registers the deploy key; writes no branch protection. One apply at once (`apply.lock`, partials too; dead/pid-reused holders reclaimed). An install from before GY-2010 that recorded protection (`protection-record.json`) restores it with `--restore-protection --plan|--apply`, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
+Writes credentials, [variables](deployment.md#variables); deploys; registers the deploy key; writes no branch protection. One apply at once (`apply.lock`, partials too; dead/pid-reused holders reclaimed). Install neither reads nor restores branch protection: protection an earlier install wrote stays until the operator changes it on GitHub. **Verify** `/healthz`.
 
 ## Step 3: deploy key
 

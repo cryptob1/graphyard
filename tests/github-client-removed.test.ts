@@ -70,7 +70,11 @@ test('unit:github-client-removed — the GitHub API client modules are gone, no 
     // no pull request listing or detail, check run or commit status is read by any route.
     assert.doesNotMatch(text, /repos\/[^'"`\n]*\/(?:check-runs|status\b|pulls(?:\?|\/\$\{[^}]+\}(?:['"`]|\/reviews)))/, `${file} must not read pull requests, their reviews, check runs or commit statuses through GitHub's API`);
     assert.doesNotMatch(text, /['"]api['"],\s*['"]graphql['"]/, `${file} must not call GitHub's GraphQL API (review threads, thread resolution)`);
+    // Branch protection and rulesets are neither read nor written: install --restore-protection is gone with them.
+    assert.doesNotMatch(text, /['"`]repos\/[^'"`\n]*\/(?:branches\/[^'"`\n]*\/protection|rulesets)/, `${file} must not read or write branch protection or rulesets through GitHub's API`);
   }
+  const { installRequestFromArgs } = await import('../src/install/index.js');
+  assert.throws(() => installRequestFromArgs(['--repo', 'owner/project', '--restore-protection', '--plan']), /Unknown option '--restore-protection'/);
   // A pending pull-request reviewer session from before the control-plane merger settles cancelled
   // on the loop's reconcile pass with no GitHub read, so its request is asked again through the control plane.
   const reviewRoot = await temporaryDirectory('github-client-removed-reviews'), calls: string[] = [];
