@@ -79,7 +79,7 @@ async function assigned(n: number, branch = `graphyard/gy-${n}-1`) {
 }
 const numbers = async () => (await store.pool.query('SELECT number::int AS number, work_id, head FROM change_numbers ORDER BY number')).rows as { number: number; work_id: string; head: string }[];
 
-test('integration:submit-head-mode-gate — submit takes exactly one of pr or head; the merger is the control plane whatever old `github` history the ledger holds, nothing can set it, and a head is submitted', async () => {
+test('unit:submit-head — submit takes exactly one of pr or head; the merger is the control plane whatever old `github` history the ledger holds, nothing can set it, and a head is submitted, ending the lease', async () => {
   // An install that once ran the github merger keeps that event on its append-only ledger; nothing reads it.
   await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['test-fixture', 'policy.merger.set', JSON.stringify({ merger: 'github', reason: 'an old install', previous: null })]);
   assert.equal(mergeWriterStatus.merger, 'control-plane', 'every reader of the merger gets the control plane');
@@ -93,6 +93,7 @@ test('integration:submit-head-mode-gate — submit takes exactly one of pr or he
   const submitted = await engine.execute(worker, 'submit', w.id, { epoch: 1, head }, randomUUID());
   assert.deepEqual(submitted.submission, { epoch: 1, pr: (await numbers())[0].number });
   assert.equal(submitted.observation?.source, 'control-plane');
+  assert.equal(submitted.lease, null, 'the head submission ends the lease');
 });
 
 test('integration:change-number-allocated-once — a head submission allocates one change number per (work, head), sets candidate and submission from it, ends the lease in the same transaction, replays from its receipt and refuses a head the object store lacks naming the branch ref', async () => {
