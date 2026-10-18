@@ -19,7 +19,7 @@ await page.goto('file://' + html);
 await page.evaluate(() => document.fonts.ready);
 await page.addStyleTag({ content: '.controls,.chapters{display:none!important} .player{border-radius:0}' });
 const player = page.locator('.player');
-const duration = 134;
+const duration = 120;
 const total = Math.round(duration * fps);
 for (let i = 0; i <= total; i++) {
   await page.evaluate(t => { const s = document.getElementById('scrub'); s.value = t; s.dispatchEvent(new Event('input')); }, i / fps);

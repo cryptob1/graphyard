@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 // composite as a frozen picture (ffmpeg's own decoder hid the bug, which is why the per-frame
 // checks passed). The GIF is now built by scripts/walkthrough/makegif.py from the same frames, and
 // the structural checks in unit:readme-walkthrough-gif-plays read its playability facts — a full
-// opaque first frame, the 134.1 s running time, the forever loop — straight from the bytes.
+// opaque first frame, the 120.1 s running time, the forever loop — straight from the bytes.
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const read = (path: string) => readFileSync(`${root}${path}`);
@@ -27,8 +27,8 @@ test('unit:readme-walkthrough-assets — README embeds the walkthrough GIF above
   // would silently replace them with different pixels, so their digests are pinned here. The GIF
   // digest is the browser-playable Pillow build; the ffmpeg GIF it replaced (d92236045486d662...)
   // fails this pin and the structural checks in unit:readme-walkthrough-gif-plays.
-  assert.equal(sha256('docs/diagrams/how-graphyard-works.gif'), 'fc73d29434bc0efa278d166728fa00b454a29d29177734bd70fd8fc33e4e974f', 'the GIF digest matches the reviewed Pillow build');
-  assert.equal(sha256('docs/diagrams/how-graphyard-works.mp4'), '94e151c86263d62262571feccfb1e4f63175bd6c534711533e47dd95ba72cca9', 'the MP4 digest matches the reviewed render');
+  assert.equal(sha256('docs/diagrams/how-graphyard-works.gif'), '02749d218be0ca36ada0705c59f827f71f52ac98a425188393d78ed3b3026060', 'the GIF digest matches the reviewed Pillow build');
+  assert.equal(sha256('docs/diagrams/how-graphyard-works.mp4'), 'ea8b187dfda82c831f7552964b980a10c8b810bce0e41c47c6df4725ff5581fc', 'the MP4 digest matches the reviewed render');
 
   const readme = text('README.md');
   const firstHeading = readme.search(/^#{2,6}\s/m);
@@ -99,10 +99,10 @@ function parseGif(bytes: Buffer) {
   return { width, height, frames, loop };
 }
 
-test('unit:readme-walkthrough-gif-plays — the committed GIF opens on a full opaque 800x510 first frame, runs 13,410 centiseconds and loops forever, read from its bytes, so browsers play it where the ffmpeg GIF froze', () => {
+test('unit:readme-walkthrough-gif-plays — the committed GIF opens on a full opaque 800x509 first frame, runs 12,010 centiseconds and loops forever, read from its bytes, so browsers play it where the ffmpeg GIF froze', () => {
   const { width, height, frames, loop } = parseGif(read('docs/diagrams/how-graphyard-works.gif'));
   assert.equal(width, 800, 'the logical screen is the 800-wide embed');
-  assert.equal(height, 510, 'the logical screen is the 510-high walkthrough stage');
+  assert.equal(height, 509, 'the logical screen is the 509-high walkthrough stage');
   const first = frames[0];
   assert.ok(first, 'the GIF has a first frame');
   assert.deepEqual([first.left, first.top, first.width, first.height], [0, 0, width, height], 'the first frame paints the whole logical screen, not a later scene');
@@ -112,6 +112,6 @@ test('unit:readme-walkthrough-gif-plays — the committed GIF opens on a full op
   assert.ok(frames.every(frame => frame.control), 'every frame carries a graphic-control extension');
   const transparent = frames.filter(frame => frame.control!.packed & 0x01);
   assert.deepEqual(transparent, [], 'no frame carries a transparent colour');
-  assert.equal(frames.reduce((sum, frame) => sum + frame.control!.delayCs, 0), 13410, 'the frame delays sum to 13,410 centiseconds, the full 134.1 s at real speed');
+  assert.equal(frames.reduce((sum, frame) => sum + frame.control!.delayCs, 0), 12010, 'the frame delays sum to 12,010 centiseconds, the full 120.1 s at real speed');
   assert.equal(loop, 0, 'the NETSCAPE loop count is 0: forever');
 });
