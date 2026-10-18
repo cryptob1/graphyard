@@ -1,10 +1,13 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { composeBundle, composeRunning, emptyObservation, hetznerAddress, httpHealth, markersFromEnvFile, publicHostname, readRemote, unroutableAddress, type AdapterContext, type AdapterObservation, type BundleFile, type ProviderAdapter } from './adapters.js';
 import { fingerprint, generateToken, workerPrincipals } from './secrets.js';
 import { shellQuote, type Transport } from './transport.js';
+import { DEPLOY_KEY_FILE } from './deploy-key.js';
+import { deployKeySshCommand } from '../merge-writer/executor.js';
 import { REDACTED, type EnvValue, type PlanAction, type PlannedPrincipal, type PreflightItem } from './types.js';
 import { packageVersion } from '../release.js';
 import { proposedConcurrency, proposedRuntimes } from '../model/registry-proposal.js';
@@ -394,6 +397,15 @@ export interface HostGithubApp { appId: number; installationId: number; slug: st
 
 const credentialHelperSource = fileURLToPath(new URL('../../deploy/host/graphyard-github-credential.mjs', import.meta.url));
 export const hostGithubKeyFile = (layout: HostLayout) => `${layout.githubDirectory}/app-private-key.pem`;
+/**
+ * Where the host's merge writer reads the install's deploy key (GY-2009): the loop runs with
+ * GRAPHYARD_CONFIG_HOME at `<install>/` (hostEnvironment), so `mergeWriterSettings` resolves
+ * `defaultDeployKeyFile` to `<install>/<install id>/deploy-key`. The installer copies the key it
+ * registered here, and the managed checkout's own fetches use it too.
+ */
+export const hostDeployKeyFile = (layout: HostLayout, installId: string) => `${layout.configDirectory}/${installId}/${DEPLOY_KEY_FILE}`;
+/** The SSH remote the managed checkout is cloned from and the merge writer pushes to: deploy keys authenticate over SSH only. */
+export const hostRepositoryRemote = (repository: string) => `git@github.com:${repository}.git`;
 export const hostCredentialHelper = (layout: HostLayout) => `${layout.githubDirectory}/graphyard-github-credential.mjs`;
 /** The gh every account on the host runs first on its PATH; it execs the packaged gh. */
 export const HOST_GH_WRAPPER = '/usr/local/bin/gh';
@@ -588,7 +600,7 @@ export function hostPlan(ctx: AdapterContext): HostPlan {
     credentials: [
       ...host.principals.map(principal => ({ path: hostTokenFile(layout, principal.id), mode: '0600' as const, holds: `${principal.role} credential of ${principal.id}` })),
       { path: hostDatabasePasswordFile(layout), mode: '0600', holds: 'the Postgres password' },
-      { path: hostGithubKeyFile(layout), mode: '0600', holds: 'the GitHub App key workers\' one-hour push and pull request tokens are minted from' },
+      { path: hostDeployKeyFile(layout, ctx.installId), mode: '0600', holds: 'the merge writer deploy key (read-write) registered on the repository: the host\'s only GitHub credential, for the managed clone, its fetches and the merge writer\'s push' },
       ...accounts.map(account => ({ path: account.credentialFile, mode: '0600' as const, holds: `the ${account.runtime} login of account ${account.name}, written when it is connected from the dashboard` })),
     ],
     accounts,
@@ -611,8 +623,8 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
     ...(host.migrate ? migrationSteps.map(step => ({ id: step.id, target: 'host' as const, state: 'create' as const, title: step.title })) : []),
     { id: 'host.runtimes', target: 'host', state, title: `Install the agent runtimes: ${plan.runtimes.map(runtime => `${runtime.kind} (${runtime.package})`).join(', ')}`, command: `npm install -g ${plan.runtimes.map(runtime => runtime.package).join(' ')}` },
     { id: 'host.herdr', target: 'host', state, title: `Install Herdr for ${HOST_USER}, supervise its server with the user unit ${host.layout.userUnitDirectory}/graphyard-herdr.service, link and enable the graphyard plugin for this install's server (in this install's own Herdr instance, ${installHerdrInstance(ctx.installId, HOST_HOME).session}, when another install's server holds the default's), and create the workspace ${plan.herdr.workspace}` },
-    { id: 'host.checkout', target: 'host', state, title: `Clone ${ctx.repository} into ${plan.checkout}, the loop's working directory, with a one-hour GitHub App installation token passed on standard input (never stored)` },
-    { id: 'host.github', target: 'host', state, title: `Give workers a GitHub credential without anyone logging in: git's credential helper and the gh wrapper (${HOST_GH_WRAPPER}) mint one-hour App installation tokens narrowed to ${ctx.repository} (Contents and Pull requests write) from ${hostGithubKeyFile(host.layout)}; commits are made as the App's bot` },
+    { id: 'host.checkout', target: 'host', state, title: `Clone ${ctx.repository} into ${plan.checkout}, the loop's working directory, over SSH (${hostRepositoryRemote(ctx.repository)}) with the merge writer deploy key` },
+    { id: 'host.github', target: 'host', state, title: `Copy the merge writer deploy key the installer registered to ${hostDeployKeyFile(host.layout, ctx.installId)} (0600, owned by ${HOST_USER}), where the host's merge writer reads it; no GitHub App key, token helper or gh wrapper is written` },
     { id: 'host.environment', target: 'host', state, title: `Point the ${HOST_USER} user manager at ${host.layout.accountsDirectory} for login homes and ${host.layout.configDirectory} for credentials (${hostEnvironmentFile(host.layout)})` },
     { id: 'host.master', target: 'host', state, title: `Configure the master loop with the coordinator credential (master init --token-stdin) and supervise it as ${host.layout.userUnitDirectory}/${perInstallUnits(ctx.repository).master}` },
     { id: 'host.executors', target: 'host', state, title: `Supervise ${host.executors} executor slot(s) as ${executorInstance(perInstallUnits(ctx.repository), 'N')} user units (Restart=always with a bounded RestartSec; the install fails without it, GY-1431); the resident executor registers the host's connect key and serves every dashboard connect` },
@@ -634,6 +646,12 @@ export interface HostFleetRequest {
   cloneToken: string | null;
   /** The Graphyard App, whose key the host keeps (0600) so workers can push and open pull requests; null when install registers none (GY-2009). */
   github: HostGithubApp | null;
+  /**
+   * The merge writer deploy key install registered, by its private path on the installing machine
+   * (ensureDeployKey); the host gets a copy at hostDeployKeyFile and clones over SSH with it.
+   * Null when nothing was registered (observation only): the clone then has no credential.
+   */
+  deployKeyFile: string | null;
   fetch: typeof fetch; log: (line: string) => void;
 }
 
@@ -854,13 +872,30 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
     for (const [name, value] of hostGitConfig(layout, request.github)) await asUser(remote, HOST_HOME, 'git', ['config', '--global', name, value]);
   }
 
-  // A private repository needs a credential the graphyard account does not hold: the App's
-  // installation token arrives on standard input and reaches git through a one-shot credential
-  // helper, so it is never an argument, never in the remote URL and never written to disk.
-  // Without an App (GY-2009) there is no token: the clone uses the graphyard account's own git access.
-  const clone = request.cloneToken === null ? `[ -d "$1/.git" ] || git clone --quiet "$2" "$1"`
-    : `[ -d "$1/.git" ] || { GIT_TOKEN="$(cat)"; export GIT_TOKEN; git -c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' clone --quiet "$2" "$1"; }`;
-  const cloned = await asUser(remote, HOST_HOME, 'sh', ['-c', clone, 'managed-checkout', layout.checkout, `https://github.com/${ctx.repository}.git`], { ...(request.cloneToken === null ? {} : { input: request.cloneToken }), allowFailure: true });
+  // A private repository needs a credential the graphyard account does not hold. Without an App
+  // (GY-2009) it is the merge writer deploy key: copied to where the host's merge writer reads it,
+  // the clone runs over SSH with it alone, and the checkout keeps it as core.sshCommand with an SSH
+  // origin, so the loop's fetches and the writer's leased push reach the remote with that one key.
+  // An App's installation token instead arrives on standard input and reaches git through a one-shot
+  // credential helper, so it is never an argument, never in the remote URL and never written to disk.
+  let clone: string, cloneArgs: string[];
+  if (request.cloneToken !== null) {
+    clone = `[ -d "$1/.git" ] || { GIT_TOKEN="$(cat)"; export GIT_TOKEN; git -c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' clone --quiet "$2" "$1"; }`;
+    cloneArgs = [layout.checkout, `https://github.com/${ctx.repository}.git`];
+  } else if (request.deployKeyFile) {
+    const keyFile = hostDeployKeyFile(layout, ctx.installId);
+    const privateKey = await readFile(request.deployKeyFile, 'utf8');
+    ctx.vault.add(privateKey.trim());
+    await remote.exec('install', ['-d', '-m', '0700', '-o', HOST_USER, '-g', HOST_USER, dirname(keyFile)], { timeout: 60_000 });
+    await remote.putFile(keyFile, privateKey.endsWith('\n') ? privateKey : `${privateKey}\n`, 0o600, owner);
+    await remote.putFile(`${keyFile}.pub`, await readFile(`${request.deployKeyFile}.pub`, 'utf8'), 0o600, owner);
+    clone = `[ -d "$1/.git" ] || GIT_SSH_COMMAND="$3" git clone --quiet "$2" "$1"; git -C "$1" config core.sshCommand "$3" && git -C "$1" remote set-url origin "$2"`;
+    cloneArgs = [layout.checkout, hostRepositoryRemote(ctx.repository), deployKeySshCommand(keyFile)];
+  } else {
+    clone = `[ -d "$1/.git" ] || git clone --quiet "$2" "$1"`;
+    cloneArgs = [layout.checkout, `https://github.com/${ctx.repository}.git`];
+  }
+  const cloned = await asUser(remote, HOST_HOME, 'sh', ['-c', clone, 'managed-checkout', ...cloneArgs], { ...(request.cloneToken === null ? {} : { input: request.cloneToken }), allowFailure: true });
   if (cloned.code !== 0) throw new Error(`Cloning ${ctx.repository} into ${layout.checkout} on ${hostName} failed: ${failure(ctx, cloned)}`);
 
   // Herdr after the checkout its workspace opens in (GY-1511): a failure is named and leaves Herdr out

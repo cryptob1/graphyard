@@ -13,6 +13,7 @@ import { hostSizing, recommendServerType, parseServerTypes } from '../src/instal
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
 import { workerConfinementRefusal } from '../src/master/profiles.js';
+import { mergeWriterSettings } from '../src/master/merge-writer-settings.js';
 import { sessionNameRefusal } from '../src/session-name.js';
 import { connectProvider } from '../src/fleet.js';
 import { createPiHome, writeProviderAuthFile } from '../src/master/connect-accounts.js';
@@ -76,9 +77,11 @@ test('unit:host-install-plan — the host plan names every unit, runtime and cre
     // The dashboard reaches sessions on the same machine: no relay is provisioned, and the plan says so.
     assert.equal(host.sessionViewer, 'local');
     assert.equal(plan.actions.find(action => action.id === 'host.session-viewer')?.state, 'satisfied');
-    // Workers' GitHub credential: minted on the host from the App key, never typed in.
-    assert.ok(host.credentials.some(entry => entry.path === `${CONFIG}/github/app-private-key.pem`));
-    assert.match(plan.actions.find(action => action.id === 'host.github')!.title, /mint one-hour App installation tokens narrowed to owner\/project/);
+    // GY-2009: the host's one GitHub credential is the merge writer deploy key, where its merge writer reads it; no App key.
+    assert.ok(host.credentials.some(entry => entry.path === `${CONFIG}/owner-project/deploy-key`));
+    assert.ok(!host.credentials.some(entry => entry.path.startsWith(`${CONFIG}/github/`)), 'no App key is planned');
+    assert.match(plan.actions.find(action => action.id === 'host.github')!.title, /deploy key .*owner-project\/deploy-key.*no GitHub App key/);
+    assert.match(plan.actions.find(action => action.id === 'host.checkout')!.title, /over SSH \(git@github\.com:owner\/project\.git\) with the merge writer deploy key/);
     assert.ok(!plan.actions.some(action => action.id === 'local.profiles'), 'profiles are not registered on the operator machine');
   } finally { await fixture.cleanup(); }
 });
@@ -154,12 +157,33 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.ok(!fixture.requests.some(request => request.url.endsWith('/api/agent-registry/apply')), 'no account is registered before it is connected');
     assert.deepEqual(summary.host!.accounts.map(account => [account.name, account.login]), ['claude', 'codex', 'opencode', 'pi'].map(kind => [`${kind}-a`, null]));
 
-    // GY-2009: install registers no App, so the managed repository is cloned with the host account's own git
-    // access: no installation token, no App key, no token helper and no App bot identity reach the host.
+    // GY-2009: install registers no App. A fresh host gets the deploy key install registered, at the
+    // path the host's merge writer resolves (GRAPHYARD_CONFIG_HOME=<install>), and the managed
+    // repository — private or not — is cloned over SSH with that key alone; the checkout keeps it
+    // for its fetches and the writer's push. No installation token, App key, token helper or App bot identity reach the host.
+    const localKey = join(session.directory, 'deploy-key');
+    const hostKey = files.get(`${CONFIG}/owner-project/deploy-key`)!;
+    assert.equal(hostKey.content.trim(), readFileSync(localKey, 'utf8').trim(), 'the registered key is copied to the host');
+    assert.equal(hostKey.mode, 0o600);
+    assert.equal(hostKey.owner, '1001:1001');
+    assert.equal(files.get(`${CONFIG}/owner-project/deploy-key.pub`)?.content, readFileSync(`${localKey}.pub`, 'utf8'));
+    assert.ok(lines.includes(`install -d -m 0700 -o graphyard -g graphyard ${CONFIG}/owner-project`));
+    const saved = process.env.GRAPHYARD_CONFIG_HOME;
+    process.env.GRAPHYARD_CONFIG_HOME = CONFIG;
+    try { assert.equal(mergeWriterSettings({}, 'owner-project').deployKeyFile, `${CONFIG}/owner-project/deploy-key`, 'the host merge writer reads the copied key'); }
+    finally { if (saved === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = saved; }
     const clone = hostOf(fixture).commands.find(command => command.args.some(arg => arg.includes('clone --quiet')))!;
     assert.equal(clone.input, undefined);
-    assert.ok(clone.args.includes('https://github.com/owner/project.git'));
+    assert.ok(clone.args.includes('git@github.com:owner/project.git'), clone.args.join(' '));
+    assert.ok(!clone.args.some(arg => arg.includes('https://github.com/owner/project')), 'no anonymous HTTPS clone');
+    const sshCommand = `ssh -i ${CONFIG}/owner-project/deploy-key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
+    assert.ok(clone.args.includes(sshCommand), clone.args.join(' '));
+    const script = clone.args.find(arg => arg.includes('clone --quiet'))!;
+    assert.match(script, /GIT_SSH_COMMAND="\$3" git clone --quiet "\$2" "\$1"/);
+    assert.match(script, /git -C "\$1" config core\.sshCommand "\$3" && git -C "\$1" remote set-url origin "\$2"/);
+    assert.ok(hostOf(fixture).commands.findIndex(command => command.args.includes(`${CONFIG}/owner-project`)) < hostOf(fixture).commands.indexOf(clone), 'the key is on the host before the clone');
     assert.ok(!clone.args.some(arg => arg.includes('GIT_TOKEN')));
+    assert.ok(!JSON.stringify(summary).includes(hostKey.content.split('\n')[1] ?? '\u0000'), 'the deploy key reaches no summary');
     assert.match(bootstrap, /command -v gh >\/dev\/null \|\| \(apt-get update && apt-get install -y gh\)/);
     for (const name of ['app.json', 'app-private-key.pem', 'graphyard-github-credential.mjs']) assert.equal(files.get(`${CONFIG}/github/${name}`), undefined, name);
     assert.ok(!lines.some(line => line.includes('credential.https://github.com.helper')), 'git is pointed at no App token helper');
@@ -294,7 +318,7 @@ test('unit:host-install-plan — a missing database password on a host with exis
 
 test('unit:host-install-plan — a private managed repository that cannot be cloned fails the install with the reason', async () => {
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
-    extraResponses: [{ match: 'clone --quiet', result: { stdout: '', stderr: "remote: Repository not found.\nfatal: repository 'https://github.com/owner/project.git/' not found", code: 128 } }] });
+    extraResponses: [{ match: 'clone --quiet', result: { stdout: '', stderr: "ERROR: Repository not found.\nfatal: Could not read from remote repository.", code: 128 } }] });
   try {
     await assert.rejects(applyHost(fixture, hostInputs()), /Cloning owner\/project into \/home\/graphyard\/code\/owner-project on graphyard-host failed: .*not found/);
   } finally { await fixture.cleanup(); }

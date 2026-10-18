@@ -1473,8 +1473,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   let protectionDetail = observeOnly
     ? `${OBSERVE_ONLY_HELD}: no GitHub App, branch protection or ruleset is read or written`
     : 'no GitHub App and no branch protection; the merge writer deploy key is the only GitHub access';
+  let deployKeyFile: string | null = null;
   if (!observeOnly) {
-    const key = await ensureDeployKey(session.directory, session.inputs.repository, gh);
+    const key = deployKeyFile = await ensureDeployKey(session.directory, session.inputs.repository, gh);
     protectionDetail = `merge writer deploy key registered at ${key} (read-write); no GitHub App and no branch protection or ruleset`;
     log(protectionDetail);
   }
@@ -1512,6 +1513,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
       url, adminToken: session.tokens.get(principalOfRole(session.principals, 'admin').id)!, coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
       reviewer: session.inputs.reviewer ?? null, fetch: deps.fetch, log,
       cloneToken: bound ? vault.add((await installationToken(bound.facts, deps.fetch)).token) : null,
+      deployKeyFile,
       github: bound ? { appId: bound.facts.appId, installationId: bound.facts.installationId, slug: bound.facts.slug, privateKey: bound.facts.privateKey, ...(bound.facts.botUserId ? { botUserId: bound.facts.botUserId } : {}) } : null,
     })
     : null;
