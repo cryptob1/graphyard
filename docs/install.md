@@ -45,7 +45,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; protects bran
 
 Skip with `--no-github-app`/`--observe-only`; else `--apply` serves `http://127.0.0.1:4311` (no browser) 900s; human installs App. **Verify** *App registered and installation verified*; unconfirmed: exit 1, `resume`.
 
-**Deploy key (GY-2010):** Graphyard calls no GitHub API, mints no installation token and serves no webhook; the control-plane merge writer pushes with a read-write ed25519 deploy key (registered by `up` through the `gh` CLI) over an SSH origin, so no App is required.
+**Deploy key (GY-2010):** Graphyard calls no GitHub API, mints no installation token and serves no webhook; the control-plane merge writer pushes with a read-write ed25519 deploy key (registered by `up` through the `gh` CLI) over an SSH origin, so no App is required. An install set up with an App may delete it, its rulesets and webhook, and unset `GITHUB_APP_*`, `GITHUB_WEBHOOK_SECRET` and `GRAPHYARD_REVERT_APPROVER_*`: the control plane reads none of them.
 
 ## Step 4: summary
 

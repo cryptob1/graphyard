@@ -42,9 +42,9 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 `faultClass` (`master status` `faults`): recurring classes file one item each; instances predating a delivered class's fix-running landing link there; triage proposes closing items holding only those, withdrawn on post-running links; doctor matches standing/cover; a resource at bound files `resource:ID`; a cycle over 60s is attention naming its slowest steps, never an item; a [stall](operations-reference.md#master-coordination-loop) uncleared past six failing cycles files one item per signature with its evidence into `master.json` `upstream` (`url`, absolute `credentialFile`), else this install as operator-agent (`master autonomy --apply`), and `master status` lists each stall's signature, count, remedy, owner; filings outlive releases; asks replay per key, backing off; `fleet-capacity`/`unanswered-request` (past `settledAnswerGraceMs`), `configuration`/`decision-unanswered`/`unclassified` unless (`plane-unavailable`/`fix-item`/`decision-stale`/`overlong-session`). Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; gh pauses `github-budget`. Fleet-held claimable items past 20min file `concurrency-starved` (`capacity:<id>`). `no master role` blockers group as `configuration`, not `stalled-gate`. Pre-start launch failures: one; a finished lease-holder files `session` past the orphan watch and gone-worker preserve.
 
-## Shadow merge gate
+## Merge writer trial
 
-`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
+`run.mergeWriter.trialTimeoutMinutes` (20, at most 120) bounds each trial, which builds and runs the affected tests credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`). The shadow gate, `run.shadowGate` and its routes are gone (GY-2010); an old `run.shadowGate` is kept unread.
 
 ## Pipeline speed
 

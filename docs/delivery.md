@@ -32,9 +32,9 @@ Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/c
 
 Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard writes main ([redesign](delivery-redesign.md)).
 
-### Main guard
+### Main
 
-Every 30s the guard reverts merges failing parent-passed checks; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon. Reverts failing the merge's named tests close `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun (merge, base): [flakes](validation.md#flake-ledger) land; base failures file P0.
+No main guard runs (GY-2010): main moves only by the merge writer's push of a trialled merge commit, and the report-only main watch explains every commit. Failing trial files rerun (merge, base): [flakes](validation.md#flake-ledger) land; base failures file P0.
 
 ## Managed repositories
 
