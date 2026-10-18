@@ -13,7 +13,7 @@ import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js'
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
 import { ensureWorktreeDependencies, installMatchesLockfile } from '../src/repository-setup.js';
 import { installUnderLease } from '../src/cli/workspace.js';
-import { runTests } from './helpers/run-tests.js';
+import { durableTestTmpdir, runTests } from './helpers/run-tests.js';
 import { hostMemoryVariable } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-24 pause resets are judged against the injected now () => clock of that test; the live command's reset is Date.now()+300, so it moves with the wall clock.
@@ -519,4 +519,12 @@ test('unit:proof-and-cli-self-sufficient graphyard complete refused during a Git
   assert.ok(requests.every(request => request.path === 'work/work-1/submit' && JSON.stringify(request.data) === JSON.stringify({ epoch: 3, pr: 42 })));
   assert.equal(requests[0].key, requests[1].key);
   assert.equal(printed[0].submitted, true);
+});
+
+test('unit:durable-test-tmpdir — a suite whose tmpdir is a tmpfs runs under a short directory on disk outside any checkout; any other tmpdir stands (GY-2001)', async () => {
+  const home = await scratch('home');
+  assert.equal(durableTestTmpdir('/tmp', home, () => ({ type: 0x01021994 })), join(home, '.gy', 'tmp'));
+  assert.ok(existsSync(join(home, '.gy', 'tmp')), 'the directory is made');
+  assert.equal(durableTestTmpdir('/tmp', home, () => ({ type: 0xef53 })), null, 'a disk tmpdir stands');
+  assert.equal(durableTestTmpdir('/tmp', home, () => { throw new Error('ENOENT'); }), null, 'an unreadable tmpdir stands');
 });
