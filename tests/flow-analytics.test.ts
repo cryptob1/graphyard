@@ -1524,7 +1524,7 @@ test('unit:delivery-speed-attention — targets default to 2h and 45 min, are co
   assert.deepEqual(deliverySpeedBreaches(deliverySpeed(deliveryItems(), { now: deliveryNow, readyAt, targets: configured }), 1).map(breach => breach.text),
     ['Merged→promoted to production p90 is 1.9h over 7 days (2 items), above the 1h target; slowest: GY-C 10h (pending), GY-A 2h, GY-B 1h']);
   assert.throws(() => masterConfigSchema.shape.deliverySpeed.parse({ readyToMergedP90Ms: 0 }));
-  assert.throws(() => masterConfigSchema.shape.deliverySpeed.parse({ unknown: 1 }));
+  assert.deepEqual(masterConfigSchema.shape.deliverySpeed.parse({ unknown: 1 }), { unknown: 1 }, 'an unknown key a newer version wrote is kept, not refused (GY-1960)');
 });
 
 // GY-1275: follow-ups from the approved review of GY-1232 (PR #728), proof manual:review-followups-triaged.

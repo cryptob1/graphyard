@@ -4,6 +4,7 @@ import { readlinkSync } from 'node:fs';
 import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
+import { forwardTolerant } from '../master/profiles.js';
 import { boundDetail } from './decisions.js';
 import { waitReason } from '../model/action-kinds.js';
 import { classified, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
@@ -13,6 +14,19 @@ import { shadowKeptVerdicts } from './cycle-shadow.js';
 import { daemonActionFaultKind, daemonActionSchema, daemonStateSchema, retainedDoctorRuns, type DaemonAction, type DaemonState, type DeploymentObservation } from './state.js';
 
 export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of a run of /tmp passes removing 0 under the standing inode bound
+/**
+ * The cursor schema as GY-1960 reads and writes it: declared fields strict, unknown fields kept.
+ * Built on first use, never at module scope: state.ts and this module import each other, so the
+ * schema it wraps does not exist while this file's body runs.
+ */
+let tolerated: typeof daemonStateSchema | undefined;
+const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSchema);
+/**
+ * GY-1960: a cursor record the loop rewrites from what it declares (its release, its latest
+ * reload) keeps the fields a newer loop wrote under it. `next` sets every declared field, so only
+ * the undeclared ones of `previous` survive under it; a null `next` clears the record as before.
+ */
+export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
 /** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
@@ -37,10 +51,11 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   let raw: string;
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
-  const stored = JSON.parse(raw), dropped = stored && typeof stored === 'object' ? Object.keys(stored).filter(key => !Object.hasOwn(daemonStateSchema.shape, key)) : [];
-  for (const key of dropped) delete stored[key]; // GY-1542: keys from newer, since reverted code are dropped and named once; declared fields stay strict
-  if (dropped.length) console.error(`Master daemon cursor: ignored top-level keys this version does not declare: ${dropped.join(', ')}`);
-  const state = daemonStateSchema.parse(stored);
+  // GY-1960: the cursor is forward-tolerant. A cursor a newer loop wrote carries fields this
+  // version does not declare; they parse, ride every write, and are written back unchanged, so a
+  // rollback or a held-CLI snapshot neither fails nor silently drops what the newer loop recorded.
+  // Declared fields are still validated: a malformed one refuses the read as before.
+  const state = toleratedStateSchema().parse(JSON.parse(raw));
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
   return state;
 }
@@ -50,7 +65,7 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
   // The cursor is written twice per external action, so it is usually the first thing a full
   // volume stops. Saying so is the difference between a disk to reclaim and a mystery.
   try {
-    await writeFile(temporary, JSON.stringify(daemonStateSchema.parse(boundDaemonState(state)), null, 2), { mode: 0o600, flag: 'wx' });
+    await writeFile(temporary, JSON.stringify(toleratedStateSchema().parse(boundDaemonState(state)), null, 2), { mode: 0o600, flag: 'wx' });
     await rename(temporary, file);
   } catch (error) { throw writeFailure(error, 'Writing the master daemon cursor'); }
   await chmod(file, 0o600);

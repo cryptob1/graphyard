@@ -3,7 +3,7 @@
 
 ## Daily checklist
 
-- `/healthz` at expected `commit`; `/api/status`: no job errors, `delegationLimits.attention`, `production.incidents`.
+- `/healthz` at expected `commit` (CLI at another release refuses: `graphyard upgrade`); `/api/status`: no job errors, `delegationLimits.attention`, `production.incidents`.
 - `master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
 
 ## Incident decision tree

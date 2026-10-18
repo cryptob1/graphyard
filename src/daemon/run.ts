@@ -9,6 +9,7 @@ import { allocateManagedCheckout } from '../master/worktrees.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { loopScratchCheckout } from '../producer.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
+import { carryUndeclared } from './state-cursor.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
@@ -110,7 +111,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
  */
 export async function noteConfigReload(state: DaemonState, reload: ConfigReload, persist: DaemonEffects['persist']) {
   const previous = state.config;
-  state.config = { at: reload.at, changed: reload.changed.slice(0, 100), refused: reload.refused?.slice(0, 1000) ?? null };
+  state.config = carryUndeclared(previous, { at: reload.at, changed: reload.changed.slice(0, 100), refused: reload.refused?.slice(0, 1000) ?? null });
   const noted: DaemonAction[] = [];
   if (reload.refused && previous?.refused !== state.config.refused) {
     // A refused reload is a configuration fault, whatever kind of action reports it.
@@ -283,8 +284,9 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const effects = boundedPersist(namedEffects(stallHeldEffects(scoped, () => state, now, bound => effects.persist(bound))));
     acquireDaemonLock(state, options.identity, now(), interval());
     // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
-    // checkout must not report the release the process before it loaded.
-    state.release = loadedRelease;
+    // checkout must not report the release the process before it loaded. Its declared fields are
+    // this process's; fields a newer loop wrote under it ride along (GY-1960).
+    state.release = carryUndeclared(state.release, loadedRelease);
     await effects.persist(state);
     // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
     // silent pipeline; a window that would restart a healthy loop is recorded and left to the

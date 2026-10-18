@@ -23,6 +23,62 @@ const safeEnvironment = z.record(
   z.string().min(1).max(1000).refine(value => !/[\u0000-\u001f\u007f]/.test(value), 'Profile environment values cannot contain control characters'),
 ).default({});
 
+/**
+ * GY-1960: a schema that keeps the fields it does not know. The files one version writes are read
+ * by others: a rollback, or a CLI pinned to the held release, opens a file a newer version wrote,
+ * and a writer that dropped fields it did not set lost them for good (GY-1918). `forwardTolerant`
+ * rebuilds `schema` so every object in it keeps unknown keys — zod 4 encodes `.strict()` as a
+ * `never` catchall and `.passthrough()` as an `unknown` one, so each object node is cloned with the
+ * `unknown` catchall — while every declared field still validates and defaults, and the wrappers
+ * around them (optionals, defaults, refinements, transforms, records, unions, lazies) are carried
+ * across. An unknown key then round-trips read and write unchanged, and a file a newer version
+ * wrote parses here instead of failing it. The rebuilt schema keeps its own type — a ZodObject
+ * stays one, shape included — so readers of the schema see exactly what they saw. A key a version
+ * declared and later retired is not unknown: schemas keep dropping those on purpose (master
+ * config's mergeQueue, GY-1264). A schema marked with `keepStrict` is a closed selection and stays
+ * as it was.
+ */
+export function forwardTolerant<T extends z.ZodTypeAny>(schema: T): T {
+  return tolerateSchema(schema, new Map()) as T;
+}
+
+const keptStrict = new WeakSet<object>();
+/** Marks `schema` as a closed selection `forwardTolerant` leaves strict: a key it does not declare is refused, not kept. */
+export function keepStrict<T extends z.ZodTypeAny>(schema: T): T {
+  keptStrict.add(schema);
+  return schema;
+}
+
+function tolerateSchema(schema: unknown, seen: Map<unknown, unknown>): any {
+  if (!schema || typeof schema !== 'object' || !(schema as any)._zod?.def || keptStrict.has(schema)) return schema;
+  if (seen.has(schema)) return seen.get(schema);
+  const def = (schema as any)._zod.def;
+  let rebuilt: unknown;
+  switch (def.type) {
+    case 'object': {
+      const shape = typeof def.shape === 'function' ? def.shape() : def.shape;
+      rebuilt = (schema as any).clone({ ...def, shape: Object.fromEntries(Object.entries(shape).map(([key, value]) => [key, tolerateSchema(value, seen)])), catchall: z.unknown() });
+      break;
+    }
+    case 'optional': case 'nullable': case 'default': case 'prefault': case 'readonly': case 'catch':
+      rebuilt = (schema as any).clone({ ...def, innerType: tolerateSchema(def.innerType, seen) }); break;
+    case 'array': rebuilt = (schema as any).clone({ ...def, element: tolerateSchema(def.element, seen) }); break;
+    case 'record': rebuilt = (schema as any).clone({ ...def, valueType: tolerateSchema(def.valueType, seen) }); break;
+    case 'tuple': rebuilt = (schema as any).clone({ ...def, items: def.items.map((item: unknown) => tolerateSchema(item, seen)), ...(def.rest ? { rest: tolerateSchema(def.rest, seen) } : {}) }); break;
+    case 'union': rebuilt = (schema as any).clone({ ...def, options: def.options.map((option: unknown) => tolerateSchema(option, seen)) }); break;
+    case 'intersection': rebuilt = (schema as any).clone({ ...def, left: tolerateSchema(def.left, seen), right: tolerateSchema(def.right, seen) }); break;
+    case 'pipe': rebuilt = (schema as any).clone({ ...def, in: tolerateSchema(def.in, seen) }); break;
+    case 'lazy':
+      // Registered before its getter can run, so a recursive schema reaches itself through the map.
+      rebuilt = (schema as any).clone({ ...def, getter: () => tolerateSchema(def.getter(), seen) });
+      seen.set(schema, rebuilt);
+      return rebuilt;
+    default: return schema; // leaves (strings, numbers, literals) have nothing to keep
+  }
+  seen.set(schema, rebuilt);
+  return rebuilt;
+}
+
 export const agentKindSchema = z.enum(['pi', 'claude', 'codex', 'gemini', 'cursor', 'devin', 'agy', 'cline', 'omp', 'mastracode', 'opencode', 'copilot', 'kimi', 'kiro', 'droid', 'amp', 'grok', 'hermes', 'kilo', 'qodercli', 'qwen', 'maki', 'muse']);
 const profileName = z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$/);
 // 'auto' installs the runtime's own non-interactive startup contract. 'prompt' would keep the
@@ -289,7 +345,8 @@ export const masterRunSchema = z.object({
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
   // The runtime of each narrow role (GY-169): `herdr` terminal session, or `pi` headless runner
   // (the approver and unit proof producer). `pi` names the wrapper and model those runs use.
-  runtimes: narrowRoleRuntimeSchema.optional(),
+  // A closed selection: only the narrow roles choose a runtime, so a key naming any other role is refused.
+  runtimes: keepStrict(narrowRoleRuntimeSchema).optional(),
   pi: piRuntimeSchema.optional(),
   // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
@@ -329,7 +386,7 @@ export const maxRerunFailedChecks = 3;
 export const supervisionModes = ['autonomous', 'supervised'] as const;
 export type Supervision = typeof supervisionModes[number];
 export const promotionCommand = 'graphyard master promote --admin-token-stdin (after graphyard master reviewer setup and master reviewer add)';
-export const masterConfigSchema = z.object({
+export const masterConfigSchema = forwardTolerant(z.object({
   version: z.literal(1),
   // Absent is autonomous, so every existing master.json loads and is written back unchanged.
   supervision: z.enum(supervisionModes).optional(),
@@ -389,7 +446,9 @@ export const masterConfigSchema = z.object({
   invariants: invariantThresholdsSchema.optional(),
   // Delivery-speed p90 targets master status judges (GY-1232); unset keeps 2h ready→merged, 8h merged→production.
   deliverySpeed: z.object({ readyToMergedP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(), mergedToProductionP90Ms: z.number().int().positive().max(30 * 86_400_000).optional() }).strict().optional(),
-}).strict();
+// GY-1960: master.json is forward-tolerant — fields a newer version wrote that this one does not
+// declare parse and are written back unchanged, so a rollback or a held-CLI snapshot opens the file.
+}).strict());
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /** Sessions `run.reviewerProfile`'s profile runs at unset concurrency (GY-1072); other reviewer profiles keep one. */
 export const automaticReviewerConcurrency = 4;

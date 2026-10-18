@@ -607,7 +607,7 @@ test('macOS foreground Herdr supervision refuses before launch without durable c
   const cwd=await temporaryDirectory('handoff');const requests:string[]=[];
   const http=createServer((req,res)=>{requests.push(req.url!);res.setHeader('Content-Type','application/json');res.end(JSON.stringify(req.url==='/api/status'?{actor:{id:'worker-a',role:'worker'},now:'2026-01-01T00:02:00Z'}:{now:'2026-01-01T00:00:00Z',work:[{id:'task',key:'GY-1',lease:{owner:'worker-a',epoch:7,expiresAt:'2026-01-01T00:01:00Z'},workspaces:[{epoch:7,host:'machine-a',path:cwd}]}]}))});
   await new Promise<void>(r=>http.listen(0,'127.0.0.1',r));
-  try{const result=await exec(process.execPath,[launcher,'handoff','GY-1'],{cwd,env:{...process.env,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_HOST_ID:'machine-a',GRAPHYARD_URL:`http://127.0.0.1:${(http.address() as any).port}`}});assert.match(JSON.parse(result.stdout).commands.join(' '),/watch/);assert.deepEqual(requests.sort(),['/api/status','/api/work-snapshot']);}
+  try{const result=await exec(process.execPath,[launcher,'handoff','GY-1'],{cwd,env:{...process.env,GRAPHYARD_TOKEN:'fixture',GRAPHYARD_HOST_ID:'machine-a',GRAPHYARD_URL:`http://127.0.0.1:${(http.address() as any).port}`}});assert.match(JSON.parse(result.stdout).commands.join(' '),/watch/);assert.deepEqual(requests.sort(),['/api/status','/api/work-snapshot','/healthz']);/* GY-1960: the invocation first reads the release /healthz serves; the stub names none, so it proceeds */}
   finally{await new Promise<void>(r=>http.close(()=>r()));await rm(cwd,{recursive:true,force:true});}
  });
 
@@ -689,7 +689,9 @@ test('the packaged runner path is usable from the CLI and refuses evidence-produ
     res.setHeader('Content-Type', 'application/json');
     if (req.url === '/api/status') { res.end(JSON.stringify({ actor: { id: 'preview-runner', role, ...(role === 'producer' ? { proofs: ['e2e:booking'] } : {}) } })); return; }
     if (req.url === '/api/validation/collection-authority') { posts.push(String(req.url)); res.end(JSON.stringify(collectionAuthority)); return; }
-    posts.push(String(req.url)); res.end('{}');
+    // GY-1960: the invocation's /healthz release read is not an API write; only /api calls count here.
+    if (req.url!.startsWith('/api/')) posts.push(String(req.url));
+    res.end('{}');
   });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));
   const env = { ...process.env, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: `http://127.0.0.1:${(http.address() as any).port}` };
@@ -867,7 +869,8 @@ test('the runner holds authority while the host attestor executes and signs the 
     const attempted = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
 
     // Acknowledgement sits between the attestor's preflight and its first container.
-    assert.deepEqual(posts, ['dispatch', 'ack']);
+    // GY-1960: the invocation first reads the release /healthz serves; the stub names none, so it proceeds.
+    assert.deepEqual(posts, ['/healthz', 'dispatch', 'ack']);
     // And the attestor checked the control plane itself, twice: once before provisioning
     // anything, and once after the runner claimed to have acknowledged. The second read is
     // what actually releases the containers, so `proceed` on the pipe decides nothing.
@@ -1001,7 +1004,7 @@ test('the runner retries a lost acknowledgement response idempotently and starts
     assert.deepEqual(JSON.parse(acks[0].body), { requestId, attemptId, epoch: 1 });
     // The replayed, already-acknowledged answer is success: the attempt went on to the
     // attestor, which read `running` for itself and produced a signed record.
-    assert.deepEqual(events, ['dispatch', 'authority:dispatched', 'ack:response-lost', 'ack:replayed', 'authority:running'],
+    assert.deepEqual(events, ['/healthz', 'dispatch', 'authority:dispatched', 'ack:response-lost', 'ack:replayed', 'authority:running'],
       'no heartbeat and no execution precede the confirmed acknowledgement');
     assert.equal(attempted.dispatched, true);
     assert.equal(attempted.attestation.payload.attemptId, attemptId);
