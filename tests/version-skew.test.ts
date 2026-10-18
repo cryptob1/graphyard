@@ -196,10 +196,11 @@ test('unit:state-files-forward-tolerant — master.json reads and writes an unkn
   const file = join(root, '.graphyard/master.json');
   await mkdir(dirname(file), { recursive: true });
   const futureField = { addedBy: 'a newer version', at: 12 }, futureBrowser = { since: 'a newer version' };
-  await writeFile(file, JSON.stringify({ ...masterConfig(coordinatorToken), futureField, browser: { profile: 'Default', futureBrowser } }), { mode: 0o600 });
+  await writeFile(file, JSON.stringify({ ...masterConfig(coordinatorToken), futureField, browser: { profile: 'Default', futureBrowser }, run: { futureRun: true } }), { mode: 0o600 });
   const loaded = await loadStoredMasterConfig(root);
   assert.deepEqual((loaded as any).futureField, futureField, 'the unknown top-level field parses');
   assert.deepEqual((loaded.browser as any).futureBrowser, futureBrowser, 'the unknown nested field parses');
+  assert.equal((loaded.run as any).futureRun, true, 'an unknown field under a prefaulted record (run) parses');
   // Writers parse before they save; the unknown fields ride the parse back into the file.
   await writeFile(file, JSON.stringify(masterConfigSchema.parse(loaded), null, 2), { mode: 0o600 });
   const reread = await loadStoredMasterConfig(root);
@@ -243,6 +244,14 @@ test('unit:state-files-forward-tolerant — setupRepository keeps what a newer C
     assert.deepEqual(reread!.futureConnection, { addedBy: 'a newer CLI' }, 'the rerun kept the newer field the file already held');
     assert.equal(reread!.hostId, 'host-a');
     assert.equal(reread!.principal, 'worker-a', 'the rerun still writes the fields it verifies');
+    // Setup rerun against a newly selected server with no credential (install.ts drops the saved one):
+    // only undeclared fields ride along, so server A's token and principal never pair with server B.
+    await setupRepository(root, { url: 'http://localhost:4311', cliPath: launcher, hostId: 'host-a' }, { fetcher, executors: false });
+    const moved = await loadConnection(root) as any;
+    assert.equal(moved!.url, 'http://localhost:4311');
+    assert.equal(moved!.token, undefined, 'the old server\'s token is not carried to the new one');
+    assert.equal(moved!.principal, undefined, 'the old server\'s principal is not carried to the new one');
+    assert.deepEqual(moved!.futureConnection, { addedBy: 'a newer CLI' }, 'the unknown field is still kept');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

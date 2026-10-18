@@ -52,7 +52,7 @@ function tolerateSchema(schema: unknown, seen: Map<unknown, unknown>): any {
       rebuilt = (schema as any).clone({ ...def, shape: Object.fromEntries(Object.entries(shape).map(([key, value]) => [key, tolerateSchema(value, seen)])), catchall: z.unknown() });
       break;
     }
-    case 'optional': case 'nullable': case 'default': case 'readonly': case 'catch':
+    case 'optional': case 'nullable': case 'default': case 'prefault': case 'readonly': case 'catch':
       rebuilt = (schema as any).clone({ ...def, innerType: tolerateSchema(def.innerType, seen) }); break;
     case 'array': rebuilt = (schema as any).clone({ ...def, element: tolerateSchema(def.element, seen) }); break;
     case 'record': rebuilt = (schema as any).clone({ ...def, valueType: tolerateSchema(def.valueType, seen) }); break;
