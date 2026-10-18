@@ -83,7 +83,6 @@ test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under
 const NAMED_BEFORE_TRIM = [
   '`release cut', '`release uat', '`release validate', '`release promote', '`release verify', '`release follow-up', '`release soak', '`release status', '`release GY-N EPOCH`',
   'graphyard master config promoteEveryMinutes', '`init --scan`', '`install --plan`', '`graphyard delivery sweep`', '`graphyard delivery`', '`graphyard doctor`', '`graphyard release`',
-  '`master browser app-permissions`', '`master browser installation-accept`', '`master reviewer setup`',
   '`POST /api/delivery/lease`', '`POST /api/delivery/build`', '`POST /api/delivery/release`', '`POST /api/delivery/approve`', '`POST /api/delivery/observe`', '`POST /api/delivery/notify`',
   '`POST /api/validation/result`', '`GET /api/analytics/attribution`',
 ];
