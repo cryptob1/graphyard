@@ -59,6 +59,14 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   processEntry(proc, 600, { cwd: join(checkout, '.graphyard') });              // the managed area: no writer
   processEntry(proc, 700, { cwd: null, state: 'I', ppid: 2, flags: 0x04208040 }); // a kernel thread (PF_KTHREAD), as root sees it: no writer
   processEntry(proc, 800, { cwd: null });                                     // exits between its stat and its cwd read: a zombie by the recheck
+  // GY-2016: a live thread that exits between its own stat read and its cwd read leaves no link
+  // behind — a live task's cwd link never fails ENOENT, so the absence is the exit — and its process
+  // is judged by its other reads alone, never unverifiable for the ghost. Its leader stands (its own
+  // read refused, as ever on the host) and no other thread lives here, so every real read of pid 810
+  // was refused: on the host this verdict is the GY-1672 skip, not a refusal of the restore.
+  processEntry(proc, 810, { cwd: null });
+  mkdirSync(join(proc, '810', 'task', '811'), { recursive: true });
+  writeFileSync(join(proc, '810', 'task', '811', 'stat'), '811 (proc 810) S 1 810 810 0 -1 4194560\n'); // live at its stat read; its cwd link is already gone
 
   // pid 800 is live when its stat is first read and has become a zombie when its cwd read fails.
   const readlink = fs.readlinkSync;
@@ -73,6 +81,7 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   assert.deepEqual(scan.unverifiable.map(entry => entry.pid), [200, 420], 'only the unreadable live processes of this user, outside the loop, its managed sessions and the kernel, are unverifiable');
   assert.match(scan.unverifiable[0].error, /EINVAL/);
   assert.match(scan.unverifiable[1].error, /live thread 421's cwd cannot be read either/);
+  assert.ok(!scan.unverifiable.some(entry => entry.pid === 810) && !scan.writers.includes(810), 'a thread whose cwd link vanished between its stat read and its cwd read has exited in between, and never makes its process unverifiable');
   fs.readlinkSync = readlink; syncBuiltinESMExports();
 
   // The freeze stops that zombie leader's live sibling rather than reading the leader as gone: SIGSTOP

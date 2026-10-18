@@ -120,7 +120,12 @@ export function checkoutProcessScan(root: string, self = process.pid, proc = '/p
  * otherwise. Live threads none of whose cwd reads: a live leader is skipped only when every read,
  * its own and its live threads', was refused EACCES, the non-dumpable daemon GY-1672 names; a
  * zombie leader's, or any other failure, or a task list that cannot be read, is unverifiable, and
- * the restore refuses.
+ * the restore refuses. A thread whose cwd read fails ENOENT after its own stat read succeeded is
+ * none of these: a live task's cwd link never fails ENOENT — a deleted working directory still
+ * reads, naming itself "(deleted)", and a permission refusal is EACCES — so the link's absence
+ * between the two reads is the thread's exit, judged like the stat-read failure beside it (GY-2016:
+ * a busy host's process churn otherwise turned that race into restore refusals that passed only on
+ * rerun).
  */
 function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone: boolean, inside: (cwd: string) => boolean): { cwd: string | null; error: string | null; denied: boolean } {
   const describe = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -144,7 +149,16 @@ function judgeByThreads(proc: string, name: string, failure: unknown, leaderGone
       const cwd = readlinkSync(join(proc, name, 'task', tid, 'cwd'));
       if (inside(cwd)) return { cwd, error: null, denied: false };
       outside ??= { tid, cwd };
-    } catch (thread) { error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${describe(thread)})`; if (!refused(thread)) denied = false; }
+    } catch (thread) {
+      // ENOENT here is the thread's exit between its stat read above and this read, never a refusal:
+      // a live task's cwd link does not fail ENOENT — a deleted working directory still reads, naming
+      // itself "(deleted)", and a permission refusal is EACCES — so the thread is gone and writes
+      // nothing, judged like the stat-read failure beside it; every other failure stays fail-closed
+      // (GY-2016: the race otherwise made the process unverifiable and the restore refuse, a rerun's
+      // lottery on a host whose suites churn processes constantly).
+      if ((thread as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      error ??= `${reason}; its live thread ${tid}'s cwd cannot be read either (${describe(thread)})`; if (!refused(thread)) denied = false;
+    }
   }
   if (!live) return leaderGone ? gone : own;
   // Outside only when fully judged: every live thread's cwd read and none inside — the leader's own
