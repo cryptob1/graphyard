@@ -134,10 +134,12 @@ test('unit:optimistic-dispatch — two items overlapping on the same files both 
   assert.deepEqual(concurrentOverlap(first, [first, second], clock), [], 'two ready peers are not in flight');
   assert.deepEqual(exclusionPaths(inReview), [file], 'a candidate is reported on its observed diff');
 
-  // The durable loop dispatches both in one cycle.
+  // The durable loop dispatches both in one cycle. The snapshot omits one claimed item (GY-185) so
+  // the in-flight count stays under the cap (GY-2097): the two ready items are the 3rd and 4th in
+  // flight, and the cap holds nothing here.
   const loop = await daemon(['one', 'two', 'three']);
   try {
-    loop.set(all);
+    loop.set([building, inReview, first, second]);
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
     assert.deepEqual(loop.log, ['GY-190→one', 'GY-191→two'], 'overlapping items are dispatched together, never held');
   } finally { await loop.cleanup(); }
@@ -149,8 +151,9 @@ test('unit:optimistic-dispatch — two items overlapping on the same files both 
   assert.deepEqual(row.overlap.concurrent.map(entry => entry.key), ['GY-184', 'GY-185', 'GY-166']);
   assert.equal(row.attention, null, 'an overlap raises no attention');
   assert.equal(status.effectiveConcurrency.effective, 5); assert.equal(status.effectiveConcurrency.inFlight, 3); assert.equal(status.effectiveConcurrency.dispatchable, 2);
+  assert.equal(status.effectiveConcurrency.cap, 4); assert.equal(status.effectiveConcurrency.atCap, false, '3 in flight is under the cap');
   assert.equal(status.counts.effectiveConcurrency, 5);
-  assert.match(status.effectiveConcurrency.statement, /^5 items could be in flight at once \(3 in flight, 2 dispatchable; planned-file overlap holds nothing\); 3 of 3 launch profiles idle$/);
+  assert.match(status.effectiveConcurrency.statement, /^5 items could be in flight at once \(3 in flight, 2 dispatchable; planned-file overlap holds nothing\); 3 of 3 launch profiles idle; the dispatcher starts new work while fewer than 4 items are in flight$/);
   assert.ok(!('held' in status.counts) && !('holdsOverdue' in status.counts));
 
   // The launcher dispatches over the overlap without any override, and records it.

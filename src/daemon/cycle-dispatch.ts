@@ -2,7 +2,8 @@
 import type { Work } from '../model.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
 import { docsOnlyConflict } from '../model/docs-sync.js';
-import { dispatchSort } from '../coordination.js';
+import { dispatchSort, inFlight } from '../coordination.js';
+import { isHotfix, maxInFlight, wipHoldWording } from '../model/dispatch.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
@@ -316,10 +317,26 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   // its decisions, merges and closes. Each launch holds a distinct healthy profile from hand-off
   // until it settles, across cycles: a profile an earlier cycle's launch still holds is taken.
   const taken = cycle.launcher.held();
+  // GY-2097: at most `maxInFlight` items in flight. The loop starts new implementation work only
+  // while fewer than `maxInFlight` items are being built or waiting to merge — `inFlight`: a live
+  // lease, or a standing submission — and an item titled "Hotfix: …" starts whatever the count.
+  // The count is read once from this cycle's snapshot, and each launch this cycle hands over joins
+  // it, so one cycle cannot oversubscribe past the cap. A held item is the cap's capacity, not the
+  // loop's silence (the GY-1890 reading a saturated fleet gets): `saturation.wipHeld` retitles the
+  // wait for the measure, and one capacity record names the cap while the count stands.
+  let inFlightCount = snapshot.work.filter(entry => inFlight(entry, clock)).length;
   // The `launches` step is the hand-off: choosing each item's profile and handing its launch over.
   await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable || memoryLow ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
+    // GY-2097: the cap holds every item but a hotfix before any profile is picked, so a held item
+    // neither cools a profile nor reports the fleet busy; its wait ends when a merge frees a slot.
+    if (inFlightCount >= maxInFlight && !isHotfix(item)) {
+      saturation.wipHeld = true;
+      const heldKey = `wip:${item.id}`, detail = `${item.key} ${wipHoldWording.held}`;
+      if (detailChanged(state.actions[heldKey], detail)) performed.push(await record(state, heldKey, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (state.actions[heldKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      return;
+    }
     // GY-860: a workspace failure hands the epoch back, so the next dispatch reuses this key; it
     // waits out the usual doubling backoff instead of retrying the same host git state every cycle.
     const failed = state.actions[key];
@@ -380,7 +397,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     // GY-1836: the launch prepares from the tip this cycle's snapshot fetched however long it
     // waits in the queue, so the cycle's fetch is held from now until the launch settles.
     const releaseBase = holdCycleBase(snapshot.now);
-    if (!cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued).finally(releaseBase))) releaseBase();
+    if (cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued).finally(releaseBase))) inFlightCount += 1; else releaseBase();
   }) === 'stop') break; });
 
   /** The one wait an item a close stands unapplied on records instead of a dispatch (GY-1439). */

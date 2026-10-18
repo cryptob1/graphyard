@@ -302,8 +302,9 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // when it dispatched. With none free a claimable item's wait is the fleet's slot capacity, so its
   // subject is a capacity one; the master session's wake reads the kinds, so a held fleet reads as
   // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
-  // not a recomputation beside it, so what reclasses a subject is what the step decided.
-  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
+  // not a recomputation beside it, so what reclasses a subject is what the step decided. GY-2097:
+  // the in-flight cap's own hold (`wipHeld`) is the same reading — the wait is the cap's capacity.
+  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, wipHeld: cycle.wipHeld, launching: item => launcher.busy(dispatchKey(item)) });
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
@@ -377,6 +378,8 @@ export interface Cycle {
   detached: boolean;
   /** GY-1890: the dispatch step stopped on a saturated fleet this cycle — no launch profile free while work is claimable, by `saturatedFleet`. The measure reads this, the step's own decision, to name a claimable item's wait a capacity subject instead of a dispatch one. Absent where the step never stopped. */
   fleetHeld?: boolean;
+  /** GY-2097: the dispatch step held a claimable item back under the in-flight cap this cycle — `maxInFlight` items are being built or waiting to merge, and the item is no "Hotfix: …". The measure reads this, the step's own decision, to count the wait under capacity instead of the loop's silence, the same reading a saturated fleet gets. Absent while the cap has room. */
+  wipHeld?: boolean;
   /** The decision histories read on earlier cycles of this loop (GY-1142), which the decisions step keeps while their ledger has not moved. */
   heldDecisions: HeldDecisions;
   /** The panes this cycle's steps have closed so far: the cycle-start inventory still lists them. */
