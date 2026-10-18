@@ -29,7 +29,6 @@ import { throughputOwnerItem } from '../src/throughput.js';
 import { postDeployChecks } from '../src/master-verification.js';
 import { server } from '../src/server.js';
 import { importAt } from './helpers/base-tree.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-10-07..09 instants are fixture clocks handed to foldInterventions, probeBlocker and sharedGithubStatus; Date.now() only clocks lease-less probes and anchors codex holds relative to itself.
 // GY-1726's 2026-10-11..13 and 2026-10-18 instants are fixture clocks handed to postDeployChecks and their expected windows; its defer cases read the database clock; the report case projects its reading from Date.now() + 10 days, 4 days past the database-clocked criterion bound.
 
@@ -168,10 +167,10 @@ test('manual:intervention-pattern-escalation-build — GY-1519: a refused delive
   assert.equal(classifyBlocker("Permission to use Bash with command git push --force origin HEAD has been denied.").class, 'genuine');
 });
 
-test('manual:intervention-pattern-escalation-build — GY-1477: the worker request says a pushed branch is fixed forward, never force-pushed', () => {
+test('manual:intervention-pattern-escalation-build — GY-1477: the worker request says a wrong commit is fixed forward, never rewritten', () => {
   const request = workerPrompt({ cliPath: '/srv/bin/graphyard.mjs' }, { key: 'GY-1477', title: 'scope' }, { principal: 'graphyard-claude-1' }, 1);
   assert.ok(request.includes(branchRewriteGuidance));
-  assert.match(branchRewriteGuidance, /Never force-push[^.]*: [^.]*fix a pushed commit forward with a new commit and push normally/);
+  assert.match(branchRewriteGuidance, /Never rewrite the assigned branch: fix a wrong commit forward with a new commit/);
 });
 
 test("manual:intervention-pattern-escalation-build — GY-1461: GitHub's own server error is github-outage, probed on GitHub and the push path, not the Graphyard server", async () => {
@@ -352,7 +351,7 @@ async function databaseFor(name: string, Store: typeof import('../src/store.js')
     await database.initialise(); await database.start();
   }
   await database.createDatabase(name);
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init(); await recordLegacyMerger(store); stores.push(store);
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init(); stores.push(store);
   return store;
 }
 /** The control-plane modules of one tree: the base's, extracted, or this checkout's own. */

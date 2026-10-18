@@ -5,8 +5,7 @@ import { createHash } from 'node:crypto';
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { hostname as osHostname } from 'node:os';
 import { resolve } from 'node:path';
-import { mainWriteRuleset, mainWriteRulesetCurrent, mainWriteRulesetName } from '../protection.js';
-import { ghJson, type GitHubCli } from './github.js';
+import type { GitHubCli } from './github.js';
 import { commandFailure, type CommandResult } from './transport.js';
 
 /** The private key's name under the install directory; `merge-writer-settings.ts` reads it from the same place. */
@@ -79,88 +78,4 @@ export async function ensureDeployKey(installDir: string, repository: string, gh
   const known = keys.some((entry: any) => publicKeyFingerprint(String(entry?.key ?? '')) === fingerprint);
   if (!known) await gh(['repo', 'deploy-key', 'add', publicKeyFile, '-R', repository, '--allow-write', '--title', title]);
   return privateKeyFile;
-}
-
-/** A listed deploy key's read-only flag from gh's `read_only` or `readOnly`, or null when it carries neither as a boolean. */
-export function deployKeyReadOnly(entry: any): boolean | null {
-  if (typeof entry?.read_only === 'boolean') return entry.read_only;
-  if (typeof entry?.readOnly === 'boolean') return entry.readOnly;
-  return null;
-}
-
-export interface MainWriteProtection {
-  /** `created`/`updated`: Graphyard wrote its ruleset; `unchanged`: it already held; `operator-protected`: the operator's own protection was found and left as is. */
-  state: 'created' | 'updated' | 'unchanged' | 'operator-protected';
-  baseBranch: string;
-  detail: string;
-}
-
-/**
- * GY-1715: protect BASE (the repository's default branch unless named) so only the merge writer's
- * deploy key may push to it, through the `Graphyard merge writer only` ruleset (`mainWriteRuleset`).
- * GitHub's deploy-key bypass covers every deploy key on the repository, so Graphyard claims the
- * branch only while WRITER_KEY is the one read-write deploy key listed: any other read-write key,
- * a writer key that is missing or read-only, or a key list that cannot be read, refuses before
- * anything is written or reported as protected, the operator's own protection included.
- * Graphyard's own ruleset is rewritten only when it drifted, so a second run writes nothing; a
- * branch the operator already protects (classic protection or another active ruleset) is left as
- * is and reported. Github-mode installs never call this: GitHub executes their merges.
- */
-export async function ensureMainWriteProtection(repository: string, gh: GitHubCli, options: { baseBranch?: string; writerKey: string }): Promise<MainWriteProtection> {
-  const repo = options.baseBranch ? null : await ghJson(gh, ['api', `repos/${repository}`]) as any;
-  const baseBranch = options.baseBranch ?? (typeof repo?.default_branch === 'string' ? repo.default_branch : null);
-  if (!baseBranch) throw new Error(`The default branch of ${repository} could not be read, so its merge-writer protection was not applied`);
-  const writer = publicKeyFingerprint(options.writerKey);
-  if (!writer) throw new Error(`The merge writer's public key holds no OpenSSH key, so ${baseBranch} was not protected`);
-  const keys = await ghJson(gh, ['repo', 'deploy-key', 'list', '-R', repository, '--json', 'id,key,title,readOnly']);
-  if (!Array.isArray(keys)) throw new Error(`The deploy keys of ${repository} could not be read, so ${baseBranch} was not protected`);
-  // GY-1839: gh prints the API's own `read_only` whatever the --json field is called; `readOnly` is read too.
-  const unflagged = keys.filter((entry: any) => deployKeyReadOnly(entry) === null).map((entry: any) => String(entry?.title ?? entry?.id));
-  if (unflagged.length) throw new Error(`The deploy key list of ${repository} carried no read-only flag (read_only or readOnly) for ${unflagged.join(', ')}, so ${baseBranch} was not protected`);
-  const writable = keys.filter((entry: any) => deployKeyReadOnly(entry) === false);
-  const others = writable.filter((entry: any) => publicKeyFingerprint(String(entry?.key ?? '')) !== writer)
-    .map((entry: any) => ({ id: String(entry?.id), title: String(entry?.title ?? entry?.id) }))
-    .sort((a, b) => a.title.localeCompare(b.title) || a.id.localeCompare(b.id));
-  const writerListed = writable.length > others.length;
-  // The deploy-key bypass names no key, so exclusivity rests on the key list: refuse rather than claim
-  // it, and check it before the operator's protection too, which setup accepts only for a key that can push.
-  if (others.length) {
-    const removals = others.map(key => `\`gh repo deploy-key delete ${key.id} -R ${repository}\` (${key.title})`).join(', ');
-    throw new Error(`Read-write deploy keys ${others.map(key => key.title).join(', ')} on ${repository} would share the merge writer's bypass, so ${baseBranch} was not protected; remove them (or make them read-only), then rerun: ${removals}`);
-  }
-  if (!writerListed) throw new Error(`The merge writer's deploy key is not registered read-write on ${repository}, so ${baseBranch} was not protected`);
-
-  const ours = (await repositoryRulesets(repository, gh, baseBranch)).find(ruleset => ruleset?.name === mainWriteRulesetName);
-  if (!ours?.id) {
-    const classic = await gh(['api', `repos/${repository}/branches/${baseBranch}/protection`], { allowFailure: true });
-    const rules = await ghJson(gh, ['api', `repos/${repository}/rules/branches/${baseBranch}`], []) as any[];
-    if (classic.code === 0 || (Array.isArray(rules) && rules.length > 0)) {
-      return { state: 'operator-protected', baseBranch, detail: `${baseBranch} already carries the operator's ${classic.code === 0 ? 'branch protection' : 'rulesets'}; left as is, so confirm it refuses pushes from everyone but the merge-writer deploy key` };
-    }
-  }
-  const body = { input: JSON.stringify(mainWriteRuleset(baseBranch)) };
-  if (ours?.id) {
-    if (mainWriteRulesetCurrent(await ghJson(gh, ['api', `repos/${repository}/rulesets/${ours.id}`]), baseBranch)) return { state: 'unchanged', baseBranch, detail: `${baseBranch} already refuses pushes from everyone but the merge-writer deploy key` };
-    await gh(['api', '--method', 'PUT', `repos/${repository}/rulesets/${ours.id}`, '--input', '-'], body);
-    return { state: 'updated', baseBranch, detail: `${mainWriteRulesetName} on ${baseBranch} rewritten so only the merge-writer deploy key may push` };
-  }
-  await gh(['api', '--method', 'POST', `repos/${repository}/rulesets`, '--input', '-'], body);
-  return { state: 'created', baseBranch, detail: `${mainWriteRulesetName} on ${baseBranch}: only the merge-writer deploy key may push` };
-}
-
-/** Rulesets per page of GET repos/OWNER/REPO/rulesets: GitHub's maximum (its default is 30). */
-export const rulesetPageSize = 100;
-/**
- * Every ruleset on REPOSITORY itself, page by page until a short page, so Graphyard's own is never
- * taken for absent because it sits past the first page. An unreadable page refuses: a partial list
- * could misreport Graphyard's ruleset as the operator's protection or write a duplicate.
- */
-async function repositoryRulesets(repository: string, gh: GitHubCli, baseBranch: string): Promise<any[]> {
-  const rulesets: any[] = [];
-  for (let page = 1; ; page++) {
-    const batch = await ghJson(gh, ['api', `repos/${repository}/rulesets?includes_parents=false&per_page=${rulesetPageSize}&page=${page}`]);
-    if (!Array.isArray(batch)) throw new Error(`The rulesets of ${repository} could not be read, so ${baseBranch} was not protected`);
-    rulesets.push(...batch);
-    if (batch.length < rulesetPageSize) return rulesets;
-  }
 }

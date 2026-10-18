@@ -14,7 +14,6 @@ import { baseFailureEffects } from '../src/daemon/base-failure-effects.js';
 import { type BaseCheck, judgeFailedCheck, parseFailedTests } from '../src/model/base-failure.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 clock drives the pure runCycle tests through `() => unobserved.now` over fixtures derived from it; the one new Date() stamps the engine tests' observations.
 
 // GY-528. 2026-09-26 07:00-07:40Z: integration:instant-exit-classified held a fixed reset time
@@ -241,7 +240,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_BASE_FAILURE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 528);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('base-failure'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
   engine.principals = [operator, worker, coordinator, producer];
 });

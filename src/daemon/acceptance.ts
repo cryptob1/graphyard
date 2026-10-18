@@ -24,7 +24,6 @@ import { ChildProcessError, type ChildRun } from '../child-runner.js';
 import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
 import { detailChanged } from './decisions.js';
-import { MergeWriterUnreadError } from '../master/dispatch.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import type { Cycle } from './cycle.js';
 import { caseChangeStep, clearCaseChangeJudgements } from './case-change-judge.js';
@@ -269,7 +268,7 @@ async function drafting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
     // A draft the base or the control plane can never take is dropped, so the role drafts new ids within the hourly retry rather than reopening it forever.
     const drop = (error: unknown) => { pending.delete(goal.id); later(cycle, goal, 'draft', acceptanceRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} can never be opened: ${message(error)}; it is dropped and drafted again in an hour`); };
     try { result.opened ??= await openDraft(acceptance, goal, result.draft); }
-    catch (error) { if (stepCallCarried(error)) throw error; if (unopenable(error)) return drop(error); later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} could not be opened: ${message(error)}; the same draft is opened again in ten minutes, reusing its branch`, error instanceof MergeWriterUnreadError ? error : undefined); }
+    catch (error) { if (stepCallCarried(error)) throw error; if (unopenable(error)) return drop(error); later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `The acceptance draft for ${goal.key} could not be opened: ${message(error)}; the same draft is opened again in ten minutes, reusing its branch`); }
     const opened = result.opened, named = opened.pr === null ? `acceptance change ${opened.head.slice(0, 12)} on ${opened.branch}` : `acceptance pull request #${opened.pr}`;
     try { await acceptance.draft(goal, { ...result.draft, ...opened }); }
     catch (error) { if (stepCallCarried(error)) throw error;

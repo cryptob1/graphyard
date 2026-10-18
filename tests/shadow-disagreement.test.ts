@@ -14,13 +14,11 @@ import {
   shadowExplanationPairsMax, sharedTmpDependencySource, trialCauseLength, trialFailureCause, shadowReportWithExplanations, type ShadowVerdict,
 } from '../src/merge-writer/shadow.js';
 import type { Work } from '../src/model.js';
-import { MergerSettings } from '../src/merger-mode.js';
 import type { Principal } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1560: explain shadow-gate disagreements from the record and refuse the control-plane merger
@@ -57,7 +55,7 @@ before(async () => {
     port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'],
   });
   await pg.initialise(); await pg.start(); await pg.createDatabase('shadow_disagreement_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/shadow_disagreement_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/shadow_disagreement_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -236,17 +234,6 @@ const loopEffects = (work: () => Work[], shadow: ReturnType<typeof shadowReads>)
   } as unknown as DaemonEffects;
 };
 
-test('unit:docs-word-budget — docs/delivery-redesign.md states the merger refuses while a shadow disagreement stands unexplained in at most 25 net words', () => {
-  const docs = readFileSync(fileURLToPath(new URL('../docs/delivery-redesign.md', import.meta.url)), 'utf8');
-  assert.match(docs, /`POST \/api\/merger` `control-plane` refuses while any shadow disagreement stands unexplained/);
-  const base = ['origin/main', 'HEAD^1'].map(ref => {
-    try { return execFileSync('git', ['show', `${ref}:docs/delivery-redesign.md`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); }
-    catch { return null; }
-  }).find(text => text !== null) ?? null;
-  const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
-  if (base) assert.ok(words(docs) - words(base) <= 25, `delivery-redesign grew by ${words(docs) - words(base)} words, at most 25`);
-});
-
 test('unit:keep-verdicts-prefer-disagreements — keepVerdicts evicts non-disagreements before a standing shadow-only-fail or shadow-missed', () => {
   const open = {
     id: 'w-open', key: 'GY-open', stage: 'build', candidate: { sha: sha('open-head') },
@@ -364,63 +351,6 @@ test('manual:explain-standing-disagreements — the two standing disagreements (
   }
 });
 
-test('integration:merger-refused-unexplained — POST /api/merger control-plane is refused while an unexplained shadow disagreement stands, naming the keys; setting github is never refused', async () => {
-  const head = sha('refuse-head'), baseTip = sha('refuse-tip');
-  const { id, key } = await deliveredDisagreement(head, baseTip, { passed: 1, failed: ['tests/z.test.ts'], files: 2 });
-  const listing = await request(token(coordinator), 'shadow-disagreements');
-  assert.ok((listing.body.disagreements as { key: string; explained: boolean }[]).some(entry => entry.key === key && !entry.explained));
-  const refused = await request(token(admin), 'merger', { merger: 'control-plane', reason: 'Switch while unexplained' });
-  assert.equal(refused.status, 409, JSON.stringify(refused.body));
-  assert.match(JSON.stringify(refused.body), new RegExp(`unexplained shadow disagreements stand:.*${key}`));
-  // github is never refused for unexplained disagreements.
-  const settings = new MergerSettings(store);
-  await assert.rejects(settings.change(admin, { merger: 'github', reason: 'already' }, randomUUID()), /already github/);
-  await request(token(admin), `work/${id}/shadow-explain`, { head, baseTip, reason: 'Explained so merger-refused test cleans up' });
-});
-
-test('integration:merger-refused-reopened-shadow-missed — a shadow-passed head whose merge was reverted and the item reopened still refuses control-plane until explained (delivered merge recovered from the ledger)', async () => {
-  const head = sha('missed-head'), baseTip = sha('missed-tip'), deliverySha = sha('missed-delivery');
-  const id = randomUUID(), itemKey = `GY-${++keySerial}`;
-  const document = {
-    id, key: itemKey, title: itemKey, description: '', type: 'bug', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }],
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/a.ts'], revision: 1, policyRevision: 1,
-    createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null,
-    workspaces: [], submission: null, candidate: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    observation: null, blocker: null, violations: [], gates: [], stage: 'ready', delivery: null,
-    mainGuardReverts: [{
-      mergeSha: deliverySha, pr: keySerial, failing: ['test'], revert: null, state: 'merged',
-      at: iso(start), settledAt: iso(start), revertSha: sha(`revert-${head}`), reason: 'broke main',
-    }],
-  };
-  await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [id, JSON.stringify(document)]);
-  // Historical delivery of this head (cleared from the document on reopen) stays on the ledger.
-  await store.pool.query(
-    `INSERT INTO events(work_id, actor, kind, payload) VALUES ($1,$2,'github.observed',$3)`,
-    [id, coordinator.id, JSON.stringify({
-      work: {
-        candidate: { sha: head, baseSha: baseTip, pr: keySerial, branch: `graphyard/${itemKey}-1`, author: 'implementer' },
-        delivery: { mergedAt: iso(start), mergeSha: deliverySha, authorizationRevision: 1 },
-      },
-    })],
-  );
-  const recorded = await request(token(coordinator), `work/${id}/shadow-verdict`, {
-    head, baseTip, mergeSha: sha(`trial-${head}`), risk: 'normal', build: 'pass',
-    tests: { passed: 4, failed: [], files: 4 }, conflict: [], durationMs: 500,
-  });
-  assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
-  const standing = await request(token(reader), 'shadow-disagreements');
-  assert.ok((standing.body.disagreements as { key: string; outcome: string; explained: boolean }[])
-    .some(entry => entry.key === itemKey && entry.outcome === 'shadow-missed' && !entry.explained),
-  JSON.stringify(standing.body.disagreements));
-  const refused = await request(token(admin), 'merger', { merger: 'control-plane', reason: 'Must refuse reopened shadow-missed' });
-  assert.equal(refused.status, 409, JSON.stringify(refused.body));
-  assert.match(JSON.stringify(refused.body), new RegExp(itemKey));
-  await request(token(admin), `work/${id}/shadow-explain`, {
-    head, baseTip, reason: `${itemKey} shadow-missed: main guard reverted delivery ${deliverySha}; explained for test cleanup`,
-  });
-});
-
 test('unit:cycle-shadow-record-regression — the loop keeps the cause a failing verdict\'s log names in its cursor (never the log), so the escalation it raises once GitHub merges the head names the contamination, the placeholder, or the failing test; and the ledger\'s standing list carries the cause it reads from the recorded verdict (GY-1565)', async () => {
   const runs: Record<string, TrialRun> = {
     'GY-1': { build: 'pass', tests: coreTests, durationMs: 1000, logTail: contaminationTail, runnerExit: 1 },
@@ -454,53 +384,6 @@ test('unit:cycle-shadow-record-regression — the loop keeps the cause a failing
   const cause = (key: string) => (listing.body.disagreements as { key: string; cause: unknown }[]).find(entry => entry.key === key)?.cause;
   assert.deepEqual([cause(contaminated.key), cause(silent.key)], [recordedFailureCause(contaminationTail), null]);
   for (const entry of [contaminated, silent]) await request(token(admin), `work/${entry.id}/shadow-explain`, { head: entry.head, baseTip: entry.baseTip, reason: 'Explained so the record-regression test cleans up' });
-});
-
-test('unit:merger-mode-refuses-unexplained-disagreement — POST /api/merger control-plane stays refused while a disagreement stands unexplained, whether its record names the contamination cause or yields none: naming a cause is not explaining it (GY-1565)', async () => {
-  const named = await deliveredDisagreement(sha('merger-named'), sha('merger-tip'), coreTests, { logTail: contaminationTail });
-  const gap = await deliveredDisagreement(sha('merger-gap'), sha('merger-tip'), { passed: 1, failed: ['tests/q.test.ts'], files: 2 });
-  const switchTo = () => request(token(admin), 'merger', { merger: 'control-plane', reason: 'Switch while disagreements stand' });
-  let refused = await switchTo();
-  assert.equal(refused.status, 409, JSON.stringify(refused.body));
-  assert.match(JSON.stringify(refused.body), new RegExp(`unexplained shadow disagreements stand:.*${named.key}.*${gap.key}`));
-  await request(token(admin), `work/${named.id}/shadow-explain`, { head: named.head, baseTip: named.baseTip, reason: 'Trial-environment contamination of the shared /tmp (GY-1565)' });
-  refused = await switchTo();
-  assert.equal(refused.status, 409, 'the record with no extractable cause still refuses the switch');
-  assert.match(JSON.stringify(refused.body), new RegExp(`stand: ${gap.key}"`));
-  await request(token(admin), `work/${gap.id}/shadow-explain`, { head: gap.head, baseTip: gap.baseTip, reason: 'Explained so the merger test cleans up' });
-});
-
-test('integration:merger-applies-when-explained — POST /api/merger control-plane applies once every disagreement is explained; github is never refused', async () => {
-  const head = sha('apply-head'), baseTip = sha('apply-tip');
-  const { id, key } = await deliveredDisagreement(head, baseTip, { passed: 2, failed: ['tests/y.test.ts'], files: 3 });
-  assert.equal((await request(token(admin), 'merger', { merger: 'control-plane', reason: 'too soon' })).status, 409);
-  const explained = await request(token(coordinator), `work/${id}/shadow-explain`, {
-    head, baseTip, reason: `Explained ${key}: host flake on tests/y.test.ts`,
-  });
-  assert.equal(explained.status, 200, JSON.stringify(explained.body));
-  // Clear any other unexplained leftovers so the switch can apply.
-  const listing = await request(token(coordinator), 'shadow-disagreements');
-  const open = (await store.pool.query(
-    `SELECT i.key, e.payload->>'head' AS head, e.payload->>'baseTip' AS "baseTip", i.id::text AS id
-     FROM events e JOIN work_index i ON i.id = e.work_id WHERE e.kind='shadow.verdict'`,
-  )).rows as { key: string; head: string; baseTip: string; id: string }[];
-  const explainedPairs = new Set((listing.body.explanations as { key: string; head: string; baseTip: string }[])
-    .map(entry => `${entry.key}:${entry.head}:${entry.baseTip}`));
-  for (const row of open) {
-    const pair = `${row.key}:${row.head}:${row.baseTip}`;
-    if (explainedPairs.has(pair)) continue;
-    const result = await request(token(admin), `work/${row.id}/shadow-explain`, {
-      head: row.head, baseTip: row.baseTip, reason: `Clear leftover ${row.key} for merger apply test`,
-    });
-    assert.ok([200, 404].includes(result.status), JSON.stringify(result.body));
-    if (result.status === 200) explainedPairs.add(pair);
-  }
-  const applied = await request(token(admin), 'merger', { merger: 'control-plane', reason: 'Every disagreement explained' });
-  assert.equal(applied.status, 200, JSON.stringify(applied.body));
-  assert.equal(applied.body.merger, 'control-plane');
-  const back = await request(token(admin), 'merger', { merger: 'github', reason: 'Roll back; github never refused' });
-  assert.equal(back.status, 200, JSON.stringify(back.body));
-  assert.equal(back.body.merger, 'github');
 });
 
 /**
@@ -606,25 +489,6 @@ test('unit:cycle-shadow-disagreement-explanation — the GY-1535 head 77da3de0 (
   assert.match(line1528!.text, /the failure is trial-environment contamination .*integration:worktree-dependency-reuse/);
   assert.doesNotMatch(line1528!.text, /merged it\. Report only/, 'not the bare line');
   await request(token(admin), `work/${second.id}/shadow-explain`, { head: gy1528.head, baseTip: gy1528.baseTip, reason: 'GY-1564 test cleanup' });
-});
-
-test('unit:merger-mode-refuses-unexplained-disagreement — a shadow-only-fail whose record names no cause says the evidence is missing, and the control-plane switch stays refused until it is explained', async () => {
-  for (const logTail of [undefined, 'some output\n[exit status 1]']) {
-    const line = shadowDisagreementDetail({ ...verdict('GY-9', { tests: { passed: 3, failed: ['tests/x.test.ts'], files: 4 } }), ...(logTail ? { logTail } : {}) });
-    assert.match(line, /1 of 4 test files failed in the trial \(tests\/x\.test\.ts\); the record names no failing cause .* missing evidence/);
-  }
-  assert.match(shadowDisagreementDetail(verdict('GY-9', { conflict: ['src/a.ts'] })), /the trial merge conflicted on src\/a\.ts; the record names no failing cause/);
-  assert.match(shadowDisagreementDetail({ ...verdict('GY-9', { build: 'fail', tests: { passed: 0, failed: [], files: 0 } }), logTail: "src/a.ts(1,1): error TS2304: Cannot find name 'x'." }),
-    /the trial build failed; the trial log names src\/a\.ts\(1,1\): error TS2304/);
-  assert.ok(trialFailureCause(`✖ failing tests:\n${Array.from({ length: 20 }, (_, n) => `✖ unit:case-${n} — ${'x'.repeat(40)}`).join('\n')}`)!.length <= trialCauseLength);
-  const head = sha('no-cause-head'), baseTip = sha('no-cause-tip');
-  const { id, key } = await deliveredDisagreement(head, baseTip, { passed: 1, failed: ['tests/q.test.ts'], files: 2 });
-  const listing = await request(token(reader), 'shadow-disagreements');
-  assert.equal((listing.body.disagreements as { key: string; cause: string | null }[]).find(entry => entry.key === key)!.cause, null);
-  const refused = await request(token(admin), 'merger', { merger: 'control-plane', reason: 'No cause recorded' });
-  assert.equal(refused.status, 409, JSON.stringify(refused.body));
-  assert.match(JSON.stringify(refused.body), new RegExp(`unexplained shadow disagreements stand:.*${key}`));
-  await request(token(admin), `work/${id}/shadow-explain`, { head, baseTip, reason: 'GY-1564 test cleanup' });
 });
 
 test('unit:cycle-shadow-record-regression — GY-1523 (9b30324f/b02f268d) and GY-1549 (d205ce97/37df2a95) still name the placeholder-runner cause, and agree-fail verdicts raise no attention', () => {

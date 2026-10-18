@@ -16,7 +16,6 @@ import { isConfirmedCoordinationRefusal } from '../src/quarantine.js';
 import { renewalGraceMs, supervise } from '../src/supervisor.js';
 import { leaseHealthStatus } from '../src/cli/lease-health-attention.js';
 import { standingEscalations, type Principal, type Work } from '../src/model.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-558: lease renewals timed out waiting for a connection behind slow report and observation
 // queries, and live workers lost their leases. Each test is named for the proof it produces.
@@ -32,7 +31,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('lease-pool'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('lease_pool');
   connection = `postgres://graphyard:testing-only@127.0.0.1:${port}/lease_pool`;
-  const store = new Store(connection); await store.init(); await recordLegacyMerger(store); await store.close();
+  const store = new Store(connection); await store.init(); await store.close();
 });
 after(async () => { if (database) await database.stop(); });
 

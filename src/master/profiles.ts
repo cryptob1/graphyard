@@ -470,8 +470,9 @@ export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(
 }
 /**
  * The config as a supervised install runs it (GY-1501): no reviewer App, operator-agent or approver
- * identity, whatever master.json still records, so the loop launches no reviewer, approver or
- * escalation session and the master requests no two-party decision. Autonomous configs pass unchanged.
+ * identity, whatever master.json still records, so the loop launches no approver or escalation
+ * session and the master requests no two-party decision; its reviewer answers in control-plane mode
+ * (GY-1978), which needs a profile, not an App. Autonomous configs pass unchanged.
  */
 export function withSupervision<T extends { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown; approver?: unknown }>(config: T): T {
   if (config.supervision !== 'supervised') return config;

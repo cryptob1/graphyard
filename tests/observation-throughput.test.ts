@@ -10,7 +10,6 @@ import { nextAction } from '../src/model/next-action.js';
 import { observationConcurrency, observationWorkers } from '../src/server/main.js';
 import { observationThroughputStatus } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-21 PR created_at is fixture data the observer never compares with a clock; every due/age instant is derived from Date.now() itself.
 
 // GY-492. Each test is named for the proof it produces: unit:job-claim-priority,
@@ -109,7 +108,7 @@ async function freshStore() {
   if (store) await store.close();
   const name = `graphyard_test_${++databases}`;
   await database.createDatabase(name);
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/${name}`); await store.init();
   return store;
 }
 const insert = async (works: Work[]) => {
@@ -247,7 +246,6 @@ test('unit:parallel-observation-jobs — twenty due jobs whose observations each
   await freshStore();
   const api = new Api();
   t.mock.method(globalThis, 'fetch', api.fetch);
-  const github = api.client();
   const operator: Principal = { id: 'operator', role: 'admin' };
   const worker: Principal = { id: 'agent-a', role: 'worker' };
   engine = new Engine(store, [CI], 120, REPOSITORY); engine.controlPlaneAppId = APP;
@@ -260,37 +258,33 @@ test('unit:parallel-observation-jobs — twenty due jobs whose observations each
     work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'machine-a', path: `/tmp/parallel/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());
     api.open(++prNumber, `graphyard/${work.key.toLowerCase()}-1`);
     await engine.execute(worker, 'submit', work.id, { epoch: 1, pr: prNumber }, randomUUID());
+    // The candidate the observation job reads from the checkout.
+    await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{candidate}',$2) WHERE id=$1", [work.id, JSON.stringify({ sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: prNumber, branch: `graphyard/${work.key.toLowerCase()}-1`, author: worker.id })]);
     await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL,error=NULL WHERE work_id=$1', [work.id]);
   }
   assert.equal(Number((await store.pool.query('SELECT count(*) AS n FROM jobs WHERE available_at<=now()')).rows[0].n), 20, 'twenty jobs are due at once');
-  // The fake provider's observations take a second, and an overlap on one item is a failure the
+  // The checkout's observations take a second, and an overlap on one item is a failure the
   // pool must never cause: SKIP LOCKED means two workers cannot hold one job.
   const seen = new Set<string>(), inFlight = new Map<string, number>();
-  const underlying = github.observe.bind(github);
-  github.observe = (async (work: Work, all: Work[]) => {
+  engine.observeControlPlaneCandidate = async (work: Work) => {
     const concurrent = (inFlight.get(work.id) ?? 0) + 1;
     inFlight.set(work.id, concurrent);
     try {
       assert.equal(concurrent, 1, `${work.key} is observed twice at once`);
       await sleep(1000);
-      const observation = await underlying(work, all);
       seen.add(work.id);
-      return observation;
+      return null;
     } finally { inFlight.set(work.id, concurrent - 1); }
-  }) as typeof github.observe;
+  };
   // The default is eight workers beside a pool of sixteen (GY-1114); a pool of twelve holds six.
   assert.equal(observationConcurrency(), 8, 'the default concurrency is eight jobs at once');
   assert.equal(observationConcurrency(12), 6, 'never more than half the pool');
   const started = Date.now();
-  await observationWorkers(engine, github, 4, () => seen.size >= 20);
+  await observationWorkers(engine, 4, () => seen.size >= 20);
   const elapsedMs = Date.now() - started;
   assert.ok(seen.size >= 20, `every due job was observed (${seen.size})`);
   assert.ok(elapsedMs >= 4500, `four workers at 1 s each need five rounds; ${elapsedMs} ms is too fast to be honest`);
   assert.ok(elapsedMs < 10_000, `twenty 1 s observations at concurrency four take about 5 s, not ${elapsedMs} ms (one worker would take 20 s)`);
-  // The durations the workers recorded are what the throughput report reads.
-  const throughput = github.budget().throughput;
-  assert.equal(throughput.count, 20);
-  assert.ok(throughput.jobsPerMinute > 0); assert.ok(throughput.medianDurationMs! >= 1000); assert.ok(throughput.p90DurationMs! >= throughput.medianDurationMs!);
 });
 
 test('unit:observation-lag-visible — master status reports what the workers achieve and how old the oldest due job is, and raises one attention item for the merge band once its readings pass two minutes', () => {

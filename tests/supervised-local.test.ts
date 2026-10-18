@@ -31,11 +31,11 @@ const identities = {
   approver: { id: 'graphyard-approver-shop', credentialFile: '/outside/approver.token' },
 } as unknown as Pick<MasterConfig, 'reviewer' | 'operatorAgent' | 'approver'>;
 
-/** A local control plane: no reviewer App, a worker account only; the loop starts on restart. */
-interface World { calls: { args: string[]; stdin?: string; env?: Record<string, string> }[]; installed: boolean; loop: boolean; supervised: number }
+/** A local control plane: no App, a worker and a reviewing account; the loop starts on restart. */
+interface World { calls: { args: string[]; stdin?: string; env?: Record<string, string> }[]; installed: boolean; loop: boolean; supervised: number; deployKeys?: number }
 const status = (w: World) => w.installed ? {
   github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] }, reviewerApps: [],
-  fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
+  fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
   setup: { protection: 'checks', loop: w.loop },
 } : null;
 function dependencies(w: World, root: string, events: UpEvent[]): UpDependencies {
@@ -50,6 +50,8 @@ function dependencies(w: World, root: string, events: UpEvent[]): UpDependencies
     status: async () => status(w),
     publishOnboarding: async () => null, onboardingMerged: async () => true,
     supervise: async () => { w.supervised++; return { operatorLogin: OPERATOR }; },
+    // The control plane is the only merge writer (GY-1978): the repository exists and the deploy key is registered.
+    gh: async () => ({ code: 0, stdout: '{}' }), ensureDeployKey: async () => { w.deployKeys = (w.deployKeys ?? 0) + 1; return 'registered'; },
     async cli(args, options = {}) {
       w.calls.push({ args, ...(options.stdin ? { stdin: options.stdin } : {}), ...(options.env ? { env: options.env } : {}) });
       if (args[0] === 'install' && args.includes('--plan')) return { code: 0, stdout: JSON.stringify({ preflight: [{ name: 'GitHub CLI', ok: true }] }) };
@@ -72,7 +74,7 @@ async function storedConfig(label: string, extra: Partial<MasterConfig> = {}) {
   return { root, file };
 }
 
-test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomous; up --local records supervised, registers no reviewer App, skips master-autonomy, and its checklist never asks for the reviewer App or a reviewing account', async () => {
+test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomous; up --local records supervised, registers no App but the merge writer\'s deploy key, skips master-autonomy, and its checklist asks for the same steps as an autonomous install', async () => {
   const { masterConfigSchema } = await import('../src/master/profiles.js');
   const { setupChecklist } = await import('../src/model/setup-checklist.js');
   const { runUp, upSupervised } = await import('../src/up.js');
@@ -84,14 +86,13 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   assert.equal(upSupervised(await localRequest()), true, '--local installs supervised');
   assert.equal(upSupervised({ provider: 'compose' }), false, 'every other provider keeps autonomous');
 
-  // The checklist: supervised omits the reviewer App and the reviewing account; autonomous keeps both.
+  // The checklist (GY-1978): supervised and autonomous installs ask for the same steps — no App, a writing and a reviewing account.
   const bare = status({ calls: [], installed: true, loop: true, supervised: 0 });
-  const supervisedIds = setupChecklist(bare, { supervised: true }).map(item => item.id);
-  assert.deepEqual(supervisedIds, ['github-app', 'account:worker', 'branch-protection', 'master-loop']);
-  assert.ok(setupChecklist(bare, { supervised: true }).every(item => item.done), 'a local install with a worker account is green');
+  const supervisedIds = setupChecklist(bare).map(item => item.id);
+  assert.deepEqual(supervisedIds, ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'master-loop']);
+  assert.ok(setupChecklist(bare).every(item => item.done), 'a local install with a writing and a reviewing account is green');
   const autonomous = setupChecklist(bare);
-  assert.deepEqual(autonomous.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'branch-protection', 'master-loop']);
-  assert.deepEqual(autonomous.filter(item => !item.done).map(item => item.id), ['reviewer-app', 'account:reviewer'], 'autonomous mode still reports them missing');
+  assert.ok(!setupChecklist({ ...bare!, fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }], accounts: bare!.fleet.accounts } }).find(item => item.id === 'account:reviewer')!.done, 'a supervised install still needs its reviewing account');
 
   // The dashboard's caller: /api/status names the live loop's supervision (`setup.supervision`, from
   // the header on its coordination read), and the Setup page judges the same checklist from it.
@@ -104,14 +105,14 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   registry.observe({ principal: 'graphyard-master', intervalSeconds: 20, supervision: loopSupervision(undefined) }, seen);
   assert.equal(registry.live(seen)?.supervision, undefined, 'an older loop that names none is not read as supervised');
   const dashboard = { ...bare!, setup: { ...bare!.setup, supervision: 'supervised' } };
-  assert.deepEqual(setupChecklist(dashboard).map(item => item.id), supervisedIds, 'the status alone makes the checklist supervised');
+  assert.deepEqual(setupChecklist(dashboard).map(item => item.id), supervisedIds, 'the status\'s supervision changes no step');
   assert.deepEqual(setupChecklist({ ...bare!, setup: { ...bare!.setup, supervision: 'autonomous' } }).map(item => item.id), autonomous.map(item => item.id));
   const { SetupView } = await import('../web/pages/setup.js');
   const page = (state: any) => renderToStaticMarkup(createElement(SetupView, { status: state, work: [], onConnect: () => {}, onSubmitGoal: () => {} }));
   const supervisedPage = page(dashboard), autonomousPage = page(bare);
-  assert.ok(!/Reviewer App|reviews code/.test(supervisedPage), 'the Setup page asks for no reviewer App or reviewing account');
-  assert.match(supervisedPage, /data-supervised/); assert.match(supervisedPage, /data-goal-submit/, 'a supervised install with a worker account is green, so the first-goal form shows');
-  assert.match(autonomousPage, /Reviewer App/); assert.ok(!/data-supervised|data-goal-submit/.test(autonomousPage), 'autonomous mode still waits for the reviewer');
+  assert.match(supervisedPage, /data-supervised/); assert.match(supervisedPage, /An agent reviews each change/);
+  assert.match(supervisedPage, /data-goal-submit/, 'a supervised install with both accounts is green, so the first-goal form shows');
+  assert.ok(!/data-supervised/.test(autonomousPage), 'autonomous mode shows no supervised notice');
 
   // up --local, end to end against a simulated local host.
   const root = await temporaryDirectory('supervised-up');
@@ -122,10 +123,11 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   assert.ok(!result.completed.includes('master-autonomy'), 'master-autonomy is not run');
   assert.ok(events.some(event => event.kind === 'step' && event.step === 'master-autonomy' && event.state === 'skipped' && /supervised/.test(event.detail ?? '')));
   assert.ok(!w.calls.some(call => call.args[0] === 'master' && ['autonomy', 'reviewer', 'approver'].includes(call.args[1])), 'no identity or reviewer App is set up');
-  for (const call of w.calls.filter(entry => entry.args[0] === 'install')) assert.ok(!call.args.includes('--reviewer'), `install registers no reviewer App: ${call.args.join(' ')}`);
+  for (const call of w.calls.filter(entry => entry.args[0] === 'install')) assert.ok(!call.args.includes('--reviewer') && call.args.includes('--no-github-app'), `install registers no App: ${call.args.join(' ')}`);
+  assert.ok(result.completed.includes('deploy-key') && w.deployKeys === 1, 'the merge writer\'s deploy key is registered, so the control plane can merge');
   assert.ok(w.supervised >= 1, 'master.json records supervised mode');
   assert.deepEqual(result.checklist.map(item => item.id), supervisedIds);
-  assert.ok(events.some(event => event.kind === 'note' && /you review and merge each pull request on GitHub/.test(event.text)));
+  assert.ok(events.some(event => event.kind === 'note' && /an agent reviewer reviews each head and the control plane merges it/.test(event.text)));
 
   // recordSupervision writes it into master.json; the loop then loads it without any agent identity.
   const stored = await storedConfig('supervised-record', identities);
@@ -149,11 +151,11 @@ function work(reviews: Observation['reviews'], author = 'graphyard-worker[bot]')
     observation, blocker: null, gates: [], violations: [] } as unknown as Work;
 }
 
-test('unit:supervised-review-gate-human — review stays required: no approval never merges, the operator\'s approval of the exact head passes; the loop launches no reviewer, approver or escalation session; master status names the operator and the promotion command', async () => {
+test('unit:supervised-review-gate-human — review stays required: no approval never merges, an approval of the exact head passes; the loop launches the control-plane reviewer but no approver or escalation session; master status names the promotion command', async () => {
   const { exactApproval } = await import('../src/model.js');
   const { evaluate } = await import('../src/model/gates.js');
   const { withRoleDefaults } = await import('../src/master/profiles.js');
-  const { selectReviewerProfile, supervisedReview } = await import('../src/auto-dispatch.js');
+  const { selectReviewerProfile } = await import('../src/auto-dispatch.js');
   const { daemonEffects } = await import('../src/master-daemon.js');
   const { buildMasterStatus } = await import('../src/master/status.js');
   const reviewGate = (item: Work) => evaluate(item, [item], new Date('2026-10-08T00:05:00.000Z'), [15368]).gates.find(gate => gate.name === 'review')!;
@@ -166,15 +168,17 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   assert.deepEqual(reviewGate(unreviewed).reasons, ['Independent approval of the current commit is required']);
   // An approval of another head is not an approval of this one.
   assert.equal(reviewGate(work([{ reviewer: OPERATOR, state: 'APPROVED', sha: sha('c1'), id: 1 }] as Observation['reviews'])).passed, false);
-  // The operator's GitHub approval of the exact head passes the gate; GitHub auto-merge then merges it.
+  // An approval of the exact head passes the gate (a retained pull request's, read live: GY-1978).
   const approved = work([{ reviewer: OPERATOR, state: 'APPROVED', sha: H, id: 2 }] as Observation['reviews']);
   assert.deepEqual(exactApproval(approved), { provider: 'github', reviewer: OPERATOR, sha: H, reviewId: 2 });
   assert.equal(reviewGate(approved).passed, true);
 
   // The loop's view of a supervised config: no reviewer App, operator-agent or approver identity.
-  const supervised = withRoleDefaults(baseConfig({ supervision: 'supervised', ...identities }));
+  const reviewer = { name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' } as MasterConfig['reviewers'][number];
+  const supervised = withRoleDefaults(baseConfig({ supervision: 'supervised', ...identities, reviewers: [reviewer] }));
   assert.equal(supervised.reviewer, undefined); assert.equal(supervised.operatorAgent, undefined); assert.equal(supervised.approver, undefined);
-  assert.deepEqual(selectReviewerProfile(supervised), { profile: null, reason: supervisedReview }, 'no reviewer session is launched');
+  // GY-1978: no pull request awaits the operator, so the reviewer profile answers every head in control-plane mode, which needs no App.
+  assert.equal(selectReviewerProfile(supervised, 'control-plane').profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
   const effects = daemonEffects('/nonexistent/gy-1501', supervised, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: async () => ({}) });
   assert.equal(effects.approver, undefined, 'no approver session is launched');
   assert.equal(effects.decide, undefined, 'no two-party decision is requested, so no escalation handler runs for one');
@@ -183,15 +187,15 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   assert.ok(autonomous.reviewer && autonomous.operatorAgent && autonomous.approver);
   assert.ok(daemonEffects('/nonexistent/gy-1501', autonomous, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: async () => ({}) }).approver);
 
-  // master status: one line naming who reviews and merges and the promotion command; none in autonomous mode.
+  // master status: one line naming who reviews and the promotion command; none in autonomous mode.
   const now = '2026-10-08T00:05:00.000Z';
   const line = buildMasterStatus({ work: [unreviewed], now }, [], [], {}, {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR }).supervision;
-  assert.match(line!, /the operator reviews and merges each pull request/);
+  assert.match(line!, /an agent reviewer reviews each head and the control plane merges it/);
   assert.match(line!, /graphyard master promote --admin-token-stdin/);
   assert.equal(buildMasterStatus({ work: [unreviewed], now }, [], []).supervision, null);
 });
 
-test('unit:supervised-no-identity-collapse — up --local hands the operator\'s gh login to no worker, reviewer or producer credential; master status raises attention when a candidate is the operator\'s own', async () => {
+test('unit:supervised-no-identity-collapse — up --local hands the operator\'s gh login to no worker, reviewer or producer credential; master status raises no own-login attention, since no pull request awaits the operator', async () => {
   const { runUp } = await import('../src/up.js');
   const { recordSupervision, loadStoredMasterConfig } = await import('../src/master/config.js');
   const { buildMasterStatus, supervisionReport } = await import('../src/master/status.js');
@@ -214,24 +218,18 @@ test('unit:supervised-no-identity-collapse — up --local hands the operator\'s 
   assert.equal(after.credentialFile, before.credentialFile);
   assert.ok(!JSON.stringify(after).includes(GH_TOKEN));
 
-  // A candidate the operator's own login authored cannot be independently approved by that operator.
-  const own = work([], 'Octo-Operator'), workers = work([]);
-  const report = supervisionReport({ mode: 'supervised', operatorLogin: OPERATOR }, [own]);
-  assert.equal(report.attentionItems.length, 1);
-  assert.equal(report.attentionItems[0].subject, 'GY-7');
-  assert.match(report.attentionItems[0].text, /authored by octo-operator, the operator's own login, so the operator's approval of it would not be independent/);
-  assert.match(report.attentionItems[0].next, /Have someone other than octo-operator approve PR #7/);
-  assert.equal(supervisionReport({ mode: 'supervised', operatorLogin: OPERATOR }, [workers]).attentionItems.length, 0, 'a worker-authored candidate raises nothing');
-  assert.equal(supervisionReport({ operatorLogin: OPERATOR }, [own]).attentionItems.length, 0, 'autonomous mode raises nothing');
+  // GY-1978: no pull request awaits the operator's approval, so master status raises no own-login attention.
+  const own = work([], 'Octo-Operator');
   const status = buildMasterStatus({ work: [own], now: '2026-10-08T00:05:00.000Z' }, [], [], {}, {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR });
-  assert.ok(status.attentionItems.some(item => item.subject === 'GY-7' && /operator's own login/.test(item.text)), 'master status carries the attention item');
+  assert.ok(!status.attentionItems.some(item => /operator's own login/.test(item.text)));
+  assert.match(supervisionReport({ mode: 'supervised', operatorLogin: OPERATOR })!, /^Supervised: /); assert.equal(supervisionReport({ operatorLogin: OPERATOR }), null);
 });
 
-test('unit:supervised-master-prompt — the supervised master prompt says the operator reviews and merges and no two-party decision can be approved yet; the autonomous prompt is unchanged', async () => {
+test('unit:supervised-master-prompt — the supervised master prompt says an agent reviews and the control plane merges and no two-party decision can be approved yet; the autonomous prompt is unchanged', async () => {
   const { masterPrompt } = await import('../src/master/harness.js');
   const { withRoleDefaults } = await import('../src/master/profiles.js');
   const supervised = masterPrompt(withRoleDefaults(baseConfig({ supervision: 'supervised', operatorLogin: OPERATOR })));
-  assert.match(supervised, /the operator reviews and merges each pull request on GitHub/);
+  assert.match(supervised, /an agent reviewer reviews each head and the control plane merges it/);
   assert.match(supervised, /no two-party decision can be approved yet/);
   assert.match(supervised, /not an onboarding fault, so do not report the missing identities/);
   assert.ok(!/report that onboarding must run/.test(supervised), 'the missing identities are not an onboarding fault');

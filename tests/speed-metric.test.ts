@@ -12,7 +12,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { pipelineSpeedSummary, type PipelineTimeline, type StoredTimeline, type TimelineBackfill } from '../src/pipeline-speed.js';
 // A namespace import, so a proof run against code without the timeline read fails in its test case, not at load.
 import * as pipelineSpeed from '../src/pipeline-speed.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-10-07 delivery and timeline fixtures are measured against the explicit now constant; pipelineSpeedSummary(work, Date.now()) measures only the live store's wall-clock-stamped item.
 
 // GY-1489: master status reads the coordination view, which drops every document's `pipeline`,
@@ -105,7 +104,7 @@ test('integration:speed-timelines-read — GET /api/pipeline-timelines answers t
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('speed-metric'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); cleanup.push(() => database.stop());
   await database.createDatabase('graphyard_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store); cleanup.push(() => store.close());
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); cleanup.push(() => store.close());
   const engine = new Engine(store, [15368], 120, 'owner/project');
   engine.submissionObserver = null;
   const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' }, implementer: Principal = { id: 'implementer', role: 'worker' };

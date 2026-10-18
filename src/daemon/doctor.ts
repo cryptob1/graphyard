@@ -96,13 +96,8 @@ export type OperatorAgentPost = (method: 'GET' | 'POST', path: string, body?: un
  */
 export const doctorEffects = (config: MasterConfig, root: string, post: OperatorAgentPost): DoctorEffects => {
   const settings = doctorSettings(config.run);
-  // GY-1835: the merger as the operator-agent identity reads it. An unreadable setting (an older
-  // server without the route, a refused call) keeps today's github reads rather than blinding a
-  // doctor over a plane hiccup — the same fallback the diagnostician reads with.
-  const merger = async (): Promise<MergerMode> => {
-    try { const status = await post('GET', 'merger') as { merger?: unknown } | undefined; return status?.merger === 'control-plane' ? 'control-plane' : 'github'; }
-    catch { return 'github'; }
-  };
+  // The control plane is the only merge writer (GY-1835 reads it here).
+  const merger = async (): Promise<MergerMode> => 'control-plane';
   return {
     settings, cwd: root, merger,
     env: { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.operatorAgent!.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_DOCTOR_CLI: config.cliPath },

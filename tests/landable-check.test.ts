@@ -5,7 +5,6 @@ import { requiredChecksOf } from '../src/merge-queue.js';
 import { LANDABLE_CHECK, landableCheckRun } from '../src/landable-check.js';
 import { evaluateLandability } from '../src/model/landability.js';
 import { GRAPHYARD_CHECKS, protectionPayload, protectionSatisfied } from '../src/install/github.js';
-import { applyProtection, mergeQueueRuleset, protectionPlan } from '../src/protection.js';
 import type { Evidence, Observation, Work } from '../src/model.js';
 
 // GY-887. The landability verdict (GY-878) reaches GitHub as one required check, graphyard/landable,
@@ -154,66 +153,6 @@ test('unit:landable-check-published — graphyard/landable concludes success on 
   assert.ok(runs.some(run => run.head_sha === sha('c') && run.name === LANDABLE_CHECK && run.conclusion === 'success'));
   // Graphyard's own verdict is never read back as a CI check.
   assert.notEqual(LANDABLE_CHECK, CHECK_NAME);
-});
-
-test('unit:landable-check-required — the reconciled branch protection requires graphyard/landable, bound to the Graphyard App, beside CI', async () => {
-  const inputs = { repository: 'owner/repo', branch: 'main', requiredChecks: ['test', 'typecheck'], graphyardAppId: APP, reviewCount: 1 };
-  assert.ok(GRAPHYARD_CHECKS.includes(LANDABLE_CHECK));
-
-  // A fresh branch: the payload requires CI, the merge gate and the landability verdict.
-  const fresh = protectionPayload(inputs, null);
-  assert.deepEqual(fresh.required_status_checks.checks.find((check: any) => check.context === 'graphyard/landable'), { context: 'graphyard/landable', app_id: APP });
-  assert.deepEqual(fresh.required_status_checks.checks.map((check: any) => check.context), ['test', 'typecheck', CHECK_NAME, LANDABLE_CHECK]);
-
-  // A branch protected before GY-887 — CI and the merge gate only — is drift the installer repairs,
-  // keeping what the repository already required.
-  const before = { required_status_checks: { strict: false, checks: [{ context: 'test', app_id: null }, { context: 'typecheck', app_id: null }, { context: 'lint', app_id: 7 }, { context: CHECK_NAME, app_id: APP }] },
-    enforce_admins: { enabled: true }, required_conversation_resolution: { enabled: false }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false },
-    required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true } };
-  assert.equal(protectionSatisfied(inputs, before), false, 'a branch that does not require graphyard/landable is not satisfied');
-  const repaired = protectionPayload(inputs, before);
-  assert.deepEqual(repaired.required_status_checks.checks, [...before.required_status_checks.checks, { context: LANDABLE_CHECK, app_id: APP }]);
-
-  // An unbound graphyard/landable another producer could publish is rebound to the App.
-  const unbound = { ...before, required_status_checks: { strict: false, checks: [...before.required_status_checks.checks, { context: LANDABLE_CHECK, app_id: null }] } };
-  assert.equal(protectionSatisfied(inputs, unbound), false);
-  assert.deepEqual(protectionPayload(inputs, unbound).required_status_checks.checks.find((check: any) => check.context === LANDABLE_CHECK), { context: LANDABLE_CHECK, app_id: APP });
-
-  // `master protection` (src/protection.ts) reconciles an already-installed branch the same way: the
-  // missing verdict is a change it applies, keeping every observed check, and verifies on re-read.
-  const config = { repository: 'owner/repo', baseBranch: 'main', githubAppId: APP };
-  const open = [{ key: 'GY-1', stage: 'build', policy: { checks: ['test'], review: true } } as unknown as Work];
-  const queueRules = (checks: readonly string[]) => [{ type: 'merge_queue', parameters: {} }, { type: 'required_status_checks', parameters: { required_status_checks: checks.map(context => ({ context, integration_id: APP })) } }];
-  assert.deepEqual(mergeQueueRuleset(config).rules.find(rule => rule.type === 'required_status_checks')?.parameters.required_status_checks,
-    [{ context: CHECK_NAME, integration_id: APP }, { context: LANDABLE_CHECK, integration_id: APP }], 'the merge queue requires the verdict on every merge group');
-  const stale = protectionPlan(before, config, open, queueRules([CHECK_NAME]));
-  assert.equal(stale.consistent, false);
-  assert.ok(stale.changes.includes(`required check ${LANDABLE_CHECK}: missing to required from App ${APP}`), stale.changes.join('; '));
-  assert.ok(stale.changes.some(change => change.startsWith(`merge queue required check ${CHECK_NAME} and ${LANDABLE_CHECK}`)), stale.changes.join('; '));
-  assert.equal(protectionPlan(unbound, config, open, queueRules(GRAPHYARD_CHECKS)).consistent, false, 'an unbound graphyard/landable does not satisfy master protection');
-
-  let protection: any = structuredClone(before), rules: unknown = queueRules([CHECK_NAME]);
-  const writes: { path: string; body: any }[] = [];
-  const run = (_command: string, args: string[], input?: string) => {
-    const path = args.find(arg => arg.startsWith('repos/'))!;
-    if (args.includes('--method')) {
-      const body = JSON.parse(input ?? '{}');
-      writes.push({ path, body });
-      if (path.endsWith('/protection/required_status_checks')) protection = { ...protection, required_status_checks: body };
-      if (/\/rulesets(\/\d+)?$/.test(path)) rules = body.rules;
-      return '{}';
-    }
-    if (path.endsWith('/protection')) return JSON.stringify(protection);
-    if (path.includes('/rules/branches/')) return JSON.stringify(rules);
-    if (path.includes('/rulesets')) return '[]';
-    if (path === 'repos/owner/repo') return JSON.stringify({ owner: { type: 'Organization' }, allow_auto_merge: false });
-    throw new Error(`Unexpected gh ${args.join(' ')}`);
-  };
-  const applied = await applyProtection(config, open, run);
-  assert.equal(applied.consistent, true, [...applied.changes, ...applied.blockers].join('; '));
-  const checksWrite = writes.find(write => write.path.endsWith('/protection/required_status_checks'))!;
-  assert.deepEqual(checksWrite.body, { strict: false, checks: [...before.required_status_checks.checks, { context: LANDABLE_CHECK, app_id: APP }] }, 'master protection adds the App-bound verdict and keeps every observed check');
-  assert.ok(protectionPlan(protection, config, open, rules).consistent, 'the reconciled protection requires graphyard/landable');
 });
 
 test('a refusal list longer than GitHub\'s summary bound keeps whole reasons and counts the ones it omits', () => {

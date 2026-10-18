@@ -11,7 +11,6 @@ import { Delivery, commonInterval, mergeSegments, serviceState, type Environment
 import { server } from '../src/server.js';
 import type { Principal, Work, Observation } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * D3 acceptance checks of the turnkey delivery roadmap, one test per check, named
@@ -39,7 +38,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_DELIVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 4);
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('delivery_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delivery_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delivery_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
   // Deployment identities (builder, observers, promoter) hold producer credentials
   // and count toward the shared review/proof agent limit the server enforces at

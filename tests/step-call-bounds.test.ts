@@ -942,13 +942,13 @@ test('unit:step-calls-bounded — a merge-mode read carried past its bound is re
   const { controlPlaneMerger } = await import('../src/daemon/cycle-scope.js');
   const { acceptanceStep } = await import('../src/daemon/acceptance.js');
   const now = () => clock;
-  let mode: Promise<string> = Promise.resolve('github');
+  let mode: Promise<string> = Promise.resolve('control-plane');
   const raw = { stepCallBoundMs: 30, persist: async () => undefined, mergeWriter: { merger: () => mode } } as unknown as DaemonEffects;
   const state = { actions: {}, cycle: 1 } as unknown as DaemonState;
   const make = (effects: DaemonEffects) => ({ state, now, performed: [], effects: boundedCalls(effects, {}, now, () => 1000, { step: 'scope', calls: ['mergeWriter'] }) }) as unknown as Cycle;
-  assert.equal(await controlPlaneMerger(make(raw)), false, 'a read that answers sets the known mode');
+  assert.equal(await controlPlaneMerger(make(raw)), true, 'a read that answers is the control plane');
   mode = new Promise<string>(() => {});
-  assert.equal(await controlPlaneMerger(make(raw)), false, 'a carried read keeps the known mode');
+  assert.equal(await controlPlaneMerger(make(raw)), true, 'a carried read is the control plane');
   const row = (state.actions as Record<string, DaemonAction>)['carried:scope:mergeWriter'];
   assert.ok(carriedRow(row), 'the carried read is recorded as a waiting attempt');
   // An acceptance write that is carried rethrows to the carried isolation, so the goal is recorded waiting and no failure note is written.

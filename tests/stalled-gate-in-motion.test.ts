@@ -17,7 +17,6 @@ import { workFaults } from '../src/model/fault-classes.js';
 import { baseRefreshConflict } from '../src/merge-queue.js';
 import { coordinationSnapshot } from '../src/server/work-view.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1557 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 3
 // stalled-gate faults in 24 hours on 8 October 2026: two `actorless` submissions (GY-1522, GY-1526)
@@ -243,7 +242,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1557;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('base-hold'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator, worker];
 });

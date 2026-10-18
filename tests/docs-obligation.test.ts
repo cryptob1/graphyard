@@ -16,7 +16,6 @@ import { decideScopeRequest, documentationScopes } from '../src/model/scope.js';
 import { configuredDocumentation, defaultDocumentationPolicy, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationDrift, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-215: every ticket keeps its project's documentation current. Documentation is a
 // per-repository setting (its committed graphyard.json, deployed as GRAPHYARD_DOCUMENTATION), the
@@ -34,7 +33,7 @@ before(async () => {
   dataDirectory = await temporaryDirectory('docs-obligation-db');
   database = new EmbeddedPostgres({ databaseDir: dataDirectory, user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('docs_obligation_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/docs_obligation_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/docs_obligation_test`); await store.init();
   engine = new Engine(store, [15368], 300, 'owner/site-repository'); engine.submissionObserver = null;
 });
 after(async () => {

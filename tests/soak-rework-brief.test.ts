@@ -80,7 +80,7 @@ test('unit:soak-invariants-hold — every rework round of the day reads its deci
     const applied = ((await api(principals.operatorAgent, 'GET', `work/${item.id}/decisions`)).decisions as { action: string; state: string; reason: string; approvedAt: string }[])
       .filter(decision => decision.action === 'rework' && decision.state === 'applied').sort((a, b) => Date.parse(a.approvedAt) - Date.parse(b.approvedAt));
     assert.equal(applied.length, 1, `${item.key} was sent back by one applied rework decision`);
-    assert.match(theirs[1].text, /This attempt is a rework round of PR #\d+ at head [0-9a-f]{12}\./);
+    assert.match(theirs[1].text, /This attempt is a rework round of change #\d+ at head [0-9a-f]{12}\./);
     assert.ok(theirs[1].text.includes(`sent it back for this reason, which is this round's brief: ${applied[0].reason.trim()}`), `${item.key}'s rework round carries the decision's reason: ${theirs[1].text.slice(0, 400)}`);
   }
   // The refused item's round was launched after the refusal, at the epoch its first attempt left.

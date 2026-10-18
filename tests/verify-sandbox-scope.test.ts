@@ -107,7 +107,7 @@ test('unit:worker-submits-sandbox-failures-to-ci — every worker runtime\'s lau
     assert.match(prompt, /full test suite is CI's gate/, `${kind}: the prompt states the full suite is CI's gate`);
     assert.match(prompt, /run the build and the tests for your own criteria/, `${kind}: the prompt names what the worker runs`);
     assert.match(prompt, /submit with complete/, `${kind}: the prompt says to submit when its own criteria pass`);
-    assert.match(prompt, /naming in the pull request any full-suite failures that come only from your sandbox and lie outside your planned files/, `${kind}: the prompt says to name sandbox-only failures in the pull request`);
+    assert.match(prompt, /naming in the commit message any full-suite failures that come only from your sandbox and lie outside your planned files/, `${kind}: the prompt says to name sandbox-only failures in the pull request`);
     assert.match(prompt, /instead of recording a blocker/, `${kind}: the prompt rules out a blocker for sandbox-only failures`);
   }
   // The prompt's rule is the harness's own exported policy text, so the harness rules and the

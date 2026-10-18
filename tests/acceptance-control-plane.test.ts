@@ -23,7 +23,6 @@ import { defaultChildRun } from '../src/child-runner.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1535 AC-1 and AC-2. Under the control-plane merger the acceptance role commits a goal's
@@ -58,7 +57,7 @@ before(async () => {
   const port = await freePort();
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('acceptance-cp-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('acceptance_cp_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/acceptance_cp_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/acceptance_cp_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = server(engine, credentials, null);
@@ -77,7 +76,6 @@ async function ok(principal: Principal, path: string, body?: unknown, key?: stri
   if (answer.status !== 200) throw new Error(`${path} refused (${answer.status}): ${answer.text}`);
   return answer.body;
 }
-const setMerger = (merger: 'github' | 'control-plane') => ok(admin, 'merger', { merger, reason: `GY-1535 test: ${merger}` });
 const readGoal = async (key: string) => (await ok(coordinator, `goals/${key}`)).goal as Goal;
 
 function stubRuntime(respond: () => unknown, runs: string[]): Runner {
@@ -93,7 +91,7 @@ const greetingCase = (id: string) => ({ id, title: `${id} answers`, tags: ['api'
 const draftFor = (goal: Goal, outcome: string) => ({ goal: goal.key, outcomes: [{ id: outcome, title: `A customer is greeted (${outcome})`, criteria: ['The greeting names the customer'], case: greetingCase(outcome) }] });
 
 /** The acceptance role as the loop wires it, its runtimes stubbed and the judgement posted as the approver identity. */
-function harness(merger: () => Promise<'github' | 'control-plane'>, outcome: string) {
+function harness(merger: () => Promise<'control-plane'>, outcome: string) {
   const runs: string[] = [], spied = { open: 0, land: 0, commit: 0, landed: 0, pushes: 0 };
   let clock = Date.parse('2026-10-08T00:00:00Z');
   const config = masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
@@ -128,7 +126,6 @@ function harness(merger: () => Promise<'github' | 'control-plane'>, outcome: str
 
 test('unit:acceptance-control-plane-change — in control-plane mode the acceptance role commits outcomes, cases and contract bindings as one change the merge writer lands (no pull request), only on the approver identity\'s verdict on its exact head, and the merged goal plans with its cases protected', { timeout: 120_000 }, async () => {
   clearDrafts();
-  await setMerger('control-plane');
   const goal = await ok(author, 'goals', { statement: 'Customers are greeted by name', users: ['Customers'], constraints: [], deployTarget: 'uat then production' }) as Goal;
   const world = harness(async () => (await ok(coordinator, 'status')).mergeWriter.merger, 'greeting');
 
@@ -194,29 +191,6 @@ test('unit:acceptance-control-plane-change — in control-plane mode the accepta
   assert.deepEqual(pushed, [], 'none of them pushed');
   assert.equal((await mergeAcceptanceChange({ ...ports([]), merge: async () => ({ conflict: ['e2e/contract.json'] }) }, accepted)).state, 'conflicting');
   assert.deepEqual(await mergeAcceptanceChange({ ...ports([]), push: async () => 'rejected' }, accepted).then(landing => landing.state), 'waiting');
-  await setMerger('github');
-});
-
-test('unit:acceptance-github-unchanged — under the github merger the acceptance draft is still one pull request landed through GitHub; the merge-writer steps are never used and the land route refuses a named merge commit', { timeout: 120_000 }, async () => {
-  clearDrafts();
-  const current = (await ok(coordinator, 'status')).mergeWriter.merger;
-  if (current !== 'github') await setMerger('github');
-  const goal = await ok(author, 'goals', { statement: 'Customers can sign up', users: ['Customers'], constraints: [], deployTarget: 'uat then production' }) as Goal;
-  const world = harness(async () => 'github', 'sign-up');
-  for (let i = 0; i < 3 && (await readGoal(goal.key)).stage === 'acceptance-drafting'; i++) await world.tick();
-  const drafted = await readGoal(goal.key);
-  assert.equal(drafted.stage, 'awaiting-approval');
-  assert.equal(drafted.acceptance!.pr, 7, 'the draft is the pull request GitHub opened');
-  assert.equal(world.spied.open, 1); assert.equal(world.spied.commit, 0, 'nothing is committed for the merge writer');
-  await world.tick(); await world.tick();
-  assert.equal((await readGoal(goal.key)).stage, 'accepted');
-  const named = await call(author, `goals/${goal.key}/land`, { mergeSha: 'c'.repeat(40) });
-  assert.equal(named.status, 422); assert.match(named.text, /GitHub reports its merge/);
-  await world.tick();
-  const merged = await readGoal(goal.key);
-  assert.equal(merged.stage, 'planning');
-  assert.equal(merged.merged!.pr, 7); assert.equal(world.spied.land, 1); assert.equal(world.spied.landed, 0); assert.equal(world.spied.pushes, 0, 'the merge writer never pushed');
-  assert.deepEqual(merged.protected.cases, ['sign-up']);
 });
 
 test('unit:planner-waits-for-acceptance — the planner never plans a goal whose acceptance change has not merged, every planned item names the outcomes it serves, and a goal with zero outcomes is refused at drafting', async () => {

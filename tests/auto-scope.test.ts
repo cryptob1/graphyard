@@ -21,7 +21,6 @@ import { successorWidening } from '../src/model/successors.js';
 import { mootScopeWidening, supersededScopeAsk, supersededScopeNote } from '../src/daemon/cycle-scope.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the only absolute instant is the 2000-01-01 lease expiry, a past date that forces a lapse the cycle keeps lapsed; Date.now() is the loop's live clock and only moves further past it.
 
 // GY-85: an additive scope request is decided by the loop, not by a master command. A worker
@@ -102,7 +101,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_AUTO_SCOPE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 43);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('auto-scope-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('auto_scope_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/auto_scope_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/auto_scope_test`); await store.init();
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

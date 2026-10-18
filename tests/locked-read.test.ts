@@ -13,7 +13,6 @@ import { coordinationDocumentSql, coordinationRelevance, coordinationTail, detoa
 import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1027: coordination writes read only what their decision needs while they hold the coordination
@@ -123,7 +122,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_LOCKED_READ_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1027);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('locked-read'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('locked_read');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/locked_read`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/locked_read`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/locked'); engine.submissionObserver = null;
   engine.principals = [operator, coordinator, worker];
   registry = new AgentRegistry(store);
