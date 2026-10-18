@@ -51,11 +51,14 @@ export async function createWorktree(context: CliContext, work: any) {
   const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);
   let startPoint = args[1] ?? 'HEAD';
   if (work.submission) {
-    const remoteBranch = `refs/remotes/origin/${branch}`;
-    // GY-860 AC-2: an unfetchable or moved PR branch is a workspace failure, so no attempt is spent.
-    const refused = await submittedBranchRefusal(root, branch, remoteBranch, work.candidate?.sha, runChild);
+    // GY-860 AC-2, GY-2035: the rework workspace starts from the worker's local branch, which must
+    // hold the submitted candidate head; anything else is a workspace failure that costs no attempt.
+    // Workers' branches never touch origin — no fetch, no push, whatever it holds (the merge writer
+    // is the only git network user) — so the remote-tracking ref, stale as it may be, is never a
+    // start point, and the reset below re-states the branch head the check just verified.
+    const refused = await submittedBranchRefusal(root, branch, work.candidate?.sha, runChild);
     if (refused) { await releaseUnderFailure(mutate, epoch, refused); throw new Error(`${refused}. The claim was released as a workspace failure, so the attempt costs nothing.`); }
-    startPoint = remoteBranch;
+    startPoint = branch;
   } else if (work.prAdoption) {
     // GY-1849: an adopted item's attempt works the adopted pull request's own branch from its
     // existing commits: it starts where origin carries that branch, never from this checkout's

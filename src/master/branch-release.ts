@@ -204,13 +204,18 @@ export async function releaseUnderFailure(mutate: (name: string, data: unknown) 
   }
 }
 
-/** GY-860 AC-2: why a rework workspace may not start from the submitted PR branch, or null when it may. */
-export async function submittedBranchRefusal(root: string, branch: string, remoteBranch: string, candidateSha: string | undefined, run: ChildRun): Promise<string | null> {
-  try { await run('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root });
-    const remoteSha = String(await run('git', ['rev-parse', '--verify', remoteBranch], { cwd: root })).trim(); return !candidateSha || remoteSha !== candidateSha ? submittedBranchMoved : null;
-  } catch (error) { // GY-1753 AC-2: a local-only head at the candidate sha is pushed; any other local sha refuses.
-    const pushed = await (async () => { const sha = String(await run('git', ['rev-parse', '--verify', `refs/heads/${branch}`], { cwd: root })).trim(); if (!candidateSha || sha !== candidateSha) return false; await run('git', ['push', '--quiet', 'origin', `refs/heads/${branch}:refs/heads/${branch}`], { cwd: root }); await run('git', ['update-ref', remoteBranch, sha], { cwd: root }); return true; })().catch(() => false);
-    return pushed ? null : `Git worktree creation failed while fetching ${branch}: ${failureText(error)}`; }
+/**
+ * GY-860 AC-2, GY-2035: why a rework workspace may not start from the submitted PR branch, or null
+ * when it may. The workspace starts from the worker's local branch, so the local head alone
+ * decides: one that is missing, or holds anything but the submitted candidate, refuses with the
+ * existing message. Origin is never asked — no fetch, no push, whatever it holds for the branch
+ * (GY-1753's push of a local-only head is gone): workers' branches never touch origin, the merge
+ * writer is the only git network user, and a stale remote-tracking ref is never a start point.
+ */
+export async function submittedBranchRefusal(root: string, branch: string, candidateSha: string | undefined, run: ChildRun): Promise<string | null> {
+  let sha = '';
+  try { sha = String(await run('git', ['rev-parse', '--verify', `refs/heads/${branch}`], { cwd: root })).trim(); } catch { /* a branch that is gone holds no candidate */ }
+  return !candidateSha || sha !== candidateSha ? submittedBranchMoved : null;
 }
 
 /**

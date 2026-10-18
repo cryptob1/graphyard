@@ -198,7 +198,6 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/executor.ts': { subcommands: ['fetch'], runs: 'the loop\'s scope reads (currentBaseTree, autoscope and dispatch)', credential: 'the coordinator checkout\'s own git credential', door: 'a terminal scope refusal needs a base read fresh at the moment it is judged (GY-1764) under either merger; the writer\'s base fetch runs only in its control-plane cycle, and this read already runs in the same loop process with the same credential' },
   'src/install/host.ts': { subcommands: ['clone', 'fetch'], runs: 'the installer driving the host shell over ssh (`sh -c`): the managed checkout and the Graphyard source checkout', credential: 'a one-shot App installation token passed on standard input for the managed clone (never stored, never an argument); the source checkout\'s remote is public and needs none', door: 'the installer creates the host checkouts the loop and its merge writer will later run from, so no merge writer exists yet; the managed clone uses a one-shot token on standard input' },
   'src/master/autonomy.ts': { subcommands: ['clone', 'fetch'], runs: 'the master cloning the approver\'s own copy (approverClone) and fetching its bound sha', credential: 'the coordinator checkout\'s own git credential for the bound-sha fetch; the clone itself is local', door: 'the clone is local (the approver\'s own unshared copy of the coordinator checkout) and never reaches the remote; the fetch reads a worker\'s bound sha into that copy, a branch the merge writer never handles, and a miss is tolerated' },
-  'src/master/branch-release.ts': { subcommands: ['fetch', 'push'], runs: 'the master preparing a rework workspace (submittedBranchRefusal)', credential: 'the coordinator checkout\'s own git credential', door: 'it runs in the `worktree` CLI preparing a rework workspace on the submitted PR branch, not the base branch; the merge writer runs in the loop, holds the base lease alone and never touches worker branches' },
   'src/master/worktrees.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s cycle preparation (cycleBaseTip, one fetch per cycle)', credential: 'the coordinator checkout\'s own git credential', door: 'the worker launcher prepares worktrees from the base tip in the coordinator\'s own object store, once per cycle; the merge writer runs as a serial queue step and publishes no base read other processes can await, so routing it there would serialize every launch behind merges' },
   'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts and release-ports.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on', door: 'it is the merge writer: pushArgs is the door\'s own leased push, defined here and executed only by the writer\'s ports' },
   'src/release-candidate.ts': { subcommands: ['fetch', 'ls-remote', 'push'], runs: 'the release candidate cut, ledger sync and remote-tip reads (`graphyard release`, the loop\'s ports)', credential: 'the caller\'s own git credential: the operator\'s for the CLI, the coordinator\'s or the deploy key in the loop', door: 'the release ledger library also serves `graphyard release` on the operator\'s machine and the release workflow in CI, where no merge writer runs; its pushes write rc/* tags and leased release/* branches, never the base branch the writer leases, and it spawns only through the git runner its caller hands it' },
@@ -248,7 +247,6 @@ export const baseline = [
   'src/executor.ts',
   'src/install/host.ts',
   'src/master/autonomy.ts',
-  'src/master/branch-release.ts',
   'src/master/worktrees.ts',
   'src/merge-writer/executor.ts',
   'src/release-candidate.ts',
@@ -261,6 +259,9 @@ export const baseline = [
 /**
  * GY-1941: the release and promotion cluster. Each file either left the allowlist and the baseline
  * (its calls moved behind the merge writer) or keeps its entry with `door`, the reason it cannot.
+ * GY-2035: src/master/branch-release.ts left both lists — its rework-workspace fetch and its
+ * GY-1753 push were deleted, so the rework workspace starts from the worker's local branch and no
+ * process but the merge writer touches a worker branch.
  */
 export const releaseCluster = [
   'src/release-candidate.ts', 'src/release-project.ts', 'src/daemon/release-ports.ts', 'src/daemon/deployment.ts', 'src/daemon/step-stalls.ts',

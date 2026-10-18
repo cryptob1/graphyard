@@ -9,8 +9,9 @@ import { simulateDay } from './helpers/soak-simulation.js';
 
 /**
  * GY-1753: over a simulated day of loop cycles the environment the loop publishes is the one deployments are read
- * under (stable, published once), and failed-fetch branch recovery pushes a local-only head once per item and
- * stays bounded across items, with every system invariant holding in the real loop's day.
+ * under (stable, published once), and the branch check a rework workspace starts from stays bounded across items —
+ * GY-2035: it reads the worker's local branch alone, so it runs no git fetch or push for any item, with every
+ * system invariant holding in the real loop's day.
  */
 soakControlPlanes('soak-pages-environment-and-branch-recovery', 1753);
 
@@ -40,7 +41,6 @@ test('unit:soak-invariants-hold — a Pages-only repository publishes one stable
   const calls: string[][] = [];
   const run = ((command: string, args: string[], options: { cwd: string }) => {
     calls.push(args);
-    if (args[0] === 'fetch') throw new Error('fatal: couldn\'t find remote ref');
     const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8' });
     if (result.status !== 0) throw new Error(result.stderr);
     return result.stdout;
@@ -49,8 +49,8 @@ test('unit:soak-invariants-hold — a Pages-only repository publishes one stable
     const branch = `graphyard/gy-${item}-1`;
     sh(work, 'checkout', '-q', '-B', branch); sh(work, 'commit', '-q', '--allow-empty', '-m', `item ${item}`);
     const sha = sh(work, 'rev-parse', 'HEAD').stdout.trim();
-    assert.equal(await submittedBranchRefusal(work, branch, `refs/remotes/origin/${branch}`, sha, run), null);
+    assert.equal(await submittedBranchRefusal(work, branch, sha, run), null);
   }
-  assert.equal(calls.filter(args => args[0] === 'push').length, 20, 'one push per item, none repeated');
-  assert.equal(sh(origin, 'branch', '--list').stdout.trim().split('\n').length, 20);
+  assert.equal(calls.filter(args => ['fetch', 'push'].includes(String(args[0]))).length, 0, 'no fetch or push, for any item');
+  assert.equal(sh(origin, 'branch', '--list').stdout.trim(), '', 'workers\' branches never touch origin');
 });

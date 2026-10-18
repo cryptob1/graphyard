@@ -59,9 +59,9 @@ const backlogged = (work: Work) => store.pool.query("UPDATE jobs SET available_a
 
 test(`manual:fault-class-loop — ${instance.id}: the worktree command's refusal is the one the release recognizes`, async () => {
   // The refusal the six dispatches recorded, produced by the worktree command's own check: the
-  // remote PR branch is fetched and no longer holds the observed candidate head.
+  // worker's local branch (GY-2035: origin is never asked) does not hold the observed candidate head.
   const run = (async (_command: string, args: string[]) => args[0] === 'rev-parse' ? `${'d'.repeat(40)}\n` : '') as never;
-  const refused = await submittedBranchRefusal('/checkout', 'graphyard/gy-1234-4', 'refs/remotes/origin/graphyard/gy-1234-4', 'a'.repeat(40), run);
+  const refused = await submittedBranchRefusal('/checkout', 'graphyard/gy-1234-4', 'a'.repeat(40), run);
   assert.equal(refused, submittedBranchMoved);
   assert.match(refused!, /^Submitted PR branch changed; wait for Graphyard to observe its current head/);
 });
