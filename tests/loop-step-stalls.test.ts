@@ -12,8 +12,9 @@ import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // The modules under test are imported inside each test, so a run against code without them fails
-// its cases rather than the file (graphyard verify's exercise).
-const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), U: await import('../src/daemon/stall-upstream.js'), R: await import('../src/stall-remedies.js') });
+// its cases rather than the file (graphyard verify's exercise). stall-upstream.ts is gone
+// (GY-1980): the module import in each case below is the proof it stays gone.
+const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), R: await import('../src/stall-remedies.js'), M: await import('../src/daemon/cycle-master.js') });
 
 // GY-1854: a loop step or dispatcher call that fails with the same normalised signature on three
 // consecutive cycles is recorded as one stall; a bound remedy (unknown profile, 401 credential,
@@ -166,17 +167,17 @@ test('unit:stall-counts-one-failure-per-cycle — several actions of one signatu
 });
 
 test('unit:loop-step-stall-unbound-wakes-master — an unbound stall and a refused remedy wake the master session with the signature, step and stall as the task, once per run', async () => {
-  const { S, R } = await load();
+  const { S, R, M } = await load();
   const loop = state();
   const failing = { kind: 'refresh', state: 'failed', detail: 'the control plane timed out after 5000ms reading /api/status' } as const;
   for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, [failing], cycle, tick(1));
   const [stall] = Object.values(loop.stepStalls);
   assert.equal(R.stepStallRemedy(stall.signature), null, 'no remedy binds to a base refresh timeout');
-  const subjects = S.stallWakeSubjects(loop, 'graphyard.mjs');
+  const subjects = M.stallWakeSubjects(loop, 'graphyard.mjs');
   assert.equal(subjects.length, 1);
   assert.ok(subjects[0].key.length <= 60, `the subject fits the master session's key bound (${subjects[0].key})`);
   assert.equal(subjects[0].key, S.stallSubjectKey(stall.signature));
-  const task = S.stallWakeTask(stall, 'graphyard.mjs');
+  const task = M.stallWakeTask(stall, 'graphyard.mjs');
   assert.equal(subjects[0].detail, task);
   assert.match(task, /refresh call failed with one signature on 3 consecutive cycles/);
   assert.match(task, /stands stalled since/);
@@ -185,7 +186,7 @@ test('unit:loop-step-stall-unbound-wakes-master — an unbound stall and a refus
   // The task is stable while the run stands: the digest machinery wakes the session once per run,
   // never again per backed-off attempt of the standing stall, so the live count stays out of it.
   S.noteCycleStalls(loop, [failing], 4, tick(1));
-  assert.equal(S.stallWakeSubjects(loop, 'graphyard.mjs')[0].detail, task, 'a backed-off reattempt of the standing stall changes no wake');
+  assert.equal(M.stallWakeSubjects(loop, 'graphyard.mjs')[0].detail, task, 'a backed-off reattempt of the standing stall changes no wake');
 
   // A bound remedy that was refused wakes the master too, and its task names the attempt.
   const held = state();
@@ -195,13 +196,13 @@ test('unit:loop-step-stall-unbound-wakes-master — an unbound stall and a refus
   assert.equal(refused.length, 1);
   assert.equal(refused[0].record.outcome, 'refused');
   assert.match(refused[0].record.detail, /outside the loop's authority/);
-  const woken = S.stallWakeSubjects(held, 'graphyard.mjs');
+  const woken = M.stallWakeSubjects(held, 'graphyard.mjs');
   assert.equal(woken.length, 1);
   assert.match(woken[0].detail, /credential-401 remedy was applied once at .* and refused/);
   // The refused-remedy task is stable too: the standing stall never re-wakes per cycle.
   const refusedTask = woken[0].detail;
   for (const cycle of [4, 5]) S.noteCycleStalls(held, [credential], cycle, tick(S.stallBackoffMs + 1));
-  assert.equal(S.stallWakeSubjects(held, 'graphyard.mjs')[0].detail, refusedTask, 'the count and the last error stay on the cursor, out of the wake');
+  assert.equal(M.stallWakeSubjects(held, 'graphyard.mjs')[0].detail, refusedTask, 'the count and the last error stay on the cursor, out of the wake');
 });
 
 test('unit:stall-backoff-five-minutes — a stalled call is attempted once per five minutes, inside the window the count stands, and the loop retry converges to the same bound', async () => {
@@ -289,7 +290,7 @@ test('unit:held-effects-gate-the-call — while a step\u2019s stall stands insid
   assert.match(refusal!.message, new RegExp(S.stallHoldMarker));
   assert.equal(dispatches, 0, 'the call itself was not attempted inside the window');
   assert.equal(held.mergeWriter!.admit!(), false, 'the merge writer starts no new merge inside the window');
-  assert.equal(await held.mergeWriter!.merger(), 'control-plane', 'the recorded merger every other step reads (the shadow gate among them) is left as it is');
+  assert.equal(await held.mergeWriter!.merger(), 'control-plane', 'the recorded merger every other step reads is left as it is');
   assert.equal(mergers, 1);
 
   // Other effects pass through untouched.
@@ -538,7 +539,7 @@ test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing c
 });
 
 test('unit:loop-step-stall-reviewer-profile — the launch boundary\u2019s recorded unknown-reviewer-profile refusal is the review-launch step\u2019s failure, binds the profile remedy, and the remedy verifies only once the named profile is configured', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const { recordReviewerProfileRefusal, readReviewerProfileRefusal, clearReviewerProfileRefusal } = await import('../src/reviewer.js');
   const directory = await temporaryDirectory('gy-1854-reviewer-profile-');
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(directory, 'coordinator.token'), cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main', githubAppId: 1, hostId: 'host', masterAgentName: 'master-test', workers: [] });
@@ -568,7 +569,7 @@ test('unit:loop-step-stall-reviewer-profile — the launch boundary\u2019s recor
   assert.equal(records[0].record.kind, 'profile-unknown');
   assert.equal(records[0].record.verified, true);
   assert.equal((await S.remedyStalledSteps(loop, runner(['reviewer-x']), clock + 5 * 60_000)).length, 0, 'never applied twice for the run');
-  assert.equal(S.stallNeedsMaster(loop.stepStalls[stall.signature]), false, 'a verified remedy needs no master');
+  assert.equal(M.stallNeedsMaster(loop.stepStalls[stall.signature]), false, 'a verified remedy needs no master');
   // The launch that gets past the lookup clears the record, and the run ends with it.
   await clearReviewerProfileRefusal(config);
   assert.deepEqual(await S.readReviewerProfileFailures(config), []);
@@ -616,7 +617,7 @@ test('unit:stall-holds-the-failing-invocation — a stalled call is held per res
 });
 
 test('unit:stall-overflow-still-stalls — recurring failures past the cursor bound still reach three cycles: 101 distinct signatures all stall, and a cycle failing more ways than the cursor keeps folds the rest into one overflow stall', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const words = (index: number) => `cause ${'_'.repeat(index + 1)} of many`;
   {
     const loop = state();
@@ -636,23 +637,23 @@ test('unit:stall-overflow-still-stalls — recurring failures past the cursor bo
     assert.ok(overflow?.stalledAt, 'the folded overflow recurs every cycle, so it stalls like any other signature');
     assert.match(overflow.signature, /more distinct failing signatures in one cycle than the N the cursor keeps a run for, from the steps dispatch, reclaim/);
     assert.equal(runs.filter(run => run.step !== S.overflowStep && run.stalledAt).length, S.retainedStepStalls - 1, 'every kept signature stalls too');
-    assert.ok(S.stallNeedsMaster(overflow), 'no remedy binds the overflow: it wakes the master session');
+    assert.ok(M.stallNeedsMaster(overflow), 'no remedy binds the overflow: it wakes the master session');
   }
 });
 
 test('unit:stall-wake-acknowledges-only-delivered — a wake beside a failed cycle names at most twenty stalls and acknowledges only those, so the twenty-first is delivered by the next', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const { wakeMasterForStalls } = await import('../src/daemon/cycle-master.js');
   const loop = state(), config = loopConfig();
   loop.master.agentName = 'master-test'; loop.master.pane = 'pane-master'; loop.master.startedAt = new Date(clock).toISOString();
   for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, Array.from({ length: 21 }, (_, index) => ({ kind: 'snapshot-read', state: 'failed' as const, detail: `unbound ${'_'.repeat(index + 1)} refusal` })), cycle, tick(60_000));
-  assert.equal(S.stallWakeSubjects(loop, config.cliPath).length, 21);
+  assert.equal(M.stallWakeSubjects(loop, config.cliPath).length, 21);
   const prompts: string[] = [];
   const effects = { agents: () => [], herdr: async () => ({ agents: [{ name: 'master-test', pane_id: 'pane-master', agent: 'claude', agent_status: 'idle' }], available: true }),
     masterSession: { launch: async () => { throw new Error('never launched'); } }, promptSession: async (_agent: unknown, text: string) => { prompts.push(text); }, persist: async () => {} } as unknown as DaemonEffects;
   const first = await wakeMasterForStalls(config, loop, effects, () => clock);
   assert.equal(first.length, 20, 'one wake carries twenty subjects');
-  const missing = S.stallWakeSubjects(loop, config.cliPath).filter(subject => !first.includes(subject.key));
+  const missing = M.stallWakeSubjects(loop, config.cliPath).filter(subject => !first.includes(subject.key));
   assert.equal(missing.length, 1);
   assert.equal(loop.master.subjects[missing[0].key], undefined, 'the subject the wake did not name is not acknowledged');
   tick(60_000);
@@ -681,7 +682,7 @@ test('unit:stall-wake-leaves-a-dialog-to-the-step — a wake beside a failed cyc
 });
 
 test('unit:stall-remedy-written-before-it-runs — the remedy attempt is on the cursor before its mutation runs, so a process ending during it restarts into a remedied run that wakes the master and is never applied twice', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const loop = state();
   for (const cycle of [1, 2, 3]) S.noteStepFailure(loop, 'dispatch', 'Graphyard refused /api/work (401): unauthorized', tick(60_000), cycle);
   const signature = Object.keys(loop.stepStalls)[0];
@@ -699,8 +700,8 @@ test('unit:stall-remedy-written-before-it-runs — the remedy attempt is on the 
   assert.deepEqual(applied, [], 'a run whose attempt was started is never remedied again');
   assert.equal(runs, 1);
   const stall = restarted.stepStalls[signature];
-  assert.ok(S.stallNeedsMaster(stall), 'an attempt that never reported wakes the master session');
-  assert.match(S.stallWakeTask(stall, '/outside/graphyard.mjs'), /remedy was started once at .* and never reported/);
+  assert.ok(M.stallNeedsMaster(stall), 'an attempt that never reported wakes the master session');
+  assert.match(M.stallWakeTask(stall, '/outside/graphyard.mjs'), /remedy was started once at .* and never reported/);
   // A write that fails applies nothing: the run stays unremedied for the next cycle.
   const other = state();
   for (const cycle of [1, 2, 3]) S.noteStepFailure(other, 'dispatch', 'Graphyard refused /api/work (401): unauthorized', tick(60_000), cycle);
@@ -765,224 +766,86 @@ test('unit:stall-kept-while-admitted-attempt-runs — a launch admitted by a sta
 });
 
 // GY-1855 AC-2: past the clearing bound the loop files exactly one upstream item per signature; master status lists each stall.
-test('unit:loop-step-stall-upstream — a stall past six consecutive failing cycles files exactly one upstream item per signature; a later cycle and a retry after a lost reply file nothing new; master status lists signature, count, remedy and owner', async () => {
-  const { S, U } = await load();
+// GY-1980 AC-3: the upstream filer is gone — the loop files no work item for a standing stall, the
+// standing-stall line still appears (from step-stalls.ts), and a cursor that still carries the
+// removed silence and stallUpstream keys loads without error.
+test('unit:stall-upstream-removed-cursor-loads — the filer module is gone, the loop files nothing for a standing stall, and a cursor carrying the removed silence and stallUpstream keys loads, writes and cycles', async () => {
+  // The module is deleted: importing it fails its one case, never the file.
+  const gone = '../src/daemon/stall-upstream.js';
+  await assert.rejects(() => import(/* the deleted filer */ gone));
+
+  // A cursor a pre-GY-1980 loop wrote: the silence record and a pending upstream filing ride on it.
+  const { execFileSync } = await import('node:child_process');
+  const root = await temporaryDirectory('gy-1980-cursor');
+  execFileSync('git', ['init', '-q'], { cwd: root });
+  const home = await temporaryDirectory('gy-1980-cursor-credentials');
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(home, 'coordinator.token'), cliPath: '/outside/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'test-host', masterAgentName: 'master-test', workers: [] });
+  const at = new Date(clock).toISOString();
+  const legacy = { ...emptyDaemonState(config), cycle: 4,
+    silence: { subjects: { 'dispatch:GY-9': { since: at, work: 'GY-9', kind: 'dispatch', detail: 'GY-9 is claimable and waiting for a worker' } }, lastActionAt: at },
+    stallUpstream: { pending: { 'stall:legacy': { signature: 'refresh: the read timed out', step: 'refresh', at, body: '{}' } }, filed: { 'stall:filed': { key: 'GY-OLD-1', at } } } };
+  const { writeDaemonState, readDaemonState, emptyDaemonState: fresh, daemonStateSchema } = await import('../src/daemon/state.js');
+  await writeDaemonState(config, legacy as unknown as ReturnType<typeof fresh>);
+  const loaded = await readDaemonState(root, config);
+  assert.equal(loaded.cycle, 4, 'the legacy cursor loads without error');
+  // The removed keys are no longer declared: they ride the forward-tolerant read unchanged, and a
+  // fresh parse of the state the loop would carry refuses neither.
+  assert.deepEqual((loaded as Record<string, unknown>).silence, (legacy as Record<string, unknown>).silence);
+  assert.deepEqual((loaded as Record<string, unknown>).stallUpstream, (legacy as Record<string, unknown>).stallUpstream);
+  await writeDaemonState(config, loaded);
+  const rewritten = JSON.parse(await readFile(join(home, 'coordinator.daemon.json'), 'utf8')) as Record<string, unknown>;
+  assert.deepEqual(rewritten.stallUpstream, (legacy as Record<string, unknown>).stallUpstream, 'the ride-along keys are written back, not lost');
+  assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify({ ...fresh(config), cycle: rewritten.cycle }))).cycle, 4);
+
+  // The loop files no work item for a standing step stall: one real --once cycle over a seeded
+  // standing stall makes no /api/work call and records no filing.
   const loop = state();
-  loop.cycle = 1;
-  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
-  // Three cycles record the stall; cycles 4–6 push it past the upstream bound without a clearing remedy.
-  for (const cycle of [1, 2, 3, 4, 5, 6]) {
-    loop.cycle = cycle;
-    S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1));
-  }
-  const [stall] = Object.values(loop.stepStalls);
-  assert.equal(stall.count, S.stallUpstreamCycles);
-  assert.equal(U.stallFilesUpstream(stall), true);
-  assert.equal(S.stallUpstreamCycles, 2 * S.stallCycleBound);
+  const signature = 'refresh: the control plane timed out after Nms reading /api/status';
+  const stale = new Date(clock - 3_600_000).toISOString();
+  loop.stepStalls[signature] = { signature, step: 'refresh', count: 9, lastCycle: 1, firstAt: stale, lastAt: stale, lastError: 'the control plane timed out after 5000ms reading /api/status', stalledAt: stale, remedy: null, nextAttemptAt: null, attemptAt: null, calls: [], cycle: false };
+  const calls: string[] = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL) => { calls.push(String(url)); throw new Error('the loop files nothing: this fetch must never run'); }) as typeof fetch;
+  let now = clock;
+  try {
+    await (await import('../src/master-daemon.js')).runDaemon(loopConfig(), loop, {
+      agents: async () => [], herdr: async () => ({ agents: [], available: true }),
+      masterSession: undefined, promptSession: undefined,
+      credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
+      snapshot: async () => ({ work: [], now: new Date(now).toISOString() }) as never,
+      closeSession: () => {}, dispatch: async () => { throw new Error('no dispatch was due'); },
+      requestProof: () => {}, requestSmoke: () => {},
+      observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+      recordDeployment: async () => {}, persist: async () => {},
+    } as unknown as DaemonEffects, { once: true, intervalMs: 60_000, identity: { pid: process.pid, host: 'test-host' }, now: () => now, log: () => {},
+      checkout: async () => ({ root: '/outside/repo', commit: 'c'.repeat(40), modified: [], untracked: [] }),
+      process: { on: () => {}, off: () => {} } as unknown as Pick<NodeJS.Process, 'on' | 'off'> });
+  } finally { globalThis.fetch = original; }
+  assert.deepEqual(calls, [], 'no filing ask left the loop');
+  assert.ok(!Object.keys(loop.actions).some(key => key.startsWith('stall-upstream:')), JSON.stringify(Object.keys(loop.actions)));
+  assert.equal((loop as unknown as Record<string, unknown>).stallUpstream, undefined);
 
-  const asks: { input: unknown; key: string }[] = [];
-  const persist = async () => {};
-  const filer = async (input: unknown, key: string) => {
-    asks.push({ input, key });
-    return { key: 'GY-STALL-1' } as never;
-  };
-  const filed = await U.fileStalledStepsUpstream(loop, filer, () => clock, persist);
-  assert.ok(filed);
-  assert.equal(filed.state, 'done');
-  assert.equal(asks.length, 1);
-  assert.equal(asks[0].key, U.stallUpstreamIdempotencyKey(stall.signature));
-  assert.equal(asks[0].key, `loop-step-stall:${S.stallSubjectKey(stall.signature).slice('stall:'.length)}`);
-  // The body carries the stall's evidence: step, signature, count, times, last error and remedy record.
-  assert.deepEqual(asks[0].input, U.stallUpstreamItem(stall));
-  const body = asks[0].input as { title: string; description: string };
-  assert.match(body.title, /refresh call fails/);
-  assert.match(body.description, new RegExp(`Consecutive failing cycles: ${S.stallUpstreamCycles}`));
-  assert.match(body.description, /Last error: the control plane timed out after 5000ms reading \/api\/status/);
-  assert.match(body.description, /Remedy: none: no remedy binds/);
-  assert.match(body.description, new RegExp(`First failure: ${stall.firstAt}`));
-  assert.equal(loop.stallUpstream.filed[S.stallSubjectKey(stall.signature)]?.key, 'GY-STALL-1');
-  assert.deepEqual(loop.stallUpstream.pending, {});
-
-  // A later cycle past the bound files nothing more: the cursor's done row is the local dedup.
-  loop.cycle = 7;
-  S.noteCycleStalls(loop, [failing], 7, tick(S.stallBackoffMs + 1));
-  assert.equal(await U.fileStalledStepsUpstream(loop, filer, () => clock, persist), null);
-  assert.equal(asks.length, 1, 'exactly one item per signature');
-
-  // master status lists the stall with signature, count, remedy and owner, and names the filed item.
-  const standing = Object.values(loop.stepStalls)[0];
-  const attention = U.stallStatusAttention(loop, '/outside/graphyard.mjs');
+  // The standing-stall line still appears, now from step-stalls.ts: signature, count, remedy and
+  // owner — and it names no upstream filing.
+  const { S } = await load();
+  loop.stepStalls[signature] = { signature, step: 'refresh', count: 7, lastCycle: 2, firstAt: stale, lastAt: stale, lastError: 'the control plane timed out after 5000ms reading /api/status', stalledAt: stale, remedy: null, nextAttemptAt: null, attemptAt: null, calls: [], cycle: false };
+  const attention = S.stallStatusAttention(loop, '/outside/graphyard.mjs');
   assert.equal(attention.length, 1);
-  assert.equal(attention[0].subject, S.stallSubjectKey(standing.signature));
-  assert.match(attention[0].text, new RegExp(`failed ${standing.count} cycle`));
-  assert.match(attention[0].text, new RegExp(standing.signature.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(attention[0].subject, S.stallSubjectKey(signature));
+  assert.match(attention[0].text, /failed 7 cycle/);
+  assert.match(attention[0].text, new RegExp(signature.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(attention[0].text, /no remedy binds to it/);
-  assert.match(attention[0].text, /Its upstream item is GY-STALL-1/);
+  assert.doesNotMatch(attention[0].text, /upstream|filed item|backoff/);
   assert.equal(attention[0].role, 'master');
   assert.equal(attention[0].human, false);
   assert.match(attention[0].next, /master status/);
-
-  // A stall under the bound is listed but files nothing yet.
-  const early = state();
-  for (const cycle of [1, 2, 3]) S.noteCycleStalls(early, [failing], cycle, tick(1));
-  assert.equal(U.stallFilesUpstream(Object.values(early.stepStalls)[0]), false);
-  assert.equal(await U.fileStalledStepsUpstream(early, filer, () => clock, persist), null);
-  assert.equal(asks.length, 1);
-  const earlyList = U.stallStatusAttention(early, 'graphyard.mjs');
-  assert.equal(earlyList.length, 1);
-  assert.match(earlyList[0].text, /failed 3 cycle/);
-  assert.doesNotMatch(earlyList[0].text, /upstream item/);
+  // A stall whose bound remedy was refused is listed with that remedy, still without a filing.
+  loop.stepStalls[signature].remedy = { kind: 'credential-401', at: stale, outcome: 'refused', verified: false, detail: 'outside the loop\'s authority' };
+  assert.match(S.stallStatusAttention(loop, '/outside/graphyard.mjs')[0].text, /credential-401 remedy was applied once at .* and refused, unverified/);
+  // A cursor without stalls lists nothing, and a null cursor lists nothing.
+  assert.deepEqual(S.stallStatusAttention(state(), '/outside/graphyard.mjs'), []);
+  assert.deepEqual(S.stallStatusAttention(null, '/outside/graphyard.mjs'), []);
 });
-
-test('unit:loop-step-stall-upstream-retries — an interrupted filing, a failed one whose stall cleared, and a re-formed stall each file exactly once, with the body first composed', async () => {
-  const { S, U } = await load();
-  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
-  const stalled = () => {
-    const loop = state();
-    for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1)); }
-    return loop;
-  };
-  const persist = async () => {};
-  const asks: { input: unknown; key: string }[] = [];
-  const filer = async (input: unknown, key: string) => { asks.push({ input, key }); return { key: 'GY-STALL-2' } as never; };
-
-  // B1: the loop exits after persisting `started`, before the plane's answer is recorded.
-  const interrupted = stalled();
-  const [stall] = Object.values(interrupted.stepStalls);
-  void U.fileStalledStepsUpstream(interrupted, () => new Promise(() => {}), () => clock, persist);
-  await new Promise(resolve => setImmediate(resolve));
-  const subject = S.stallSubjectKey(stall.signature), key = U.stallUpstreamActionKey(stall.signature);
-  assert.equal(interrupted.actions[key]?.state, 'started', 'the ask was cut off before its answer was recorded');
-  const first = interrupted.stallUpstream.pending[subject]!.body;
-  assert.equal(await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist), null, 'the same cycle does not ask twice');
-  interrupted.cycle += 1;
-  // The stall counted on meanwhile: the re-ask still sends the body first composed.
-  S.noteCycleStalls(interrupted, [{ ...failing, detail: `${failing.detail} again` }], interrupted.cycle, tick(S.stallBackoffMs + 1));
-  const resumed = await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist);
-  assert.equal(resumed?.state, 'done');
-  assert.equal(asks.length, 1);
-  assert.deepEqual(asks[0].input, JSON.parse(first));
-  interrupted.cycle += 1;
-  assert.equal(await U.fileStalledStepsUpstream(interrupted, filer, () => clock, persist), null);
-  assert.equal(asks.length, 1, 'a started row followed by a re-run files exactly once');
-
-  // A filing that failed at the bound is asked again after its stall cleared, with the same body.
-  const cleared = stalled();
-  const failed = await U.fileStalledStepsUpstream(cleared, async () => { throw new Error('Graphyard refused work (403): forbidden'); }, () => clock, persist);
-  assert.equal(failed?.state, 'failed');
-  const body = Object.values(cleared.stallUpstream.pending)[0]!.body;
-  cleared.cycle += 1;
-  S.noteStepsSucceeded(cleared, cleared.cycle, tick(S.stallBackoffMs + 1));
-  assert.deepEqual(cleared.stepStalls, {}, 'the stall cleared');
-  cleared.cycle += 1;
-  assert.equal((await U.fileStalledStepsUpstream(cleared, filer, () => clock, persist))?.state, 'done');
-  assert.equal(asks.length, 2);
-  assert.deepEqual(asks[1].input, JSON.parse(body));
-
-  // The stall re-forms under the same signature: its filed key files nothing more.
-  for (const cycle of [20, 21, 22, 23, 24, 25]) { cleared.cycle = cycle; S.noteCycleStalls(cleared, [failing], cycle, tick(S.stallBackoffMs + 1)); }
-  assert.equal(U.stallFilesUpstream(Object.values(cleared.stepStalls)[0]!), true);
-  delete cleared.actions[U.stallUpstreamActionKey(Object.values(cleared.stepStalls)[0]!.signature)];
-  assert.equal(await U.fileStalledStepsUpstream(cleared, filer, () => clock, persist), null);
-  assert.equal(asks.length, 2, 'one item per signature, even after the done row is pruned');
-});
-
-test('unit:loop-step-stall-upstream-ledger-full — a full ledger of waiting filings evicts none: a newly due stall waits on its run until one is filed, and a plane that does not answer ends the cycle\u2019s asks', async () => {
-  const { S, U } = await load();
-  const failing = { kind: 'refresh', state: 'failed' as const, detail: 'the control plane timed out after 5000ms reading /api/status' };
-  const loop = state();
-  for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, [failing], cycle, tick(S.stallBackoffMs + 1)); }
-  const [stall] = Object.values(loop.stepStalls);
-  const body = JSON.stringify(U.stallUpstreamItem({ ...stall!, signature: 'waiting' }));
-  for (let index = 0; index < U.retainedStallFilings; index++)
-    loop.stallUpstream.pending[`stall:waiting${index}`] = { signature: `waiting filing ${index}`, step: 'refresh', at: new Date(clock).toISOString(), body };
-  for (let index = 0; index < U.retainedStallFilings; index++)
-    loop.actions[U.stallUpstreamActionKey(`waiting filing ${index}`)] = { kind: 'fault', work: null, principal: null, state: 'failed', detail: 'refused', attempts: 5, cycle: loop.cycle, at: new Date(clock).toISOString(), epoch: null };
-  const asks: string[] = [];
-  const filer = async (_input: unknown, key: string) => { asks.push(key); return { key: 'GY-STALL-3' } as never; };
-  assert.equal(await U.fileStalledStepsUpstream(loop, filer, () => clock, async () => {}), null, 'the full ledger admits nothing and its waiting filings are on backoff');
-  assert.equal(Object.keys(loop.stallUpstream.pending).length, U.retainedStallFilings, 'no waiting filing was evicted');
-  assert.equal(asks.length, 0);
-  // One waiting filing is filed: its place admits the stall, which still stands.
-  delete loop.actions[U.stallUpstreamActionKey('waiting filing 0')];
-  assert.equal((await U.fileStalledStepsUpstream(loop, filer, () => clock, async () => {}))?.state, 'done');
-  assert.deepEqual(asks, [U.stallUpstreamIdempotencyKey('waiting filing 0'), U.stallUpstreamIdempotencyKey(stall!.signature)]);
-  assert.equal(loop.stallUpstream.filed[S.stallSubjectKey(stall!.signature)]?.key, 'GY-STALL-3');
-
-  // A plane that does not answer: one ask this cycle, the rest wait for a later one.
-  for (let index = 1; index < 4; index++) delete loop.actions[U.stallUpstreamActionKey(`waiting filing ${index}`)];
-  asks.length = 0;
-  const down = async (_input: unknown, key: string) => { asks.push(key); throw new Error('The operation was aborted due to timeout'); };
-  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, async () => {}))?.state, 'failed');
-  assert.equal(asks.length, 1, 'the unanswered ask ends the cycle\u2019s asks');
-  assert.equal(Object.keys(loop.stallUpstream.pending).length, U.retainedStallFilings - 1, 'the unanswered filing still waits');
-});
-
-test('unit:loop-step-stall-upstream-admits-before-asking — every due signature is on the cursor before any ask, so a plane that times out keeps them all, and stalls that clear during the outage are each filed once it answers', async () => {
-  const { S, U } = await load();
-  const loop = state();
-  const failures = ['refresh', 'reclaim', 'close'].map(kind => ({ kind, state: 'failed' as const, detail: `the ${kind} call timed out after 5000ms` }));
-  for (const cycle of [1, 2, 3, 4, 5, 6]) { loop.cycle = cycle; S.noteCycleStalls(loop, failures.slice(0, 2), cycle, tick(S.stallBackoffMs + 1)); }
-  const persisted: string[][] = [];
-  const persist = async (written: typeof loop) => { persisted.push(Object.values(written.stallUpstream.pending).map(pending => pending.step)); };
-  const asks: string[] = [];
-  const down = async (_input: unknown, key: string) => { asks.push(key); throw new Error('The operation was aborted due to timeout'); };
-  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, persist))?.state, 'failed');
-  assert.equal(asks.length, 1, 'the unanswered ask ends the cycle’s asks');
-  assert.deepEqual(persisted[0]?.sort(), ['reclaim', 'refresh'], 'both due signatures were persisted before the first ask');
-  assert.equal(Object.keys(loop.stallUpstream.pending).length, 2);
-
-  // A retry of a waiting filing that times out again still admits a stall that fell due meanwhile.
-  for (const cycle of [7, 8, 9, 10, 11, 12]) { loop.cycle = cycle; S.noteCycleStalls(loop, failures, cycle, tick(S.stallBackoffMs + 1)); }
-  loop.cycle = 40;
-  assert.equal((await U.fileStalledStepsUpstream(loop, down, () => clock, persist))?.state, 'failed');
-  assert.deepEqual(Object.values(loop.stallUpstream.pending).map(pending => pending.step).sort(), ['close', 'reclaim', 'refresh']);
-
-  // Every stall clears during the outage; once the plane answers, each signature is filed exactly once.
-  loop.cycle = 41;
-  S.noteStepsSucceeded(loop, loop.cycle, tick(S.stallBackoffMs + 1));
-  assert.deepEqual(loop.stepStalls, {}, 'the stalls cleared');
-  asks.length = 0;
-  const filer = async (_input: unknown, key: string) => { asks.push(key); return { key: `GY-UP-${asks.length}` } as never; };
-  loop.cycle = 80;
-  await U.fileStalledStepsUpstream(loop, filer, () => clock, persist);
-  assert.equal(new Set(asks).size, 3, `each of the three signatures was filed: ${asks.join(', ')}`);
-  assert.equal(asks.length, 3, 'once each');
-  assert.deepEqual(loop.stallUpstream.pending, {});
-  assert.equal(Object.keys(loop.stallUpstream.filed).length, 3);
-});
-
-test('unit:loop-step-stall-upstream-pass-budget — a slow-answering plane holds one filing pass for at most its budget plus one request, a fast one for at most its ask count, and every filing it did not reach waits for a later cycle', async () => {
-  const { S, U } = await load();
-  const loop = state();
-  loop.cycle = 10;
-  const body = JSON.stringify({ title: 'waiting', type: 'bug', priority: 1, description: 'waiting', criteria: [{ id: 'AC-1', text: 'waiting', proofs: ['unit:waiting'] }], reason: 'waiting' });
-  for (let index = 0; index < 50; index++) loop.stallUpstream.pending[`stall:slow${index}`] = { signature: `slow filing ${index}`, step: 'refresh', at: new Date(clock + index).toISOString(), body };
-  // Each answer arrives just under the 30-second request timeout, refused for the item alone.
-  const asks: string[] = [];
-  const slow = async (_input: unknown, key: string) => { asks.push(key); tick(29_000); throw new Error('Graphyard refused work (422): invalid item'); };
-  const began = clock;
-  await U.fileStalledStepsUpstream(loop, slow, () => clock, async () => {});
-  assert.ok(clock - began <= U.stallUpstreamPassBudgetMs + 30_000, `the pass took ${clock - began}ms`);
-  assert.equal(asks.length, 2, 'no ask starts once the budget is spent');
-  assert.equal(Object.keys(loop.stallUpstream.pending).length, 50, 'every filing still waits');
-  // A fast plane: the pass stops at its ask count, and the next cycle reaches filings this one did not.
-  const filed: string[] = [];
-  const fast = async (_input: unknown, key: string) => { filed.push(key); return { key: `GY-UP-${filed.length}` } as never; };
-  loop.cycle = 11;
-  await U.fileStalledStepsUpstream(loop, fast, () => clock, async () => {});
-  assert.equal(filed.length, U.stallUpstreamAsksPerPass);
-  assert.ok(!filed.some(key => asks.includes(key)), 'never-asked filings go before those just refused');
-  for (let cycle = 12; Object.keys(loop.stallUpstream.pending).length; cycle++) {
-    assert.ok(cycle < 200, 'every waiting filing is filed within a bounded number of cycles');
-    loop.cycle = cycle;
-    await U.fileStalledStepsUpstream(loop, fast, () => clock, async () => {});
-  }
-  assert.equal(new Set(filed).size, 50);
-  assert.equal(filed.length, 50, 'each filed exactly once');
-  assert.equal(S.stallUpstreamCycles, 6);
-});
-
 test('unit:stall-signature-overflow-invocations-held — ten panes sharing one signature from one effect are all held after the third cycle, every invocation past the eighth included, and the record stays within its bound', async () => {
   const { S } = await load();
   const { stepStallSchema } = await import('../src/daemon/state.js');
@@ -1024,7 +887,7 @@ test('unit:stall-signature-overflow-invocations-held — ten panes sharing one s
 });
 
 test('unit:stall-signature-overflow-records-once — twelve items sharing one signature still record one stall at three cycles, apply its bound remedy once and wake the master once, exactly as eight do', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const failed = (item: string): { kind: 'dispatch'; state: 'failed'; detail: string } =>
     ({ kind: 'dispatch', state: 'failed', detail: `Dispatch of ${item} to worker-a failed: the control plane answered HTTP 401 for ${item} epoch 1` });
   const sharing = (items: string[]) => {
@@ -1057,7 +920,7 @@ test('unit:stall-signature-overflow-records-once — twelve items sharing one si
   assert.equal(attempts, 2);
   // A refused remedy wakes the master session once, with the one signature as the subject.
   for (const one of [eight, twelve]) {
-    const subjects = S.stallWakeSubjects(one.loop, 'graphyard.mjs');
+    const subjects = M.stallWakeSubjects(one.loop, 'graphyard.mjs');
     assert.equal(subjects.length, 1, 'one wake for the shared signature');
     assert.equal(subjects[0].key, S.stallSubjectKey(one.signature));
     assert.match(subjects[0].detail, /dispatch call failed with one signature on 3 consecutive cycles/);

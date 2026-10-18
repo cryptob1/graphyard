@@ -341,7 +341,7 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
       recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
       github: new Proxy({}, { get: (_, name) => { throw new Error(`the delivery called GitHub (${String(name)})`); } }),
       merge: new Proxy({}, { get: (_, name) => { throw new Error(`the delivery called GitHub's merge (${String(name)})`); } }),
-      shadow: null, mergeWriter: writerReads } as unknown as DaemonEffects;
+      mergeWriter: writerReads } as unknown as DaemonEffects;
     await runCycle(config, state, effects, () => clock);
     await mergeWriterIdle(state);
     await runCycle(config, state, effects, () => clock);

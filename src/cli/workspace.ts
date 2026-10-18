@@ -6,14 +6,13 @@ import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { containmentFailureNote, controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../supervisor.js';
-import { attributeConflicts, hasConflictMarkers, localScopeFindings, managedServerUrl, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
+import { attributeConflicts, hasConflictMarkers, managedServerUrl, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
 import { resolveTimingBaseline, timedTestFile, timingBaselinePath } from '../model/timing-companion.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import { resolveWork, type CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
-import { restoreAndReport } from './sync-restore.js';
 import { pushViaControlPlane } from './sync-push.js';
 import { defineCommands, workMutation } from './registry.js';
 import { keepBlockedWork } from './lease.js';
@@ -24,12 +23,14 @@ export { installUnderLease };
 
 const quietBranch = () => spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).stdout.trim();
 
-export async function syncWork({ api, print, base: serverUrl, args }: CliContext, work: any) {
+export async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) {
   // The canonical way to take the base branch: a merge keeps the worker's history and makes every
-  // resolution visible, and the same classifier the control plane applies at complete runs here,
-  // against the fetched tip, before anything is pushed. Files the repository declares generated
-  // are rendered afresh from the merged sources rather than merged by hand; every other conflict
-  // is the worker's, reported with the shipped items that landed it.
+  // resolution visible. Files the repository declares generated are rendered afresh from the
+  // merged sources rather than merged by hand; every other conflict is the worker's, reported with
+  // the shipped items that landed it. The merge alone is judged (GY-1991): plannedFiles is a plan,
+  // not a lock, so a file outside the plan that differs from the base is this branch's change to
+  // submit — the merge writer's trial and the independent review decide it, nothing is classified,
+  // refused or restored here.
   const status = await api('status');
   const baseBranch = String(status.baseBranch ?? 'main');
   // GY-1523: the shared refs/remotes/origin/BASE the confinement re-exposes is the merge writer's own
@@ -100,7 +101,7 @@ export async function syncWork({ api, print, base: serverUrl, args }: CliContext
     }
     const remaining = attributeConflicts(conflicts, all ?? [], sha => landed.has(sha), generated?.files ?? []);
     print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
-      next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge. Files outside plannedFiles must match origin/${baseBranch} byte-for-byte: git checkout ${baseTip.slice(0, 12)} -- PATH restores one.` });
+      next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge.` });
     process.exitCode = 1; return;
   }
   // The merged sources decide what the generated files say, whether or not they conflicted.
@@ -110,18 +111,8 @@ export async function syncWork({ api, print, base: serverUrl, args }: CliContext
   }
   if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) git('commit', '--no-edit', '--quiet');
   else if (quietly('diff', '--cached', '--quiet').status !== 0) git('commit', '--quiet', '-m', `Regenerate generated files after sync ${work.key}`);
-  const raw = git('diff', '--raw', '-M', '-z', '--no-abbrev', baseTip, 'HEAD'), numstat = git('diff', '--numstat', '-M', '-z', baseTip, 'HEAD');
-  const read = async (sha: string) => { const blob = quietly('cat-file', 'blob', sha); return blob.status === 0 ? blob.stdout : null; };
-  const findings = await localScopeFindings(work.plannedFiles ?? [], raw, numstat, generated?.files ?? [], read);
-  const refused = findings.filter(finding => finding.refused);
-  // `--restore` takes the remedy itself (GY-859): one plain commit, which one `complete --head` submits (GY-1523).
-  if (args.includes('--restore') && refused.length) return restoreAndReport(git, print, { work, baseBranch, baseTip, regenerated, generated: generated?.files ?? [], refused: refused.map(finding => finding.path), read, controlPlane: true });
-  const afterRepair = `complete ${work.key} EPOCH --head submits it from the shared object store; nothing is pushed`;
-  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, fetched: false, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: !refused.length,
-    files: findings, refused: refused.map(finding => `${finding.path}: ${finding.detail}`),
-    next: refused.length ? `Run sync ${work.key} --restore: it restores each listed file to origin/${baseBranch} in one new commit naming them (by hand: git checkout ${baseTip.slice(0, 12)} -- PATH for each, restoring a rename's original path, then commit), so ${afterRepair}; a force push is never needed or allowed. Do not complete until it reports ok. Only an operator can widen plannedFiles, through an audited requirements revision.`
-      : `Every file outside plannedFiles matches origin/${baseBranch}. Nothing is pushed: complete ${work.key} EPOCH --head submits the commit the shared object store already holds.` });
-  if (refused.length) process.exitCode = 1;
+  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, fetched: false, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: true,
+    next: `Nothing is pushed: complete ${work.key} EPOCH --head submits the commit the shared object store already holds.` });
 }
 
 /** Local worktrees and the supervised worker launch. */
@@ -130,14 +121,12 @@ export const workspaceCommands = defineCommands([
     name: 'sync',
     scope: 'work',
     help: [
-      '  sync GY-N [--restore]         Merge origin/BASE (never rebase), regenerate generated files',
+      '  sync GY-N                     Merge origin/BASE (never rebase), regenerate generated files',
       '                                (docs indexes, AGENTS.md blocks, the timing baseline) instead of',
-      '                                hand-merging them, name the shipped items behind each remaining',
-      '                                conflict, and list every file outside plannedFiles that no longer',
-      '                                matches the base; run before complete --head. It fetches nothing:',
-      '                                the shared origin/BASE is the merge writer\'s tip',
-      '  sync GY-N --restore           The same, then restore every such file to the base in one new',
-      '                                commit naming them',
+      '                                hand-merging them, and name the shipped items behind each',
+      '                                remaining conflict; run before complete --head. Only merge',
+      '                                conflicts are judged: plannedFiles is a plan, not a lock. It',
+      "                                fetches nothing: the shared origin/BASE is the merge writer's tip",
       '  sync GY-N --push-via-control-plane COMMIT  Control plane pushes a refused workflow base sync',
     ],
     async run(context, work) {

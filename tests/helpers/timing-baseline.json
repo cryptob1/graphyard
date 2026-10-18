@@ -626,6 +626,7 @@
     "tests/plane-hot-calls-latency.test.ts": 49722,
     "tests/plane-load.test.ts": 615867,
     "tests/planned-files-derived.test.ts": 1268,
+    "tests/planned-files-not-a-lock.test.ts": 1700,
     "tests/post-deploy-criteria.test.ts": 600,
     "tests/post-deploy-follow-ups.test.ts": 600,
     "tests/post-deploy-observation-state.test.ts": 657,
@@ -763,8 +764,6 @@
     "tests/setup-checks-consistent.test.ts": 1400,
     "tests/setup-guide-no-operator-token.test.ts": 300,
     "tests/setup-self-provision.test.ts": 1100,
-    "tests/shadow-disagreement.test.ts": 3270,
-    "tests/shadow-gate.test.ts": 45000,
     "tests/shared-account-identity.test.ts": 995,
     "tests/shared-identity-followups.test.ts": 11000,
     "tests/shipping-pulse-coverage.test.ts": 2732,
@@ -847,7 +846,6 @@
     "tests/soak-scope-settling.test.ts": 1146,
     "tests/soak-session-liveness.test.ts": 54008,
     "tests/soak-sessions.test.ts": 162500,
-    "tests/soak-shadow-gate.test.ts": 5943,
     "tests/soak-silent-exhaustion.test.ts": 2500,
     "tests/soak-snapshot-launcher.test.ts": 60000,
     "tests/soak-stale-close.test.ts": 2259,
@@ -981,6 +979,7 @@
     "tests/goal-candidate-promotion.test.ts": 5000,
     "tests/release-uat-after-read.test.ts": 400,
     "tests/control-plane-rework-workspace.test.ts": 1500,
-    "tests/merge-writer-trial-timeout-queue.test.ts": 1000
+    "tests/merge-writer-trial-timeout-queue.test.ts": 1000,
+    "~": 0
   }
 }

@@ -11,7 +11,6 @@ import { maxDecisionRequests, neededDecision } from '../src/daemon/decisions.js'
 import { cycleFaults } from '../src/daemon/faults.js';
 import { decisionKey } from '../src/daemon/reconcile.js';
 import { approvalWatchSchema } from '../src/daemon/state.js';
-import { approverWait } from '../src/daemon/metrics.js';
 import * as owedReport from '../src/cli/owed-report.js';
 import { terminalDecisions } from '../src/cli/decision-report.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
@@ -377,8 +376,10 @@ test(`unit:approved-unapplied-not-an-approver-wait — GY-949 (${gy1315.supersed
   const w = plainWorld([subject], ledger, start);
   w.state.approvals[decisionKey(subject, decision)] = approvalWatchSchema.parse({ work: 'GY-949', action: 'close', decision: id, agentName: session, requestedAt: '2026-10-03T16:46:20.601Z', launchedAt: '2026-10-03T16:46:21.000Z', launches: 1 });
   for (let at = start; at <= Date.parse(unanswered); at += 2 * minute) { w.at(at); await w.cycle(); }
-  const waits = Object.entries(w.state.silence.subjects).filter(([, entry]) => entry.work === 'GY-949' && entry.kind === 'decision');
-  assert.ok(waits.length, JSON.stringify(w.state.silence.subjects));
-  for (const [key, entry] of waits) assert.equal(approverWait({ kind: entry.kind, detail: entry.detail }), false, `${key}: ${entry.detail}`);
-  assert.deepEqual(w.state.faults.instances.filter(fault => fault.kind === 'decision-unanswered' && fault.subject === 'GY-949'), []);
+  // The approved decision's own watch names the apply owed, never an approver's judgement; the
+  // subject detail the loop keeps (actionableSubjects) words it the same way. (GY-1980 removed the
+  // silence measure the instance was filed under.)
+  const watch = Object.values(w.state.approvals)[0];
+  assert.ok(watch?.approvedAt && watch.approvedBy, JSON.stringify(watch));
+  assert.ok(!Object.values(w.state.faults.instances).some(fault => fault.kind === 'decision-unanswered' && fault.subject === 'GY-949'), JSON.stringify(w.state.faults.instances.filter(fault => fault.subject === 'GY-949')));
 });

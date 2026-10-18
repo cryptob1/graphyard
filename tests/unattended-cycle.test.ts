@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, reconcilePendingActions, routineDecision, runCycle, runDaemon, silenceBudgetMs, standingVerdict, trackSilence, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, progressAttention, reconcilePendingActions, routineDecision, runCycle, runDaemon, standingVerdict, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { approverSessionName, decisionInput, launchApprover, listHerdrAgents, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
@@ -559,10 +559,10 @@ test('integration:mergeable-dwell-budget — a candidate whose gates are green m
   assert.equal(attention.at(-1)!.human, false);
 });
 
-test('integration:no-actionable-silence — every cycle records what it could act on and what it did, the longest actionable-but-idle wait is reported, and a subject nothing has acted on for more than twenty minutes reaches the top of the attention list, a decision the loop requested and no approver judged included', async t => {
+test('integration:no-actionable-silence — every cycle records what it could act on and what it did, an actionable item stays named while nothing can act on it, and a decision the loop requested and no approver judged stays on the measure until it is judged', async t => {
   const simulation = plane([{ key: 'GY-400', rounds: ['pass'] }]);
   // A two-minute cycle, so cycling every two simulated minutes is a healthy loop rather than a
-  // stalled one: this proof is about silence in the work, not about the loop's own liveness.
+  // stalled one: this proof is about the work standing still, not about the loop's own liveness.
   // The loop runs from a fixture checkout that records its units, so the harness remedy validates it and, with no Claude settings installed, has nothing to journal (GY-1662).
   const recorded = await temporaryDirectory('silence-checkout');
   await mkdir(join(recorded, '.graphyard'), { recursive: true });
@@ -577,29 +577,30 @@ test('integration:no-actionable-silence — every cycle records what it could ac
 
   const first = await cycle(state, master, simulation, effects, minute);
   assert.equal(first.metrics.actionable, 1, 'the cycle records what it could act on, not only what it did');
-  assert.deepEqual(first.silence.longest && [first.silence.longest.kind, first.silence.longest.work], ['dispatch', 'GY-400']);
-  assert.match(first.silence.longest!.detail, /GY-400 is claimable and waiting for a worker/);
+  // The subject the wake reads names the item and what holds it, for as long as nothing can act.
+  assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()).map(subject => [subject.kind, subject.work]), [['dispatch', 'GY-400']]);
+  assert.match(actionableSubjects(master, simulation.work, simulation.now())[0].detail, /GY-400 is claimable and waiting for a worker/);
   assert.deepEqual(steps(first.actions), ['escalation:GY-400:done'], 'and what it did: the escalation naming the profile it cannot use');
-  assert.equal(first.silence.longestIdleMs, 0, 'a subject it acted on this cycle starts its wait again');
 
   let last = first;
-  for (let pass = 0; pass < 12; pass++) last = await cycle(state, master, simulation, effects, 2 * minute);
-  assert.ok(last.silence.longestIdleMs > silenceBudgetMs, `${last.silence.longestIdleMs}ms of silence on an actionable item`);
-  assert.equal(last.silence.breached, true);
-  assert.equal(last.metrics.idleMs, last.silence.longestIdleMs, 'every cycle records the wait, whether or not it acted');
+  // Over an hour of stillness: the progress watchdog's bound, not the responsive cadence's.
+  for (let pass = 0; pass < 32; pass++) last = await cycle(state, master, simulation, effects, 2 * minute);
+  assert.equal(last.metrics.actionable, 1, 'the item is still measured while nothing can act on it');
   const liveness = loopLiveness(state, simulation.now(), master.run.intervalSeconds * 1000, master.hostId);
-  assert.equal(liveness.state, 'running', 'the loop is cycling: the silence is about the work, not about the loop');
-  const attention = loopAttention({ liveness, silence: last.silence, budget: latencyBudget(state.latency) });
+  assert.equal(liveness.state, 'running', 'the loop is cycling: the stillness is in the work, not in the loop');
+  // The progress watchdog (GY-1980) is the one bound over stillness now: one line naming the item.
+  const attention = progressAttention(simulation.work, null, simulation.now());
+  assert.equal(attention.length, 1);
   assert.equal(attention[0].subject, 'GY-400');
-  assert.match(attention[0].text, /Nothing has acted on GY-400 is claimable and waiting for a worker for 2\d minutes, past the 20-minute bound/);
+  assert.match(attention[0].text, /Nothing has progressed for \d+ minutes \(since \d{4}-.*\): GY-400 has been in build since/);
   assert.equal(attention[0].human, false);
+  assert.equal(attention[0].kind, undefined, 'the watchdog line carries no fault class');
 
-  // The credential comes back: the same subject is acted on, and the wait resets to zero.
+  // The credential comes back: the same subject is acted on, and the watchdog's oldest-open-item
+  // instant moves with it.
   const healthy = simulation.effects();
   const acted = await cycle(state, master, simulation, healthy, minute);
   assert.ok(acted.actions.some(action => action.kind === 'dispatch' && action.state === 'done'));
-  assert.equal(acted.silence.longestIdleMs, 0);
-  assert.equal(acted.silence.breached, false);
 
   // The inventory follows the work rather than a fixed list: a claimed, submitted attempt asks
   // nothing of the dispatcher, what it is still missing is named, and a delivery asks nothing.
@@ -628,8 +629,8 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   while (!Object.keys(waitingState.approvals).length) pass = await cycle(waitingState, host.master, waiting, waitingEffects, 2 * minute);
   const [watchKey] = Object.keys(waitingState.approvals), decision = waitingState.approvals[watchKey].decision;
   const session = approverSessionName(waiting.work[0], decision);
-  // Requested and launched: still a subject, its wait started by the action just taken.
-  assert.deepEqual(pass.silence.subjects.map(subject => [subject.kind, subject.work, subject.idleMs]), [['decision', 'GY-410', 0]]);
+  // Requested and launched: still a subject the loop keeps, for the master session's wake.
+  assert.deepEqual(actionableSubjects(host.master, waiting.work, waiting.now()).map(subject => [subject.kind, subject.work]), [['decision', 'GY-410']]);
   assert.equal(pass.metrics.actionable, 1, 'a decision waiting on an approver is still something the pipeline could act on');
 
   // Three sessions decline in turn. Each replacement is an action; then the launches are spent.
@@ -645,24 +646,19 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   assert.match(unjudged[0].detail, new RegExp(`graphyard master approver GY-410 ${decision}`), 'with the command that puts it to a fresh approver');
   assert.equal(waiting.decisions.get(waiting.work[0].id)![0].state, 'requested', 'the request itself still stands for whoever judges it');
 
-  // From there nothing acts on it, and the silence is reported for what it is.
+  // From there nothing acts on it, and the loop keeps naming it without relaunching anything.
   for (let round = 0; round < 11; round++) pass = await cycle(waitingState, host.master, waiting, waitingEffects, 2 * minute);
   assert.deepEqual(pass.actions.filter(action => action.kind !== 'deployment'), [], 'no relaunch every few minutes forever');
-  assert.equal(pass.silence.breached, true, `${pass.silence.longestIdleMs}ms on ${pass.silence.longest?.detail}`);
-  assert.deepEqual([pass.silence.longest!.kind, pass.silence.longest!.work], ['decision', 'GY-410']);
-  const unjudgedAttention = loopAttention({ liveness: loopLiveness(waitingState, waiting.now(), host.master.run.intervalSeconds * 1000, host.master.hostId), silence: pass.silence, budget: latencyBudget(waitingState.latency) });
-  assert.equal(unjudgedAttention[0].subject, 'GY-410');
-  assert.match(unjudgedAttention[0].text, new RegExp(`Nothing has acted on GY-410's rework decision ${decision} is unjudged after 3 approver session\\(s\\) for 2\\d minutes, past the 20-minute bound`));
+  assert.deepEqual(actionableSubjects(host.master, waiting.work, waiting.now()).map(subject => [subject.kind, subject.work]), [['decision', 'GY-410']], 'the unjudged decision stays named while nothing can act on it');
   assert.equal(daemonSummary(waitingState, waiting.now(), host.master.run.intervalSeconds * 1000, host.master.hostId).approvals[0].decision, decision, 'master status lists the decision the loop is waiting on');
 
   // A fresh approver judges it (`master approver`, from a master session): the loop sees the
-  // decision applied, retires its watch, dispatches the round, and the silence is over.
+  // decision applied, retires its watch, dispatches the round, and the wait is over.
   waiting.approve(waiting.work[0], waiting.decisions.get(waiting.work[0].id)![0]);
   pass = await cycle(waitingState, host.master, waiting, waitingEffects, 2 * minute);
   assert.ok(pass.actions.some(action => action.kind === 'dispatch' && action.state === 'done'), steps(pass.actions).join(', '));
   assert.deepEqual(waitingState.approvals, {});
-  assert.equal(pass.silence.breached, false);
-  assert.deepEqual(pass.silence.subjects.filter(subject => subject.kind === 'decision'), []);
+  assert.deepEqual(actionableSubjects(host.master, waiting.work, waiting.now()).filter(subject => subject.kind === 'decision'), []);
 
   // The step behind each of those cycles, as a pure judgement over one watch. A session that is
   // still working is waited for up to the bound and replaced past it; a history or an inventory
@@ -704,10 +700,9 @@ test('integration:dispatch-latency-budget — ready work reaches a free worker i
 
   // A fifteen-minute interval is an idle cadence, never a bound on how long ready work may sit:
   // with anything actionable the loop comes back inside the responsive window.
-  assert.equal(cycleDelay(900_000, { actionable: 1 }), 30_000);
-  assert.equal(cycleDelay(10_000, { actionable: 3 }), 10_000, 'a shorter configured interval still wins');
-  assert.equal(cycleDelay(900_000, { actionable: 0 }), 900_000);
-  assert.equal(cycleDelay(900_000, null), 900_000);
+  assert.equal(cycleDelay(900_000, 1), 30_000);
+  assert.equal(cycleDelay(10_000, 3), 10_000, 'a shorter configured interval still wins');
+  assert.equal(cycleDelay(900_000, 0), 900_000);
 });
 
 test('integration:loop-liveness — an absent or stalled loop is the top attention item with the command that restarts it, the loop keeps its supervisor\'s watchdog fed per cycle, and the packaged unit restarts it without a person', async () => {
@@ -750,7 +745,6 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   // The same judgement reaches `master status` through the daemon summary it reads.
   const summary = daemonSummary(state, now, intervalMs, master.hostId);
   assert.equal(summary.liveness.state, 'running');
-  assert.equal(summary.silence.actionable, 0);
   assert.equal(summary.budget.met, null, 'no delivery measured yet');
 
   // Self-healing: under a supervisor that watches for keep-alives, the loop reports ready once and
@@ -858,7 +852,8 @@ test('routine decisions rest on what the loop verified and are supervised to the
   const held = await cycle(state, master, simulation, effects);
   assert.deepEqual(simulation.decisions.get(item.id) ?? [], [], 'no rework is requested on an attestation nobody verified');
   assert.deepEqual(held.actions.filter(action => action.kind === 'escalation').map(action => /cannot be settled automatically: Process 4242 is still present/.test(action.detail)), [true]);
-  assert.ok(held.silence.subjects.some(subject => subject.kind === 'decision' && /is not verified: Process 4242 is still present/.test(subject.detail)), 'and the withheld decision stays on the silence measure');
+  assert.ok(actionableSubjects(master, simulation.work, simulation.now(), { assessments: { [item.id]: { ...assessed(verified, verified ? [] : ['Process 4242 is still present']), key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch } } })
+    .some(subject => subject.kind === 'decision' && /is not verified: Process 4242 is still present/.test(subject.detail)), 'and the withheld decision stays named for the master session');
 
   // The probe verifies it. Rework is requested on those grounds — and the engine refuses to apply
   // the first decision, which the loop reads back and requests again; the second one's first
@@ -951,18 +946,6 @@ test('a requested round is requested once, a request the item moved past is take
   verified = true;
   for (let pass = 0; pass < 6 && !waiting.reworkRequested; pass++) await cycle(withheldState, master, withheld, withheldEffects);
   assert.deepEqual(withheld.decisions.get(waiting.id)!.map(decision => [decision.id, decision.state]), [[standing.id, 'applied']], 'the same request is adopted and applied; no second one is made');
-
-  // Only an action that succeeded restarts a subject's wait. A request refused on every retry
-  // reaches the twenty-minute bound like any other silence.
-  const silent = emptyDaemonState(master), start = Date.parse('2031-03-01T09:00:00Z');
-  const subject = [{ key: 'decision:GY-730', kind: 'decision' as const, work: 'GY-730', detail: 'GY-730 needs a rework decision' }];
-  const acted = (outcome: DaemonAction['state']): DaemonAction[] => [{ kind: 'decision', work: 'GY-730', principal: null, state: outcome, detail: 'Requesting the rework decision', attempts: 1, epoch: 1, cycle: 1, at: new Date(start).toISOString() }];
-  trackSilence(silent, subject, [], start);
-  assert.equal(trackSilence(silent, subject, acted('failed'), start + 15 * minute).longestIdleMs, 15 * minute, 'a refusal is not the loop acting');
-  const breached = trackSilence(silent, subject, acted('failed'), start + 30 * minute);
-  assert.equal(breached.breached, true);
-  assert.equal(breached.longest!.key, 'decision:GY-730');
-  assert.equal(trackSilence(silent, subject, acted('done'), start + 31 * minute).longestIdleMs, 0, 'a request that lands is');
 
   // No operator-agent identity: the wired loop has no decision effects at all, so a routine
   // decision is the escalation naming the two commands — not a request that fails on every retry —

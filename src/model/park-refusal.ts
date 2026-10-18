@@ -60,7 +60,7 @@ export function hostDoableAsk(needed: string, kind?: string): HostDoableAsk | nu
 }
 export const hostDoableRefusal = (ask: HostDoableAsk) => `Not a human-only decision: NEEDED asks for ${ask.what}, which an agent identity on the host can do; it is the master's owed action, not the human's. Agent route: ${ask.route} — ${ask.command}`;
 export function parkRefusal(data: { needed: string; kind?: string }): string | null {
-  if (scopeWideningAsk.test(data.needed)) return 'A scope widening is not a human-only decision: ask for it with graphyard scope-request GY-N EPOCH PATH… -- REASON, which an approver decides';
+  if (scopeWideningAsk.test(data.needed)) return 'A scope widening is not a human-only decision: plannedFiles is a plan, not a lock — edit the file you need and submit; nothing needs requesting';
   if (deferredAsk.test(data.needed)) return 'Ask for every human step the item still needs in this one request: NEEDED may not leave steps to later parks';
   const doable = hostDoableAsk(data.needed, data.kind);
   return doable ? hostDoableRefusal(doable) : null;

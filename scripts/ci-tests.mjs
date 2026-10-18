@@ -28,6 +28,12 @@ import { fileURLToPath } from 'node:url';
 export const defaultShardCount = 4;
 export const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const baselinePath = 'tests/helpers/timing-baseline.json';
+/**
+ * The baseline's last `files` key, never a test file. With it last, every real line ends in a comma, so
+ * .gitattributes' `merge=union` merges two changes that touch neighbouring lines into valid JSON
+ * instead of a conflict: the file is shard weights only, so an update lost to the union costs nothing.
+ */
+export const baselineSentinel = '~';
 /** The subject Graphyard gives the commit of a speculative merge-queue tip (src/github.ts). */
 export const speculativeTipSubject = /^Graphyard speculative tip for /;
 
@@ -74,7 +80,8 @@ export function preMergeTestFiles(root = repositoryRoot) {
 export function readDurations(root = repositoryRoot) {
   const file = join(root, baselinePath);
   if (!existsSync(file)) return {};
-  return JSON.parse(readFileSync(file, 'utf8')).files ?? {};
+  const { [baselineSentinel]: _sentinel, ...files } = JSON.parse(readFileSync(file, 'utf8')).files ?? {};
+  return files;
 }
 
 const median = values => { const sorted = [...values].sort((a, b) => a - b); return sorted.length ? sorted[Math.floor(sorted.length / 2)] : 1000; };
@@ -120,6 +127,7 @@ export function mergeDurations(baseline, records, testFiles) {
   }
   const files = {};
   for (const file of testFiles) { const value = measured[file] ?? baseline.files?.[file]; if (value !== undefined) files[file] = value; }
+  files[baselineSentinel] = 0;
   return { ...baseline, files };
 }
 
