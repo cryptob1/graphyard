@@ -104,7 +104,9 @@ test('unit:trial-timeout-yields-queue-turn — after a trial timeout the timed-o
   await step(); await mergeWriterIdle(state);
   assert.deepEqual(state.mergeWriter.queue.map(entry => entry.key), ['GY-2', 'GY-3', 'GY-1'], 'the timed-out head keeps its place only behind every other queued head');
   assert.deepEqual(made.trials, ['GY-1', 'GY-2'], 'GY-2 had the turn the timeout yielded');
-  // GY-2 delivers, then GY-3; only then is GY-1 tried again.
+  // GY-2 delivers, then GY-3; only then is GY-1 tried again. A cycle that lands a merge starts no trial.
+  await step(); await mergeWriterIdle(state);
+  await step(); await mergeWriterIdle(state);
   await step(); await mergeWriterIdle(state);
   await step(); await mergeWriterIdle(state);
   assert.deepEqual(made.trials, ['GY-1', 'GY-2', 'GY-3', 'GY-1']);
@@ -122,6 +124,7 @@ test('unit:repeated-trial-timeout-refused-to-rework — a head that times out it
   // cycle that settles it counts the second timeout, settles the intent the trial left open, then
   // refuses the head: the refusal is the ledger's last word for it, naming the slow files the runner
   // reported, and the rework it grounds is owed.
+  await step();
   await step(); await mergeWriterIdle(state);
   await step();
   assert.deepEqual(made.trials, ['GY-1', 'GY-2', 'GY-1']);
