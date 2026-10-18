@@ -31,7 +31,7 @@ function work(overrides: Partial<Work> = {}) {
 test('master instructions carry the operating loop the master guide prints first', () => {
   const first = masterInstructions;
   assert.match(first, /dedicated, visible master-agent session/);
-  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub\nmerged, then deployment verification/);
+  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review, record what the merge\nwriter's trial and push landed, then deployment verification/);
   assert.match(first, /both conditions hold:\n\(1\) every in-scope item is Done or has a genuinely external blocker recorded in\nGraphyard; and \(2\) every merged change is deployed and live-verified against the exact\ndeployed release, or a genuinely external deployment blocker is recorded in Graphyard/);
   assert.match(first, /Delivered work is immutable, so a deployment blocker is recorded as a follow-up work\nitem naming the delivered item, its merge commit, and the external cause/);
   assert.match(first, /An observed merge alone does not end the loop/);

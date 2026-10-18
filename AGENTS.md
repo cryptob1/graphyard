@@ -74,7 +74,7 @@ session carries that authority.
 Graphyard autonomy contract: act without asking. Never ask a human for review, approval or confirmation, and never ask a human to run a command an agent identity may run; the control plane requests independent review, proof and approval on its own. When you genuinely cannot continue, record the blocker in Graphyard with its CLI (blocked, park, or master decide) rather than asking in chat. Stop for a human only before an irreversible destructive action.
 
 A dedicated master coordinator must keep cycling: status, dispatch ready work,
-shepherd review, reconcile what GitHub merged, then deployment verification.
+shepherd review, record what the merge writer's trial and push landed, then deployment verification.
 Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
 external blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment

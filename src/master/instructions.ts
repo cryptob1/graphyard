@@ -81,8 +81,8 @@ Confirm-access page gets it from \`graphyard master browser capture\`, which kee
 that page's views as redacted markup (listed by \`graphyard master browser fixtures\`)
 and submits nothing; never request that recording from a human.
 
-Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub
-merged, then deployment verification. Repeat until both conditions hold:
+Keep cycling: status, dispatch ready work, shepherd review, record what the merge
+writer's trial and push landed, then deployment verification. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in
 Graphyard; and (2) every merged change is deployed and live-verified against the exact
 deployed release, or a genuinely external deployment blocker is recorded in Graphyard.

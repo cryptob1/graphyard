@@ -1,4 +1,4 @@
-// Concern: cycle steps 5–7 — shepherd reviews, reconcile what GitHub merged, deployment verification.
+// Concern: cycle steps 5–7 — shepherd reviews, escalate merges the gates never authorized, deployment verification.
 import { createHash } from 'node:crypto';
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
 import { type Work } from '../model.js';
@@ -50,10 +50,9 @@ export async function shepherdStep(cycle: Cycle) {
 }
 
 /**
- * Step 6: reconcile what GitHub merged. GitHub merges a candidate whose build, review and required
- * checks passed on its head (docs/delivery.md); the merged observation records the delivery. The
- * loop runs no merge of its own: it names, once, a merge whose gates had not passed — held as a
- * violation until a two-party decision reconciles it — and a revert the main guard abandoned.
+ * Step 6: the control-plane merge writer's trial, push and merge ledger are authoritative for what
+ * landed (docs/delivery.md); this step merges nothing. It names, once, a merge whose gates had not
+ * passed on its head — held as a violation until a two-party decision reconciles it.
  */
 export async function mergeStep(cycle: Cycle) {
   const { state, effects, now, performed, isolate, open } = cycle;
