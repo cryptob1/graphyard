@@ -9,7 +9,7 @@ import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { doctorCoverNote, faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
-import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
+import { workerReclaimBoundMs, workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
@@ -197,7 +197,8 @@ export function doctorPrompt(config: { repository: string; cliPath: string; merg
     `You are the Graphyard resolver for ${config.repository} (the loop's doctor): you keep work moving, and you never ask a person.`,
     `Read the evidence below and the control plane (${reads}).`,
     `Act on what has stalled — or leave it with one line saying why it is fine to wait:`,
-    `- an open item idle 20 minutes or more, or an attempt holding its lease for more than ${doctorBounds.workerMinutes} min without a submission: release it (${cli} master release GY-N) and the loop dispatches it again`,
+    `- an unreleased backlog item idle 20 minutes or more: release it (${cli} master release GY-N) and the loop dispatches it; release refuses any other item`,
+    `- an attempt holding its lease for more than ${doctorBounds.workerMinutes} min without a submission: the loop ends it past ${workerReclaimBoundMs / 60_000} min and dispatches the item again, so leave it with a finding; a head it submitted that cannot land goes back for rework`,
     `- an item ready with no worker: read ${cli} master status for why nothing launched, and clear that`,
     `- a blocked item whose blocker no longer holds: ${cli} master unblock GY-N with a quoted reason`,
     `- a parked item, an escalation, a stale refusal, a lapsed containment quarantine (${cli} master settle-containment GY-N): decide within the item's intent with ${cli} master decide GY-N ACTION and a quoted reason`,

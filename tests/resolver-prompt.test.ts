@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { boundedInput, doctorBounds, doctorPrompt, type DoctorInput } from '../src/daemon/doctor.js';
-import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
+import { workerReclaimBoundMs, workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 
 // GY-2004 AC-1 (unit:resolver-prompt): the doctor's prompt is the resolver's short charter. It
 // acts on stalled, ready-but-idle, blocked and parked items with the master CLI, never asks a
@@ -19,7 +19,7 @@ test('unit:resolver-prompt — the resolver\'s prompt is short and tells it to a
   // Short: the whole built prompt, evidence line included, fits the length bound.
   assert.ok(text.split('\n').length < 60, `the resolver prompt is ${text.split('\n').length} lines; the bound is under 60`);
   // The stalls it acts on: the 20-minute idle rule and the worker bound, one declaration behind both.
-  assert.match(text, /idle 20 minutes or more/);
+  assert.match(text, /an unreleased backlog item idle 20 minutes or more/);
   assert.match(text, new RegExp(`more than ${doctorBounds.workerMinutes} min without a submission`));
   assert.equal(doctorBounds.workerMinutes * minute, workerSubmissionBoundMs, 'the worker bound the charter names is the product bound');
   // Ready-but-idle, blocked and parked, each with its master CLI action.
@@ -28,7 +28,11 @@ test('unit:resolver-prompt — the resolver\'s prompt is short and tells it to a
   assert.match(text, /a parked item/);
   // The actions: re-dispatch, unblock, rework with a concrete reason, close as obsolete or
   // duplicate with a reason, decide scope or requirements within the item's intent.
-  assert.match(text, /master release GY-N\) and the loop dispatches it again/);
+  // Release is only for unreleased backlog work (the ready endpoint refuses the rest); an overdue
+  // lease-holder is the loop's own reclaim, never a release.
+  assert.match(text, /master release GY-N\) and the loop dispatches it; release refuses any other item/);
+  assert.match(text, new RegExp(`the loop ends it past ${workerReclaimBoundMs / minute} min and dispatches the item again`));
+  assert.doesNotMatch(text.split('\n').find(line => line.includes('holding its lease'))!, /master release/);
   assert.match(text, /master unblock GY-N with a quoted reason/);
   assert.match(text, /send it back for rework with a concrete reason/);
   assert.match(text, /master decide GY-N rework REASON/);
