@@ -102,7 +102,7 @@ export const healthRoutes = defineRoutes('health', [
     const readiness = (services as Services & { readiness?: boolean }).readiness ?? true;
     const repositoryCause = await repository;
     const observable = (body: { healthy: boolean; causes: string[] } & Record<string, unknown>) => repositoryCause ? { ...body, ok: false, healthy: false, causes: [...body.causes, repositoryCause] } : body;
-    if (!readiness && url.searchParams.has('ready')) return send(503, { ok: true, healthy: true, readiness, causes: ['startup validation has not completed'], ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol });
+    if (!readiness && url.searchParams.has('ready')) return send(503, observable({ ok: true, healthy: true, readiness, causes: ['startup validation has not completed'], ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol }));
     if (!reachable) return observable({ ok: true, healthy: true, readiness, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol });
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued

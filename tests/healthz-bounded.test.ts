@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { healthCheckQueryGraceMs, healthCheckWaitMs, healthRoutes, repositoryRootCause } from '../src/server/routes/health.js';
 
 // On a fresh process the reconciliation step can hold every pooled connection for minutes; an
@@ -99,14 +98,14 @@ test('unit:healthz-select-bounded — while a probe is still queued behind the s
 });
 
 test('unit:healthz-unreadable-repository-root — a GRAPHYARD_REPOSITORY_ROOT that is missing or not a readable Git work tree is a /healthz cause naming the path and the plane is not healthy; a readable one adds none (GY-2054)', async () => {
-  const scratch = await mkdtemp(join(tmpdir(), 'healthz-repository-root-'));
+  const scratch = await temporaryDirectory('healthz-repository-root');
   const saved = process.env.GRAPHYARD_REPOSITORY_ROOT;
   try {
     const missing = join(scratch, 'reclaimed-worktree'), plain = join(scratch, 'plain'), checkout = join(scratch, 'checkout');
     execFileSync('mkdir', [plain]);
     execFileSync('git', ['init', '-q', checkout]);
-    assert.match((await repositoryRootCause(missing))!, new RegExp(`repository root ${missing} \\(GRAPHYARD_REPOSITORY_ROOT\\) is missing`));
-    assert.match((await repositoryRootCause(plain))!, new RegExp(`repository root ${plain} \\(GRAPHYARD_REPOSITORY_ROOT\\) is not a readable Git work tree`));
+    assert.equal(await repositoryRootCause(missing), `repository root ${missing} (GRAPHYARD_REPOSITORY_ROOT) is missing; submitted heads cannot be observed`);
+    assert.equal(await repositoryRootCause(plain), `repository root ${plain} (GRAPHYARD_REPOSITORY_ROOT) is not a readable Git work tree; submitted heads cannot be observed`);
     assert.equal(await repositoryRootCause(checkout), null);
     assert.equal(await repositoryRootCause(''), null, 'a server given no repository root reports nothing about one');
     // The route itself: the cause joins the others and the plane is unhealthy; a readable root leaves the verdict alone.
@@ -120,8 +119,25 @@ test('unit:healthz-unreadable-repository-root — a GRAPHYARD_REPOSITORY_ROOT th
     assert.ok(broken.causes.some((cause: string) => cause.includes(missing)), broken.causes.join('; '));
     assert.equal(fine.healthy, true);
     assert.deepEqual(fine.causes, [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`]);
+    // `?ready` before startup validation completes: the 503 body names the unreadable root too, never healthy.
+    const ready = (root: string) => {
+      process.env.GRAPHYARD_REPOSITORY_ROOT = root;
+      const pool = { waitingCount: 0, idleCount: 1, connect: () => Promise.resolve({ query: async () => ({}), release: () => {} }) };
+      const services = { engine: { store: { pool } }, github: null, readiness: false, build: { commit: 'c'.repeat(40), protocol: 1 } } as any;
+      let answered: { status: number; body: any } | null = null;
+      const context = { services, url: new URL('http://plane/healthz?ready'), send: (status: number, body: any) => { answered = { status, body }; return body; } } as any;
+      return Promise.resolve(healthRoutes.routes[0].handle(context, [])).then(() => answered!);
+    };
+    const notReady = await ready(missing);
+    assert.equal(notReady.status, 503);
+    assert.equal(notReady.body.healthy, false);
+    assert.equal(notReady.body.ok, false);
+    assert.deepEqual(notReady.body.causes, ['startup validation has not completed', `repository root ${missing} (GRAPHYARD_REPOSITORY_ROOT) is missing; submitted heads cannot be observed`]);
+    const readyFine = await ready(checkout);
+    assert.equal(readyFine.status, 503);
+    assert.equal(readyFine.body.healthy, true);
+    assert.deepEqual(readyFine.body.causes, ['startup validation has not completed']);
   } finally {
     if (saved === undefined) delete process.env.GRAPHYARD_REPOSITORY_ROOT; else process.env.GRAPHYARD_REPOSITORY_ROOT = saved;
-    await rm(scratch, { recursive: true, force: true });
   }
 });
