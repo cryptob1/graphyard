@@ -734,6 +734,12 @@ export type ReviewCriterion = { id: string; text: string; proofs?: readonly stri
  * checks on the serving release after delivery. Empty when no criterion is declared, so every
  * other review request stays byte-identical.
  */
+/**
+ * The shared simplicity paragraph (GY-1999): defined once here and interpolated verbatim into every
+ * role prompt — worker (dispatch.ts), reviewer, planner, acceptance and master — and put at the top
+ * of AGENTS.md, so agents build the simplest thing that meets the criteria instead of machinery.
+ */
+export const simplicityParagraph = 'Keep it simple. Build the simplest thing that meets the criteria and gives users a good experience. Do not over-engineer: no defensive layers, extra gates, permission checks or tests for hypothetical cases. Prefer deleting code to adding it. Agents are capable: do not build process around corner cases. ';
 export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
   const declared = (criteria ?? []).filter(criterion => criterion.proofs && declaredPostDeploy({ proofs: criterion.proofs })).map(criterion => criterion.id);
   if (!declared.length) return '';
@@ -760,6 +766,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + postDeployReviewSection(criteria)
     + findingClassificationSection()
+    + simplicityParagraph
     + (fresh ? freshReadSection(fresh, binding.sha) : '')
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
@@ -781,11 +788,36 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
  * records out of the mechanical rounds), so a nit here is advisory and kept for later workers.
  */
 export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:LINE — FINDING" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. ';
+/**
+ * The judging part of a control-plane review request (GY-1987): what the diff is read with, the
+ * criteria rule, the declared post-deploy rule, the BLOCKING/Nit rule, the documentation and
+ * repetition sections and the verification maps — everything a diff is judged by, and none of the
+ * session, posting and credential instructions around it. The documentation obligation is judged
+ * beside the item's own criteria, exactly as controlPlaneReviewPrompt judges it. `review self`
+ * prints this for the worker's own head, so a worker applies the standard the independent reviewer
+ * will apply to the same diff before it submits. `context` carries the request's project-memory and
+ * review-round sections through their exact pre-factoring positions inside this span, so the
+ * request stays byte-identical whatever a session's history and memory hold; a self-review passes
+ * none, and judges the diff by the shared standard alone.
+ */
+export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
+  const judged = documentation ? [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }] : criteria;
+  return `Read the change with: git diff ${binding.base} ${binding.head} (both commits are in this session's object store; git show --stat ${binding.head} lists its files). `
+    + (context?.memory ?? '')
+    + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
+    + (context?.round ?? '')
+    + criteriaRuleSection(binding.key, binding.head, judged)
+    + postDeployReviewSection(judged)
+    + controlPlaneFindingSection
+    + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
+    + repetitionReviewSection(documentation?.files);
+}
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
 function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') rounds = roundsOrMemory;
   else if (roundsOrMemory && !memory) memory = roundsOrMemory as ProjectMemory;
+  const own = criteria;
   if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
   const subject = plane.postMerge
@@ -795,15 +827,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     ? 'Name each defect worth a fix on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
     : '';
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
-    + `Read the change with: git diff ${plane.baseTip} ${plane.head} (both commits are in this session's object store; git show --stat ${plane.head} lists its files). `
-    + (memorySection || '')
-    + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
-    + reviewRoundSection(plane.head, history, rounds)
-    + criteriaRuleSection(binding.key, plane.head, criteria)
-    + postDeployReviewSection(criteria)
-    + controlPlaneFindingSection
-    + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
-    + repetitionReviewSection(documentation?.files)
+    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, own, documentation, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history, rounds) })
     + (research ? researchReviewSection(research) : '')
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
