@@ -14,7 +14,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // The modules under test are imported inside each test, so a run against code without them fails
 // its cases rather than the file (graphyard verify's exercise). stall-upstream.ts is gone
 // (GY-1980): the module import in each case below is the proof it stays gone.
-const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), R: await import('../src/stall-remedies.js') });
+const load = async () => ({ S: await import('../src/daemon/step-stalls.js'), R: await import('../src/stall-remedies.js'), M: await import('../src/daemon/cycle-master.js') });
 
 // GY-1854: a loop step or dispatcher call that fails with the same normalised signature on three
 // consecutive cycles is recorded as one stall; a bound remedy (unknown profile, 401 credential,
@@ -167,17 +167,17 @@ test('unit:stall-counts-one-failure-per-cycle — several actions of one signatu
 });
 
 test('unit:loop-step-stall-unbound-wakes-master — an unbound stall and a refused remedy wake the master session with the signature, step and stall as the task, once per run', async () => {
-  const { S, R } = await load();
+  const { S, R, M } = await load();
   const loop = state();
   const failing = { kind: 'refresh', state: 'failed', detail: 'the control plane timed out after 5000ms reading /api/status' } as const;
   for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, [failing], cycle, tick(1));
   const [stall] = Object.values(loop.stepStalls);
   assert.equal(R.stepStallRemedy(stall.signature), null, 'no remedy binds to a base refresh timeout');
-  const subjects = S.stallWakeSubjects(loop, 'graphyard.mjs');
+  const subjects = M.stallWakeSubjects(loop, 'graphyard.mjs');
   assert.equal(subjects.length, 1);
   assert.ok(subjects[0].key.length <= 60, `the subject fits the master session's key bound (${subjects[0].key})`);
   assert.equal(subjects[0].key, S.stallSubjectKey(stall.signature));
-  const task = S.stallWakeTask(stall, 'graphyard.mjs');
+  const task = M.stallWakeTask(stall, 'graphyard.mjs');
   assert.equal(subjects[0].detail, task);
   assert.match(task, /refresh call failed with one signature on 3 consecutive cycles/);
   assert.match(task, /stands stalled since/);
@@ -186,7 +186,7 @@ test('unit:loop-step-stall-unbound-wakes-master — an unbound stall and a refus
   // The task is stable while the run stands: the digest machinery wakes the session once per run,
   // never again per backed-off attempt of the standing stall, so the live count stays out of it.
   S.noteCycleStalls(loop, [failing], 4, tick(1));
-  assert.equal(S.stallWakeSubjects(loop, 'graphyard.mjs')[0].detail, task, 'a backed-off reattempt of the standing stall changes no wake');
+  assert.equal(M.stallWakeSubjects(loop, 'graphyard.mjs')[0].detail, task, 'a backed-off reattempt of the standing stall changes no wake');
 
   // A bound remedy that was refused wakes the master too, and its task names the attempt.
   const held = state();
@@ -196,13 +196,13 @@ test('unit:loop-step-stall-unbound-wakes-master — an unbound stall and a refus
   assert.equal(refused.length, 1);
   assert.equal(refused[0].record.outcome, 'refused');
   assert.match(refused[0].record.detail, /outside the loop's authority/);
-  const woken = S.stallWakeSubjects(held, 'graphyard.mjs');
+  const woken = M.stallWakeSubjects(held, 'graphyard.mjs');
   assert.equal(woken.length, 1);
   assert.match(woken[0].detail, /credential-401 remedy was applied once at .* and refused/);
   // The refused-remedy task is stable too: the standing stall never re-wakes per cycle.
   const refusedTask = woken[0].detail;
   for (const cycle of [4, 5]) S.noteCycleStalls(held, [credential], cycle, tick(S.stallBackoffMs + 1));
-  assert.equal(S.stallWakeSubjects(held, 'graphyard.mjs')[0].detail, refusedTask, 'the count and the last error stay on the cursor, out of the wake');
+  assert.equal(M.stallWakeSubjects(held, 'graphyard.mjs')[0].detail, refusedTask, 'the count and the last error stay on the cursor, out of the wake');
 });
 
 test('unit:stall-backoff-five-minutes — a stalled call is attempted once per five minutes, inside the window the count stands, and the loop retry converges to the same bound', async () => {
@@ -539,7 +539,7 @@ test('unit:held-effects-hold-any-stalled-call — a stalled step whose failing c
 });
 
 test('unit:loop-step-stall-reviewer-profile — the launch boundary\u2019s recorded unknown-reviewer-profile refusal is the review-launch step\u2019s failure, binds the profile remedy, and the remedy verifies only once the named profile is configured', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const { recordReviewerProfileRefusal, readReviewerProfileRefusal, clearReviewerProfileRefusal } = await import('../src/reviewer.js');
   const directory = await temporaryDirectory('gy-1854-reviewer-profile-');
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(directory, 'coordinator.token'), cliPath: 'graphyard', repository: 'owner/project', baseBranch: 'main', githubAppId: 1, hostId: 'host', masterAgentName: 'master-test', workers: [] });
@@ -569,7 +569,7 @@ test('unit:loop-step-stall-reviewer-profile — the launch boundary\u2019s recor
   assert.equal(records[0].record.kind, 'profile-unknown');
   assert.equal(records[0].record.verified, true);
   assert.equal((await S.remedyStalledSteps(loop, runner(['reviewer-x']), clock + 5 * 60_000)).length, 0, 'never applied twice for the run');
-  assert.equal(S.stallNeedsMaster(loop.stepStalls[stall.signature]), false, 'a verified remedy needs no master');
+  assert.equal(M.stallNeedsMaster(loop.stepStalls[stall.signature]), false, 'a verified remedy needs no master');
   // The launch that gets past the lookup clears the record, and the run ends with it.
   await clearReviewerProfileRefusal(config);
   assert.deepEqual(await S.readReviewerProfileFailures(config), []);
@@ -617,7 +617,7 @@ test('unit:stall-holds-the-failing-invocation — a stalled call is held per res
 });
 
 test('unit:stall-overflow-still-stalls — recurring failures past the cursor bound still reach three cycles: 101 distinct signatures all stall, and a cycle failing more ways than the cursor keeps folds the rest into one overflow stall', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const words = (index: number) => `cause ${'_'.repeat(index + 1)} of many`;
   {
     const loop = state();
@@ -637,23 +637,23 @@ test('unit:stall-overflow-still-stalls — recurring failures past the cursor bo
     assert.ok(overflow?.stalledAt, 'the folded overflow recurs every cycle, so it stalls like any other signature');
     assert.match(overflow.signature, /more distinct failing signatures in one cycle than the N the cursor keeps a run for, from the steps dispatch, reclaim/);
     assert.equal(runs.filter(run => run.step !== S.overflowStep && run.stalledAt).length, S.retainedStepStalls - 1, 'every kept signature stalls too');
-    assert.ok(S.stallNeedsMaster(overflow), 'no remedy binds the overflow: it wakes the master session');
+    assert.ok(M.stallNeedsMaster(overflow), 'no remedy binds the overflow: it wakes the master session');
   }
 });
 
 test('unit:stall-wake-acknowledges-only-delivered — a wake beside a failed cycle names at most twenty stalls and acknowledges only those, so the twenty-first is delivered by the next', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const { wakeMasterForStalls } = await import('../src/daemon/cycle-master.js');
   const loop = state(), config = loopConfig();
   loop.master.agentName = 'master-test'; loop.master.pane = 'pane-master'; loop.master.startedAt = new Date(clock).toISOString();
   for (const cycle of [1, 2, 3]) S.noteCycleStalls(loop, Array.from({ length: 21 }, (_, index) => ({ kind: 'snapshot-read', state: 'failed' as const, detail: `unbound ${'_'.repeat(index + 1)} refusal` })), cycle, tick(60_000));
-  assert.equal(S.stallWakeSubjects(loop, config.cliPath).length, 21);
+  assert.equal(M.stallWakeSubjects(loop, config.cliPath).length, 21);
   const prompts: string[] = [];
   const effects = { agents: () => [], herdr: async () => ({ agents: [{ name: 'master-test', pane_id: 'pane-master', agent: 'claude', agent_status: 'idle' }], available: true }),
     masterSession: { launch: async () => { throw new Error('never launched'); } }, promptSession: async (_agent: unknown, text: string) => { prompts.push(text); }, persist: async () => {} } as unknown as DaemonEffects;
   const first = await wakeMasterForStalls(config, loop, effects, () => clock);
   assert.equal(first.length, 20, 'one wake carries twenty subjects');
-  const missing = S.stallWakeSubjects(loop, config.cliPath).filter(subject => !first.includes(subject.key));
+  const missing = M.stallWakeSubjects(loop, config.cliPath).filter(subject => !first.includes(subject.key));
   assert.equal(missing.length, 1);
   assert.equal(loop.master.subjects[missing[0].key], undefined, 'the subject the wake did not name is not acknowledged');
   tick(60_000);
@@ -682,7 +682,7 @@ test('unit:stall-wake-leaves-a-dialog-to-the-step — a wake beside a failed cyc
 });
 
 test('unit:stall-remedy-written-before-it-runs — the remedy attempt is on the cursor before its mutation runs, so a process ending during it restarts into a remedied run that wakes the master and is never applied twice', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const loop = state();
   for (const cycle of [1, 2, 3]) S.noteStepFailure(loop, 'dispatch', 'Graphyard refused /api/work (401): unauthorized', tick(60_000), cycle);
   const signature = Object.keys(loop.stepStalls)[0];
@@ -700,8 +700,8 @@ test('unit:stall-remedy-written-before-it-runs — the remedy attempt is on the 
   assert.deepEqual(applied, [], 'a run whose attempt was started is never remedied again');
   assert.equal(runs, 1);
   const stall = restarted.stepStalls[signature];
-  assert.ok(S.stallNeedsMaster(stall), 'an attempt that never reported wakes the master session');
-  assert.match(S.stallWakeTask(stall, '/outside/graphyard.mjs'), /remedy was started once at .* and never reported/);
+  assert.ok(M.stallNeedsMaster(stall), 'an attempt that never reported wakes the master session');
+  assert.match(M.stallWakeTask(stall, '/outside/graphyard.mjs'), /remedy was started once at .* and never reported/);
   // A write that fails applies nothing: the run stays unremedied for the next cycle.
   const other = state();
   for (const cycle of [1, 2, 3]) S.noteStepFailure(other, 'dispatch', 'Graphyard refused /api/work (401): unauthorized', tick(60_000), cycle);
@@ -887,7 +887,7 @@ test('unit:stall-signature-overflow-invocations-held — ten panes sharing one s
 });
 
 test('unit:stall-signature-overflow-records-once — twelve items sharing one signature still record one stall at three cycles, apply its bound remedy once and wake the master once, exactly as eight do', async () => {
-  const { S } = await load();
+  const { S, M } = await load();
   const failed = (item: string): { kind: 'dispatch'; state: 'failed'; detail: string } =>
     ({ kind: 'dispatch', state: 'failed', detail: `Dispatch of ${item} to worker-a failed: the control plane answered HTTP 401 for ${item} epoch 1` });
   const sharing = (items: string[]) => {
@@ -920,7 +920,7 @@ test('unit:stall-signature-overflow-records-once — twelve items sharing one si
   assert.equal(attempts, 2);
   // A refused remedy wakes the master session once, with the one signature as the subject.
   for (const one of [eight, twelve]) {
-    const subjects = S.stallWakeSubjects(one.loop, 'graphyard.mjs');
+    const subjects = M.stallWakeSubjects(one.loop, 'graphyard.mjs');
     assert.equal(subjects.length, 1, 'one wake for the shared signature');
     assert.equal(subjects[0].key, S.stallSubjectKey(one.signature));
     assert.match(subjects[0].detail, /dispatch call failed with one signature on 3 consecutive cycles/);

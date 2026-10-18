@@ -8,7 +8,7 @@
 
 ## Incident decision tree
 
-- **Item not moving**: fix refusal's cause. Never weaken requirements.
+- **Item not moving**: the watchdog's `master status` lines — no progress 60min with an item open, merges unreleased 90min — judge, never file; fix the cause. Never weaken requirements.
   - Escalation: declared human runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](delegation.md#who-may-settle-what)).
   - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); retry: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
   - Late-fault waits: 30min: owed `request-rework` (`owed-decision`), unwatched decision, owed escalation/blocker, stale non-release, `actorless` head behind base; 10min: containment past grace; 15min: watched decision post-launch; once: unre-asked refusal (`decision-refused`).

@@ -25,7 +25,7 @@ Profile `accounts` lists [agent environments](onboarding.md#agent-environments) 
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it (`esc` dismisses notices); `run.masterHeartbeatMinutes` (30) sends heartbeat (`daemon.master`); undeliverable wakes rotate it (`deaf`, ≤3 straight).
+`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it (`esc` dismisses notices); `run.masterHeartbeatMinutes` (30) sends heartbeat (`daemon.master`); undeliverable wakes rotate it (`deaf`, ≤3 straight). The watchdog's `master status` lines — no progress 60min, merges unreleased 90min — judge, never file.
 
 ### The request is the session's first message
 

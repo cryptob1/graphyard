@@ -29,8 +29,8 @@ import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
 import { shadowGateSummary } from './cycle-shadow.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
-import { wakeMasterForStalls } from './cycle-master.js';
-import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
+import { stallNeedsMaster, wakeMasterForStalls } from './cycle-master.js';
+import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
 
