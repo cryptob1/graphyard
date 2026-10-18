@@ -53,7 +53,12 @@ const git = (...args: string[]) => execFileSync('git', args, { cwd: process.cwd(
 const nodeModules = (() => { for (let at = process.cwd(); ; at = dirname(at)) { if (existsSync(join(at, 'node_modules'))) return join(at, 'node_modules'); if (dirname(at) === at) throw new Error(`no node_modules above ${process.cwd()}`); } })();
 let baseFold: typeof foldInterventions;
 before(async () => {
-  try { git('cat-file', '-e', `${baseSha}^{commit}`); } catch { git('fetch', '--no-tags', '--depth=1', '--quiet', 'origin', baseSha); }
+  // A concurrent shallow fetch in the same shard can fail ours ("shallow file has changed since we
+  // read it"), so a failed fetch re-checks for the commit and retries before giving up.
+  const present = () => { try { git('cat-file', '-e', `${baseSha}^{commit}`); return true; } catch { return false; } };
+  for (let attempt = 1; !present(); attempt++) {
+    try { git('fetch', '--no-tags', '--depth=1', '--quiet', 'origin', baseSha); } catch (error) { if (attempt >= 3 && !present()) throw error; }
+  }
   const directory = await temporaryDirectory(`gy1719-base-${baseSha.slice(0, 7)}`);
   execFileSync('tar', ['-x', '-C', directory], { input: git('archive', '--format=tar', baseSha, 'src') });
   await symlink(nodeModules, join(directory, 'node_modules'), 'dir');
