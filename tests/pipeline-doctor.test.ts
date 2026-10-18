@@ -69,7 +69,7 @@ const words = (...values: string[]) => values.map(value => ({ value, dynamic: fa
 const liveAgent = (name: string) => ({ name, agent_status: 'working', pane_id: 'p1' } as any);
 const summary = (at_: string, runState: 'reported' | 'running' = 'reported'): DoctorRunRecord => ({ at: at_, state: runState, runs: [], findings: [], actions: [], filed: [], detail: '' });
 
-test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by default on a configurable interval, its session holds only the sanctioned commands with a refusal recorded rather than run, and the shipped template names every fault bound', async () => {
+test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by default on a configurable interval, its session holds only the sanctioned commands with a refusal recorded rather than run, and the shipped template is the resolver\'s short act-don\'t-ask charter', async () => {
   const settings = doctorSettingsSchema.parse({});
   assert.equal(settings.enabled, true, 'the doctor is on by default');
   assert.equal(settings.intervalMinutes, 10, 'the doctor runs every ten minutes by default');
@@ -253,13 +253,15 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by 
   // read per call, and the finally above restored the session's own).
   assert.equal(call('read', { path: 'src/x.ts' }), undefined, 'without the doctor role the built-in tools are not blocked here');
 
-  // The shipped template names every check bound, the sanctioned commands and the unactionable rule.
+  // The shipped template is the resolver's charter (GY-2004): short, act-don't-ask, naming the
+  // stalls it acts on, the sanctioned commands and the unactionable rule — no per-bound checklist.
   const prompt = doctorPrompt({ repository: master.repository, cliPath: master.cliPath }, { items: [], faults: [] });
   assert.ok(prompt.includes(`node ${master.cliPath}`), 'the template names node <cliPath>');
-  for (const [bound, minutes] of Object.entries(doctorBounds)) assert.ok(prompt.includes(`${minutes} min`), `the template names the ${bound} bound (${minutes} min)`);
+  assert.ok(prompt.split('\n').length < 60, `the resolver prompt is short (${prompt.split('\n').length} lines, under 60)`);
+  for (const rule of ['never ask a person', 'File an item only for a code change', 'simplest action', '20 minutes']) assert.ok(prompt.includes(rule), `the charter says: ${rule}`);
+  assert.ok(!prompt.includes('The checks and their bounds:'), 'the per-bound checklist is gone; the resolver reads the evidence');
   // GY-1462: the worker bound is the product's no-submission bound, one declaration behind both.
   assert.equal(doctorBounds.workerMinutes * 60_000, workerSubmissionBoundMs, 'the doctor\'s worker bound is the bound the loop and the server enforce');
-  assert.ok(prompt.includes('lapsed containment') && prompt.includes('refusal') && prompt.includes('overdue'), 'the template names the non-minute checks: lapsed containment, stale refusal text, overdue items');
   for (const command of doctorSanctionedCommands) assert.ok(prompt.includes(`master ${command}`), `the template names the sanctioned command master ${command}`);
   for (const never of ['never merge', 'dispatch', 'evidence', 'lease']) assert.ok(prompt.includes(never), `the template refuses ${never}`);
   assert.ok(prompt.includes('human-only'), 'the template names the human-only decisions a finding cannot act on');
