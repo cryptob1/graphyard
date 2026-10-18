@@ -675,4 +675,4 @@ export async function worktreePrepareSummary(root: string, now = Date.now()) {
 
 // A stale attempt worktree holding the item's branch (GY-860) is released in ./branch-release.ts;
 // these re-export it, so every existing import keeps working.
-export { preservedDiffCaptureBytes, releaseHeldBranch, releaseUnderFailure, submittedBranchRefusal, reserveReleasingHold, workspaceFailure, type PreservedWorktree, type BranchGit } from './branch-release.js';
+export { preservedDiffCaptureBytes, registeredReworkHead, releaseHeldBranch, releaseUnderFailure, reserveReleasingHold, workspaceFailure, type PreservedWorktree, type BranchGit } from './branch-release.js';

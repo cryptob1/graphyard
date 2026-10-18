@@ -1063,7 +1063,10 @@ export async function launchReview(root: string, work: Work, profileName: string
   if (await readReviewerProfileRefusal(config)) await clearReviewerProfileRefusal(config);
   const binding = postMerge ? await postMergeBinding(root, work, postMerge, dependencies.run) : assertReviewCandidate(work, observedAt, dependencies.request);
   if (reviewerApp && binding.author.toLowerCase() === `${reviewerApp.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
-  // The reviewer principal a control-plane launch registers: the profile's agent name, which every session of the profile posts as.
+  // The reviewer principal a control-plane launch registers: the bound reviewer App's bot login
+  // (`${slug}[bot]`, the identity GitHub shows for the App) when one is configured, else the
+  // profile's agent name, which every session of the profile posts as. The launch route accepts
+  // exactly this shape (server/review-verdict.ts reviewLaunchBodySchema, GY-2008).
   const reviewerIdentity = reviewerApp ? `${reviewerApp.slug}[bot]` : profile.agentName;
   if (plane && !postMerge && implementerIdentities(work).includes(reviewerIdentity)) throw new Error(`${reviewerIdentity} implemented ${work.key}; an identity cannot independently review its own work`);
   const verdictToken = plane ? randomBytes(32).toString('hex') : null;
