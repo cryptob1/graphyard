@@ -352,7 +352,7 @@ export const masterRunSchema = z.object({
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
   decomposition: decompositionSettingsSchema.optional(), // splitting broad items before first dispatch (GY-1126): size bounds and run time limit; it runs on run.research's account
-  // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (10 by default).
+  // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (5 by default).
   doctor: doctorSettingsSchema.optional(),
   // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
   // cause and fix item — its model, fallback, time limit, bound and log-reading commands.

@@ -64,7 +64,7 @@ const assessment = (work: Work, settleable: boolean): ContainmentAssessment => (
 function replay(work: Work[], span: number, context: Parameters<typeof actionableSubjects>[3] = {}) {
   const master = config();
   // A record of its own: the schema's default silence object is one shared value.
-  const state: DaemonState = { ...emptyDaemonState(master), silence: { subjects: {}, lastActionAt: null } };
+  const state: DaemonState = { ...emptyDaemonState(master), silence: { subjects: {}, lastActionAt: null, breached: false } };
   state.lock = { pid: process.pid, host: 'machine-a', startedAt: iso(clock), heartbeatAt: iso(clock) } as DaemonState['lock'];
   let silence = trackSilence(state, actionableSubjects(master, work, clock, context), [], clock);
   for (let at = clock; at <= clock + span; at += 30_000) {

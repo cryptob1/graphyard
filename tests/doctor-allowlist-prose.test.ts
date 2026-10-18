@@ -122,6 +122,16 @@ test('unit:allowlist-grammar-only-scanning — the allowlist judges the command 
   assert.deepEqual(run(noJson.command!), ['master', 'decide', 'GY-1652', 'rework', 'the item\'s most recent attempt failed'], 'a decide without JSON takes its reason after ACTION');
   const requirements = pi.doctorCommandVerdict(`node ${cli} master requirements GY-1652 'plan.json' 'the item's criteria were revised'`, context);
   assert.deepEqual(run(requirements.command!), ['master', 'requirements', 'GY-1652', 'plan.json', 'the item\'s criteria were revised'], 'a quoted FILE stays its own argument');
+  // GY-2005: item creation is held to a stated reason at the gate — a create with nothing stated
+  // past the file is refused before it runs, and one with the why quoted runs, rewritten like any prose.
+  for (const line of [`node ${cli} master create plan.json`, `graphyard master create plan.json`]) {
+    const bare = pi.doctorCommandVerdict(line, context);
+    assert.equal(bare.allow, false, `${line} is refused`);
+    if (!bare.allow) assert.match(bare.reason, /create-reason rule.*no reason stated past the file/);
+  }
+  const filed = pi.doctorCommandVerdict(`node ${cli} master create plan.json 'the item's most recent attempt failed for a code reason'`, context);
+  assert.equal(filed.allow, true, 'the create with its why quoted is accepted');
+  assert.deepEqual(run(filed.command!), ['master', 'create', 'plan.json', 'the item\'s most recent attempt failed for a code reason'], 'the reason reaches the CLI as one prose argument');
   // The prompt tells the doctor where the reason goes.
   assert.match(doctorPrompt({ repository: 'owner/project', cliPath: cli }, { items: [], faults: [] }), /free-text reason last, enclosed in one pair of quotes/);
 });

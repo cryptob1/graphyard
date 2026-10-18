@@ -308,6 +308,11 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // recomputation beside it, so what reclasses a subject is what the step decided.
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
   const silence = trackSilence(state, actionable, performed, clock);
+  // The loop's progress watchdog (GY-2005): a subject nothing has acted on crossed the silence
+  // bound. The crossing — not every cycle the breach stands — is the resolver's cue: a run is
+  // marked due and the next cycle's doctorStep launches it at once instead of waiting the interval.
+  if (silence.breached && !state.silence.breached) state.doctor.watchdogDue = true;
+  state.silence.breached = silence.breached;
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).

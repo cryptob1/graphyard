@@ -1580,7 +1580,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     ];
   };
   const doctor: DaemonEffects['doctor'] = {
-    settings: { ...doctorSettingsSchema.parse({}), command: 'pi' }, cwd: '/soak/coordinator', env: {},
+    // This world's day — its pane-sweep passes and session choreography — is timed to the doctor
+    // firing every ten minutes, the cadence it was designed around (GY-2005 moved the shipped
+    // default to five; the shipped default is proven in tests/resolver-prompt.test.ts).
+    settings: { ...doctorSettingsSchema.parse({ intervalMinutes: 10 }), command: 'pi' }, cwd: '/soak/coordinator', env: {},
     runner: async () => ({ runtime: 'pi', model: 'soak/doctor', runner: {
       name: 'pi', start: (_prompt: string, runOptions: { tool: string }) => ({
         id: `soak-doctor-${clock.now()}`, events: [], onEvent: () => () => {}, cancel: () => {},

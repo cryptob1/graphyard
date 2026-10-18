@@ -232,6 +232,8 @@ export { itemClockSchema, latencySampleSchema, type ItemClock, type LatencySampl
 export const silenceSchema = z.object({
   subjects: z.record(z.string(), z.object({ since: z.string(), work: z.string().max(40).nullable(), kind: z.string().max(40), detail: z.string().max(500) }).strict()).default({}),
   lastActionAt: z.string().nullable().default(null),
+  /** GY-2005: whether the last cycle ended past the silence bound — the progress watchdog's edge, so the resolver fires once per stall, not every cycle. */
+  breached: z.boolean().default(false),
 }).strict();
 
 /**
@@ -532,7 +534,7 @@ export const daemonStateSchema = z.object({
   clocks: z.record(z.string(), itemClockSchema).default({}), // per-item passage clocks and the samples they produced: the loop's own latency measurement
   latency: z.array(latencySampleSchema).default([]),
   /** What is actionable and how long it has gone without an action (see `silenceReport`). */
-  silence: silenceSchema.default({ subjects: {}, lastActionAt: null }),
+  silence: silenceSchema.default({ subjects: {}, lastActionAt: null, breached: false }),
   /** One entry per scope request this loop has decided, for the latency budget it must keep. */
   scope: z.array(scopeMeasurementSchema).default([]),
   /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
@@ -576,7 +578,9 @@ export const daemonStateSchema = z.object({
     refusedFilings: z.array(z.object({ digest: z.string().max(80), at: z.number() }).strict()).default([]),
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
-  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {} })),
+    /** GY-2005: set when the loop's progress watchdog fires (cycle.ts, on the silence bound's crossing): the next doctorStep launches a run at once, past the interval. */
+    watchdogDue: z.boolean().default(false),
+  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {}, watchdogDue: false })),
   /**
    * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
    * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).

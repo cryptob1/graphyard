@@ -81,7 +81,7 @@ function item(key: string, since: string): Work {
 }
 /** A state with its own silence record: the schema's default object is one shared value. */
 function daemonState(master: MasterConfig): DaemonState {
-  const state: DaemonState = { ...emptyDaemonState(master), silence: { subjects: {}, lastActionAt: null } };
+  const state: DaemonState = { ...emptyDaemonState(master), silence: { subjects: {}, lastActionAt: null, breached: false } };
   state.lock = { pid: process.pid, host: 'machine-a', startedAt: iso(firstSeen), heartbeatAt: iso(firstSeen) } as DaemonState['lock'];
   return state;
 }

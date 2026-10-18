@@ -276,7 +276,7 @@ function gy727(unexercised: boolean): Work {
 /** 437 minutes of cycles every thirty seconds, the loop requesting GY-727's rework decision every quarter hour as it did; the silence attention at the end. */
 function replay(work: Work[]) {
   const master = config(), span = 437 * minute, start = silentAt - span;
-  const state: DaemonState = { ...emptyDaemonState(master), silence: { subjects: {}, lastActionAt: null } };
+  const state: DaemonState = { ...emptyDaemonState(master), silence: { subjects: {}, lastActionAt: null, breached: false } };
   state.lock = { pid: process.pid, host: 'machine-a', startedAt: iso(start), heartbeatAt: iso(start) } as DaemonState['lock'];
   let silence = trackSilence(state, actionableSubjects(master, work, start), [], start);
   for (let at = start; at <= silentAt; at += 30_000) {
