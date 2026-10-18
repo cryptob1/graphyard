@@ -108,8 +108,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures \(empty reply, reset, stall, non-2xx, bodiless 2xx\), else ending `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
   // GY-1844: the release-candidate section states digest promotion: a candidate's recorded build promotes by its exact digests, never a rebuild.
   ['docs/delivery.md', /A recorded build promotes by digest, never rebuilt, once UAT names it/],
-  // GY-1855 AC-2: an uncleared stall's upstream filing, the `upstream` shape and its absence, and the status listing.
-  ['docs/master-agent-reference.md', /a \[stall\]\(operations-reference\.md#master-coordination-loop\) uncleared past six failing cycles files one item per signature with its evidence into `master\.json` `upstream` \(`url`, absolute `credentialFile`\), else this install as operator-agent \(`master autonomy --apply`\), and `master status` lists each stall's signature, count, remedy, owner/],
+  // GY-1855 AC-2, reworded by GY-1980: an uncleared stall wakes the master session once per run and files nothing; the status listing stays.
+  ['docs/master-agent-reference.md', /an unbound \[stall\]\(operations-reference\.md#master-coordination-loop\) wakes the master session once per run at three failing cycles \(bound: remedy refused, unverified or failing at six\); `master status` lists each stall's signature, count, remedy, owner, filing nothing/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
@@ -181,9 +181,7 @@ test('unit:docs-no-duplication — no two pages share a heading, a paragraph of 
   assert.match(check.stdout, /all relative links, anchors and generated indexes resolve/);
 });
 
-test('unit:docs-budget — docs/master-agent-reference.md states how the shadow trial obtains the submitted head under the control-plane merger (GY-2043), and the budgeted pages stay within their per-page and total budgets', () => {
-  const shadow = read('docs/master-agent-reference.md').split('## Shadow merge gate')[1]!.split('\n## ')[0]!;
-  assert.match(shadow, /control-plane: base-only fetch, head from shared object store \(absent: skipped\)/);
+test('unit:docs-budget — the budgeted pages stay within their per-page and total budgets', () => {
   for (const page of pages) assert.ok(words(read(page)) <= PAGE_BUDGET, `${page} is within its ${PAGE_BUDGET}-word budget`);
   assert.ok(pages.reduce((sum, page) => sum + words(read(page)), 0) <= TOTAL_BUDGET, `the set is within its ${TOTAL_BUDGET}-word budget`);
 });

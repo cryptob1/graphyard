@@ -17,15 +17,14 @@ import { approvalApplyGraceMs } from '../src/model/approval.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-03/10-05 instants are the explicit now handed to approvalStep, routineDecision and actionableSubjects over same-day watches; new Date() only stamps live records.
 
-const { approverWait, approverWaitWording } = metrics;
 
 // GY-1300: approval and application are two steps, and an interruption between them stranded a
 // decision at 'approved' with no outcome. Only the risk lane's own approvals were ever resumed
 // (GY-1110); GY-949's session-approved rework 8b62b40b stood 2.5 days approved and unapplied while
 // the loop kept waiting for an approver session to judge what it had already judged, and every
 // re-request was refused 'already approved; wait for it'. The server now resumes any approved,
-// unapplied decision, the loop's decision cycle applies one through it, and the silence measure
-// names it for what it is.
+// unapplied decision, the loop's decision cycle applies one through it, and the loop's subject
+// detail names it for what it is.
 
 const minute = 60_000;
 const decisionId = '8b62b40b-0f3d-4cd6-b3c0-3920340a512b';
@@ -81,7 +80,7 @@ function verdictItem(key: string, now: number): Work {
   } as unknown as Work;
 }
 
-// ---- AC-4: the silence measure names the true state ---------------------------------------------
+// ---- AC-4: the loop's subject detail names the true state ---------------------------------------
 test('unit:loop-silence-decision-state — an approved, unapplied decision is named as such once its session ended, never as waiting for its approver', () => {
   const now = Date.parse('2026-10-05T12:23:51.627Z'), approvedAt = '2026-10-03T16:47:22.985Z';
   const item = verdictItem('GY-949', now);
@@ -382,7 +381,7 @@ test('unit:approved-decision-applies-on-cycle — GY-949\'s stranded session app
 // GY-949's rework stood approved for 2.5 days behind an approver account out of quota. The control
 // plane now settles such an approval (GY-1297: applied under its approval, or superseded once the
 // candidate moved), the loop sends that settlement on its next cycle and takes an applied answer
-// as the decision settled, and the silence measure names the apply owed, not an approver's
+// as the decision settled, and the loop's subject detail names the apply owed, not an approver's
 // judgement. Each test is named for the proof it produces.
 
 const clock = Date.parse('2026-10-05T12:40:00.000Z'), iso = (at: number) => new Date(at).toISOString();
@@ -520,16 +519,14 @@ test('unit:loop-silence-decision-state — a decision approved but never applied
   const key = decisionKey(item, { action: 'rework', reason: '', binding: `${head}:conflict` } as never);
   const watch = approvalWatchSchema.parse({ work: 'GY-949', action: 'rework', decision: 'decision-949', requestedAt: iso(clock - 61 * 60 * minute), agentName: 'graphyard-approver-gy-949', launchedAt: iso(clock - 61 * 60 * minute), launches: 1 });
   const subject = (approvals: Record<string, typeof watch>) => actionableSubjects(config, [item], clock, { approvals }).find(entry => entry.kind === 'decision' && entry.work === 'GY-949')!;
-  // Unjudged, it waits on its approver session, and that wait is the approver's (a decision fault).
+  // Unjudged, it waits on its approver session.
   const waiting = subject({ [key]: watch });
-  assert.match(waiting.detail, new RegExp(`${approverWaitWording.waiting} graphyard-approver-gy-949 to judge it`));
-  assert.equal(approverWait(waiting), true);
+  assert.match(waiting.detail, /is requested and waiting for approver session graphyard-approver-gy-949 to judge it$/);
   // Judged: the loop's supervision recorded the approval on the watch, and the subject names it.
   const approvedAt = iso(clock - 60 * 60 * minute);
   const approved = subject({ [key]: { ...watch, approvedAt, approvedBy: 'graphyard-approver-graphyard' } });
   assert.match(approved.detail, new RegExp(`decision decision-949 ${(metrics as { approvedUnappliedWording?: string }).approvedUnappliedWording ?? 'is approved but unapplied: approved at'} ${approvedAt.replace(/[.]/g, '\\.')} by graphyard-approver-graphyard; the loop applies it`));
   assert.doesNotMatch(approved.detail, /to judge it/, 'it is not said to wait for an approver to judge it');
-  assert.equal(approverWait(approved), false, 'the apply is owed by the loop, so it is not read as an approver’s wait');
 });
 
 test('unit:loop-silence-decision-state — the loop records the approval on its watch while the decision stands approved', async () => {

@@ -143,8 +143,8 @@ test('unit:zero-touch-onboarding — `graphyard up --agent --goal FILE` on a fre
     goals: async () => (await api(tokenOf(master), 'GET', 'goals?open=1')).goals,
     runner: async (role, attempt, goal) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
       ? { goal: goal.key, verdict: 'approve', reason: 'One small item a worker finishes in one change' }
-      : { goal: goal.key, note: 'A small Node module under src/basket/, served by the existing API and deployed with the service.',
-        items: [{ ref: 'basket', title: 'Show the basket', description: 'The basket page lists the items a shopper added', type: 'feature', priority: 1, outcomes: ['basket-view'], cases: ['basket-view'],
+      : { goal: goal.key, summary: 'Shoppers see their basket. One page lists what they added. It ships with the service.', note: 'A small Node module under src/basket/, served by the existing API and deployed with the service.',
+        items: [{ ref: 'basket', title: 'Show the basket', plain: 'Shoppers see the items in their basket.', description: 'The basket page lists the items a shopper added', type: 'feature', priority: 1, outcomes: ['basket-view'], cases: ['basket-view'],
           criteria: [{ id: 'AC-1', text: 'The basket page lists the items a shopper added', proofs: ['unit:basket-view'] }], plannedFiles: ['src/basket/view.ts'], dependsOn: [] }] }, world.runs) }),
     plan: (goal, plan) => api(intent(), 'POST', `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
     invalid: (goal, reason) => api(intent(), 'POST', `goals/${goal.key}/plan-invalid`, { reason }, `planner:${goal.id}:${goal.revision}:invalid`),

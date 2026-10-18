@@ -43,7 +43,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1070 and GY-1
 });
 
 test('manual:intervention-pattern-human-only-decision-build — each request is judged: a scope widening and a deferred ask are refused, and (GY-1416) so are the account actions the host could do itself', () => {
-  assert.match(parkRefusal({ needed: asked['GY-1113'] })!, /scope widening is not a human-only decision: ask for it with graphyard scope-request/);
+  assert.match(parkRefusal({ needed: asked['GY-1113'] })!, /scope widening is not a human-only decision: plannedFiles is a plan, not a lock/);
   assert.match(parkRefusal({ needed: asked['GY-1384-2'] })!, /every human step the item still needs in this one request/);
   // GY-1416: re-scoping a criterion is no scope widening, but the repository is the host's gh login's to make reachable,
   // and the revert approver variables are derived from the reviewer App saved on the host: both are the master's.

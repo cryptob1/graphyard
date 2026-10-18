@@ -82,10 +82,11 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
   const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
     + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `
-    + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: anything worth fixing before this merges: the head fails a stated acceptance criterion, or the changed code has a correctness, security or reliability defect, or a clear, cheap improvement it should make. The same worker fixes BLOCKING findings on this pull request; nothing is deferred to another item. '
+    + 'Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: a real defect a user or operator would hit with this change, an acceptance criterion not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. The same worker fixes BLOCKING findings on this pull request; nothing is deferred to another item. '
     + 'FOLLOW-UP: nits only — style, naming, hypotheticals and suggestions not worth a round; mention them briefly and move on. '
     + 'APPROVE when every criterion is met and no finding or thread is BLOCKING; mention the FOLLOW-UP nits in the body instead of requesting changes for them. Graphyard files no backlog item for a nit. '
     + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. '
+    + 'A change to a file outside plannedFiles is not a finding by itself; judge the change. '
     + 'End the review body with three lines, exactly of the forms "Resolved threads: ID1 ID2", "Follow-up threads: ID3 ID4" and "Overridden threads: ID5 ID6": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP; the third names the threads whose finding you judged wrong, with the reason for each earlier in the body. Write "none" after a line\'s colon when it names nothing. '
     + 'Once Graphyard observes your approval of this head it resolves the Resolved threads, and resolves each Follow-up thread with a reply; nits are not filed as backlog items. ';
 }

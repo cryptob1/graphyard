@@ -194,7 +194,7 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
   assert.equal(summary.invariants.violated, systemInvariants.length);
 });
 
-test('unit:reviewer-repeat-question — the review of a change to the loop, master, merge queue, GitHub adapter or review threads asks what repetition does and requires soak coverage; docs/master-agent.md lists the invariants within the budget', async () => {
+test('unit:reviewer-repeat-question — the review of a change to the loop, master, merge queue, GitHub adapter or review threads asks what repetition does and never requires soak coverage; docs/master-agent.md lists the invariants within the budget', async () => {
   const binding = { key: 'GY-404', pr: 7, sha: sha('a'), baseSha: sha('b'), policyRevision: 1 };
   const obligation = { id: 'DOCS' as const, text: 'Documentation reflects this change', paths: ['docs/', 'AGENTS.md', 'README.md'], changelog: null };
   const prompt = (files: string[] | null) => reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, [{ id: 'AC-1', text: 'Behaves' }], undefined, { obligation, files });
@@ -202,8 +202,8 @@ test('unit:reviewer-repeat-question — the review of a change to the loop, mast
     const text = prompt(['docs/master-agent.md', file]);
     assert.ok(text.includes(`This change touches ${file}`), `${file} is named: ${text}`);
     assert.match(text, /what it does when repeated across many cycles, heads and items/);
-    assert.match(text, /must be covered by the soak suites \(tests\/soak-\*\.test\.ts\)/);
-    assert.match(text, /without that coverage is a BLOCKING finding/);
+    assert.match(text, /never require new soak-suite coverage/);
+    assert.doesNotMatch(text, /must be covered by the soak suites|is a BLOCKING finding/, 'the review asks about repetition but never demands soak coverage');
   }
   for (const files of [['src/model/work.ts', 'docs/coordination.md'], ['src/github-cache.ts', 'src/masterful.ts', 'src/daemonic/x.ts']]) assert.doesNotMatch(prompt(files), /repeated across many cycles/, `${files.join(', ')} runs on no loop cycle`);
   // A head nobody has observed yet: the question is asked, conditioned on the paths it names.
