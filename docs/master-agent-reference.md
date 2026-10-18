@@ -3,15 +3,15 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded (fault-class machinery, quoted failed-check, repeating soak suites); non-repository refused; else `approve-scope`; `master scope GY-N [--allow-broad-scope] REASON` applies refusals; transport-failed widens retry; a live lease's additive multi-path refusal waits 15min, others stand; attempt ends close requests, `master unblock GY-N` closes carried; `held`: applied at attempt end, never re-requested. Human: `park …`/`answer GY-N …`/`master decide GY-N withdraw-park REASON` ([Needs you](dashboard.md#needs-you)); [host-doable](deployment.md) and criterion-rewrite asks ([requirements decisions](glossary.md#who-decides)) refused; bare `requirements` names the rewrite as work (whether it lands, succeeds or is ordered parks); a change verb on the requirements or a named object refuses.
+Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded (fault-class machinery; trusted failed-check `PATH:LINE` quoted; repeating-path soak suites); non-repository refused; else `approve-scope`; `master scope GY-N [--allow-broad-scope] REASON` applies refusals; transport-failed widens retry; a live lease's additive multi-path refusal waits 15min, others stand; attempt ends close requests, `master unblock GY-N` closes carried; `held`: applied at attempt end, never re-requested; covering revision watched. Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `answer GY-N …`; `master decide GY-N withdraw-park REASON`; [host-doable](deployment.md) and criterion-rewrite asks ([requirements decisions](glossary.md#who-decides)) refused; bare `requirements` (no AC-N, criteria, or key with tests/ path) names the rewrite as work: whether it lands, succeeds or is ordered parks; a change verb on the requirements or a named object refuses.
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses there; `master.json` edits skip checks. Refuses until the reviewer App and profile are independent of you and every worker; provisions operator-agent and approver, writes `supervision: autonomous`.
+`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses there; `master.json` edits skip checks. Refuses until reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`.
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`. Approvals survive base refreshes ([carry](github.md#bindings-and-carry)); a current-head one dismissed on a merge-base change is restored, never re-posted. A branch must never keep another item's unlanded commits (build gate refuses): `git reset --hard REVIEWED_HEAD`, `sync GY-N`, `restore-branch GY-N EPOCH`.
+Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`. Approvals survive base refreshes ([carry](github.md#bindings-and-carry)); a current-head one dismissed `The merge-base changed after approval.` is restored, never re-posted. A branch must never keep another item's unlanded commits (build gate refuses): `git reset --hard REVIEWED_HEAD`, `sync GY-N`, `restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
@@ -26,13 +26,13 @@ Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/
 
 ## Typed actions and executors
 
-`nextAction` (one per item): `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`verify-deployment`/`escalate`; judgements: `actions.needsHuman`. `init` starts executors; `master executors restart` refreshes slots; verified deployments advance clean checkouts, restarting executors and loop. `resync` needs newer observation. `dispatch`/`request-review` complete if a session answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle; plane-wide failures, human-only parks, a promotion's `verify-deployment` failure within `promotionWaitBoundMs` (90min, naming the newest movement; else machinery `production`), never stall); counted nowhere, only in `actions.stalled` and on the item's card; backoff never outlives it; eight escalate. Permanent reasons the registry binds — `Deployment endpoint answered 4xx`, claim `A valid Graphyard bearer token is required`, refused reviewer launch `(4xx)` — raise installation `setup` attention (not per-item `stalled-action` / stalled-gate). Ticks requeue ownerless items (`liveness.violations`). One origin fetch per dispatch cycle builds worktrees; preparation times: `master status` `launches.prepare`.
+`nextAction` (one per item): `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`verify-deployment`/`escalate`; judgements: `actions.needsHuman`. `init` starts executors; `master executors restart` refreshes slots; verified deployments advance clean checkouts, restarting executors and loop. `resync` needs newer observation. `dispatch`/`request-review` complete if a session answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle; plane-wide failures, human-only parks, a promotion's `verify-deployment` failure within `promotionWaitBoundMs` (90min, naming the newest movement; else machinery `production`), never stall); in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Permanent reasons the registry binds — `Deployment endpoint answered 4xx`, claim `A valid Graphyard bearer token is required`, refused reviewer launch `(4xx)` — raise installation `setup` attention (not per-item `stalled-action` / stalled-gate). Ticks requeue ownerless items (`liveness.violations`). One origin fetch per dispatch cycle builds worktrees; preparation times: `master status` `launches.prepare` (daily p50/p90).
 
 Declared slot not `active`: `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min; `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse.
 
 ## Recovery
 
-Dead supervisor fences item; `containment` lists survivors' pid/cmdline/cwd: `settleable: true` → loop settles; past grace+10min `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss`; admins settle explained: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler: `master decide GY-N resolve … --context FINGERPRINT REASON`.
+Dead supervisor fences item; `containment` lists survivors' pid, cmdline and cwd: `settleable: true` → loop settles; past grace+10min `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss` (`blocked-awaiting-operator`/`stopped-by-attestation`: history); admins settle explained: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler: `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ### Producer-runtime faults
 
@@ -40,7 +40,7 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Resolver
 
-Every `run.doctor.intervalMinutes` (10min) the loop launches one resolver (`doctorPrompt`, `src/daemon/doctor.ts`), act-don't-ask over items/faults/failed actions/attention lines stalled 20min (re-dispatch, unblock, rework naming why, close obsolete work, decide in-intent scope), else says why waiting is fine. Never a person; items only for needed code changes; merge/dispatch/evidence/lease commands refused.
+Every `run.doctor.intervalMinutes` (10min) the loop launches a resolver (`doctorPrompt`) that acts, never asks, on work stalled 20min (re-dispatch, unblock, rework, close, decide scope) or says why waiting is fine; it files items only for code changes.
 
 ## Fault classes
 
@@ -48,7 +48,7 @@ Every `run.doctor.intervalMinutes` (10min) the loop launches one resolver (`doct
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
+`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; control-plane: base-only fetch, head from shared object store (absent: skipped); `shadow.verdict` joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
 
 ## Pipeline speed
 
