@@ -66,3 +66,29 @@ test('the paragraph is an input-free constant: a builder that gains no input sta
     workerPrompt({ cliPath: config.cliPath }, { key: 'GY-42', title: 'T' }, { principal: 'graphyard-test-1' }, 1));
   assert.equal(reviewPrompt({ repository: 'owner/project' }, binding), reviewPrompt({ repository: 'owner/project' }, binding));
 });
+
+// GY-2000: the reviewer holds a head only for a real user- or operator-facing defect, an unmet
+// criterion, a leaked secret, or lost or corrupted data — anything else is at most a Nit — and
+// asks about repeated behaviour without ever demanding new soak-suite coverage.
+
+const reviewerHead = 'c'.repeat(40);
+const standard = 'A BLOCKING finding must name a real defect a user or operator would hit with this change, a criterion that is not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit.';
+const repeatingChange = { obligation: { id: 'DOCS' as const, text: 'Documentation reflects this change', paths: ['docs/', 'AGENTS.md', 'README.md'], changelog: null }, files: ['docs/master-agent.md', 'src/daemon/cycle.ts'] };
+
+test('unit:reviewer-blocking-standard — the built reviewer prompt holds a head only for the blocking standard, and asks about repetition without requiring soak coverage', () => {
+  const github = reviewPrompt({ repository: 'owner/project' }, binding);
+  const controlPlane = reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, [], undefined, undefined, null, null, null, null, null, { head: reviewerHead, baseTip: binding.baseSha });
+  const postMerge = reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, [], undefined, undefined, null, null, null, null, null, { head: reviewerHead, baseTip: binding.baseSha, postMerge: { mergeSha: reviewerHead } });
+  const capped = reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, [], { changesRequested: 3 });
+  for (const [mode, prompt] of Object.entries({ github, controlPlane, postMerge, capped })) {
+    assert.ok(prompt.includes(standard), `the ${mode} review prompt states the blocking standard`);
+    assert.doesNotMatch(prompt, /anything worth fixing before this merges|clear, cheap improvement|wrong behaviour, or a security defect/, `the ${mode} review prompt keeps no wider blocking rule`);
+  }
+  assert.match(postMerge, /Name each finding that meets the blocking standard on its own line starting BLOCKING: as PATH:LINE — FINDING/);
+
+  // Repeating behaviour: the review asks whether it stays bounded and never demands soak suites.
+  const repeating = reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, [], undefined, repeatingChange);
+  assert.match(repeating, /what it does when repeated across many cycles, heads and items/);
+  assert.match(repeating, /never require new soak-suite coverage/);
+  assert.doesNotMatch(repeating, /must be covered by the soak suites|is a BLOCKING finding/, 'the review never makes soak coverage a blocking requirement');
+});

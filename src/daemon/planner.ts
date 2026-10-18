@@ -38,8 +38,8 @@ export const planRetryMs = 60 * 60_000;
 export const planStepRetryMs = 10 * 60_000;
 /** A released goal's items are read for delivery, and a full role's run deferred, at most this often per goal. */
 export const planPollMs = 5 * 60_000;
-export const planPayloadSchema = z.object({ goal: z.string().min(1).max(40), note: z.unknown(), items: z.unknown() }).strict()
-  .transform(({ goal, note, items }) => ({ goal, ...goalPlanSchema.parse({ note, items }) }));
+export const planPayloadSchema = z.object({ goal: z.string().min(1).max(40), summary: z.unknown(), note: z.unknown(), items: z.unknown() }).strict()
+  .transform(({ goal, summary, note, items }) => ({ goal, ...goalPlanSchema.parse({ summary, note, items }) }));
 export const planJudgementSchema = z.object({ goal: z.string().min(1).max(40), verdict: z.enum(['approve', 'refuse']), reason: z.string().trim().min(1).max(2000) }).strict();
 export type PlanJudgement = z.infer<typeof planJudgementSchema>;
 
@@ -81,8 +81,8 @@ export function plannerPrompt(config: { repository: string }, goal: Goal) {
   return `You are the Graphyard planner (architect) for ${config.repository}. The goal below has approved customer outcomes, each proved by a required uat case that is already merged and protected. Plan how to build it. `
     + 'This session is read-only: never edit, commit, push, claim or decide anything, and never ask anyone anything. Read the repository to learn its stack and module layout. '
     + simplicityParagraph
-    + `Then call the ${planTool} tool exactly once with goal "${goal.key}", a note of at most ${planNoteMaxWords} words (stack, module layout, data and deploy approach), and items: `
-    + 'each item a ref (lower-case letters, digits and -), a title, a description, the outcome ids it serves, the case ids it must make pass (at least the case of every outcome it serves), '
+    + `Then call the ${planTool} tool exactly once with goal "${goal.key}", a summary of at most 3 plain sentences (what the user gets and how it will be built; no file paths, commit shas or internal terms), a note of at most ${planNoteMaxWords} words (stack, module layout, data and deploy approach), and items: `
+    + 'each item a ref (lower-case letters, digits and -), a title, a plain one-sentence description a non-engineer understands, a description, the outcome ids it serves, the case ids it must make pass (at least the case of every outcome it serves), '
     + 'criteria (AC-1, AC-2, ... each id once, each with text and unit:, integration: or manual: proofs), the plannedFiles it changes, and dependsOn naming the refs it must land after. '
     + 'Every outcome is served by at least one item. '
     + 'A criterion observed on the serving release — production, the deployed release, the restarted loop: an outcome no head can show before merge — must name a manual:post-deploy/NAME proof on the item that ships the change (the reviewer judges it on that head\'s pre-merge evidence, and the serving release is checked after), beside at least one criterion with a unit:, integration: or manual: proof a head can show before merge: no item may consist of post-deploy criteria alone. '

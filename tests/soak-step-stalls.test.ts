@@ -641,33 +641,33 @@ test('unit:soak-step-stalls-snapshot-restart — failed cycles stalled on the sn
   assert.ok(restartedGaps.every(gap => gap >= stallBackoffMs), 'and keeps one read per window');
 });
 
-test('unit:soak-step-stalls-structured-port — a day whose shadow gate\u2019s verdict write is refused the same way every cycle: one stall holding shadow.record for that item, the write made at most once per five minutes, the port\u2019s other methods never held', { timeout: 600_000 }, async () => {
+test('unit:soak-step-stalls-structured-port — a day whose merge writer\u2019s step record is refused the same way every cycle: one stall holding mergeWriter.record for that item, the write made at most once per five minutes, the port\u2019s other methods never held', { timeout: 600_000 }, async () => {
   const state = emptyDaemonState(config());
   let now = start;
   const records: number[] = [];
-  let explanations = 0;
-  // The shadow gate's reads, as cycle-shadow.ts calls them: the owed verdict write retried every cycle, the explanations read beside it.
-  const held = stallHeldEffects({ shadow: {
-    record: async () => { records.push(now); throw new Error('Graphyard refused /api/work/work-7/shadow (409): verdict conflict'); },
-    explanations: async () => { explanations += 1; return []; },
+  let mergers = 0;
+  // The merge writer's reads: the owed step record retried every cycle, the merger read beside it.
+  const held = stallHeldEffects({ mergeWriter: {
+    record: async () => { records.push(now); throw new Error('Graphyard refused /api/work/work-7/merge-record (409): record conflict'); },
+    merger: async () => { mergers += 1; return 'control-plane'; },
   } } as unknown as DaemonEffects, () => state, () => now);
   let cycles = 0;
   for (; now - start < dayMs; now += interval) {
     cycles += 1;
     const actions: { kind: string; state: 'failed'; detail: string }[] = [];
-    try { await held.shadow!.record(claimable(now), {} as never); }
-    catch (error) { actions.push({ kind: 'merge', state: 'failed', detail: `The shadow verdict for GY-7 is not yet recorded by the coordinator and is retried next cycle: ${(error as Error).message}` }); }
-    await held.shadow!.explanations!([]);
+    try { await held.mergeWriter!.record(claimable(now), {} as never); }
+    catch (error) { actions.push({ kind: 'merge', state: 'failed', detail: `The merge record for GY-7 is not yet recorded by the coordinator and is retried next cycle: ${(error as Error).message}` }); }
+    await held.mergeWriter!.merger();
     noteCycleStalls(state, actions, cycles, now);
   }
   const runs = Object.values(state.stepStalls);
   assert.equal(runs.length, 1, 'one signature, one run');
   assert.ok(runs[0].stalledAt, 'the recurring refusal is one stall');
-  assert.deepEqual(runs[0].calls, [{ call: 'shadow.record', async: true, resource: 'GY-7' }], 'the stall holds the structured call that failed, for its item');
-  assert.ok(records.length <= stallCycleBound + 1 + dayMs / stallBackoffMs, `${records.length} verdict writes over ${cycles} cycles is once per window, not once per cycle`);
+  assert.deepEqual(runs[0].calls, [{ call: 'mergeWriter.record', async: true, resource: 'GY-7' }], 'the stall holds the structured call that failed, for its item');
+  assert.ok(records.length <= stallCycleBound + 1 + dayMs / stallBackoffMs, `${records.length} record writes over ${cycles} cycles is once per window, not once per cycle`);
   const gaps = records.slice(stallCycleBound).map((at, index) => at - records[stallCycleBound - 1 + index]);
   assert.ok(gaps.every(gap => gap >= stallBackoffMs), 'every write past the stall waits a full window');
-  assert.equal(explanations, cycles, 'the port\u2019s other methods are made every cycle');
+  assert.equal(mergers, cycles, 'the port\u2019s other methods are made every cycle');
 });
 
 test('unit:soak-step-stalls-upstream-once — a day whose reclaim stall stands past its bound, clears, and re-forms under the same signature: exactly one upstream item is filed per signature, carrying its evidence, and none after the re-formed stall passes the bound again, every invariant holding', { timeout: 600_000 }, async () => {

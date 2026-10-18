@@ -125,7 +125,7 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(), fileFaultClass: world.fileChore,
+    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), fileFaultClass: world.fileChore,
     decide: scopeSpy('decide'), decideScope: scopeSpy('decideScope'), widenScope: scopeSpy('widenScope'), replan: scopeSpy('replan'), baseSuccessions: scopeSpy('baseSuccessions') } as unknown as DaemonEffects;
   let state: DaemonState = emptyDaemonState(config);
   const invariantNames = new Set<string>();
@@ -189,7 +189,7 @@ test('unit:scope-switches-control-plane — a filing outage across a simulated d
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(), fileFaultClass: world.fileChore } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), fileFaultClass: world.fileChore } as unknown as DaemonEffects;
   let state: DaemonState = emptyDaemonState(config);
   let held = false, escalated = false;
   for (let cycle = 0; cycle < cycles; cycle++) {
