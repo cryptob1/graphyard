@@ -1807,16 +1807,14 @@ test('unit:land-coordinator-commits — the operator commits landed from the coo
   assert.equal(detectedBaseBranch('  origin/master-old\n  origin/feature\n'), null, 'master-old is not master');
   assert.equal(detectedBaseBranch('  origin/HEAD -> origin/master\n  origin/master\n'), 'master');
   assert.equal(detectedBaseBranch(''), null);
-  // A compose install mounts a plain checkout alone; a linked worktree's common Git directory goes with it, at its own host path.
+  // A compose install mounts a plain checkout alone; run from a linked worktree it mounts the main checkout instead (GY-2054).
   const plain = await temporaryDirectory('land-coordinator-commits-checkout');
   execFileSync('git', ['init', '-q', plain]);
   execFileSync('git', ['-C', plain, 'commit', '-q', '--allow-empty', '-m', 'base'], { env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
   assert.deepEqual(composeCheckoutMounts(plain), { repoCheckout: plain, repoGitDir: null });
   const linked = join(plain, '.graphyard', 'worktrees', 'GY-1-1');
   execFileSync('git', ['-C', plain, 'worktree', 'add', '-q', linked]);
-  const mounts = composeCheckoutMounts(linked);
-  assert.equal(mounts.repoCheckout, linked);
-  assert.equal(mounts.repoGitDir, execFileSync('git', ['-C', plain, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim(), 'the worktree points into the main checkout\'s .git, which is what the container needs');
+  assert.deepEqual(composeCheckoutMounts(linked), { repoCheckout: resolve(execFileSync('git', ['-C', plain, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim(), '..'), repoGitDir: null }, 'the main checkout, whose .git holds the worktree\'s refs and objects');
   assert.deepEqual(composeCheckoutMounts(bare), { repoCheckout: null, repoGitDir: null }, 'no .git, nothing to mount');
 
   // AC-2: the coverage of graphyard up and of the install's own Herdr instance that these commits touched is kept, not dropped.
