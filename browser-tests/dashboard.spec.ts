@@ -913,9 +913,9 @@ test('the Tests panel lists each criterion proof with its result from the merge 
   const panel = itemPage(page).locator('section[aria-label="Tests"]');
   await expect(panel.getByText(/Merge trial of eeeeeeee: build passed · 12 test files ran/)).toBeVisible();
   await expect(panel.getByText('1 of 2 passed on the current head')).toBeVisible();
-  await expect(panel.locator('[data-case="a"]')).toContainText('✓ passed unit:a');
+  await expect(panel.locator('[data-case="a"]')).toContainText('✓ passed unit:a · AC-1');
   await expect(panel.locator('[data-case="a"]')).toContainText('2 executed in the merge trial');
-  await expect(panel.locator('[data-case="b"]')).toContainText('× failed integration:b');
+  await expect(panel.locator('[data-case="b"]')).toContainText('× failed integration:b · AC-1');
   await expect(panel.locator('[data-case="b"]')).toContainText('1 executed in the merge trial · 1 failed');
   // Without a trial of the head nothing has judged the proofs yet.
   await page.getByRole('button', { name: 'Sign out' }).click();
