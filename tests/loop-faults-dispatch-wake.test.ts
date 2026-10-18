@@ -6,7 +6,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { submittedBranchMoved } from '../src/model/assignment.js';
-import { submittedBranchRefusal } from '../src/master/worktrees.js';
+import { registeredReworkHead } from '../src/master/worktrees.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1286 names this file, beside tests/loop-faults.test.ts, for its proof: manual:fault-class-loop.
@@ -19,6 +19,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 //   for an observation that nothing asked for: the release woke no observation job, so the reading
 //   sat in the polled backlog while the dispatch backed off and failed again. The release that
 //   carries this refusal now wakes the item's observation job ahead of the backlog, as a webhook does.
+//   GY-2017 removed the trigger itself: the workspace starts from the registered local head, so no
+//   dispatch waits on a PR-branch reading again — the wake answers only releases recorded before it.
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'agent-a', role: 'worker', runtime: 'claude' };
@@ -57,13 +59,20 @@ async function job(work: Work) {
 /** The backlog as it stood: the item's job scheduled for later, unprioritized. */
 const backlogged = (work: Work) => store.pool.query("UPDATE jobs SET available_at=now()+interval '1 hour', webhook_at=NULL WHERE work_id=$1", [work.id]);
 
-test(`manual:fault-class-loop — ${instance.id}: the worktree command's refusal is the one the release recognizes`, async () => {
-  // The refusal the six dispatches recorded, produced by the worktree command's own check: the
-  // remote PR branch is fetched and no longer holds the observed candidate head.
-  const run = (async (_command: string, args: string[]) => args[0] === 'rev-parse' ? `${'d'.repeat(40)}\n` : '') as never;
-  const refused = await submittedBranchRefusal('/checkout', 'graphyard/gy-1234-4', 'refs/remotes/origin/graphyard/gy-1234-4', 'a'.repeat(40), run);
-  assert.equal(refused, submittedBranchMoved);
-  assert.match(refused!, /^Submitted PR branch changed; wait for Graphyard to observe its current head/);
+test(`manual:fault-class-loop — ${instance.id}: a rework workspace no longer observes the PR branch, so the refusal this instance recorded is only the legacy one the release still wakes on`, async () => {
+  // GY-2017: the worktree command resolves the registered local head from the shared object store
+  // and fetches nothing, so a stale or absent PR branch cannot refuse a dispatch again — the branch
+  // this instance saw move is never read. The message the six dispatches recorded is only
+  // recognized on releases that carry it, and the wake below answers exactly those.
+  const calls: string[][] = [];
+  const candidate = 'a'.repeat(40);
+  const run = (async (_command: string, args: string[]) => {
+    calls.push(args);
+    return `${String(args[1] ?? '').startsWith('refs/heads/') ? 'd'.repeat(40) : candidate}\n`;
+  }) as never;
+  const head = await registeredReworkHead('/checkout', 'graphyard/gy-1234-4', candidate, run);
+  assert.equal(head, candidate, 'the registered head is the start, not the branch the PR branch has moved to');
+  assert.deepEqual(calls.filter(args => args[0] === 'fetch' || args[0] === 'push'), [], 'the workspace start runs no worker-ref network operation');
 });
 
 test(`manual:fault-class-loop — ${instance.id}: a rework dispatch refused because its PR branch moved wakes the item's observation, prioritized, so the next dispatch is not refused again`, async () => {

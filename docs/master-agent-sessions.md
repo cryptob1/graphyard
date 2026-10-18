@@ -23,6 +23,8 @@ Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs
 
 Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) absent registry roles. Launches take first account under `run.quotaCeilingPercent`, else (or failed start) **fail over** (`dispatch.accounts`). Runtime limit notices (never agent text: mid-session `[retrying in 4s]`, agy `Individual quota reached`, pi 429 `Weekly/Monthly Limit Exhausted`, Claude's unanswered usage-limit menu or `/usage-credits`) or silent done with unpushed `WIP:` hold the launch account (`capacity.exhausted`, until reset/`account set`), relaunch elsewhere. An item's two latest epochs' account (within 2h, reset unpassed) is re-held first; unwritable holds refuse dispatch. Reviewers/producers: profile `kind` only (else `cross-runtime`).
 
+A rework worktree starts from the submission head Graphyard registered in the shared object store — the branch's own tip once a requirements revision cleared the candidate — and fetches and pushes no worker branch: a stale or absent PR branch cannot refuse a dispatch.
+
 ## The loop's own master session
 
 `master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it (`esc` dismisses notices); `run.masterHeartbeatMinutes` (30) sends heartbeat (`daemon.master`); undeliverable wakes rotate it (`deaf`, ≤3 straight).
