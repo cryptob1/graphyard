@@ -26,11 +26,11 @@ A reviewer App is never granted Contents: write, Checks, or Administration; work
 | Metadata | Read | read the managed repository (repository access) |
 | Pull requests | Read and write | post the verdict comment (review dispatch) |
 
-`master reviewer setup` creates it (Pull requests write; tokens last one hour); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`; `github-setup --update-permissions` lists `Actions: write (failed CI reruns)`) hold jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept`.
+`master reviewer setup` creates it (Pull requests write; tokens last one hour); `SLUG[bot]` head approval satisfies both. Shortfalls (`appPermissions`, `github-setup --update-permissions`) hold jobs **not retried** (`integration-held`) until `master browser app-permissions` or `master browser installation-accept`.
 
 ## Reusing an App
 
-`--reuse-app SLUG` needs a saved key (returned once); else generate one in its settings; `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it, saves `0600` (`imported-app-SLUG.json`, install directory), refusing a control-plane App whose webhook serves another install; `graphyard app list` names reusable roles.
+`--reuse-app SLUG` needs a saved key (returned once) or a new one; `graphyard app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo OWNER/NAME]` proves it, saves `0600` (install-directory `imported-app-SLUG.json`), refusing a control-plane App whose webhook serves another install; `graphyard app list` names reusable roles.
 
 Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/work/:id/sync-push`) pushes COMMIT fast-forwarded, merged with `origin/BASE` (`sync.workflow-push`).
 
@@ -38,7 +38,7 @@ Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/
 
 Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force-push/deletion (`install --apply`); merges mergeable non-draft approved heads ([one delivery path](delivery.md#one-delivery-path)) whose `Graphyard / merge`, App-bound required runs pass, else held (one `merge.enqueue.refused`, ≤3 runs/head); `master init --no-auto-merge` holds each until approved `master decide GY-N merge`; merged runs frozen, re-read in rotation for 24h; drift: `required-checks-disagree`, `public-verdict-contradicts-delivery`.
 
-Operator rulesets (inherited too; classic 404 = none, unwritten): install adds both checks, once PR-published, to the sole checks ruleset; snapshotted (`.graphyard/protection-snapshots/`), diff-verified, rolled back.
+Operator rulesets (inherited too): install adds both checks to the sole checks ruleset, snapshotted (`.graphyard/protection-snapshots/`), diff-verified, rolled back.
 
 ## Failed checks
 
@@ -54,4 +54,4 @@ Protected `pull_request_target` workflow per `graphyard/*` push: **plan** reads 
 
 ## Identity-bound agent review
 
-`reviewProvider`: `codex` takes Codex's clean head result; `agent` non-author reviewer App (`github-setup URL --reviewer claude`; `GRAPHYARD_REVIEWER_APPS`; `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json)) approving via head-naming `graphyard-verdict` comments.
+`reviewProvider`: `codex` takes Codex's clean head result; `agent` non-author reviewer App (`github-setup URL --reviewer claude`; `graphyard reviewpolicy GY-N agent REVISION "reason" --profiles` [FILE](../examples/reviewer-profiles.json)) approving via head-naming `graphyard-verdict` comments.

@@ -59,7 +59,7 @@ node "$GRAPHYARD_CLI" master registry account set claude-b --runtime claude --mo
 node "$GRAPHYARD_CLI" master registry account quota NAME exhausted --resets-at 2026-09-22T00:00:00Z --reason "Quota"
 ```
 
-`--plan NAME` groups accounts under one provider quota; `--key-file zai.key --key-variable ZAI_API_KEY` exports a 0600 key per run; pasted keys refused.
+`--plan NAME` groups accounts under one provider quota; `--key-file zai.key --key-variable ZAI_API_KEY` exports a 0600 key per run (pasted keys refused).
 
 ### Add a role
 
@@ -80,26 +80,26 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ### The loop must be supervised
 
-`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger`; never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` there. `master status`: `setup.supervisor`. The loop and `graphyard up` preflight refuse a dirty CLI checkout; its research scratch is a managed-repository worktree.
+`master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger`; never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` there. `master status`: `setup.supervisor`. The loop and `graphyard up` preflight refuse a dirty CLI checkout.
 
-Shared hosts: units are per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (`graphyard-master.service` alias); setup never touches another checkout's; each install needs its `--herdr-workspace`.
+Units are per repository (`graphyard-executor-OWNER-NAME@N.service` too; `graphyard-master.service` alias), listed in `.graphyard/units.json`; on a shared host each install needs its `--herdr-workspace`.
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore`); runs a `master-role` refusal's command, then unblocks; posts findings (`master status` `doctor`), escalates or files faults (deduped). Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work through master commands (`master scope`, `unblock`, `decide`, `close`, `release`, `checkout-restore` and others), posts findings (`master status` `doctor`) and escalates or files deduped faults. Off: `run.doctor.enabled=false`.
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: an agent reviewer reviews each head, the control plane merges it; no approver or escalation runs, so you answer decisions. `master status` prints `supervision`. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json` (absent: autonomous): an agent reviewer reviews each head, the control plane merges it, and you answer decisions (no approver or escalation). `master status` prints `supervision`. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
 
 ## 4. Prove the first PR
 
 `graphyard doctor --profile through-merge` names gaps; `master run` dispatches small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-CI workflows should cancel superseded pull-request runs: group `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled.
+The generated `graphyard-delivery.yml` cancels superseded pull-request runs, never main's.
 
 ## 5. Inventory PRs
 
-`graphyard onboard inventory --repo OWNER/REPO [--mapping FILE] [--out FILE]` labels open PRs and drafts: `continue`, `hold` (draft), `adopt` (mergeable; protection, ruleset checks clean per App) or `superseded` (base holds the head). Read-only; `--mapping` binds keys.
+`graphyard onboard inventory --repo OWNER/REPO [--mapping FILE] [--out FILE]` labels open PRs read-only: `continue`, `hold` (draft), `adopt` (mergeable, checks clean) or `superseded` (base holds the head).
 
-`master adopt GY-N --pr NUMBER --head SHA [--source-key KEY --source-url URL] REASON` binds an open non-draft PR at its live head (source kept); attempts use its branch, `complete` only it; a moved head or second owner is refused by name, a repeat is a no-op; GitHub is never written.
+`master adopt GY-N --pr NUMBER --head SHA [--source-key KEY --source-url URL] REASON` binds an open non-draft PR at its live head for attempts to use; a moved head or second owner is refused, a repeat is a no-op, and GitHub is never written.
