@@ -606,14 +606,14 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
   await writeTempOwner(kept);
   const child = spawn('sleep', ['3600'], { stdio: 'ignore' });
   const ticks = processStartTicks(child.pid!);
-  writeFileSync(tempOwnerMarker(dying), `${JSON.stringify({ pid: child.pid, startedAt: ticks, pidNamespace: processPidNamespace(), at: '2030-03-01T00:00:00.000Z' })}\n`);
+  writeFileSync(tempOwnerMarker(dying), `${JSON.stringify({ pid: child.pid, startedAt: ticks, pidNamespace: processPidNamespace(), at: new Date().toISOString() })}\n`);
   const exited = new Promise(resolve => child.once('exit', resolve));
   let crashes = 0, gone = 2 ** 22;
   const crash = () => {
     // A trial killed before its cleanup: its checkout and its marker naming a process that is gone.
     const left = join(trials!, `${trialCheckoutPrefix}crash${++crashes}`);
     mkdirSync(join(left, 'checkout', 'node_modules'), { recursive: true }); writeFileSync(join(left, 'checkout', 'a.txt'), 'x\n');
-    writeFileSync(tempOwnerMarker(left), `${JSON.stringify({ pid: ++gone, startedAt: 1, pidNamespace: processPidNamespace(), at: '2030-03-01T00:00:00.000Z' })}\n`);
+    writeFileSync(tempOwnerMarker(left), `${JSON.stringify({ pid: ++gone, startedAt: 1, pidNamespace: processPidNamespace(), at: new Date().toISOString() })}\n`);
     return left;
   };
   const checkouts: string[] = [], reclaimed: string[] = [];
