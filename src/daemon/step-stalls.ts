@@ -1,8 +1,9 @@
-// Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, the unbound stall's master wake and five-minute backoff, and when an uncleared stall files upstream (GY-1855).
+// Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, the unbound stall's master wake and five-minute backoff, and the standing-stall listing master status shows (GY-1980 moved it here when the upstream filer was deleted).
 import { createHash } from 'node:crypto';
 import { chmod, readdir, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { runChild } from '../child-runner.js';
+import { type AttentionItem, agentOwner } from '../master/attention.js';
 import type { ActionableSubject } from './metrics.js';
 import type { DaemonAction, DaemonState, StepStall, StepStallRemedyRecord } from './state.js';
 import { applyStepStallRemedy, stepStallRemedy, type BoundStepStallRemedy, type StepStallRemedyKind, type StepStallRemedyOutcome } from '../stall-remedies.js';
@@ -20,8 +21,8 @@ import { localTransport } from '../install/transport.js';
 import { DispatchReservedError } from '../master/dispatch-reservation.js';
 import { setupAgentEnvironments } from '../master/environments.js';
 
-/** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1); past twice that an uncleared stall files its one upstream item (GY-1855 AC-2, stallFilesUpstream in ./stall-upstream.ts): woken at three, the master holds one stall-length more. */
-export const stallCycleBound = 3, stallUpstreamCycles = 2 * stallCycleBound;
+/** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1). */
+export const stallCycleBound = 3;
 /**
  * A stalled call is attempted at most once per five minutes while its stall stands (GY-1854 AC-1):
  * `noteStepFailure` arms one window per attempt, failures inside it are that attempt still failing,
@@ -405,6 +406,27 @@ export function stallWakeTask(stall: StepStall, cliPath: string): string {
 export function stallWakeSubjects(state: DaemonState, cliPath: string): ActionableSubject[] {
   return Object.values(state.stepStalls).filter(stallNeedsMaster)
     .map(stall => ({ key: stallSubjectKey(stall.signature), kind: 'wake' as const, work: null, detail: stallWakeTask(stall, cliPath) }));
+}
+
+/**
+ * `master status`'s standing-stall listing (GY-1855 AC-2, moved here from the deleted upstream
+ * filer by GY-1980): one attention line per standing stall with its signature, count, remedy and
+ * owner. A stall files nothing by itself: the line shows the problem and names its master, as the
+ * progress watchdog's lines do.
+ */
+export function stallStatusAttention(state: DaemonState | null, cliPath: string): AttentionItem[] {
+  if (!state) return [];
+  return Object.values(state.stepStalls).filter(run => run.stalledAt).map(run => {
+    const subject = stallSubjectKey(run.signature);
+    const remedy = !run.remedy ? 'no remedy binds to it'
+      : run.remedy.outcome === 'started' ? `its ${run.remedy.kind} remedy was started at ${run.remedy.at} and never reported`
+        : `its ${run.remedy.kind} remedy was applied once at ${run.remedy.at} and ${run.remedy.outcome}${run.remedy.verified ? ', verified' : ', unverified'}`;
+    return {
+      subject,
+      text: `Loop-step stall: the ${run.step} call failed ${run.count} cycle(s) with one signature, standing since ${run.stalledAt}: ${run.signature}; ${remedy}. The stalled call is attempted at most once per five minutes while this stands.`,
+      ...agentOwner('master', `node ${cliPath} master status (daemon.stepStalls, subject ${subject}) names the failing attempts; judge the cause and clear it`),
+    };
+  });
 }
 
 /**

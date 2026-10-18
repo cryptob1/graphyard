@@ -636,9 +636,9 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   // A source the budget cut is unread: the cycle is partial, and the next cycle observes again (taking the read in flight) rather than waiting out the interval.
   if (unreadSources.length) { partial = true; state.faults.observedAt = lastObservedAt; }
   await noteObservationBudget(cycle, budgetMs, unreadSources);
-  // The loop's own health lines, as master status puts them first: its cost, silence and delivery budget. The loop reading
+  // The loop's own health lines, as master status puts them first: its cost and delivery budget. The loop reading
   // them is cycling, so its liveness is not in question here, and a failed cycle is noted once as it happens (noteCycleFailure).
-  const loop = [...loopAttention({ liveness: { ...summary.liveness, state: 'running' }, silence: summary.silence, budget: summary.budget, cost: summary.cost }), ...baseFailureAttention(summary.baseFailures, config.baseBranch)];
+  const loop = [...loopAttention({ liveness: { ...summary.liveness, state: 'running' }, budget: summary.budget, cost: summary.cost }), ...baseFailureAttention(summary.baseFailures, config.baseBranch)];
   endFailingRuns(state, policy, clock);
   // The system invariants (GY-404): properties of the running pipeline no per-item gate can see,
   // judged on each observation over the same snapshot; each violation is one fault of its class below.

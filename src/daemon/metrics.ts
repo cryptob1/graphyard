@@ -1,4 +1,4 @@
-// Concern: measurement — stage percentiles, the scope-decision budget, silence and item latency.
+// Concern: measurement — stage percentiles, the scope-decision budget, actionable subjects and item latency.
 import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal, unplannedPaths } from '../model/scope.js';
 import { askIdentity, plannedFilesCovered } from '../model/scope-collapse.js';
@@ -6,7 +6,7 @@ import { pendingBaseRefresh } from '../merge-queue.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
-import { approvalWatchSchema, type ApprovalWatch, type DaemonAction, type DaemonActionKind, type DaemonState, type CycleMetrics, type ScopeMeasurement, carriedSession } from './state.js';
+import { approvalWatchSchema, type ApprovalWatch, type DaemonActionKind, type DaemonState, type CycleMetrics, type ScopeMeasurement, carriedSession } from './state.js';
 import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
 import { decisionKey, scopeOutcomeAnswered } from './reconcile.js';
 import { docsSyncHolding } from '../model/docs-sync.js';
@@ -283,35 +283,16 @@ export function missingProofs(work: Work, now: Date) {
 // ---- What the loop could act on ------------------------------------------------------------
 /*
  * A cycle that reports "0 actions" says nothing about whether it had anything to do. Every cycle
- * therefore records both halves: the subjects it could act on, and the actions it took. A subject
- * the cycle acts on has its clock reset; one that goes without any action accumulates, and the
- * longest such wait is what `master status` reports and what the 20-minute bound is judged on.
+ * therefore records both halves: the subjects it could act on, and the actions it took. The
+ * subjects feed the master session's wake (one wake per changed subject, by digest) and the
+ * cycle's `actionable` count; whether the whole pipeline has gone still is the progress
+ * watchdog's judgement (progressAttention in ./liveness.ts), not a per-subject wait.
  */
-export const silenceBudgetMs = 1_200_000;
-/** The fixed wording of a decision subject that waits on an approver session, which `approverWait` reads back. */
-export const approverWaitWording = { waiting: 'is requested and waiting for approver session', unjudged: 'is unjudged after' } as const;
 /**
  * GY-1298. The wording of a decision its approver judged but nobody applied: the wait is the apply the
- * loop owes, not an approver's judgement, so it is not an `approverWait` and counts against the loop.
+ * loop owes, not an approver's judgement.
  */
 export const approvedUnappliedWording = 'is approved but unapplied: approved at';
-/**
- * A silent subject that is a decision with an approver (GY-1295): the wait is the approver's to end, a
- * decision fault, not the loop failing to cycle. Counted as loop silence, it filed loop items for it.
- */
-export const approverWait = (entry: Pick<SilenceEntry, 'kind' | 'detail'>) => entry.kind === 'decision'
-  && (entry.detail.includes(approverWaitWording.waiting) || entry.detail.includes(approverWaitWording.unjudged));
-/**
- * GY-1890. The fixed wording of a claimable item the dispatch step could not place because no
- * worker profile was free: every launch profile held by a live attempt, its account spent, or the
- * profile cooling off after a failed launch. The wait is the fleet's slot capacity — a role
- * starved of slots — which no cycle of the loop can end by acting: only a worker finishing frees
- * a slot. Counted as the loop's silence, it filed loop faults for one saturated fleet (GY-1886,
- * GY-1888, GY-1889) while the loop cycled at its responsive cadence the whole time.
- */
-export const fleetHoldWording = { held: 'is claimable but no worker profile is free; it starts when one frees' } as const;
-/** A silent subject whose wait the fleet's slot capacity owns (GY-1890), as an approver-held decision is the approver's (`approverWait`). */
-export const fleetHold = (entry: Pick<SilenceEntry, 'kind' | 'detail'>) => entry.kind === 'capacity' && entry.detail.includes(fleetHoldWording.held);
 /**
  * When the watch's decision was approved with no outcome recorded, as the loop last found it once the named session ended (GY-1300),
  * or null. The apply step keeps that finding on the watch; a re-request's new decision carries the entry under the old id, never its own.
@@ -323,15 +304,17 @@ export function approvedUnappliedSince(watch: Pick<ApprovalWatch, 'decision' | '
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
   context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'];
-    /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not the loop's silence. */ fleetHeld?: boolean;
+    /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not a dispatch wait. */ fleetHeld?: boolean;
     /** GY-1890: whether an item's own launch is in flight; its slot is allocated, so its wait is that launch, never the fleet's capacity. */ launching?: (item: Work) => boolean } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
-  // The silence record keeps each detail to 500 characters; a refusal or proof list quoted here is cut to fit.
+  // A subject's detail is bounded to 500 characters: the master session wakes once per changed
+  // detail (its digest), so a refusal or proof list quoted here is cut to fit.
   const add = (kind: DaemonActionKind, item: Work | null, detail: string) => subjects.push({ key: `${kind}:${item?.key ?? 'pipeline'}`, kind, work: item?.key ?? null, detail: boundDetail(detail, 500) });
   // An open item the control plane names no action for and nothing is moving. The loop cannot
-  // clear it — that is what makes it a subject rather than an action: counted here, its wait
-  // accumulates against the silence bound instead of being absent from every measure the loop
-  // keeps, which is how an item used to hold a failing gate for hours with nobody told (GY-106).
+  // clear it — that is what makes it a subject rather than an action: named here, it is absent
+  // from no measure the loop keeps, which is how an item used to hold a failing gate for hours
+  // with nobody told (GY-106). The master session is woken once per changed detail, and the
+  // progress watchdog (./liveness.ts) judges whether the whole pipeline has gone still.
   const stalled = new Map(stalledItems(work, new Date(now), 0).map(entry => [entry.key, entry]));
   for (const item of work) {
     // A routine decision is the one subject a delivered item can still raise: containment recovery.
@@ -343,30 +326,29 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
     // An approved decision whose application was lost is named for what it is (GY-1300), never as waiting for its approver.
     const unapplied = watch ? approvedUnappliedSince(watch) : null;
-    // A conflict rework a docs-sync session holds inside its bound is the step's recorded wait, not its silence (GY-1436).
+    // A conflict rework a docs-sync session holds inside its bound is the step's recorded wait, not a stall (GY-1436).
     const docsHeld = decision?.action === 'rework' && !watch && decision.binding === `${item.candidate?.sha}:conflict` && !!context.docsSyncs && !!docsSyncHolding(context.docsSyncs, item, now);
     if (decision && !docsHeld && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
       : unapplied ? `${item.key}'s ${decision.action} decision ${watch.decision} is ${approvedUnapplied} ${unapplied}; the loop asks the control plane to apply it`
       : watch.approvedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approvedUnappliedWording} ${watch.approvedAt}${watch.approvedBy ? ` by ${watch.approvedBy}` : ''}; the loop applies it (graphyard master decisions ${item.key})`
-      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.unjudged} ${watch.launches} approver session(s)`
-        : `${item.key}'s ${decision.action} decision ${watch.decision} ${approverWaitWording.waiting} ${watch.agentName ?? '(not launched)'} to judge it`);
+      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} is unjudged after ${watch.launches} approver session(s)`
+        : `${item.key}'s ${decision.action} decision ${watch.decision} is requested and waiting for approver session ${watch.agentName ?? '(not launched)'} to judge it`);
     const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
     if (withheld) add('decision', item, withheld.reason.slice(0, 500));
     if (item.stage === 'done') continue;
     const stall = stalled.get(item.key);
     if (stall) add('escalation', item, `${item.key} holds its ${stall.gate ?? 'unevaluated'} gate with no action, no dependency and no recorded human need: ${stall.refusal ?? stall.detail}`);
     // GY-1890: with no launch profile free the wait on a claimable item is the fleet's slot
-    // capacity, so it is a capacity subject, not a dispatch one: the loop cannot end it by acting,
-    // and counting it as the loop's silence filed loop faults for a saturated fleet.
+    // capacity, so it is a capacity subject, not a dispatch one: the loop cannot end it by acting.
     // An item whose own launch is in flight already holds its slot: it waits on that launch, not the fleet.
-    try { assertDispatchable(item, work, new Date(now).toISOString()); const fleetHeld = context.fleetHeld && !context.launching?.(item); add(fleetHeld ? 'capacity' : 'dispatch', item, fleetHeld ? `${item.key} ${fleetHoldWording.held}` : `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
+    try { assertDispatchable(item, work, new Date(now).toISOString()); const fleetHeld = context.fleetHeld && !context.launching?.(item); add(fleetHeld ? 'capacity' : 'dispatch', item, fleetHeld ? `${item.key} is claimable but no worker profile is free; it starts when one frees` : `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
     if (request && (!request.decision || redecidableScopeRefusal(item)) && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
       add('scope', item, boundDetail(`${item.key}: ${request.requestedBy} is waiting for a decision on ${namePaths(request.paths, 300)}`, 500));
     // A lapsed quarantine is the loop's to settle only where this host verified its supervisor gone
     // (GY-426). One it cannot verify — another host's, or a supervisor still holding its scope — is
-    // escalated with its refusals and counted under the containment class; read as the loop's
-    // silence it filed a loop fault for a wait no cycle could end (GY-393).
+    // escalated with its refusals and counted under the containment class, a wait no cycle could
+    // end (GY-393).
     if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed' && (!context.assessments || context.assessments[item.id]?.settleable))
       add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
     if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} conflicts with the moved base and is waiting for the control plane to try bringing its candidate onto it`);
@@ -380,40 +362,6 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     else if (outcome === 'awaiting-smoke') add('smoke', item, `${item.key} is deployed at ${item.delivery!.deployment.sha.slice(0, 12)} and waiting for its smoke proof`);
   }
   return subjects;
-}
-
-export interface SilenceEntry { key: string; kind: string; work: string | null; detail: string; since: string; idleMs: number }
-export interface SilenceReport { actionable: number; longestIdleMs: number; longest: SilenceEntry | null; budgetMs: number; breached: boolean; lastActionAt: string | null; subjects: SilenceEntry[] }
-/** Fold this cycle's actionable inventory and its actions into the silence record. */
-export function trackSilence(state: DaemonState, subjects: ActionableSubject[], performed: DaemonAction[], now: number): SilenceReport {
-  const record = state.silence, at = new Date(now).toISOString();
-  // Only an action that succeeded is the loop acting on a subject. A request refused every time it
-  // is retried — a revoked credential, a standing 409 — moves nothing, and a wait that restarted
-  // on each refusal would never reach the bound that puts it in front of someone.
-  const acted = new Set(performed.filter(action => action.state === 'done').map(action => `${action.kind}:${action.work ?? 'pipeline'}`));
-  const live = new Map(subjects.map(subject => [subject.key, subject]));
-  // GY-1890: a claimable item's wait is one wait whether the fleet is saturated or not, so a subject
-  // reclassed between `dispatch:<item>` and `capacity:<item>` keeps the age of the key it replaces;
-  // restarting it there would let saturation transitions hold either class short of the bound.
-  const counterpart = (key: string) => key.startsWith('dispatch:') ? `capacity:${key.slice(9)}` : key.startsWith('capacity:') ? `dispatch:${key.slice(9)}` : null;
-  const reclassed = new Map<string, DaemonState['silence']['subjects'][string]>();
-  for (const key of live.keys()) { const other = counterpart(key), prior = other ? record.subjects[other] : undefined; if (other && prior && !record.subjects[key] && !live.has(other)) reclassed.set(key, prior); }
-  for (const key of Object.keys(record.subjects)) if (!live.has(key)) delete record.subjects[key];
-  for (const [key, subject] of live) {
-    const previous = record.subjects[key] ?? reclassed.get(key);
-    // First sight, or an action for this exact subject: the wait starts again from now.
-    if (!previous || acted.has(key)) record.subjects[key] = { since: at, work: subject.work, kind: subject.kind, detail: subject.detail };
-    else record.subjects[key] = { ...previous, kind: subject.kind, detail: subject.detail };
-  }
-  if (performed.length) record.lastActionAt = at;
-  return silenceReport(record, now);
-}
-export function silenceReport(record: DaemonState['silence'], now: number): SilenceReport {
-  const subjects: SilenceEntry[] = Object.entries(record.subjects)
-    .map(([key, entry]) => ({ key, kind: entry.kind, work: entry.work, detail: entry.detail, since: entry.since, idleMs: Math.max(0, now - Date.parse(entry.since)) }))
-    .sort((a, b) => b.idleMs - a.idleMs);
-  const longestIdleMs = subjects[0]?.idleMs ?? 0;
-  return { actionable: subjects.length, longestIdleMs, longest: subjects[0] ?? null, budgetMs: silenceBudgetMs, breached: longestIdleMs > silenceBudgetMs, lastActionAt: record.lastActionAt, subjects: subjects.slice(0, 20) };
 }
 
 // ---- Latency the loop is judged on ---------------------------------------------------------
