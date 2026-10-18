@@ -917,23 +917,20 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
 // ---------------------------------------------------------------------------
 
 /**
- * The `gh` login a provider needs (GY-1412): `repo` for branch protection and CI discovery
- * everywhere, plus `admin:repo_hook` for a hosted provider. Compose observes GitHub by polling,
- * never through a webhook, so it needs no `admin:repo_hook`; nor does `--observe-only` (GY-1862),
- * which holds every App, webhook and protection action. A login whose scopes `gh` does not
- * list (a fine-grained token) is not refused for scopes it may hold.
+ * The `gh` login an install needs: `repo`, to register the merge writer deploy key (GY-2009).
+ * No install binds an App or registers a webhook, so no provider needs `admin:repo_hook`.
+ * A login whose scopes `gh` does not list (a fine-grained token) is not refused for scopes it may hold.
  */
-export function githubCliScopes(provider: Provider, choice: ObserveOnlyChoice = {}) { return pollsGitHub(provider) || choice.observeOnly ? ['repo'] : ['repo', 'admin:repo_hook']; }
-export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string, choice: ObserveOnlyChoice = {}): PreflightItem {
-  const needed = githubCliScopes(provider, choice);
+export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string): PreflightItem {
+  const needed = ['repo'];
   const login = `gh auth login --scopes ${needed.join(',')}`;
-  const note = pollsGitHub(provider) ? `; ${provider} polls GitHub, so it needs no admin:repo_hook` : choice.observeOnly ? '; --observe-only registers no webhook, so it needs no admin:repo_hook' : '';
+  const note = '; no install registers a webhook, so none needs admin:repo_hook';
   if (status.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: ${login} (the account must administer ${repository})${note}` };
   const listed = /Token scopes:\s*(.*)/.exec(`${status.stdout}\n${status.stderr ?? ''}`)?.[1];
   const held = listed === undefined ? null : [...listed.matchAll(/[\w:-]+/g)].map(match => match[0]);
   const lacking = held ? needed.filter(scope => !held.includes(scope)) : [];
   if (lacking.length) return { name: 'GitHub CLI', ok: false, detail: `the gh login lacks scope ${lacking.join(', ')} (${provider} needs ${needed.join(', ')})${note}`, fix: `Run: gh auth refresh --scopes ${needed.join(',')}` };
-  return { name: 'GitHub CLI', ok: true, detail: `authenticated for branch protection and CI discovery with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}${note}` };
+  return { name: 'GitHub CLI', ok: true, detail: `authenticated for deploy-key registration with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}${note}` };
 }
 
 /**
@@ -959,7 +956,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // still need it. Install never registers an App or reads protection.
   const ghNeeded = true;
   const ghStatus = ghNeeded ? await gh(['auth', 'status'], { allowFailure: true }) : { code: 1, stdout: '', stderr: '' };
-  if (ghNeeded) preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository, { observeOnly }));
+  if (ghNeeded) preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository));
   const polling = noApp ? null : webhookPreflight(context.provider);
   if (polling) preflight.push(polling);
   // The master loop runs from this checkout and its unit refuses a temporary directory: say so
@@ -1637,7 +1634,7 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   const preflight = await adapter.preflight(context);
   const gh = githubCli(context.transport);
   const ghStatus = await gh(['auth', 'status'], { allowFailure: true });
-  preflight.push(githubCliPreflight(context.provider, ghStatus, repository, { observeOnly: true }));
+  preflight.push(githubCliPreflight(context.provider, ghStatus, repository));
   const url = record?.url ?? null;
   // Only an installation an observation-only apply deployed, whose recorded roster holds no worker
   // or producer: a rewrite adapter's environment is written from this session's principals, so a

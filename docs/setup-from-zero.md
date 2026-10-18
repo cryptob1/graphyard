@@ -43,7 +43,7 @@ Once green, **Describe what you want built** records a goal.
 
 ```sh
 node --version          # v24+
-gh auth status          # scope repo; non-compose providers also admin:repo_hook
+gh auth status          # scope repo (deploy-key registration); no provider needs admin:repo_hook
 docker compose version
 herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
