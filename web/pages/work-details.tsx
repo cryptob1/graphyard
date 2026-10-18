@@ -141,14 +141,15 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const risk = shownRisk(item, status?.repositoryPolicy);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
   // GY-2011: open on the plain sentence (or the title) and the state; description and criteria fold under Details.
-  const plainLead = item.summary?.trim() || item.title;
+  const plainSentence = typeof item.summary === 'string' ? item.summary.trim() : '';
+  const plainLead = plainSentence || item.title;
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
     <div className="item-head">
       <div className="item-title">
         <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}<span>{item.type.replace(/^./, c => c.toUpperCase())} · priority {item.priority}</span>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
-        <h1 data-title data-plain-summary={item.summary ? 'true' : 'false'}>{plainLead}</h1>
-        {item.summary && item.summary.trim() !== item.title && <p className="item-title-full muted">{item.title}</p>}
+        <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
+        {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
       </div>
       {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key}/> on GitHub ↗</span>}
     </div>
