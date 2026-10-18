@@ -860,7 +860,7 @@ export const allowances: Record<string, Allowance> = {
   'tests/helpers/review-fleet.ts': { why: 'the 2026-10-01T10:00Z at stamps createdAt, stageEnteredAt and evidence of fixture items', dates: ['2026-10-01'], readings: 4 },
   'tests/helpers/soak-plane.ts': { why: 'start is the simulated day\'s clock, installed by soakControlPlanes\' before hook; failoverInstalled\'s Date.now() runs inside a soak test, after that hook', dates: ['2031-06-02'], readings: 1 },
   'tests/human-decisions-ui.test.ts': { why: 'the 2026-09-26 and 2026-10-02 instants are clocks handed to HumanSignIn', dates: ['2026-09-26', '2026-10-02'], readings: 3 },
-  'tests/install-harness.ts': { why: 'the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only', dates: ['2024-01-01'], readings: 3 },
+  'tests/install-harness.ts': { why: 'the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only', dates: ['2024-01-01'], readings: 1 },
   'tests/intervention-feedback.test.ts': { why: 'the 2026-09-01, 2026-10-06 and 2026-10-07 instants are ledger rows and the now handed to foldInterventions, detectPatterns and loopSettledInBound', dates: ['2026-09-01', '2026-10-06', '2026-10-07'], readings: 9 },
   'tests/intervention-pattern-containment-settlement-build.test.ts': { why: 'the Date.UTC(2026, 9, 10, 3, m) rows are a ledger judged on at(30) handed to foldInterventions', dates: ['2026-10-10'], readings: 3 },
   'tests/intervention-pattern-escalation-build.test.ts': { why: 'the 2026-10-07..09 instants are fixture clocks handed to foldInterventio', dates: ['2026-10-07', '2026-10-08', '2026-10-09', '2026-10-11', '2026-10-12', '2026-10-13', '2026-10-18'], readings: 7 },

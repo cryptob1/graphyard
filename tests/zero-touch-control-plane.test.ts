@@ -166,7 +166,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   assert.deepEqual(result.handoffs, [], 'no browser or device handoff');
   assert.ok(!events.some(event => event.kind === 'handoff' || event.kind === 'waiting'), 'no handoff or waiting event');
   assert.ok(result.checklist.every(item => item.done), JSON.stringify(result.checklist.filter(item => !item.done)));
-  assert.ok(world.calls.filter(args => args[0] === 'install').every(args => args.includes('--no-github-app')), 'no GitHub App is registered');
+  assert.ok(world.calls.filter(args => args[0] === 'install').every(args => !args.some(arg => /^--(reviewer|no-github-app|reuse-app|github-app)$/.test(arg))), 'no GitHub App is registered: install takes no App flag');
   assert.deepEqual(world.ghCalls, [['repo', 'view', repository, '--json', 'name']], 'the operator\'s gh login only looked the repository up');
   assert.equal(world.deployKeys.length, 1);
   const status = await request(operatorAgent, 'status');

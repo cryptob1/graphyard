@@ -1,0 +1,287 @@
+import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
+import { generateKeyPairSync } from 'node:crypto';
+import { rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { fakeTransport, type BundleFileRecord, type Transport } from '../src/install/transport.js';
+import type { InstallDependencies } from '../src/install/index.js';
+import type { Provider } from '../src/install/types.js';
+import { ensureDeployKey } from '../src/install/deploy-key.js';
+import { installUnitsFile, legacyInstallUnits, perInstallUnits } from '../src/install/units.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+// Time-bomb allowance (GY-1694): the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only; Date.now() is the install's handed clock and stamps records nothing ages.
+
+export const REPOSITORY = 'owner/project';
+export const HEAD_SHA = 'a'.repeat(40);
+/** The Graphyard source every harness install uploads: this checkout, never the managed repository, at a fixed commit (GY-1864). */
+export const GRAPHYARD_SOURCE = fileURLToPath(new URL('..', import.meta.url));
+export const GRAPHYARD_SOURCE_SHA = 'c'.repeat(40);
+
+export async function temporaryRepository(repository = REPOSITORY) {
+  const root = await temporaryDirectory('install');
+  execFileSync('git', ['init', '-q', root]);
+  execFileSync('git', ['remote', 'add', 'origin', `git@github.com:${repository}.git`], { cwd: root });
+  await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'project', scripts: { test: 'node --test', typecheck: 'tsc --noEmit' } }));
+  return root;
+}
+
+/** An ed25519 public key as an OpenSSH line, the form ssh-keygen writes and `gh repo deploy-key list` answers (GY-2010). */
+export function openSshPublicKey(comment: string) {
+  const raw = generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  const field = (value: Buffer) => { const length = Buffer.alloc(4); length.writeUInt32BE(value.length); return Buffer.concat([length, value]); };
+  return `ssh-ed25519 ${Buffer.concat([field(Buffer.from('ssh-ed25519')), field(raw)]).toString('base64')} ${comment}`;
+}
+/** The key pair the fake ssh-keygen writes on this machine; the private half is a placeholder ensureDeployKey never reads. */
+export const DEPLOY_PUBLIC_KEY = openSshPublicKey('graphyard-merge-writer-install-test-host');
+/** The key the fixture host's ssh-keygen prints: its own, generated there. */
+export const HOST_DEPLOY_PUBLIC_KEY = openSshPublicKey('graphyard-merge-writer-graphyard-host');
+
+/** `deployKeys`: the deploy keys GitHub lists for the repository, which `gh repo deploy-key add` appends to. */
+export interface FakeState { installed: boolean; deployKeys: { id: number; key: string; title: string }[] }
+
+export const RAILWAY_WORKSPACES = [{ id: 'ws-graphyard-0001', name: 'Graphyard' }, { id: 'ws-personal-0002', name: "Installer's Projects" }];
+
+/**
+ * `hcloud server-type list -o json`, trimmed to what the installer reads: memory, architecture, and
+ * the gross monthly price per location. Prices are illustrative, not Hetzner's current list.
+ */
+export const HETZNER_SERVER_TYPES = JSON.stringify([
+  { name: 'cx22', cores: 2, memory: 4, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '3.7900', gross: '4.5101' } }] },
+  { name: 'cx32', cores: 4, memory: 8, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '6.8000', gross: '8.0920' } }] },
+  { name: 'cax31', cores: 8, memory: 16, architecture: 'arm', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '12.4900', gross: '14.8631' } }] },
+  { name: 'cx42', cores: 8, memory: 16, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '16.4000', gross: '19.5160' } }] },
+  { name: 'cpx41', cores: 8, memory: 16, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '26.9000', gross: '32.0110' } }] },
+  { name: 'cx52', cores: 16, memory: 32, architecture: 'x86', deprecation: null, prices: [{ location: 'nbg1', price_monthly: { net: '32.4000', gross: '38.5560' } }] },
+  { name: 'cx11', cores: 1, memory: 2, architecture: 'x86', deprecation: { announced: '2024-01-01T00:00:00Z' }, prices: [{ location: 'nbg1', price_monthly: { net: '3.2900', gross: '3.9151' } }] },
+]);
+
+/**
+ * The fixture host of a self-contained install (GY-717): a Linux machine reached as root, whose
+ * `cat` answers with what the installer wrote there (`files`, shared with the recording transport),
+ * so a second run reads its own credentials back exactly as a real host would.
+ */
+export function hostResponses(files: Map<string, BundleFileRecord>, state: { installed: boolean } = { installed: false }, repository = REPOSITORY) {
+  const checkout = `/home/graphyard/code/${repository.replace('/', '-')}`;
+  return [
+    // master init records the units the install owns (GY-1441): the legacy names as an alias when
+    // the host's legacy loop unit already exists (an install from before them), its own otherwise.
+    { match: ' master init ', result: () => {
+      const legacy = files.has('/home/graphyard/.config/systemd/user/graphyard-master.service');
+      files.set(`${checkout}/${installUnitsFile}`, { content: `${JSON.stringify(legacy ? legacyInstallUnits : perInstallUnits(repository), null, 2)}\n`, mode: 0o600, owner: '1001:1001' });
+      return '';
+    } },
+    { match: 'id -u graphyard', result: '1001' },
+    { match: 'id -g graphyard', result: '1001' },
+    { match: 'systemctl --version', result: 'systemd 255 (255.4-1ubuntu8)' },
+    { match: 'hostname', result: 'graphyard-host' },
+    // The merge writer's deploy key, generated on the host (GY-2010): only its public half is printed.
+    { match: 'ssh-keygen -q -t ed25519', result: `${HOST_DEPLOY_PUBLIC_KEY}\n` },
+    { match: 'command -v', result: (line: string) => `/usr/bin/${line.split(' ').pop()}` },
+    // Herdr on the host (GY-1511): its servers running, and the default instance's graphyard plugin
+    // configured where Herdr keeps it, so a host whose plugin another install holds is a written file.
+    { match: 'status server', result: 'status: running\n' },
+    { match: 'plugin config-dir graphyard', result: (line: string) => `${/XDG_CONFIG_HOME=(\S+)/.exec(line)?.[1] ?? '/home/graphyard/.config'}/herdr/plugins/config/graphyard\n` },
+    { match: 'workspace list', result: JSON.stringify({ id: 'cli:workspace:list', result: { type: 'workspace_list', workspaces: [] } }) },
+    { match: 'workspace create', result: JSON.stringify({ id: 'cli:workspace:create', result: { type: 'workspace_info', workspace: { workspace_id: 'w1', label: 'graphyard-owner-project' } } }) },
+    { match: 'is-active graphyard-postgres.service', result: 'active\nactive\nactive\n' },
+    { match: '--user is-active', result: 'active\nactive\nactive\nactive\n' },
+    { match: 'test -f', result: (line: string) => files.has(line.split(' ').pop()!) ? '' : { stdout: '', stderr: '', code: 1 } },
+    { match: 'cat /home/graphyard/', result: (line: string) => { const file = files.get(line.slice(4)); return file ? file.content : { stdout: '', stderr: 'No such file', code: 1 }; } },
+    { match: 'cat /opt/graphyard/', result: (line: string) => { const file = files.get(line.slice(4)); return file && state.installed ? file.content : { stdout: '', stderr: 'No such file', code: 1 }; } },
+    // Last: every command run as the graphyard account carries `$(id -u)` in its wrapper.
+    { match: 'id -u', result: '0' },
+  ];
+}
+
+/** Provider CLI transcripts. `installed` switches every probe to the "already there" answer. */
+export function providerResponses(provider: Provider, state: { installed: boolean; workdir: string; service: string; envFile?: string; workspaces?: { id: string; name: string }[] }) {
+  const ps = JSON.stringify([{ Service: 'db', State: 'running' }, { Service: 'server', State: 'running' }]);
+  const compose = [
+    { match: 'docker version', result: '27.1.1' },
+    { match: 'docker compose version', result: '2.29.0' },
+    { match: `cat ${state.workdir}/server.env`, result: state.installed ? { stdout: state.envFile ?? '', stderr: '', code: 0 } : { stdout: '', stderr: 'No such file', code: 1 } },
+    { match: 'compose --project-directory', result: state.installed ? ps : '' },
+  ];
+  if (provider === 'compose' || provider === 'docker-host') return compose;
+  if (provider === 'hetzner') {
+    // The fake becomes stateful at exactly the point a real project does: once the
+    // server exists, every later describe answers with its address.
+    let created = state.installed;
+    return [
+      { match: 'hcloud version', result: 'hcloud v1.49.0' },
+      { match: 'hcloud context active', result: 'graphyard' },
+      { match: 'hcloud server-type list', result: HETZNER_SERVER_TYPES },
+      { match: 'hcloud server create', result: () => { created = true; return ''; } },
+      { match: `hcloud server describe ${state.service}`, result: () => created ? JSON.stringify({ public_net: { ipv4: { ip: '203.0.113.10' } } }) : { stdout: '', stderr: 'server not found', code: 1 } },
+      // cloud-init mounted the data volume; the installer refuses to deploy Postgres
+      // onto a server whose attached disk never appeared.
+      { match: 'findmnt', result: '/dev/disk/by-id/scsi-0HC_Volume_000000\n' },
+      ...compose,
+    ];
+  }
+  // A redeploy lists deployments so it can refuse a newer failed latest and wait for the redeployed
+  // id (GY-1908); a single SUCCESS is both serving and latest until redeploy prepends another.
+  let deployments: { id: string; status: string }[] = [{ id: 'dep-serving', status: 'SUCCESS' }];
+  return [
+    { match: 'railway --version', result: 'railway 3.11.0' },
+    // The account's workspaces, as `railway whoami --json` reports them; one by default so a
+    // plain install resolves the workspace on its own.
+    { match: 'railway whoami --json', result: JSON.stringify({ name: 'installer', email: 'installer@example.test', workspaces: state.workspaces ?? RAILWAY_WORKSPACES.slice(0, 1) }) },
+    { match: 'railway whoami', result: 'installer@example.test' },
+    { match: 'railway status --json', result: state.installed ? JSON.stringify({ name: 'graphyard-owner-project', services: { edges: [{ node: { name: 'Postgres' } }, { node: { name: state.service } }] } }) : { stdout: '', stderr: 'no linked project', code: 1 } },
+    { match: 'railway deployment list', result: () => JSON.stringify(deployments) },
+    { match: 'railway redeploy', result: () => {
+      const id = `dep-redeployed-${deployments.length}`;
+      deployments = [{ id, status: 'SUCCESS' }, ...deployments];
+      return JSON.stringify({ id });
+    } },
+    { match: 'railway variables', result: state.installed ? (state.envFile ?? '{}') : '{}' },
+    { match: 'railway domain', result: 'https://graphyard-owner-project.up.railway.app' },
+  ];
+}
+
+/** The gh login's transcript: authenticated, and the repository's deploy keys (GY-2010). Nothing else on GitHub is read or written. */
+export function githubResponses(state: FakeState, repository = REPOSITORY) {
+  return [
+    { match: 'gh auth status', result: `Logged in to github.com account installer` },
+    { match: `gh repo deploy-key list -R ${repository}`, result: () => JSON.stringify(state.deployKeys) },
+    { match: 'gh repo deploy-key add ', result: (line: string) => {
+      const [, file, title] = /deploy-key add (\S+) .*--title (\S+)/.exec(line) ?? [];
+      state.deployKeys.push({ id: state.deployKeys.length + 1, key: readFileSync(file, 'utf8').trim(), title });
+      return '';
+    } },
+  ];
+}
+export interface Harness {
+  root: string;
+  configHome: string;
+  hostFiles: Map<string, BundleFileRecord>;
+  transport: ReturnType<typeof fakeTransport>;
+  remotes: Map<string, ReturnType<typeof fakeTransport>>;
+  state: FakeState;
+  requests: { method: string; url: string; body?: string }[];
+  deps: InstallDependencies;
+  commandLines(): string[];
+  allCommandLines(): string[];
+  cleanup(): Promise<void>;
+}
+
+export interface HarnessOptions {
+  provider: Provider;
+  installed?: boolean;
+  serverUrl?: string;
+  envFile?: string;
+  service?: string;
+  workdir?: string;
+  /** GET /api/status's body, or a function answering it per request. */
+  statusBody?: unknown;
+  healthy?: boolean;
+  /** The commit /healthz reports; the pinned Graphyard source's by default, so a Railway upload is served. */
+  servedCommit?: string | null;
+  repository?: string;
+  /** Reuse a previous harness's checkout and credential home to exercise a re-run. */
+  root?: string;
+  configHome?: string;
+  /** Railway only: the workspaces the fake account belongs to (default: exactly one). */
+  workspaces?: { id: string; name: string }[];
+  /** A self-contained install on a created Hetzner server (the host provider is always one). */
+  selfContained?: boolean;
+  /** The remote host's files, to reuse a previous harness's host on a re-run. */
+  hostFiles?: Map<string, BundleFileRecord>;
+  /** Transcript lines consulted before the fixture host's and the provider's own (first match wins). */
+  extraResponses?: { match: string; result: string | { stdout: string; stderr: string; code: number } | ((line: string, input?: string) => string | { stdout: string; stderr: string; code: number }) }[];
+  /** The agent registry the fake server holds (GET /api/agent-registry/document). */
+  registry?: any;
+  /** Deploy keys GitHub already lists for the repository. */
+  deployKeys?: FakeState['deployKeys'];
+}
+
+/**
+ * The roster the fake deployment serves (GY-1879): the last GRAPHYARD_PRINCIPALS the transport was
+ * handed, over standard input (Railway, local) or in a written env file (Compose, a host).
+ */
+export function deployedRoster(transport: ReturnType<typeof fakeTransport>, remotes: Map<string, ReturnType<typeof fakeTransport>> = new Map()): { id: string; role: string; sessionKind?: string; proofs?: string[]; grants?: string[]; token: string }[] {
+  const commands = [...transport.commands, ...[...remotes.values()].flatMap(remote => remote.commands)];
+  const handed = [...commands].reverse().find(command => command.args.includes('GRAPHYARD_PRINCIPALS') && command.input);
+  if (handed) return JSON.parse(handed.input!);
+  const files = [...transport.files.values(), ...[...remotes.values()].flatMap(remote => [...remote.files.values()])];
+  for (const file of [...files].reverse()) {
+    const line = file.content.split('\n').find(entry => entry.startsWith('GRAPHYARD_PRINCIPALS='));
+    if (line) return JSON.parse(line.slice('GRAPHYARD_PRINCIPALS='.length));
+  }
+  return [];
+}
+
+export async function harness(options: HarnessOptions): Promise<Harness> {
+  const repository = options.repository ?? REPOSITORY;
+  const reused = !!(options.root && options.configHome);
+  const root = options.root ?? await temporaryRepository(repository);
+  const configHome = options.configHome ?? await temporaryDirectory('config');
+  const installId = repository.replace('/', '-');
+  const service = options.service ?? `graphyard-${installId}`;
+  const workdir = options.workdir ?? (options.provider === 'compose' ? `${configHome}/${installId}/compose` : `/opt/graphyard/${installId}`);
+  const state: FakeState = { installed: !!options.installed, deployKeys: options.deployKeys ?? [] };
+  // One file store per remote host, shared with its fixture responses, so a host reads back what was written to it.
+  const hostFiles = options.hostFiles ?? new Map<string, BundleFileRecord>();
+  const selfContained = options.provider === 'host' || !!options.selfContained;
+  const responses = [...(options.extraResponses ?? []), ...githubResponses(state, repository), ...(selfContained ? hostResponses(hostFiles, { installed: state.installed }, repository) : []), ...providerResponses(options.provider === 'host' ? 'docker-host' : options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces })];
+  const transport = fakeTransport({ responses });
+  const remotes = new Map<string, ReturnType<typeof fakeTransport>>();
+  const ssh = (host: string) => {
+    if (!remotes.has(host)) remotes.set(host, fakeTransport({ responses, files: hostFiles }));
+    return remotes.get(host)! as Transport;
+  };
+  const serverUrl = options.serverUrl ?? 'https://graphyard-owner-project.up.railway.app';
+  const requests: { method: string; url: string; body?: string }[] = [];
+  const registry = options.registry ?? { version: 1, revision: 0, updatedAt: null, runtimes: [], models: [], accounts: [], roles: [], sessions: [], refusals: [], lastMutation: null };
+  const fetchImpl = (async (input: any, init: any = {}) => {
+    const url = String(input); const method = String(init.method ?? 'GET');
+    requests.push({ method, url, ...(init.body ? { body: String(init.body) } : {}) });
+    const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+    if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true, commit: options.servedCommit === undefined ? GRAPHYARD_SOURCE_SHA : options.servedCommit });
+    if (url.endsWith('/api/agent-registry/document')) return json(200, registry);
+    // The served roster (GET /api/principals), as the control plane lists it: ids, roles, kinds and grants, never tokens.
+    if (url.endsWith('/api/principals')) return json(200, { principals: deployedRoster(transport, remotes).map(principal => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [], leases: [] })) });
+    if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
+    if (url.endsWith('/api/status')) return json(200, typeof options.statusBody === 'function' ? options.statusBody() : options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository });
+    // Nothing else is served: a request to GitHub's API is recorded and refused, so a test can prove there was none.
+    return json(404, { message: 'unexpected request' });
+  }) as unknown as typeof fetch;
+
+  const deps: InstallDependencies = {
+    transport: transport as Transport, ssh, fetch: fetchImpl, configHome, sourceRoot: GRAPHYARD_SOURCE, sourceCommit: GRAPHYARD_SOURCE_SHA,
+    cliPath: join(root, 'package.json'), hostId: 'install-test-host',
+    wait: async () => {}, now: () => Date.now(), log: () => {},
+    // The real deploy-key step, with ssh-keygen replaced by one that writes a fixed pair; gh is the recording transport's.
+    ensureDeployKey: (installDir, repo, gh) => ensureDeployKey(installDir, repo, gh, { hostname: 'install-test-host', keygen: async args => {
+      const file = args[args.indexOf('-f') + 1];
+      await writeFile(file, 'placeholder private key: never read by the installer\n', { mode: 0o600 });
+      await writeFile(`${file}.pub`, `${DEPLOY_PUBLIC_KEY}\n`, { mode: 0o600 });
+      return { stdout: '', stderr: '', code: 0 };
+    } }),
+    detectRuntimes: async () => [{ kind: 'claude', program: 'claude', path: '/usr/bin/claude', authenticated: true, reason: 'test runtime' }],
+    detectHerdr: async () => ({ available: true, version: 'herdr 0.7.1', reason: 'available' }),
+    registerProfiles: async request => ({
+      repository: { connected: true, herdr: request.herdr.available, detail: 'test' },
+      master: { configured: true, kind: request.masterKind, detail: 'test' },
+      workers: request.workers.map(worker => ({ name: worker.name, principal: worker.principal, kind: worker.kind })),
+      reviewers: request.reviewers,
+    }),
+  };
+
+  return {
+    root, configHome, hostFiles, transport, remotes, state, requests, deps,
+    commandLines: () => transport.commands.map(command => [command.program, ...command.args].join(' ')),
+    allCommandLines: () => [...transport.commands, ...[...remotes.values()].flatMap(remote => remote.commands)].map(command => [command.program, ...command.args].join(' ')),
+    cleanup: async () => { if (reused) return; await rm(root, { recursive: true, force: true }); await rm(configHome, { recursive: true, force: true }); },
+  };
+}
+
+export const allText = (harnessed: Harness, extra: string[] = []) => [
+  ...harnessed.allCommandLines(),
+  ...[...harnessed.transport.commands, ...[...harnessed.remotes.values()].flatMap(remote => remote.commands)].map(command => command.input ?? ''),
+  ...[...harnessed.transport.files.values(), ...[...harnessed.remotes.values()].flatMap(remote => [...remote.files.values()])].map(file => file.content),
+  ...harnessed.requests.map(request => `${request.method} ${request.url} ${request.body ?? ''}`),
+  ...extra,
+].join('\n');

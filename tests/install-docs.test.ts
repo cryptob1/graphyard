@@ -63,7 +63,7 @@ test('docs/install.md is an agent-executable runbook with commands, verification
   // Failure handling is a symptom-to-action table, not prose.
   const failures = runbook.slice(runbook.indexOf('## Failure handling'));
   assert.ok((failures.match(/^\| `/gm) ?? []).length >= 8, 'the failure table must cover the real refusals');
-  for (const symptom of ['Preflight is incomplete', 'did not become healthy', 'Branch protection could not be applied', 'inside the managed repository']) {
+  for (const symptom of ['Preflight is incomplete', 'did not become healthy', 'gh repo deploy-key', 'inside the managed repository']) {
     assert.ok(failures.includes(symptom), `failure handling must cover "${symptom}"`);
   }
 });
