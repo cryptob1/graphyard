@@ -33,9 +33,9 @@ Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits
 
 Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) raises each crossed pattern as attention, never an item, drafting `retro.drafted` changes per recurring cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses; approved: [`retroStanding`](protocol/read-endpoints.md).
 
-## Flaky CI check
+## Flaky test
 
-Reruns once (`mergeQueue.rerunFailedChecks`, 0 disables); main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run+step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure/refusal/unconcluded hour reverts.
+The merge writer reruns a trial's failing files on the same merge commit; a pass is a trial flake on the item's merge ledger, which the [flake ledger](validation.md#flake-ledger) reads. No CI check or job log is read (GY-2010).
 
 ## Accepted evidence turns out to be wrong
 
