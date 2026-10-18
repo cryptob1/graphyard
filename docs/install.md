@@ -55,7 +55,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; redeploy; healthy `/healthz`. A bound App: `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `appPermissions.missing` empties.
+`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; redeploy; healthy `/healthz`. A bound App: `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `appPermissions.missing` empties. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`).
 
 ## Failure handling
 
