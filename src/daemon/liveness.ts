@@ -263,7 +263,7 @@ export const culpritShare = (cost: Pick<CycleCost, 'culprit' | 'workMs'>) => cos
  * The loop's own attention, ahead of every work item: a coordinator that is not cycling is why
  * nothing else on the list is moving. A breached latency budget follows it.
  */
-export function loopAttention(report: { liveness: LoopLiveness; budget?: LatencyBudget | null; failures?: CycleFailures | null; cost?: CycleCost | null }): AttentionItem[] {
+export function loopAttention(report: { liveness: LoopLiveness; /** Retired (GY-1980): always null, ignored. */ silence?: null; budget?: LatencyBudget | null; failures?: CycleFailures | null; cost?: CycleCost | null }): AttentionItem[] {
   const items: AttentionItem[] = [];
   const cost = report.cost ?? report.liveness.cost;
   // What to do about a long cycle depends on where its time went: a step that computed too long

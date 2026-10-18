@@ -29,7 +29,7 @@ import type { Runner } from '../runner/types.js';
 import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
 import { cycleCost, loopAttention, loopLiveness } from './liveness.js';
-import { latencyBudget } from './metrics.js';
+import { latencyBudget, silenceReport } from './metrics.js';
 import { baseFailureAttention } from './cycle-base-failures.js';
 import { maxApproverLaunches } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
@@ -565,6 +565,7 @@ export async function doctorStep(cycle: Cycle) {
       .map(([key, action]) => `${action.at} ${action.kind} on ${action.work ?? key}: ${action.detail}`),
     attention: [...loopAttention({
       liveness: { ...loopLiveness(state, clock, intervalMs, cycle.config.hostId), state: 'running' },
+      silence: silenceReport(state.silence, clock),
       budget: latencyBudget(state.latency),
       cost: cycleCost(state.metrics?.at(-1) ?? null, intervalMs),
     }), ...baseFailureAttention(Object.values(state.baseFailures), cycle.config.baseBranch)]

@@ -527,6 +527,8 @@ export const daemonStateSchema = z.object({
   memory: hostMemoryStateSchema.nullable().default(null),
   clocks: z.record(z.string(), itemClockSchema).default({}), // per-item passage clocks and the samples they produced: the loop's own latency measurement
   latency: z.array(latencySampleSchema).default([]),
+  /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and src/daemon/doctor.ts still names it until it drops its `silenceReport` argument. */
+  silence: z.unknown().optional(),
   /** One entry per scope request this loop has decided, for the latency budget it must keep. */
   scope: z.array(scopeMeasurementSchema).default([]),
   /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
