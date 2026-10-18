@@ -13,7 +13,7 @@ import { pinningVerify, retryPendingPin } from '../master/known-good.js';
 import { installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { boundDeployment, type ContainmentRetention, type DeploymentObservation, deploymentObservationSchema, message, type PromotionState, retainedContainments } from './state.js';
-import { promotionWaitBoundMs, staleContainmentReasonPrefix } from '../model/action-kinds.js';
+import { staleContainmentReasonPrefix } from '../model/action-kinds.js';
 
 export function deploymentDetail(observation: DeploymentObservation) {
   if (observation.source === 'unavailable') return `Deployment SHA is unverified: ${observation.reason ?? 'no deployment observation is configured or available'}`;
@@ -438,8 +438,8 @@ export interface PromotionReads {
   /** GY-1526: the local port set control-plane mode runs candidates through (promotion-local.ts); null where the loop's environment names no UAT. */
   local?: LocalReleasePorts | null;
 }
-/** GY-1966: the promotion-flight reading — the gates that stop every dispatch, local containment and the pipeline-progress answers — is a module of its own (src/daemon/promotion-flight.ts); these names are its public surface. */
-export { noLocalPortsReason, promotionCarryingMerge, promotionFrozenReasonPrefix, promotionHandoffMs, promotionMovement, promotionOffReason, promotionWaitSuffix } from './promotion-flight.js';
+/** The gate reasons a recorded promotion state names live in src/daemon/promotion-flight.ts; these names are their public surface. */
+export { noLocalPortsReason, promotionFrozenReasonPrefix, promotionOffReason } from './promotion-flight.js';
 import { noLocalPortsReason, promotionFrozenReasonPrefix, promotionOffReason } from './promotion-flight.js';
 
 /**
@@ -638,8 +638,8 @@ async function sealRefresh(previous: PromotionState | null, reads: PromotionRead
   if (!reads.sealChecks || (previous?.sealChecksReadAt && now - Date.parse(previous.sealChecksReadAt) < windowMs)) return kept;
   try { return { sealChecks: (await reads.sealChecks()).slice(0, promotionCandidatesListed), sealChecksReadAt: new Date(now).toISOString() }; } catch { return { ...kept, sealChecksReadAt: new Date(now).toISOString() }; }
 }
-/** How long after its cut a candidate's soak is looked for before the loop stops reading for it: the candidate-validation window, which GY-1966 also made the promotion wait's bound, so the two cannot drift. */
-export const soakAwaitedMs = promotionWaitBoundMs;
+/** How long after its cut a candidate's soak is looked for before the loop stops reading for it: the candidate-validation window (GY-1966). */
+export const soakAwaitedMs = 90 * 60_000;
 
 /**
  * A candidate's soak as `master status` shows it: `running` while its newest soak run is, else the

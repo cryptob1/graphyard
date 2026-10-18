@@ -433,7 +433,7 @@ test('unit:watchdog-refusal-clears-on-reapplied-unit — watchdogPlan\'s refusal
  * unit:executor-presence-renewal-live (AC-3), unit:executor-listening-keyed-to-evidence (AC-4), and
  * manual:fault-class-configuration (AC-5). The executor routes run against a real engine and store.
  */
-const fleetKinds: NextActionKind[] = ['dispatch', 'request-review', 'approve-scope', 'resync', 'reclaim', 'verify-deployment'];
+const fleetKinds: NextActionKind[] = ['dispatch', 'request-review', 'approve-scope', 'resync', 'reclaim'];
 const coordinatorActor = { id: 'graphyard-master', role: 'coordinator' } as Principal;
 const fleetSlot = (n: number) => `graphyard-master@vishrog/${n}`;
 let database: EmbeddedPostgres | undefined, sharedStore: Store | undefined;

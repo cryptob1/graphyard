@@ -830,7 +830,6 @@
     "tests/soak-pages-environment-and-branch-recovery.test.ts": 61453,
     "tests/soak-pi-provider-limit.test.ts": 80000,
     "tests/soak-plane-stall.test.ts": 2857,
-    "tests/soak-promotion-wait.test.ts": 56000,
     "tests/soak-promotion.test.ts": 51322,
     "tests/soak-reclaim-refusal.test.ts": 2659,
     "tests/soak-red-regression.test.ts": 1000,

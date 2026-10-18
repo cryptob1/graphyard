@@ -1,6 +1,6 @@
-import { carriedBindings, deliveryState, isClosed, type Gate, type Work } from '../model.js';
+import { carriedBindings, isClosed, type Gate, type Work } from '../model.js';
 import { latestCheck } from '../merge-queue.js';
-import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release.js';
+import { noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
 import { ciCheckName } from './ci-refusal.js';
@@ -158,13 +158,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       const stuck = reasons.map(reason => plainReason(reason, 'merge')).find(plain => plain.stuck);
       return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
     }
-    case 'deploy': {
-      const state = deliveryState(work);
-      return state === 'delivered-with-failure' ? { detail: 'the check after deploying failed', who: 'Master agent' }
-        : release.failed.has(work.key) ? { detail: 'production has not deployed it', who: 'Master agent' }
-        : state === 'awaiting-smoke' ? { detail: 'checking the live release', who: 'Prover agent' }
-          : { detail: 'waiting for the live release to serve it', who: 'Graphyard (automatic)' };
-    }
+    case 'deploy': return { detail: 'merged', who: 'Nobody — it has merged' };
   }
 }
 
@@ -172,9 +166,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
  * The seven steps for one item. Before the work is handed in only Build can be current. After
  * it, each step's own gate decides done, and the first step whose gate refuses is current; when
  * every gate passes the item is merging. A merged item has every step done — reading "Live" where
- * production was observed serving it — unless its policy asks for a post-deployment check that has
- * not passed, or the production watch observes production not serving it yet (src/model/release.ts),
- * which keeps it at Deploy. Work closed without merging has no step at all.
+ * production was observed serving it. Work closed without merging has no step at all.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
   const make = (state: (id: StepId) => StepState, current: StepId | null, detail: string, who: string): PrSteps => ({
@@ -183,14 +175,9 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
   });
   // Closed without merging (src/model/closure.ts): no step is done or current, and nobody acts.
   if (isClosed(work)) return make(() => 'pending', null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
-  if (work.stage === 'done') {
-    // Delivered once merged, unless a post-deployment check or the production watch holds it at
-    // Deploy (web/groups.ts reads the same `leftFlowAt`). "Live" only once the release is observed serving it.
-    if (!work.delivery || leftFlowAt(work, release)) return servedFor(work, release) ? make(() => 'done', null, 'Live', 'Nobody — it is live')
-      : make(() => 'done', null, 'Merged', 'Nobody — it has merged');
-    const { detail, who } = waitsOn('deploy', undefined, work, now, release);
-    return make(id => id === 'deploy' ? 'current' : 'done', 'deploy', detail, who);
-  }
+  // Done = merged (GY-1981): the steps end at merge. "Live" only once the release is observed serving it.
+  if (work.stage === 'done') return servedFor(work, release) ? make(() => 'done', null, 'Live', 'Nobody — it is live')
+    : make(() => 'done', null, 'Merged', 'Nobody — it has merged');
   // A change request sends the work back to its builder, so it waits at Build, not at Review; and
   // a refusing ready gate keeps handed-in work at build, as the control plane's stage does (src/model/gates.ts).
   const readyRefused = work.gates.some(gate => gate.name === 'ready' && !gate.passed);
@@ -242,8 +229,8 @@ export function stepSince(work: Work, now: number, moves?: readonly StepTransiti
 
 /**
  * How long the item has held its current step, and whether that is past the one threshold
- * (src/model/duration.ts). Only work that has left the flow (no current step, `leftFlowAt`) has arrived
- * and is never overdue; merged work still held at Deploy keeps a running clock.
+ * (src/model/duration.ts). Work that has left the flow (no current step: merged or closed) has arrived
+ * and is never overdue.
  */
 export function stepHeld(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): StatusDuration {
   return statusDuration(stepSince(work, now, moves, release), now, prSteps(work, now, release).current === null);

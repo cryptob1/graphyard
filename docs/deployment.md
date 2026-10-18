@@ -37,7 +37,7 @@ Observing a release reports post-deploy checks it does not yet see; nothing is f
 
 ### Deployment incident
 
-Railway deploys `release/production` in ~1min. `/healthz` `commit` at tip: `graphyard master verify-deployment GY-N` per pending delivery; else `railway deployment list` shows failures; redeploy ([manual fallback](#manual-fallback)), verify.
+Railway deploys `release/production` in ~1min. `/healthz` `commit` behind tip: `railway deployment list` shows failures; redeploy ([manual fallback](#manual-fallback)), verify.
 
 #### Production environment name
 

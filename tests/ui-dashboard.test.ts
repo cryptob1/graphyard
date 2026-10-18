@@ -106,28 +106,18 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
     // The tile row still counts every group, so the numbers never change under the reader.
     for (const other of groups) assert.equal(tileCount(filtered, other), byGroup[other].length);
   }
-  // Merged work is Shipped; only a policy that asks for a post-deployment check keeps it Moving (at
-  // Deploy) until that check passes on the recorded deployment, and a failed check is Blocked.
+  // Merged work is Shipped (GY-1981: done = merged), whatever its smoke policy, deployment record or smoke verdict.
   const merged = find('GY-18', work);
   const release = (delivery: Record<string, unknown>) => ({ ...merged, policy: { ...merged.policy, deploySmoke: true }, delivery: { ...merged.delivery!, ...delivery } }) as Work;
   const deployment = { sha: merged.delivery!.mergeSha, covers: 'exact' };
   const smoke = (result: string) => ({ sha: merged.delivery!.mergeSha, mergeSha: merged.delivery!.mergeSha, result, producer: 'smoke', executed: 1, skipped: 0, at: new Date(NOW).toISOString() });
-  const awaiting = release({ deployment: null }), checking = release({ deployment, smoke: null }), failed = release({ deployment, smoke: smoke('fail') }), live = release({ deployment, smoke: smoke('pass') });
-  assert.equal(groupOf(merged, NOW), 'shipped');
-  assert.equal(groupOf(live, NOW), 'shipped');
-  // With no post-deployment check asked for, no per-item deployment record is written: the merge has shipped (AC-11).
+  const awaiting = release({ deployment: null });
   const unverified = { ...merged, delivery: { ...merged.delivery!, deployment: undefined } } as Work;
-  assert.equal(groupOf(unverified, NOW), 'shipped'); assert.equal(prSteps(unverified, NOW).current, null);
-  assert.equal(groupOf(awaiting, NOW), 'moving'); assert.equal(groupOf(checking, NOW), 'moving'); assert.equal(groupOf(failed, NOW), 'blocked');
-  const releasing = classify(work.map(item => item.key === 'GY-18' ? awaiting : item), NOW);
-  assert.ok(releasing.byGroup.moving.some(item => item.key === 'GY-18'), 'a merge waiting on its release stays on the Work page');
-  assert.equal(releasing.open, open + 1);
-  const releasingPage = home(dashboard({ work: work.map(item => item.key === 'GY-18' ? awaiting : item) }));
-  assert.equal(tileCount(releasingPage, 'moving'), rowsOf(releasingPage, 'moving').length);
-  assert.ok(rowsOf(releasingPage, 'moving').includes('GY-18'));
+  for (const item of [merged, unverified, awaiting, release({ deployment, smoke: null }), release({ deployment, smoke: smoke('fail') }), release({ deployment, smoke: smoke('pass') })]) {
+    assert.equal(groupOf(item, NOW), 'shipped'); assert.equal(prSteps(item, NOW).current, null);
+  }
   // "Shipped this week" counts what the page classifies as Shipped and the release was seen serving:
-  // a merge from this morning still waiting on the post-deployment check its policy asks for is in
-  // Moving, not in the footer.
+  // a merge from this morning with no observed release is off the open board but not in the count.
   const shippedLine = (html: string) => Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(html)?.[1]);
   const servedThisWeek = (items: Work[]) => items.filter(item => groupOf(item, NOW) === 'shipped' && releasedAt(item) !== null && NOW - releasedAt(item)! <= 7 * 24 * hour).map(item => item.key);
   assert.equal(shippedLine(page), servedThisWeek(work).length);
@@ -136,8 +126,8 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   const pendingPage = home(dashboard({ work: pending }));
   assert.ok(!servedThisWeek(pending).includes('GY-18'));
   assert.equal(shippedLine(pendingPage), servedThisWeek(pending).length);
-  assert.ok(rowsOf(pendingPage, 'moving').includes('GY-18'), 'the pending merge is counted once, in Moving');
-  // The footer names it only as the latest merge (GY-168), never as shipped.
+  assert.ok(!rowsOf(pendingPage, 'moving').includes('GY-18'), 'the merge is off the open board');
+  // The footer names it as the latest merge (GY-168).
   assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · merged /);
   // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
   const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
@@ -314,9 +304,6 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     ['proofs pending on an inherited obligation', withReasons(find('GY-16', work), { acceptance: ['Bootstrap obligation inherited from GY-9 AC-2: integration:contract needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'] }), 'prove', 'Proving · 3 of 4 proofs passed', 'Prover agent'],
     ['proofs no longer independent', withReasons(find('GY-16', work), { acceptance: [`Trusted ${find('GY-16', work).criteria[0].proofs[0]} evidence from producer-1 is no longer independent: producer-1 has since held an assignment on GY-16`] }), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
     ['merging', find('GY-21', work), 'merge', 'Merging · Graphyard is merging it', 'Graphyard (automatic)'],
-    // Deploy is a step only where the policy asks for the check after deploying (GY-161, AC-11).
-    ['deploying', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'deploy', 'Deploying · waiting for the live release to serve it', 'Graphyard (automatic)'],
-    ['checking the live release', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true } } as Work, 'deploy', 'Deploying · checking the live release', 'Prover agent'],
     // A change request sends it back to the builder: the item waits at Build, not at Review.
     ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'build', 'Building · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
   ];
@@ -332,8 +319,9 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
     for (const step of steps.steps.slice(0, at)) assert.equal(step.state, 'done', `${name}: ${step.id} before the current step is done`);
     assert.equal(steps.steps[stepIds.length - 1].state, current === 'deploy' ? 'current' : 'pending', `${name}: deploy`);
   }
-  // A shipped item the live release serves has every step done.
+  // A merged item has every step done, whatever its smoke policy (GY-1981: the steps end at merge).
   assert.ok(prSteps(find('GY-18', work), NOW).steps.every(step => step.state === 'done'));
+  assert.equal(prSteps({ ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, NOW).current, null);
   // The Work page row, the phone card (the same element, laid out as a card) and the item page draw the same steps.
   for (const key of ['GY-14', 'GY-15', 'GY-16', 'GY-21', 'GY-22']) {
     const steps = prSteps(find(key, work), NOW);
@@ -383,19 +371,19 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   const { byGroup: flowGroups } = classify(board(), NOW);
   for (const item of [...flowGroups.moving, ...flowGroups.blocked]) assert.equal(replayed.get(item.key)?.step, prSteps(item, NOW).current, `${item.key} replays to its true step`);
   assert.equal(replayed.get('GY-22')?.step, 'test');
-  // The recorded release serving a merge takes its dot from Deploy out of the flow, as the Now view drops it.
+  // A merge takes its dot from Deploy out of the flow (GY-1981: done = merged), as the Now view drops it.
   const shipped = board().filter(item => groupOf(item, NOW) === 'shipped');
   assert.ok(shipped.length > 0);
   for (const item of shipped) assert.equal(replayed.get(item.key), undefined, `${item.key} is out of the flow`);
-  // (GY-9's fixture history records its creation after its merge, so only GY-18 and GY-19 leave Deploy at their release.)
+  // (GY-9's fixture history records its creation after its merge, so only GY-18 and GY-19 leave Deploy, at their merge.)
   for (const key of ['GY-18', 'GY-19'])
-    assert.ok(recorded.rows.some(row => row.workKey === key && row.detail === 'deploy to outside' && row.observedAt === find(key).delivery!.deployment!.observedAt), `${key} leaves Deploy when the release serves it`);
+    assert.ok(recorded.rows.some(row => row.workKey === key && row.detail === 'deploy to outside' && row.observedAt === find(key).delivery!.mergedAt), `${key} leaves Deploy at its merge`);
   // Time per step is measured over those same moves: Validate and Deploy get their own time, and
-  // Deploy's is the wait from the merge to the recorded release (ten minutes on this board).
+  // Deploy's is none, since a merge leaves the flow.
   const report = boardApi('analytics/flow?window=7') as { stepDwell: { step: string; n: number; medianMs: number | null }[] };
   assert.deepEqual(report.stepDwell.map(entry => entry.step), [...stepIds]);
   const deploy = report.stepDwell.find(entry => entry.step === 'deploy')!;
-  assert.ok(deploy.n >= 2); assert.equal(deploy.medianMs, 10 * 60_000);
+  assert.ok(deploy.n >= 2); assert.equal(deploy.medianMs, 0);
   const since = new Date(NOW - 3 * hour).toISOString();
   const recent = boardApi(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(since)}`) as typeof recorded;
   assert.ok(recent.rows.length < recorded.rows.length && recent.rows.every(row => Date.parse(row.observedAt!) >= Date.parse(since)), 'the key leaves out moves before the instant');
@@ -666,56 +654,28 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   assert.deepEqual(stepMoves(asOf, later).map(move => `${move.from}>${move.to}`), ['null>deploy'], 'a delivery after the cutoff is not in the report');
   assert.deepEqual(stepMoves({ ...asOf, to: new Date(NOW).toISOString() }, later).map(move => `${move.from}>${move.to}`), ['null>deploy', 'deploy>null']);
   assert.deepEqual(stepMoves({ ...dataset, to: new Date(NOW - 2 * hour).toISOString() }, later), [], 'a gate fact after the cutoff is not a move');
-  // Only a policy that asks for the post-deployment check keeps a merge at Deploy, while that check is outstanding.
+  // Done = merged (GY-1981): a smoke policy keeps nothing at Deploy.
   const smoke = { ...real[0], policy: { ...real[0].policy, deploySmoke: true } } as Work;
-  assert.equal(groupOf(smoke, NOW), 'moving'); assert.equal(prSteps(smoke, NOW).current, 'deploy');
+  assert.equal(groupOf(smoke, NOW), 'shipped'); assert.equal(prSteps(smoke, NOW).current, null);
   // A Deploy stay that ended before the window opened is not in the window: no carried move, no exit.
   const before = { facts: [], carryIn: [{ workId: real[0].id, kind: 'gates.changed', observedAt: new Date(NOW - 30 * hour).toISOString(), details: { stage: 'done' } }], from: new Date(NOW - 24 * hour).toISOString(), to: new Date(NOW).toISOString() } as any;
   const early = { ...real[0], delivery: { ...real[0].delivery!, mergedAt: new Date(NOW - 28 * hour).toISOString() } } as Work;
   assert.deepEqual(stepMoves(before, early), [], 'a delivery before the window is no move in it');
   assert.deepEqual(stepMoves({ ...before, from: new Date(NOW - 29 * hour).toISOString() }, early).map(move => `${move.from}>${move.to}`), ['null>deploy', 'deploy>null']);
-  // Held at Deploy by the production watch, the step clock runs and goes overdue; it settles only once the item leaves the flow.
+  // Whatever the production watch reports, a merge has left the flow: the board, the step clock and
+  // the step history all read the merge, never a per-item hold (production health is one release-level reading).
   const stale = { ...real[0], delivery: { ...real[0].delivery!, mergedAt: new Date(NOW - 48 * hour).toISOString() } } as Work;
   const failing = { ...noRelease, failed: new Set([stale.key]) }, pending = { ...noRelease, unserved: new Set([stale.key]) };
-  for (const release of [failing, pending]) { assert.equal(prSteps(stale, NOW, release).current, 'deploy'); assert.equal(stepHeld(stale, NOW, [], release).overdue, true, 'a pending Deploy goes overdue'); }
-  assert.equal(stepHeld({ ...stale, policy: smoke.policy } as Work, NOW, []).overdue, true, 'an outstanding smoke check keeps the clock running');
-  assert.equal(stepHeld(stale, NOW, []).overdue, false, 'work that left the flow is never overdue');
-  // The step history holds a merge at Deploy exactly where the board does (one rule, `flowExitAt`):
-  // while the watch reports it pending or failed, or it merged after the watch's last pass.
   const atDeploy = { facts: [{ workId: stale.id, kind: 'gates.changed', observedAt: new Date(NOW - 47 * hour).toISOString(), details: { stage: 'done' } }], carryIn: [] } as any;
-  const exits = (production?: typeof noRelease) => stepMoves({ ...atDeploy, production }, stale).map(move => `${move.from}>${move.to}`);
-  assert.deepEqual(exits(), ['null>deploy', 'deploy>null'], 'no production observation: the merge leaves Deploy');
-  for (const release of [failing, pending, { ...noRelease, observedAt: NOW - 49 * hour }]) {
-    assert.deepEqual(exits(release), ['null>deploy'], 'held at Deploy in the history as on the board');
-    assert.notEqual(groupOf(stale, NOW, undefined, undefined, release), 'shipped');
+  for (const release of [noRelease, failing, pending, { ...noRelease, observedAt: NOW - 49 * hour }]) {
+    assert.equal(groupOf(stale, NOW, undefined, undefined, release), 'shipped');
+    assert.equal(prSteps(stale, NOW, release).current, null); assert.equal(stepHeld(stale, NOW, [], release).overdue, false, 'work that left the flow is never overdue');
+    assert.deepEqual(stepMoves({ ...atDeploy, production: release }, stale).map(move => `${move.from}>${move.to}`), ['null>deploy', 'deploy>null']);
   }
-  assert.deepEqual(exits({ ...noRelease, observedAt: NOW - hour }), ['null>deploy', 'deploy>null'], 'looked for since, and not reported unserved');
-  // The flow API reads the watch's report the same way as the board, so its steps drill-down and
-  // step dwell agree with the Now view and each row's clock.
+  // Merges the watch reports pending or failed are merged and not yet seen live: the footer counts them.
   const watch = { observedAt: new Date(NOW).toISOString(), serving: 'abc', pending: [keys[0]], incidents: [{ key: keys[1] }] };
-  const watchView = releaseView({ ...boardStatus(), production: watch });
-  assert.deepEqual([...productionHold(watch).unserved], [...watchView.unserved]); assert.deepEqual([...productionHold(watch).failed], [...watchView.failed]);
-  assert.equal(groupOf(real[0], NOW, undefined, undefined, watchView), 'moving'); assert.equal(groupOf(real[1], NOW, undefined, undefined, watchView), 'blocked');
-  const heldData = { ...flowDataset(work), production: productionHold(watch) };
-  const heldRows = flowDrilldown(heldData, computeFlow(heldData, { days: 30 }), { metric: 'steps', key: null, authorized: true }).rows;
-  for (const key of keys.slice(0, 2)) assert.ok(!heldRows.some(row => row.workKey === key && row.detail === 'deploy to outside'), `${key} stays at Deploy in the history`);
-  assert.ok(heldRows.some(row => row.workKey === keys[2] && row.detail === 'deploy to outside'), `${keys[2]} is not held`);
-  // The server's flow route reads the watch itself on each request, never through another route's
-  // side effect (integration:flow-analytics-production-hold exercises it end to end).
-  assert.match(await read('src/server/routes/flow-analytics.ts'), /production: production\?\.status\(\) \?\? null/);
-  // Merges the watch holds at Deploy (Moving, Blocked) are still merged and not yet seen live: the footer counts them.
   const watched = home(dashboard({ work, status: { ...boardStatus(), production: watch } as any }));
   assert.equal(Number(/data-unreleased="(\d+)"/.exec(watched)?.[1]), 2, `${keys[0]} pending and ${keys[1]} failed`);
-  // A production incident blocks at Deploy and says so, on the row and the item page — never "Shipped".
-  assert.equal(groupOf(stale, NOW, undefined, undefined, failing), 'blocked');
-  const row = markup(createElement(WorkCard, { item: stale, now: NOW, onOpen: noop, release: failing }));
-  assert.match(row, /Production has not deployed it\./); assert.doesNotMatch(row, /Shipped/);
-  const incident = { observedAt: new Date(NOW).toISOString(), serving: 'abc', incidents: [{ key: stale.key }], pending: [] };
-  const detail = firstScreen(markup(createElement(WorkDetails, { ...dashboard({ work: [stale], status: { ...boardStatus(), production: incident } as any }), item: stale })));
-  assert.match(detail, /Production has not deployed it\./); assert.doesNotMatch(detail, /Shipped in/);
-  // What is left names the release-aware Deploy detail, never "nothing blocks it".
-  const left = /aria-label="What is left">[\s\S]*?<\/section>/.exec(detail)![0];
-  assert.match(left, /<small>1 thing<\/small>/); assert.match(left, /Production has not deployed it\./); assert.doesNotMatch(left, /nothing blocks it/);
 });
 
 test('unit:ui-insights-real-items — Insights builds its flow and 24-hour replay from real-shaped items (no observation, no reviews, no candidate) without failing, through the same code path the page reads', async () => {
@@ -792,30 +752,22 @@ test('unit:ui-workers-finish — agent names and roles never break mid-word, Hea
   assert.match(await read('browser-tests/screenshots.spec.ts'), /\.sessions-table \.agent-name, \.sessions-table td\[data-label=Role\][\s\S]*getClientRects[\s\S]*toEqual\(\[\]\)/);
 });
 
-test('GY-161 review: where the production watch observes production, a merge waits at Deploy until it is served (a failed deployment is Blocked); the configured production environment decides Live; the item page reads its checks from the test gate', async () => {
+test('GY-161 review: whatever the production watch observes, a merge is Shipped (GY-1981: done = merged); the configured production environment decides Live; the item page reads its checks from the test gate', async () => {
   const real = realDeliveredWork() as unknown as Work[];
   const [waiting, failing, deployed] = real;
   const status = (production: unknown, productionEnvironment?: string) => ({ ...boardStatus('admin'), production, ...(productionEnvironment ? { productionEnvironment } : {}) });
   const observed = { observedAt: new Date(NOW - 60_000).toISOString(), serving: 'a'.repeat(40), servingSource: 'provider', error: null,
     deployed: [deployed.key], pending: [waiting.key, failing.key], incidents: [{ id: 'i1', workId: failing.id, key: failing.key, status: 'missing', reason: 'no deployment observed' }] };
   const release = releaseView(status(observed));
-  // Production observed not serving it yet: Moving, at Deploy, waiting for the release.
-  assert.equal(groupOf(waiting, NOW, undefined, undefined, release), 'moving');
-  const steps = prSteps(waiting, NOW, release);
-  assert.equal(steps.current, 'deploy'); assert.equal(steps.label, 'Deploying · waiting for the live release to serve it'); assert.equal(steps.who, 'Graphyard (automatic)');
-  // An open deployment incident: Blocked at Deploy, for the master agent.
-  assert.equal(groupOf(failing, NOW, undefined, undefined, release), 'blocked');
-  assert.equal(prSteps(failing, NOW, release).label, 'Deploying · production has not deployed it');
-  assert.equal(nextActor(failing, 'blocked', NOW, release).who, 'Master agent');
-  // Served: Shipped.
-  assert.equal(groupOf(deployed, NOW, undefined, undefined, release), 'shipped');
+  // Production observed not serving it yet, an open deployment incident, or served: every merge is Shipped, at no step.
+  for (const item of [waiting, failing, deployed]) { assert.equal(groupOf(item, NOW, undefined, undefined, release), 'shipped'); assert.equal(prSteps(item, NOW, release).current, null); }
   // The Work page and Insights read the same view from status.
   const work = [...board(), ...real];
   const { byGroup } = classify(work, NOW, undefined, release);
   const page = home(dashboard({ work, status: status(observed) }));
-  assert.ok(rowsOf(page, 'moving').includes(waiting.key)); assert.ok(rowsOf(page, 'blocked').includes(failing.key));
+  assert.ok(!rowsOf(page, 'moving').includes(waiting.key)); assert.ok(!rowsOf(page, 'blocked').includes(failing.key));
   assert.equal(tileCount(page, 'moving'), byGroup.moving.length); assert.equal(tileCount(page, 'blocked'), byGroup.blocked.length);
-  assert.match(markup(createElement(InsightsFlow, dashboard({ work, status: status(observed) }))), new RegExp(`class="now-dot[^"]*"[^>]*data-key="${waiting.key}"`));
+  assert.doesNotMatch(markup(createElement(InsightsFlow, dashboard({ work, status: status(observed) }))), new RegExp(`class="now-dot[^"]*"[^>]*data-key="${waiting.key}"`));
   // No observation of what production serves (none configured, an unknown serving commit, a failed
   // provider read) holds nothing back: every real-shaped merge stays Shipped (AC-11).
   for (const unknown of [null, { ...observed, serving: null }, { ...observed, error: 'Railway API answered 500' }, { ...observed, observedAt: null }]) {
@@ -832,7 +784,7 @@ test('GY-161 review: where the production watch observes production, a merge wai
   assert.match(await read('src/server/routes/status.ts'), /const productionEnvironment = await resolvedProductionEnvironment\(engine\.store\.pool\);[\s\S]*production\?\.status\(\) \?\? null, productionEnvironment,/);
   assert.match(await read('src/server/routes/flow-analytics.ts'), /flowQuery\(url, await resolvedProductionEnvironment\(engine\.store\.reportPool\)\)/);
   assert.equal(releasedAt(live, named), NOW - hour); assert.equal(prSteps(live, NOW, named).label, 'Live');
-  assert.equal(groupOf(live, NOW, undefined, undefined, named), 'shipped', 'a verified release outranks a pending watch entry');
+  assert.equal(groupOf(live, NOW, undefined, undefined, named), 'shipped');
   assert.equal(releasedAt(live), null, 'under the default name it is not live');
   const namedStatus = status(null, 'graphyard / production');
   assert.match(markup(createElement(ShippedPage, dashboard({ work: [live], status: namedStatus }))), /data-live="true">Live</);
@@ -865,7 +817,7 @@ test('GY-161 review: where the production watch observes production, a merge wai
 });
 
 
-test('GY-161 review: a check fails on the latest trusted run across Apps; closed work has no step; a pending rework replays at Build; step moves are read page by page; a merge after the watch\'s last pass waits at Deploy', async () => {
+test('GY-161 review: a check fails on the latest trusted run across Apps; closed work has no step; a pending rework replays at Build; step moves are read page by page; a merge after the watch\'s last pass is Shipped', async () => {
   // The latest run across every trusted App decides, as the test gate's `latestCheck` does: an
   // older pending run from one App never hides a newer failure from another.
   const handedIn = find('GY-22');
@@ -921,17 +873,14 @@ test('GY-161 review: a check fails on the latest trusted run across Apps; closed
   assert.match(await read('web/step-moves.ts'), /readStepRows\(api\)/);
   assert.match(await read('web/pages/insights-flow.tsx'), /readStepRows\(api, since\)/);
 
-  // Where the production watch observes production, a merge after its last pass has not been
-  // looked for yet: it waits at Deploy until a live observation is recorded. Older merges the
-  // watch does not list (outside its window) and boards with no watch stay Shipped (AC-11).
+  // A merge after the production watch's last pass is Shipped too (GY-1981: done = merged).
   const [merged] = realDeliveredWork() as unknown as Work[];
   const lastPass = NOW - 10 * 60_000;
   const watch = releaseView({ ...boardStatus('admin'), production: { observedAt: new Date(lastPass).toISOString(), serving: 'a'.repeat(40), error: null, deployed: [], pending: [], incidents: [] } });
   assert.equal(watch.observedAt, lastPass);
   const fresh = { ...merged, delivery: { ...merged.delivery!, mergedAt: new Date(NOW - 5 * 60_000).toISOString() } } as Work;
-  assert.equal(groupOf(fresh, NOW, undefined, undefined, watch), 'moving');
-  assert.equal(prSteps(fresh, NOW, watch).current, 'deploy');
-  assert.equal(prSteps(fresh, NOW, watch).label, 'Deploying · waiting for the live release to serve it');
+  assert.equal(groupOf(fresh, NOW, undefined, undefined, watch), 'shipped');
+  assert.equal(prSteps(fresh, NOW, watch).current, null);
   const older = { ...merged, delivery: { ...merged.delivery!, mergedAt: new Date(NOW - 48 * hour).toISOString() } } as Work;
   assert.equal(groupOf(older, NOW, undefined, undefined, watch), 'shipped');
   assert.equal(groupOf(fresh, NOW), 'shipped', 'with no production observation a merge alone is Shipped');
@@ -1239,20 +1188,14 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   const row = /data-session="d1"[\s\S]*?<\/tr>/.exec(html)![0];
   assert.match(row, /data-health="ended"[^>]*>.*Not seen for 3h 00m 00s · its item is delivered/);
   assert.doesNotMatch(row, /Copy local|Copy remote/, 'no attach command offered for a left-over session');
-  // Stage done is not delivered: a merge the production watch still reports pending, and a smoke-gated
-  // merge without its passing check, are still at Deploy, so their idle sessions stay open.
+  // Done = merged (GY-1981): a merge the production watch still reports pending, and a smoke-gated
+  // merge without a check, are delivered, so their idle sessions are ended too.
   const pendingItem = { ...real[1], sessions: [running('p1', 'Watch GY-164 deploy', 3 * hour)] } as unknown as Work;
   const smokeItem = { ...real[2], policy: { ...real[2].policy, deploySmoke: true }, sessions: [running('s1', 'Smoke GY-165', 3 * hour)] } as unknown as Work;
   const deploying = [...work.filter(item => ![pendingItem.id, smokeItem.id].includes(item.id)), pendingItem, smokeItem];
   const status = { ...boardStatus(), production: { observedAt: new Date(NOW).toISOString(), serving: 'f'.repeat(40), error: null, deployed: [], pending: [pendingItem.key], incidents: [] } };
   const held = workersView(deploying, new Date(NOW), undefined, releaseView(status));
-  for (const id of ['p1', 's1']) { assert.ok(ids(held.running).includes(id), `${id} stays open while its item is at Deploy`); assert.equal(held.running.find(row => row.id === id)!.leftOn, null); }
-  assert.equal(held.finished.find(row => row.id === 'd1')!.leftOn, 'delivered', 'a merge that left the flow still files its session as ended');
-  // Open is not running: a session not observed for three hours is no principal's current work (GY-172).
-  assert.equal(held.principals.find(entry => entry.principal === 'worker-p1')!.current, null);
-  const heldPage = markup(createElement(WorkersPage, dashboard({ work: deploying, status: status as any })));
-  const heldOpen = heldPage.slice(heldPage.indexOf('aria-label="Agent sessions"'), heldPage.indexOf('<details class="finished-sessions"'));
-  for (const id of ['p1', 's1']) assert.match(heldOpen, new RegExp(`data-session="${id}"`));
+  for (const id of ['p1', 's1', 'd1']) assert.equal(held.finished.find(row => row.id === id)!.leftOn, 'delivered', `${id} is filed as ended: its item is delivered`);
   // Work merged before delivery records existed is Shipped on the board, so an idle session on it is ended too.
   const legacyItem = { ...real[1], id: 'legacy-item', key: 'GY-9', delivery: undefined, sessions: [running('l1', 'Legacy GY-9', 3 * hour), running('l2', 'Legacy GY-9 fresh', 5 * 60_000)] } as unknown as Work;
   assert.equal(groupOf(legacyItem, NOW), 'shipped');
