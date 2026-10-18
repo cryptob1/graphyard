@@ -746,3 +746,9 @@ test('integration:executor-reconcile-after-crash — holds reads the whole first
   for (const head of secondParents) assert.equal(await reads.holds(head), false, `${head.slice(0, 12)} is only a second parent`);
   assert.equal(await reads.holds('b'.repeat(40)), false);
 });
+
+test('unit:hotfix-merges-first — a head titled "Hotfix: …" is merged before older queued heads; among hotfixes and among the rest the oldest submission goes first', () => {
+  const old = submitted(1, 50), fix = submitted(2, 1, ['src/app.ts'], { title: 'Hotfix: unblock the queue' }), olderFix = submitted(3, 5, ['src/app.ts'], { title: 'hotfix: earlier one' }), plain = submitted(4, 20);
+  assert.deepEqual(mergeQueue([old, fix, olderFix, plain], {}, start).queue.map(entry => entry.key), ['GY-3', 'GY-2', 'GY-1', 'GY-4']);
+  assert.equal(nextToMerge([old, fix], {}, start)?.key, 'GY-2');
+});
