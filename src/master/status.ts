@@ -356,7 +356,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const inFlightCount = snapshot.work.filter(work => inFlight(work, now)).length;
   const idle = workerSessions.filter(session => session.mode === 'launch' && session.credential.available && (session.state === 'offline' || session.state === 'idle') && !rows.some(row => row.owner === session.principal));
   const launchProfiles = workerSessions.filter(session => session.mode === 'launch').length;
-  const fleet = { effective: inFlightCount + scheduling.order.length, inFlight: inFlightCount, dispatchable: scheduling.order.length, cap: maxInFlight, atCap: inFlightCount >= maxInFlight, idleWorkers: idle.length, workers: launchProfiles,
+  const fleet = { effective: inFlightCount + scheduling.order.length, inFlight: inFlightCount, dispatchable: scheduling.order.length, idleWorkers: idle.length, workers: launchProfiles,
     statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; planned-file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle; the dispatcher starts new work while fewer than ${maxInFlight} ${inFlightCount === 1 ? 'item is' : 'items are'} in flight${atCapClause(inFlightCount)}` };
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
   const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });

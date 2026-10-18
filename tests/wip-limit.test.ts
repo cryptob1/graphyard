@@ -118,8 +118,7 @@ test('unit:wip-limit — the measure counts a cap-held item under capacity, not 
   const profiles = ['one'].map(name => launchProfile(name, '/credentials/worker.token'));
   const status = buildMasterStatus({ work: all, now: iso(0) }, profiles, [], {}, {}, { pending: [], completed: [] });
   assert.equal(status.effectiveConcurrency.inFlight, 4);
-  assert.equal(status.effectiveConcurrency.cap, 4);
-  assert.equal(status.effectiveConcurrency.atCap, true);
+  assert.match(status.effectiveConcurrency.statement, /the dispatcher starts new work while fewer than 4 items are in flight — 4 in flight is the cap, so ready work waits until one merges \(Hotfix items excepted\)$/);
   assert.match(status.effectiveConcurrency.statement, /the dispatcher starts new work while fewer than 4 items are in flight — 4 in flight is the cap, so ready work waits until one merges \(Hotfix items excepted\)$/);
 });
 

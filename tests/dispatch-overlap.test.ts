@@ -151,7 +151,6 @@ test('unit:optimistic-dispatch — two items overlapping on the same files both 
   assert.deepEqual(row.overlap.concurrent.map(entry => entry.key), ['GY-184', 'GY-185', 'GY-166']);
   assert.equal(row.attention, null, 'an overlap raises no attention');
   assert.equal(status.effectiveConcurrency.effective, 5); assert.equal(status.effectiveConcurrency.inFlight, 3); assert.equal(status.effectiveConcurrency.dispatchable, 2);
-  assert.equal(status.effectiveConcurrency.cap, 4); assert.equal(status.effectiveConcurrency.atCap, false, '3 in flight is under the cap');
   assert.equal(status.counts.effectiveConcurrency, 5);
   assert.match(status.effectiveConcurrency.statement, /^5 items could be in flight at once \(3 in flight, 2 dispatchable; planned-file overlap holds nothing\); 3 of 3 launch profiles idle; the dispatcher starts new work while fewer than 4 items are in flight$/);
   assert.ok(!('held' in status.counts) && !('holdsOverdue' in status.counts));
