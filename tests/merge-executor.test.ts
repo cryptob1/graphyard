@@ -295,7 +295,7 @@ function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => nu
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(world.now()), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.mergeWriter, ...(world.decide ? { decide: world.decide } : {}),
+    github: githubDouble, merge: githubDouble, mergeWriter: world.mergeWriter, ...(world.decide ? { decide: world.decide } : {}),
   } as unknown as DaemonEffects;
 }
 /** Reads over fake ports, switched by `merger`. */
@@ -305,7 +305,7 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   const work = [submitted(2, 5), submitted(1, 30)], now = () => start;
   const { metrics } = await runCycle(config, emptyDaemonState(config), effectsFor({ work: () => [], now, mergeWriter: null }), now);
   const steps = (metrics.timings?.steps ?? []).map(step => step.step);
-  assert.ok(steps.indexOf('merge writer') > steps.indexOf('merges') && steps.indexOf('merge writer') < steps.indexOf('shadow gate'), `the step runs right after the merge step: ${steps.join(', ')}`);
+  assert.ok(steps.indexOf('merge writer') === steps.indexOf('merges') + 1 && !steps.includes('shadow gate'), `the step runs right after the merge step: ${steps.join(', ')}`);
   const bare = emptyDaemonState(config);
   await runCycle(config, bare, effectsFor({ work: () => work, now, mergeWriter: null }), now);
   assert.deepEqual(bare.mergeWriter, emptyMergeWriterState());
@@ -409,7 +409,7 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   assert.equal(summary.mergeWriter.inFlight?.key, 'GY-1');
   assert.deepEqual(summary.mergeWriter.reworks.map(entry => [entry.key, entry.attempts, entry.lastError]), [['GY-3', 2, 'route down']], 'the reworks still owed are shown with their attempts');
   assert.deepEqual(mergeWriterSummary(undefined), { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] });
-  assert.match(readFileSync(`${root}src/cli/master/operations.ts`, 'utf8'), /mergeWriter: mergeWriterSummary\(state\?\.mergeWriter\)/, 'master status prints the section beside shadowGate');
+  assert.match(readFileSync(`${root}src/cli/master/operations.ts`, 'utf8'), /mergeWriter: mergeWriterSummary\(state\?\.mergeWriter\)/, 'master status prints the section');
   assert.throws(() => mergeWriterStateSchema.parse({ queue: Array.from({ length: 51 }, () => state.mergeWriter.queue[0]) }), 'the queue keeps at most 50');
   assert.deepEqual(emptyDaemonState(config).mergeWriter, { lastMergeAt: null, queue: [], inFlight: null, refusals: [], reworks: [] });
   // The loop's effects: the reads over the coordinator checkout, each step posted as the coordinator under its own key.
