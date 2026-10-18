@@ -93,9 +93,11 @@ const request = async (credential: string, path: string, body?: unknown, key: st
 const verdictBody = 'AC-1 met after the merge.\nResolved threads: none\nFollow-up threads: none\nOverridden threads: none';
 
 const herdr = (_command: string, args: string[]) => { herdrCalls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
+/** The merge commit's first parent when the ledger names one; the launcher reads it from the object store when not. */
+const mergeBaseTip = (work: Work) => { const tip = work.mergeLedger?.baseTip; return tip && tip !== unknownParent ? { baseTip: tip } : {}; };
 /** The real post-merge wiring: the launch through `launchReview`, registration through the real route, keyed like `dispatchEffects` keys it. */
 const realLaunch = (work: Work, requestId: string) => launchReview(root, work, 'reviewer-claude', [], at(), {
-  run: herdr, requestId, postMerge: { mergeSha: work.delivery!.mergeSha, ...(work.mergeLedger!.baseTip !== unknownParent ? { baseTip: work.mergeLedger!.baseTip } : {}) },
+  run: herdr, requestId, postMerge: { mergeSha: work.delivery!.mergeSha, ...mergeBaseTip(work) },
 });
 const items: Work[] = [];
 const effects: DispatchEffects = {

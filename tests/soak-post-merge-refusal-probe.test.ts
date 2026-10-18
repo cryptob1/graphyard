@@ -83,9 +83,11 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   let cause = true;
   const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   const items = keys.map(deliveredPrLess);
+  /** The merge commit's first parent when the ledger names one; the launcher reads it from the object store when not. */
+  const mergeBaseTip = (work: Work) => { const tip = work.mergeLedger?.baseTip; return tip && tip !== unknownParent ? { baseTip: tip } : {}; };
   const realLaunch = (work: Work, id: string) => launchReview(root, work, 'reviewer-claude', [], at(), {
     run: herdr, requestId: id, filesystem: durable,
-    postMerge: { mergeSha: work.delivery!.mergeSha, ...(work.mergeLedger!.baseTip !== unknownParent ? { baseTip: work.mergeLedger!.baseTip } : {}) },
+    postMerge: { mergeSha: work.delivery!.mergeSha, ...mergeBaseTip(work) },
     registerLaunch: async (item, launch) => {
       registrations.push({ key: item.key, at: instantMs, postMerge: launch.postMerge, head: launch.head, baseTip: launch.baseTip });
       if (cause) throw new Error(`The control plane refused the reviewer launch of ${item.key} (400): Invalid input`);
