@@ -20,15 +20,17 @@ import { execFileSync } from 'node:child_process';
 export const MERGE_PROTOCOL = 3;
 
 /** How the running build identifies itself: the source commit it was built from, when the deployment says. */
-export interface BuildIdentity { commit: string | null; protocol: number; source: 'GRAPHYARD_BUILD_SHA' | 'RAILWAY_GIT_COMMIT_SHA' | 'SOURCE_COMMIT' | null }
+export interface BuildIdentity { commit: string | null; protocol: number; source: 'GRAPHYARD_BUILD_SHA' | 'RAILWAY_GIT_COMMIT_SHA' | 'SOURCE_COMMIT' | 'GRAPHYARD_BUILD_REVISION' | null }
 const commitPattern = /^[0-9a-f]{40}$/i;
 /**
  * The deployed commit, read from the environment the deployment provides. Railway injects
  * RAILWAY_GIT_COMMIT_SHA into every service it builds from GitHub; other hosts set
- * GRAPHYARD_BUILD_SHA from their build step. Unknown stays unknown rather than guessed.
+ * GRAPHYARD_BUILD_SHA from their build step; else the revision the image itself was stamped with
+ * (GRAPHYARD_BUILD_REVISION), so a Compose-built server reports its commit (GY-1977). Unknown stays
+ * unknown rather than guessed.
  */
 export function buildIdentity(env: Record<string, string | undefined> = process.env): BuildIdentity {
-  for (const source of ['GRAPHYARD_BUILD_SHA', 'RAILWAY_GIT_COMMIT_SHA', 'SOURCE_COMMIT'] as const) {
+  for (const source of ['GRAPHYARD_BUILD_SHA', 'RAILWAY_GIT_COMMIT_SHA', 'SOURCE_COMMIT', 'GRAPHYARD_BUILD_REVISION'] as const) {
     const value = env[source]?.trim();
     if (value && commitPattern.test(value)) return { commit: value.toLowerCase(), protocol: MERGE_PROTOCOL, source };
   }
