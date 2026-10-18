@@ -289,7 +289,7 @@ test('unit:held-effects-gate-the-call — while a step\u2019s stall stands insid
   assert.match(refusal!.message, new RegExp(S.stallHoldMarker));
   assert.equal(dispatches, 0, 'the call itself was not attempted inside the window');
   assert.equal(held.mergeWriter!.admit!(), false, 'the merge writer starts no new merge inside the window');
-  assert.equal(await held.mergeWriter!.merger(), 'control-plane', 'the recorded merger every other step reads (the shadow gate among them) is left as it is');
+  assert.equal(await held.mergeWriter!.merger(), 'control-plane', 'the recorded merger every other step reads is left as it is');
   assert.equal(mergers, 1);
 
   // Other effects pass through untouched.

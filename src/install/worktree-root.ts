@@ -90,7 +90,7 @@ export async function verifyWorktreeRoot(path: string, options: { minFreeBytes: 
  * files, an install's cache — sits beside that, so removing the directory removes all of it.
  */
 // `approval` is a headless approver's own working directory (GY-391): no checkout is made in it.
-// `trial` is the shadow merge gate's detached checkout of a trial merge commit (GY-1522).
+// `trial` is the merge writer's detached checkout of a trial merge commit.
 export const checkoutKinds = ['proof', 'review', 'approval', 'trial'] as const;
 export type CheckoutKind = typeof checkoutKinds[number];
 const managedName = /^graphyard-(proof|review|approval|trial)-[a-z0-9][a-z0-9-]{0,39}-[0-9a-f]{7}-[0-9a-f]{8}$/;

@@ -10,7 +10,6 @@ import { waitReason } from '../model/action-kinds.js';
 import { classified, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { unansweredStands } from '../model/fault-record.js';
 import { diagnosisSettled, retainedDiagnoses } from '../runner/payloads.js';
-import { shadowKeptVerdicts } from './cycle-shadow.js';
 import { daemonActionFaultKind, daemonActionSchema, daemonStateSchema, retainedDoctorRuns, type DaemonAction, type DaemonState, type DeploymentObservation } from './state.js';
 
 export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of a run of /tmp passes removing 0 under the standing inode bound
@@ -55,7 +54,9 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   // version does not declare; they parse, ride every write, and are written back unchanged, so a
   // rollback or a held-CLI snapshot neither fails nor silently drops what the newer loop recorded.
   // Declared fields are still validated: a malformed one refuses the read as before.
-  const state = toleratedStateSchema().parse(JSON.parse(raw));
+  // GY-2087: the shadow gate's verdicts an older loop kept are dropped, not carried.
+  const { shadow: _shadow, ...stored } = JSON.parse(raw);
+  const state = toleratedStateSchema().parse(stored);
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
   return state;
 }
@@ -90,7 +91,6 @@ export function pruneDaemonState(state: DaemonState) {
   const clocks = Object.keys(state.clocks);
   if (clocks.length > retainedClocks) for (const id of clocks.slice(0, clocks.length - retainedClocks)) delete state.clocks[id];
   if (state.scope.length > retainedScopeDecisions) state.scope = state.scope.slice(-retainedScopeDecisions);
-  if (state.shadow.length > shadowKeptVerdicts) state.shadow = state.shadow.slice(-shadowKeptVerdicts); // GY-1522: the step evicts by openness; this is the bound on a read state
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
