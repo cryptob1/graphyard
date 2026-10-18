@@ -47,8 +47,8 @@ export const mergeWriterStateSchema = z.object({
   inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional() }).strict().nullable().default(null),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
   reworks: z.array(pendingReworkSchema).max(mergeWriterKeptReworks).default([]),
-  /** GY-2079: the heads whose merge trial timed out, yielding their queue turn until they leave the queue. `count` is the timeouts counted toward the refusal bound (only where another head passed since the previous one); `reason` is set while the bound refusal it names is still owed. */
-  timeouts: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, at: instant, count: z.number().int().min(1).max(100_000), othersPassed: z.boolean(), reason: z.string().max(2000).nullable() }).strict()).max(mergeWriterKeptTimeouts).default([]),
+  /** GY-2079: the heads whose merge trial timed out, yielding their queue turn until they leave the queue; absent until one does. `count` is the timeouts counted toward the refusal bound (only where another head passed since the previous one); `reason` is set while the bound refusal it names is still owed. */
+  timeouts: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, at: instant, count: z.number().int().min(1).max(100_000), othersPassed: z.boolean(), reason: z.string().max(2000).nullable() }).strict()).max(mergeWriterKeptTimeouts).optional(),
   /** GY-1852: record writes whose reply was lost, replayed with their exact input before anything new starts; absent until one is. */
   unconfirmed: z.array(unconfirmedRecordSchema).max(mergeWriterKeptUnconfirmed).optional(),
   /** The advisory budget runs owed after merges (GY-1528); absent until the advisory step first runs. */
@@ -325,7 +325,7 @@ const timeoutFiles = (error: TrialTimeoutError) => [...new Set(error.logTail.mat
 export const trialTimeoutReason = (count: number, files: readonly string[]) =>
   `${trialFailurePrefix}: the trial timed out ${count} times while other heads' trials passed${files.length ? `: ${files.slice(0, 10).join(', ')}` : ''}`.slice(0, 2000);
 /** One timeout record of `state.mergeWriter.timeouts`. */
-type TrialTimeout = MergeWriterState['timeouts'][number];
+type TrialTimeout = NonNullable<MergeWriterState['timeouts']>[number];
 /**
  * A trial timeout of `flight` counts on its head's record: the first sets the head yielding its queue
  * turn; one where another head passed since the head's previous timeout counts toward the refusal
@@ -333,10 +333,11 @@ type TrialTimeout = MergeWriterState['timeouts'][number];
  * head keeps yielding, its count stands.
  */
 function countTrialTimeout(writer: MergeWriterState, flight: { key: string; id: string; head: string }, at: string, files: readonly string[]): TrialTimeout {
-  const counted = writer.timeouts.find(entry => entry.key === flight.key && entry.head === flight.head);
+  const timeouts = writer.timeouts ??= [];
+  const counted = timeouts.find(entry => entry.key === flight.key && entry.head === flight.head);
   if (!counted) {
     const record: TrialTimeout = { key: flight.key, id: flight.id, head: flight.head, at, count: 1, othersPassed: false, reason: null };
-    writer.timeouts = [...writer.timeouts, record].slice(-mergeWriterKeptTimeouts);
+    writer.timeouts = [...timeouts, record].slice(-mergeWriterKeptTimeouts);
     return record;
   }
   if (counted.othersPassed) { counted.count = Math.min(counted.count + 1, 100_000); counted.othersPassed = false; if (counted.count >= mergeWriterTrialTimeoutRefusals) counted.reason = trialTimeoutReason(counted.count, files); }
@@ -479,6 +480,7 @@ export async function mergeWriterStep(cycle: Cycle) {
     try { await itemPreviewStep(live, snapshot.work, reads.itemPreviews); } catch (error) { console.error(`The item preview step failed: ${error instanceof Error ? error.message : String(error)}`); }
   }
   const writer = state.mergeWriter;
+  writer.timeouts ??= []; // GY-2079: the yields the queue turns over, read plainly below and persisted with the rest.
   const at = () => new Date(now()).toISOString();
   let changed = false, delivered: { key: string; mergeSha: string } | null = null;
   const flight = flights.get(state);
@@ -561,14 +563,20 @@ export async function mergeWriterStep(cycle: Cycle) {
         changed = true;
       }
       if (!reconciled.length) {
-        const queue = mergeQueue(snapshot.work, ledger, now(), new Set(writer.timeouts.map(entry => `${entry.key}:${entry.head}`)));
-        const summary = queue.queue.slice(0, mergeWriterKeptQueue);
+        const queue = mergeQueue(snapshot.work, ledger, now());
+        // GY-2079: the heads yielding their queue turn keep the oldest-first order only behind every head not yielding, and the next merge is the first head in that order.
+        const yielding = new Set(writer.timeouts.map(entry => `${entry.key}:${entry.head}`));
+        const ordered = yielding.size
+          ? [...queue.queue.filter(entry => !yielding.has(`${entry.key}:${entry.head}`)), ...queue.queue.filter(entry => yielding.has(`${entry.key}:${entry.head}`))]
+          : queue.queue;
+        const summary = ordered.slice(0, mergeWriterKeptQueue);
         if (JSON.stringify(summary) !== JSON.stringify(writer.queue)) { writer.queue = summary; changed = true; }
         // GY-2079: a yield whose head the queue no longer holds goes with it.
-        const yielding = writer.timeouts.filter(entry => queue.queue.some(queued => queued.key === entry.key && queued.head === entry.head));
-        if (yielding.length !== writer.timeouts.length) { writer.timeouts = yielding; changed = true; }
+        const kept = writer.timeouts.filter(entry => ordered.some(queued => queued.key === entry.key && queued.head === entry.head));
+        if (kept.length !== writer.timeouts.length) { writer.timeouts = kept; changed = true; }
         // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
-        const next = writer.reworks.length >= mergeWriterKeptReworks ? null : queue.next;
+        const owed = queue.blockedBy ? null : snapshot.work.find(entry => entry.id === ordered[0]?.id) ?? null;
+        const next = writer.reworks.length >= mergeWriterKeptReworks ? null : owed;
         const due = next?.candidate && (reads.admit?.() ?? true) ? next : null;
         if (due?.candidate) {
           const head = due.candidate.sha.toLowerCase();

@@ -99,7 +99,7 @@ test('unit:trial-timeout-yields-queue-turn — after a trial timeout the timed-o
   // The settled timeout counts and yields; the intent the trial left open is settled first, so the
   // queue turns over only the cycle after, and GY-2 — not GY-1 — takes it.
   await step();
-  assert.deepEqual(state.mergeWriter.timeouts.map(entry => [entry.key, entry.count, entry.reason]), [['GY-1', 1, null]]);
+  assert.deepEqual(state.mergeWriter.timeouts?.map(entry => [entry.key, entry.count, entry.reason]) ?? [], [['GY-1', 1, null]]);
   assert.match(state.actions[`merge-writer:GY-1:${sha('head:GY-1')}`]?.detail ?? '', /yields its turn and is tried after every other queued head/);
   await step(); await mergeWriterIdle(state);
   assert.deepEqual(state.mergeWriter.queue.map(entry => entry.key), ['GY-2', 'GY-3', 'GY-1'], 'the timed-out head keeps its place only behind every other queued head');
@@ -125,7 +125,7 @@ test('unit:repeated-trial-timeout-refused-to-rework — a head that times out it
   await step(); await mergeWriterIdle(state);
   await step();
   assert.deepEqual(made.trials, ['GY-1', 'GY-2', 'GY-1']);
-  assert.deepEqual(state.mergeWriter.timeouts.map(entry => [entry.key, entry.count, entry.othersPassed]), [['GY-1', 2, false]]);
+  assert.deepEqual(state.mergeWriter.timeouts?.map(entry => [entry.key, entry.count, entry.othersPassed]) ?? [], [['GY-1', 2, false]]);
   const refusals = made.events.filter(({ key, event }) => key === 'GY-1' && (event as { kind: string }).kind === 'refused' && String((event as { reason?: string }).reason ?? '').startsWith(trialFailurePrefix)).map(({ event }) => event as { reason: string });
   assert.deepEqual(refusals.map(entry => entry.reason), [trialTimeoutReason(2, ['tests/fast.test.ts', 'tests/slow.test.ts'])], 'the refusal names the slow test files where the runner reported them');
   assert.ok(refusals[0]!.reason.startsWith(`${trialFailurePrefix}: the trial timed out 2 times while other heads' trials passed`));
@@ -143,7 +143,7 @@ test('unit:repeated-trial-timeout-refused-to-rework — a head that times out it
   (item1 as { reworkRequested: boolean }).reworkRequested = true;
   await step(); await mergeWriterIdle(state); await step();
   assert.deepEqual(made.trials, ['GY-1', 'GY-2', 'GY-1'], 'no trial beyond the bound');
-  assert.deepEqual(state.mergeWriter.timeouts, [], 'the yield of a head the queue no longer holds is pruned');
+  assert.deepEqual(state.mergeWriter.timeouts ?? [], [], 'the yield of a head the queue no longer holds is pruned');
 });
 
 test('unit:repeated-trial-timeout-refused-to-rework — a timeout where no other head passed is host noise: it neither counts toward the bound nor refuses', async () => {
@@ -154,7 +154,7 @@ test('unit:repeated-trial-timeout-refused-to-rework — a timeout where no other
   await step(); await mergeWriterIdle(state);
   await step();
   assert.deepEqual(made.trials, ['GY-9', 'GY-9'], 'alone on the queue the head keeps being tried');
-  assert.deepEqual(state.mergeWriter.timeouts.map(entry => [entry.key, entry.count, entry.othersPassed, entry.reason]), [['GY-9', 1, false, null]], 'the second timeout counted nothing: no other head passed since the first');
+  assert.deepEqual(state.mergeWriter.timeouts?.map(entry => [entry.key, entry.count, entry.othersPassed, entry.reason]) ?? [], [['GY-9', 1, false, null]], 'the second timeout counted nothing: no other head passed since the first');
   assert.equal(made.events.filter(({ event }) => (event as { kind: string }).kind === 'refused' && String((event as { reason?: string }).reason ?? '').startsWith(trialFailurePrefix)).length, 0);
   assert.deepEqual([state.mergeWriter.refusals, state.mergeWriter.reworks, made.decided], [[], [], []]);
 });

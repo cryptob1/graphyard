@@ -29,7 +29,7 @@ export function countProofCases(tap: string, proof: string) {
 
 // ---- The queue -----------------------------------------------------------------------------------
 
-/** One queued control-plane candidate, oldest submission first, the heads yielding their turn (GY-2079) last. */
+/** One queued control-plane candidate, oldest submission first. */
 export interface QueuedMerge { key: string; id: string; head: string; submittedAt: string; waitingMs: number }
 export interface MergeQueue {
   /** The candidate the writer merges next, or null: nothing is due, or an open intent blocks the queue. */
@@ -50,11 +50,9 @@ const gate = (item: Work, name: string) => item.gates.find(entry => entry.name =
  * trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework rather than a second
  * trial; one refused `base moved N times` is queued again. An item whose ledger holds an open intent
  * or an unreconciled push blocks the whole queue: `reconcileIntents` settles it before any new merge,
- * so never more than one merge is in flight. A head named in `yielded` (`${key}:${head}`, GY-2079:
- * its trial timed out) keeps the oldest-first order but only behind every head not named: it is
- * tried again once the others have had their turn.
+ * so never more than one merge is in flight.
  */
-export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number, yielded?: ReadonlySet<string>): MergeQueue {
+export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number): MergeQueue {
   const blocking = Object.values(ledger).find(open);
   const owed = work.filter(item => {
     const candidate = item.candidate;
@@ -72,10 +70,8 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;
     return true;
   }).sort((a, b) => submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
-  const turning = (item: Work) => yielded?.has(`${item.key}:${item.candidate!.sha.toLowerCase()}`) ?? false;
-  const ordered = owed.some(turning) ? [...owed.filter(item => !turning(item)), ...owed.filter(turning)] : owed;
-  const queue = ordered.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
-  return { next: blocking ? null : ordered[0] ?? null, queue, blockedBy: blocking?.key ?? null };
+  const queue = owed.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
+  return { next: blocking ? null : owed[0] ?? null, queue, blockedBy: blocking?.key ?? null };
 }
 /** The oldest-submitted candidate due a merge, or null while nothing is due or an open intent blocks the queue (AC-1). */
 export const nextToMerge = (work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number) => mergeQueue(work, ledger, now).next;
