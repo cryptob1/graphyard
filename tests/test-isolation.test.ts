@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -26,6 +26,23 @@ const listen = (port = 0) => new Promise<{ port: number; close(): Promise<void> 
   server.listen({ port, host: '127.0.0.1', exclusive: true }, () => resolve({ port: (server.address() as { port: number }).port, close: () => new Promise(done => server.close(() => done())) }));
 });
 
+/**
+ * A port region the host allocates nothing into automatically: past the kernel's ephemeral source
+ * range when it leaves room, else just below it, else the Linux default range's tail. The suite's
+ * own reservations run defaultTestPortBase..highestBase, so nothing of a parallel suite reaches
+ * here either — a scenario played out inside it sees no port move under it (GY-2013).
+ */
+function unallocatedPortRegion(): { first: number; last: number } {
+  try {
+    const [start, end] = readFileSync('/proc/sys/net/ipv4/ip_local_port_range', 'utf8').trim().split(/\s+/).map(Number);
+    if (Number.isInteger(start) && Number.isInteger(end) && start >= 1024 && end <= 65_535) {
+      if (end + 451 <= 65_535) return { first: end + 1, last: 65_535 };
+      return { first: start - 451, last: start - 11 };
+    }
+  } catch { /* not Linux, or the range is not exposed: the default below */ }
+  return { first: 61_000, last: 65_535 };
+}
+
 test('unit:test-isolation strips every GRAPHYARD_* and HERDR_* variable the runner did not set', () => {
   const environment = isolatedTestEnvironment({
     PATH: '/usr/bin', HOME: '/home/someone', NODE_TEST_CONTEXT: 'child-v8',
@@ -43,9 +60,18 @@ test('unit:test-isolation strips every GRAPHYARD_* and HERDR_* variable the runn
 });
 
 test('unit:test-isolation reserves a free port window per run: held and busy windows are skipped, concurrent reservations never share one, a killed holder leaves none behind', async () => {
-  const busy = await listen();
+  // The scenario plays out where no other process on the host can take a port. This test once
+  // anchored its range at a port-0 listener, so it sat inside the kernel's ephemeral range, where
+  // every connection's source port and every other port-0 listener lands: under a loaded host (a
+  // full parallel suite) transient sockets covered its windows, reserveTestPorts rightly skipped
+  // them, and its exact-window expectations failed on one run and passed on the next (GY-2013). So
+  // the test first reserves a playground outside that range through reserveTestPorts itself — the
+  // kernel-decided sentinel bind keeps concurrent copies of this test, a trial beside a worker
+  // suite, in disjoint playgrounds — and holds it for the whole scenario.
+  const playground = await reserveTestPorts({ ...unallocatedPortRegion(), span: 41 });
+  const busy = await listen(playground.base);
   try {
-    const options = { first: busy.port, span: 4, last: busy.port + 400 };
+    const options = { first: busy.port, span: 4, last: playground.base + 39 };
     const first = await reserveTestPorts(options);
     assert.ok(first.base > busy.port, 'the window holding a listening port is skipped');
     assert.equal(first.sentinel, first.base + first.span - 1);
@@ -75,7 +101,7 @@ test('unit:test-isolation reserves a free port window per run: held and busy win
     const after = await reserveTestPorts(options);
     assert.equal(after.base, heldBase, 'the killed holder\'s window is free at once');
     after.release();
-  } finally { await busy.close(); }
+  } finally { await busy.close(); playground.release(); }
 });
 
 test('unit:test-isolation two concurrent test runs on one host both pass', async () => {
