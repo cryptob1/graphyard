@@ -52,7 +52,8 @@ export async function capacityForPrincipals(principalsFile: string, status: () =
  * (`rosterEntry`: a producer needs an explicit lane grant or proof seed), and `applyRosterChange`
  * writes its credential, hands the deployment GRAPHYARD_PRINCIPALS alone and reads the served
  * roster back. `--token-file` restores a former credential so existing dispatcher files keep
- * working (GY-1998). The installer's own principals are refused: `install --apply` plans them.
+ * working (GY-1998); `--proof` reads back the producer's recorded grant, which a roster edit never widens.
+ * The installer's own principals are refused: `install --apply` plans them.
  * Repeating either command changes nothing and only reads the roster back.
  */
 export async function principalCommand(args: string[], dependencies: InstallDependencies & { cwd: string }) {

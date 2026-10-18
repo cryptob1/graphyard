@@ -2222,12 +2222,23 @@ export async function applyRosterChange(session: InstallSession, record: Install
   }
   const admin = principalOfRole(roster, 'admin');
   const target = `${record.url.replace(/\/$/, '')}/api/principals`;
-  let readback: { url: string; principal: { id: string; role: string; sessionKind: string | null; grants: string[] } | null; principals: number } | null = null;
+  const read = async (url: string) => {
+    const response = await deps.fetch(url, { headers: { Authorization: `Bearer ${session.tokens.get(admin.id)}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+    return response?.ok ? await response.json().catch(() => null) : null;
+  };
+  const proofs = change.entry?.proofs ?? [];
+  let readback: { url: string; principal: { id: string; role: string; sessionKind: string | null; grants: string[] } | null; principals: number; proofAuthority?: string[] } | null = null;
   for (let attempt = 0; attempt < 40 && !readback; attempt++) {
-    const response = await deps.fetch(target, { headers: { Authorization: `Bearer ${session.tokens.get(admin.id)}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
-    const served = response?.ok ? (await response.json().catch(() => null))?.principals : null;
+    const served = (await read(target))?.principals;
     const listed = Array.isArray(served) ? served.find((principal: { id: string }) => principal.id === change.id) : undefined;
-    if (Array.isArray(served) && (change.entry ? listed && servedAs(listed, change.entry) : !listed)) readback = { url: target, principal: listed ? { id: listed.id, role: listed.role, sessionKind: listed.sessionKind ?? null, grants: listed.grants ?? [] } : null, principals: served.length };
+    // GY-1998: --proof counts as restored only once the grant record Graphyard authorizes from holds every pattern.
+    // The server seeds a producer's record once and never re-seeds it, so a revoked pattern stays revoked: a record
+    // that lacks a requested pattern is refused with the explicit grant that restores it, never reported as restored.
+    const authority = proofs.length && listed ? ((await read(`${record.url.replace(/\/$/, '')}/api/proof-grants`))?.authorities ?? [])
+      .find((entry: { principalId: string; source: string }) => entry.principalId === change.id && entry.source === 'grant') : undefined;
+    const missing = authority ? proofs.filter(pattern => !(authority.patterns ?? []).includes(pattern)) : [];
+    if (missing.length) throw new Error(`${change.id} is served with its roster entry, but its recorded proof grant holds ${authority.patterns?.join(', ') || 'no pattern'}, not ${missing.join(', ')}: Graphyard seeds a producer's grant once and never re-seeds it from GRAPHYARD_PRINCIPALS, so a revoked pattern stays revoked. To restore it, run graphyard grants grant ${change.id} ${missing.join(',')} REASON, then rerun this command: it changes nothing and reads the grant back`);
+    if (Array.isArray(served) && (change.entry ? listed && servedAs(listed, change.entry) && (!proofs.length || authority) : !listed)) readback = { url: target, principal: listed ? { id: listed.id, role: listed.role, sessionKind: listed.sessionKind ?? null, grants: listed.grants ?? [] } : null, principals: served.length, ...(authority ? { proofAuthority: authority.patterns } : {}) };
     else await deps.wait(3000);
   }
   if (!readback) throw new Error(`${target} still ${change.entry ? `does not list ${change.id} as ${change.entry.role} with grants ${(change.entry.grants ?? []).join(', ') || 'none'}${change.entry.proofs?.length ? ` and proofs ${change.entry.proofs.join(', ')}` : ''}` : `lists ${change.id}`} after two minutes; the redeploy may still be in progress. Rerun the same command: it changes nothing and reads the roster back again`);

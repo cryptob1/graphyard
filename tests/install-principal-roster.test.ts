@@ -157,11 +157,31 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add --tok
     assert.notEqual((await readFile(tokenFile(directory, 'owner-project-worker-1'), 'utf8')).trim(), 'b'.repeat(43), 'an installer-owned credential is never replaced');
     await assert.rejects(principal(fixture, ['add', 'observer', '--role', 'producer', '--grant', 'delivery:observe-sha', '--grant', GRANT, '--token-file', other]), /dedicated observer/);
     await assert.rejects(stat(tokenFile(directory, 'observer')), { code: 'ENOENT' });
-    const proof = await principal(fixture, ['add', 'restored-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']);
+    // The served grant records, as ProofGrants keeps them: a producer's record is seeded once from its
+    // GRAPHYARD_PRINCIPALS proofs and never re-seeded, so a later --proof changes the environment only.
+    const records = new Map<string, string[]>();
+    const granted = (async (input: string | URL | Request, init?: RequestInit) => {
+      if (!String(input).endsWith('/api/proof-grants')) return fixture.deps.fetch!(input, init);
+      for (const entry of deployedRoster(fixture.transport)) if (entry.role === 'producer' && !records.has(entry.id)) records.set(entry.id, [...(entry.proofs ?? [])]);
+      return new Response(JSON.stringify({ authorities: [...records].map(([principalId, patterns]) => ({ principalId, role: 'producer', patterns, source: 'grant' })), grants: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+    const withGrants = (args: string[]) => principalCommand(args, { ...fixture.deps, fetch: granted, cwd: fixture.root });
+    const proof = await withGrants(['add', 'restored-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']);
     assert.equal(proof.changed, true);
     assert.deepEqual(proof.principal, { id: 'restored-producer', role: 'producer', sessionKind: 'ai', grants: [], proofs: ['integration:*', 'unit:*'] });
     assert.deepEqual(withoutToken(deployedRoster(fixture.transport).find(entry => entry.id === 'restored-producer')!), { id: 'restored-producer', role: 'producer', sessionKind: 'ai', proofs: ['integration:*', 'unit:*'] });
     assert.deepEqual(proof.readback.principal, { id: 'restored-producer', role: 'producer', sessionKind: 'ai', grants: [] }, 'the served roster lists lane grants only; proof seeds ride in GRAPHYARD_PRINCIPALS');
+    assert.deepEqual(proof.readback.proofAuthority, ['integration:*', 'unit:*'], 'a new producer reads back the effective grant its seed recorded');
+
+    // An already-seeded producer: widening --proof is never reported restored while its record lacks the pattern.
+    assert.deepEqual((await withGrants(['add', 'seeded-producer', '--role', 'producer', '--proof', 'unit:*'])).readback.proofAuthority, ['unit:*']);
+    await assert.rejects(withGrants(['add', 'seeded-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']),
+      /recorded proof grant holds unit:\*, not integration:\*.*never re-seeds.*graphyard grants grant seeded-producer integration:\* REASON/);
+    assert.deepEqual(records.get('seeded-producer'), ['unit:*'], 'the roster edit grants nothing: a revoked pattern is not resurrected');
+    records.set('seeded-producer', ['integration:*', 'unit:*']);
+    const restored = await withGrants(['add', 'seeded-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']);
+    assert.equal(restored.changed, false, 'once the explicit grant is applied, the rerun changes nothing');
+    assert.deepEqual(restored.readback.proofAuthority, ['integration:*', 'unit:*']);
   } finally { await fixture.cleanup(); }
 });
 
