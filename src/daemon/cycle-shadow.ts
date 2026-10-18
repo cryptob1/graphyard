@@ -28,8 +28,13 @@ export interface ShadowReads {
   enabled: boolean;
   /** The base branch tip the promotion ledger last fetched; null when the checkout holds none. */
   mainTip(): Promise<string | null>;
-  /** Fetches the head's branch (and the base) into the coordinator checkout; moves no local branch. */
-  fetch(branch: string): Promise<void>;
+  /**
+   * Fetches only the base branch into the coordinator checkout (GY-2010). The submitted head is
+   * already in the shared object store from `complete --head`; a pull-request-era fetch of the
+   * worker assignment branch is never made, so an unpublished ref cannot fail the probe or hold
+   * merge-writer admission. Moves no local branch.
+   */
+  fetch(): Promise<void>;
   /** The trial of `head` on `baseTip`: its merge commit, the files the merge changes, the build and test run, and the checkout left behind when its removal failed. Rejects with TrialTimeoutError past the time budget. */
   trial(head: string, baseTip: string, key: string): Promise<{ mergeSha: string | null; conflict: string[]; files: string[]; run: TrialRun | null; leftover?: string }>;
   /** Posts the verdict to the coordinator (`POST /api/work/:id/shadow-verdict`). */
@@ -64,7 +69,10 @@ export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, ro
       }
       return null;
     },
-    fetch: async branch => { await git('fetch', '--no-tags', 'origin', config.baseBranch, branch); },
+    // GY-2010: only the base. The head landed in this object store at submit; fetching the worker
+    // assignment branch from origin was the pull-request-era probe that failed with missing-remote-ref
+    // when workers stopped publishing branches, and must not hold the merge writer.
+    fetch: async () => { await git('fetch', '--no-tags', 'origin', config.baseBranch); },
     trial: async (head, baseTip, key) => {
       const merged = await trialMerge(gitAs, { head, baseTip });
       if ('conflict' in merged) return { mergeSha: null, conflict: merged.conflict, files: [], run: null };
@@ -265,11 +273,11 @@ export async function shadowStep(cycle: Cycle) {
     const fresh = open.filter(item => !item.candidate || !deferred(item)), retryable = open.filter(item => item.candidate && deferred(item) && !givenUp(item));
     const due = tip ? shadowDue(fresh, state.shadow, tip) ?? shadowDue(retryable, state.shadow, tip) : null;
     if (tip && due?.candidate) {
-      const head = due.candidate.sha.toLowerCase(), branch = due.candidate.branch, started = now();
+      const head = due.candidate.sha.toLowerCase(), started = now();
       const entry: Flight = { key: due.key, head, baseTip: tip, settled: null };
       flights.set(state, entry);
       void (async () => {
-        await reads.fetch(branch);
+        await reads.fetch();
         const trial = await reads.trial(head, tip, due.key);
         const risk = classifyRisk(trial.files.map(path => ({ path }))).risk;
         const build = trial.run?.build ?? 'fail';

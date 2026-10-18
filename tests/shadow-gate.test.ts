@@ -256,9 +256,11 @@ test('unit:shadow-verdict-keeps-log-tail — a trial that did not pass (a failed
 test('unit:shadow-step-writes-nothing — across a conflicting head, a passing one and an infrastructure failure the step runs only git (fetch, rev-parse, merge-tree, commit-tree, update-ref on refs/graphyard/trial/*, diff), pushes nothing, moves no refs/heads/* and never touches the GitHub double', async () => {
   const git = recordingGit(), now = () => start;
   const inner = git.run as unknown as (command: string, args: string[]) => string;
+  let fetches = 0;
   const run = ((command: string, args: string[]) => {
     if (args[2] === 'merge-tree' && args.includes(sha('head1'))) { throw Object.assign(new Error('conflict'), { status: 1, stdout: `${sha('tree')}\0a.txt\0\0CONFLICT` }); }
-    if (args[2] === 'fetch' && args.includes('graphyard/gy-3-1')) throw new Error('network down');
+    // GY-2010: fetch asks only for the base; the third owed head's base fetch is the infrastructure failure.
+    if (args[2] === 'fetch' && ++fetches === 3) throw new Error('network down');
     return inner(command, args);
   }) as never;
   const reads = shadowReads(config, '/coordinator', run, { base: '/w', record: async (work, entry) => { recorded.push({ id: work.id, verdict: entry }); }, trial: async () => trialRun });
@@ -298,7 +300,12 @@ test('unit:shadow-step-writes-nothing — across a conflicting head, a passing o
   for (const forbidden of ['push', 'branch', 'checkout', 'reset', 'commit', 'merge', 'tag', 'remote']) assert.ok(!subcommands.has(forbidden), `no git ${forbidden}`);
   assert.ok(['fetch', 'merge-tree'].every(name => subcommands.has(name)), git.calls.map(call => call.slice(3, 5).join(' ')).join(' / '));
   assert.ok(git.calls.every(call => call[0] === 'git' && call[1] === '-C' && call[2] !== 'gh'));
+  // GY-2010: every fetch asks only for the base; no worker assignment branch reaches origin.
+  const fetchCalls = git.calls.filter(call => call[3] === 'fetch');
+  assert.ok(fetchCalls.length > 0 && fetchCalls.every(call => call.slice(3).join(' ') === 'fetch --no-tags origin main'),
+    `shadow fetches only the base: ${fetchCalls.map(call => call.slice(3).join(' ')).join(' / ')}`);
 });
+
 
 test('unit:shadow-status — master status lists the gate report and, for each item with a shadow-only-fail or shadow-missed, one escalation line raised once, and docs/delivery-redesign.md Rollout names the fields within 50 net words', async () => {
   const entries = [verdict('GY-1', { outcome: 'agree-pass' }), verdict('GY-2', { outcome: 'shadow-only-fail', tests: failedTests }), verdict('GY-3', { outcome: 'shadow-missed' })];
