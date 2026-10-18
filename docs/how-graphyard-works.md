@@ -26,7 +26,7 @@ A 401/403/409/422 refusal redrafts acceptance or re-releases plan an hour later;
 - **Medium** (60min): remainder; adds producer-run `unit:`/`integration:`.
 - **Low** (30min): test-only, docs-only, single-module. Required CI, one approval.
 
-**Risk class** (`sensitive`/`normal`; unknown: sensitive): delta paths vs `graphyard.json` `risk.sensitive` (generic default), in `graphyard status`. **Review timing**: sensitive before merge, normal after unless `review.normalChanges: pre-merge` ([delivery](delivery.md)); github mode: lane-gated, all pre-merge.
+**Risk class** (`sensitive`/`normal`; unknown: sensitive): delta paths vs `graphyard.json` `risk.sensitive` (generic default), in `graphyard status`. **Review timing**: sensitive before merge, normal after unless `review.normalChanges: pre-merge` ([delivery](delivery.md)).
 
 All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard-risk-lane`), nor any lane's rework grounded on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop-requested), or control plane's test merge onto moved base conflicted (not GitHub's; `src/model/rework-ground.ts`). A returned head spent its ground (later retry-cap reworks wait). Grounded reworks are no [intervention](dashboard.md).
 
