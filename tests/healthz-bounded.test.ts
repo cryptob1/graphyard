@@ -137,6 +137,32 @@ test('unit:healthz-unreadable-repository-root — a GRAPHYARD_REPOSITORY_ROOT th
     assert.equal(readyFine.status, 503);
     assert.equal(readyFine.body.healthy, true);
     assert.deepEqual(readyFine.body.causes, ['startup validation has not completed']);
+    // `?strict` with an unreadable root answers 503 on both busy answers — the probe queued behind a
+    // saturated pool, and resource checks past their bound — while a readable root's busy answer stays 200.
+    const strict = (root: string, path: 'probe' | 'resources') => {
+      process.env.GRAPHYARD_REPOSITORY_ROOT = root;
+      const hang = () => new Promise<never>(() => {});
+      const client = { query: (sql: string) => sql === 'SELECT 1' ? Promise.resolve({}) : hang(), release: () => {} };
+      let waiting = 0;
+      const pool = path === 'probe'
+        ? { get waitingCount() { return waiting; }, idleCount: 0, connect: () => { waiting++; return hang(); }, query: hang }
+        : { waitingCount: 0, idleCount: 1, connect: () => Promise.resolve(client), query: hang };
+      const services = { engine: { store: { pool } }, github: null, build: { commit: 'c'.repeat(40), protocol: 1 } } as any;
+      let answered: { status: number; body: any } = { status: 200, body: null };
+      const context = { services, url: new URL('http://plane/healthz?strict'), send: (status: number, body: any) => { answered = { status, body }; return body; } } as any;
+      return Promise.resolve(healthRoutes.routes[0].handle(context, [])).then(body => answered.body ? answered : { status: 200, body });
+    };
+    const [queuedBroken, resourcesBroken, queuedFine, resourcesFine] = await Promise.all([strict(missing, 'probe'), strict(plain, 'resources'), strict(checkout, 'probe'), strict(checkout, 'resources')]);
+    for (const [answered, root, cause] of [[queuedBroken, missing, 'the pool is busy'], [resourcesBroken, plain, 'the database pool is busy']] as const) {
+      assert.equal(answered.status, 503, `strict answers 503 when ${cause} and the root is unreadable`);
+      assert.equal(answered.body.healthy, false);
+      assert.ok(answered.body.causes.some((text: string) => text.includes(cause)), answered.body.causes.join('; '));
+      assert.ok(answered.body.causes.some((text: string) => text.includes(root)), answered.body.causes.join('; '));
+    }
+    for (const answered of [queuedFine, resourcesFine]) {
+      assert.equal(answered.status, 200, 'a healthy busy-pool answer stays 200 under ?strict');
+      assert.equal(answered.body.healthy, true);
+    }
   } finally {
     if (saved === undefined) delete process.env.GRAPHYARD_REPOSITORY_ROOT; else process.env.GRAPHYARD_REPOSITORY_ROOT = saved;
   }
