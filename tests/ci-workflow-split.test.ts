@@ -140,10 +140,10 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   assert.doesNotMatch(jobs.get('uat')!.text, /--suite '(long-suites|soak)=/, 'the soak verdict is advisory');
 
   // Every suite the pre-merge gate excludes runs here.
-  assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'imports', 'promote', 'soak', 'uat']);
+  assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'imports', 'promote', 'soak', 'uat', 'upgrade']);
   // GY-1860: the production job holds no plane credential; the uat-environment job before it reads the candidate's import hold and hands it on.
   assert.match(jobs.get('imports')!.text, /environment: uat[\s\S]*release imports "\$\{\{ needs\.candidate\.outputs\.id \}\}"[\s\S]*GRAPHYARD_TOKEN: \$\{\{ secrets\.GRAPHYARD_RELEASE_TOKEN \}\}/);
-  assert.deepEqual(jobs.get('promote')!.needs, ['candidate', 'uat', 'imports']);
+  assert.deepEqual(jobs.get('promote')!.needs, ['candidate', 'uat', 'imports', 'upgrade']);
   assert.match(jobs.get('promote')!.text, /GRAPHYARD_PROMOTION_IMPORTS: \$\{\{ needs\.imports\.outputs\.hold \}\}/);
   assert.deepEqual([...soakJobs.keys()], ['long-suites', 'record']);
   assert.deepEqual(soakJobs.get('record')!.needs, ['long-suites'], 'the verdict is recorded after the suites, whatever their outcome');

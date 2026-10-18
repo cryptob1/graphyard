@@ -639,7 +639,7 @@ test('unit:release-candidate-zero-touch-suite — every release candidate runs t
   const validate = uat.slice(uat.indexOf('node bin/graphyard.mjs release validate'), uat.indexOf('- name: Record the E2E case runs'));
   assert.match(validate, /--suite 'zero-touch=node --import tsx --eval "import\(\\"\.\/src\/release-candidate\.ts\\"\)\.then\(m => m\.runZeroTouchSuite\(\)\)"'/, 'release validate runs the zero-touch suite');
   assert.doesNotMatch(uat.slice(0, uat.indexOf('node bin/graphyard.mjs release validate')), /continue-on-error/);
-  assert.match(workflow.slice(workflow.indexOf('\n  promote:\n')), /needs: \[candidate, uat, imports\]\n\s+if: needs\.uat\.result == 'success'/, 'promotion follows only a passed UAT validation, after its import hold is read');
+  assert.match(workflow.slice(workflow.indexOf('\n  promote:\n')), /needs: \[candidate, uat, imports, upgrade\]\n\s+if: needs\.uat\.result == 'success' && needs\.upgrade\.result == 'success'/, 'promotion follows only a passed UAT validation and upgrade gate, after its import hold is read');
   assert.equal(zeroTouchScenario, 'tests/zero-touch-onboarding.test.ts');
   assert.match(await readFile(new URL(`../${zeroTouchScenario}`, import.meta.url), 'utf8'), /test\('unit:zero-touch-onboarding — /, 'the suite runs the zero-touch scenario');
 
@@ -907,7 +907,7 @@ test('unit:soak-runs-outside-release-run — release-candidate-soak.yml runs the
   assert.match(starter, /gh workflow run release-candidate-soak\.yml --repo "\$GITHUB_REPOSITORY" --ref main -f sha="\$CANDIDATE_SHA" -f candidate="\$\{\{ needs\.candidate\.outputs\.id \}\}"/);
   for (const id of ['uat', 'promote']) assert.doesNotMatch(workflowJob(release, id).match(/^ {4}needs: .*$/m)![0], /soak/, `${id} never waits for the soak`);
   // So the release run concludes with promote, the last job whose verdict counts.
-  assert.match(workflowJob(release, 'promote'), /^ {4}needs: \[candidate, uat, imports\]$/m);
+  assert.match(workflowJob(release, 'promote'), /^ {4}needs: \[candidate, uat, imports, upgrade\]$/m);
 
   // The soak workflow: dispatched with a sha, never on a pull request, push or schedule, in a group of its own per SHA.
   const on = soak.slice(soak.indexOf('\non:\n') + 1, soak.indexOf('\npermissions:'));
