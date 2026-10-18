@@ -41,8 +41,10 @@ export interface MergeQueue {
 const open = (state: MergeLedgerState) => state.state === 'intent' || state.state === 'pushed';
 const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)?.passed === true;
 
+/** A hotfix (an item titled `Hotfix: …`) is merged before every other queued head, so a fix to a bottleneck never waits out the queue. */
+export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.title ?? '');
 /**
- * The control-plane candidates owed a merge, oldest submission first: submitted (a candidate the
+ * The control-plane candidates owed a merge, hotfixes first then oldest submission first: submitted (a candidate the
  * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
  * and `review` gates passed as the control plane served them: its review gate fails a delta reviewed before
  * merge (a sensitive one, or any under a repository declaring `review.normalChanges: pre-merge`) until its
@@ -52,8 +54,6 @@ const gate = (item: Work, name: string) => item.gates.find(entry => entry.name =
  * or an unreconciled push blocks the whole queue: `reconcileIntents` settles it before any new merge,
  * so never more than one merge is in flight.
  */
-/** A hotfix (an item titled `Hotfix: …`) is merged before every other queued head, so a fix to a bottleneck never waits out the queue. */
-export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.title ?? '');
 export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number): MergeQueue {
   const blocking = Object.values(ledger).find(open);
   const owed = work.filter(item => {
