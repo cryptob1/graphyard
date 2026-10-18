@@ -12,6 +12,7 @@ import { mergeAuthorized, mergeQueueAction } from '../src/merge-queue.js';
 import { reviewNeed } from '../src/model/dispatch.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-10-04T12:30Z now is handed to evaluate, mergeQueueAction and reviewNeed with observations stamped from it; the engine case stamps its observation with new Date() and reads the database clock.
 
 // GitHub delivery is the only delivery (GY-1235): a candidate whose build, review and required
@@ -43,16 +44,16 @@ function evaluated(work: Work): Work {
 }
 const githubState = { pullRequestId: 'PR_x', head: A, queue: false, mergeStateStatus: 'CLEAN', mode: 'none' as const, entryState: null, position: null, groupHead: null, at: now.toISOString() };
 
-test('unit:guarded-merge-removed — the guarded merge is gone, master merge says the control plane merges, and a ten-minute-old observation does not hold a passing candidate', async () => {
+test('unit:guarded-merge-removed — the guarded merge is gone, master merge says GitHub merges, and a ten-minute-old observation does not hold a passing candidate', async () => {
   assert.equal(existsSync(new URL('../src/master/merge.ts', import.meta.url)), false, 'src/master/merge.ts is deleted');
   assert.equal(existsSync(new URL('../src/model/delivery-mode.ts', import.meta.url)), false, 'the delivery-mode switch is deleted');
   // Read inside the case, so a base without the answer fails here rather than at module load.
-  const { mergeAnswer } = await import('../src/cli/master/operations.js') as { mergeAnswer?: string };
-  assert.equal(typeof mergeAnswer, 'string', 'master merge has an answer of its own');
+  const { githubMergesAnswer } = await import('../src/cli/master/operations.js') as { githubMergesAnswer?: string };
+  assert.equal(typeof githubMergesAnswer, 'string', 'master merge has an answer of its own');
   const printed: unknown[] = [];
   await operationsCommand({ id: 'merge', args: ['GY-9'], print: (value: unknown) => { printed.push(value); return value; } } as any);
-  assert.deepEqual(printed, [{ merged: false, result: mergeAnswer }]);
-  assert.match(mergeAnswer!, /^The control plane merges/);
+  assert.deepEqual(printed, [{ merged: false, result: githubMergesAnswer }]);
+  assert.match(githubMergesAnswer!, /^GitHub merges/);
 
   const stale = new Date(now.getTime() - 10 * 60_000).toISOString();
   const work = evaluated(item(stale));
@@ -86,7 +87,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1235;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('github-delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('github_delivery_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/github_delivery_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/github_delivery_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, ciAppIds, 120, 'test/repository');
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });

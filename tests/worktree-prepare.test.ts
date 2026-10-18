@@ -113,7 +113,7 @@ test('unit:one-fetch-per-cycle — dispatching several items in one cycle fetche
     const herdrRun = (_command: string, args: string[]) => JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'muse-pane', tab_id: 'muse-tab' }, tab: { tab_id: 'muse-tab' } }
       : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'muse-pane', agent: 'muse', agent_status: 'working' } } : {} });
     const dispatch = (key: string) => dispatchWork(root, item(key), profile, [], herdrRun, [item('GY-9006'), item('GY-9007')], prepare, async () => {}, 5_000, cycle,
-      { start: { wait: () => {} } });
+      { start: { wait: () => {} }, mergeWriter: 'github' });
     await dispatch('GY-9006');
     await dispatch('GY-9007');
     assert.deepEqual(cycles, [cycle, cycle], 'both dispatches of one snapshot prepare on the cycle the snapshot names, whose single fetch the preparer shares');
@@ -134,7 +134,7 @@ test('unit:worktree-prepare-time-recorded — each dispatch names its worktree p
 
     const started = Date.now();
     const result = await dispatchWork(root, item('GY-9006'), profile, [], (_command, args) => JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'muse-pane', tab_id: 'muse-tab' }, tab: { tab_id: 'muse-tab' } } : args[1] === 'get' ? { type: 'agent_info', agent: { pane_id: 'muse-pane', agent: 'muse', agent_status: 'working' } } : {} }),
-      [item('GY-9006')], async () => { await new Promise(resolve => setTimeout(resolve, 20)); return { epoch: 3, path: join(root, 'assigned'), base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { start: { wait: () => {} } });
+      [item('GY-9006')], async () => { await new Promise(resolve => setTimeout(resolve, 20)); return { epoch: 3, path: join(root, 'assigned'), base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { start: { wait: () => {} }, mergeWriter: 'github' });
     assert.equal(typeof result.prepareMs, 'number');
     assert.ok(result.prepareMs! >= 10, `the recorded time measures the preparation it belongs to: ${result.prepareMs}ms`);
     const record = (await readProfileLaunchRecords(root, [profile]))[profile.name]!;
@@ -258,9 +258,9 @@ if (command === 'claim') {
   };
   // One dispatch as production's effects make it (src/daemon/effects-production.ts:300): the real
   // prepare, release and renewal through the real child runner, the snapshot's instant as the
-  // cycle. Only the start bound stands in, as the other soaks' worlds do.
+  // cycle. Only the plane's merger read and the start bound stand in, as the other soaks' worlds do.
   const dispatch = (key: string, at: string) => dispatchWork(root, item(key), profile, [], herdrRun, [item(key)], undefined, undefined, undefined, at,
-    { start: { wait: () => {} } });
+    { start: { wait: () => {} }, readMergeWriter: async () => 'github' as const });
   const markCycle = (label: string) => appendFileSync(fetchLog, `cycle ${label}\n`);
   const fetchesByCycle = async () => {
     const counts = new Map<string, number>(), failed = new Map<string, number>();

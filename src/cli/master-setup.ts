@@ -25,7 +25,7 @@ import { provisionReleaseFiling, type ReleaseFilingAudit, type ReleaseFilingDeps
  * status, is named here too: every revert it opens would be refused by main's last-push-approval
  * rule, so it is raised before a merge breaks main, not after.
  */
-export const browserProfileMissing = 'No browser profile is configured: App permission updates and installation acceptance cannot run through master browser until the operator lends the master a signed-in Chrome profile';
+export const browserProfileMissing = 'No browser profile is configured: App permission updates, installation acceptance, and page-only protection changes cannot run through master browser until the operator lends the master a signed-in Chrome profile';
 /**
  * A deployment variable the install plan derives from a credential saved on this host is the
  * master's, never the human's (GY-1416): `master setup --apply` sets it, and the loop runs that
@@ -120,18 +120,6 @@ export async function loopSelfProvision(root: string, master: Pick<MasterConfig,
   if (unreported) throw new Error(`setup self-provision ${unreported.outcome}`);
   return (await lastLoopSelfProvision(root))!;
 }
-/**
- * The loop's setup run with the merge writer's deploy key renewed beside it (GY-1978): RENEW
- * registers the key on the repository when it is missing (the credential-401 remedy's port). A key
- * that cannot be registered fails the run after the setup itself ran, so it backs off like any failed run.
- */
-export const setupRenewingDeployKey = (renew: () => Promise<unknown>, setup: typeof masterSetup = masterSetup): typeof masterSetup => async (...args) => {
-  // Both settle before the run does, so a failed setup never leaves a renewal running into the next run.
-  const [report, renewed] = await Promise.allSettled([setup(...args), renew()]);
-  if (report.status === 'rejected') throw report.reason;
-  if (renewed.status === 'rejected') throw renewed.reason;
-  return report.value;
-};
 export async function lastLoopSelfProvision(root: string): Promise<LoopSelfProvision | null> {
   const current = loopProvisionRuns.get(root);
   if (current) return { at: new Date(current.at).toISOString(), outcome: current.outcome, failed: current.failed, ...(current.releaseFiling ? { releaseFiling: current.releaseFiling } : {}) };

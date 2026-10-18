@@ -19,7 +19,7 @@ import { candidateRoot, checkoutHead, createOnboardingFixture, fixtureCases, rec
 
 // GY-1910 (release hold GY-1909): onboarding-delivery-defaults runs on an isolated project onboarded
 // the normal way from the candidate's source, never on the shared UAT install, which keeps its
-// own state.
+// explicit github merger.
 
 const root = candidateRoot as string;
 const caseId = 'onboarding-delivery-defaults';
@@ -65,10 +65,10 @@ const tree = (directory: string): Record<string, string> => Object.fromEntries(r
   .map(entry => { const path = join(entry.parentPath, entry.name); return [path.slice(directory.length + 1), readFileSync(path, 'utf8')]; }).sort(([a], [b]) => a.localeCompare(b)));
 
 const probe: CaseFile = { file: 'e2e/cases/shared-merger-probe.json', definition: parseCase('e2e/cases/shared-merger-probe.json', JSON.stringify({
-  id: 'shared-merger-probe', title: 'The shared install reads the control plane', target: 'uat', required: true,
-  steps: [{ kind: 'http', method: 'GET', path: '/api/merger', status: 200, expect: [{ path: 'mode', equals: 'control-plane' }] }] })) };
+  id: 'shared-merger-probe', title: 'The shared install keeps its merger', target: 'uat', required: true,
+  steps: [{ kind: 'http', method: 'GET', path: '/api/merger', status: 200, expect: [{ path: 'mode', equals: 'github' }] }] })) };
 
-test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-defaults passes, unchanged, on an isolated project normally onboarded from the candidate source; the shared install keeps github, the fixture is bound to the checkout HEAD and removed afterwards, and the run clears the outcome\'s release hold', async () => {
+test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-defaults fails on a shared install explicitly set to github and passes, unchanged, on an isolated project normally onboarded from the candidate source; the shared install keeps github, the fixture is bound to the checkout HEAD and removed afterwards, and the run clears the outcome\'s release hold', async () => {
   const shipped = (await loadCases(root)).find(entry => entry.definition.id === caseId)!;
   // The protected case is the one the release contract binds, with every assertion it was approved with.
   assert.ok(fixtureCases.includes(caseId));
@@ -79,11 +79,20 @@ test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-de
   assert.deepEqual(expectations, ['/api/status project.delivery.previews="local"', '/api/status project.delivery.candidateMaxChanges=5', '/api/status project.delivery.productionVerification=true', '/api/merger mode="control-plane"', 'view Local preview', 'view Production verification']);
 
   const head = checkoutHead(root) as string;
-  // The shared install: an existing installation serving the local defaults .
+  // The shared install: an existing installation serving the local defaults whose merger an admin explicitly set to github.
   const declared = projectDeliveryAssignment({ mode: 'local', previews: 'local', candidateMaxChanges: 5, productionVerification: true });
   const shared = await startControlPlane({ root, sha: head, scratch: await temporaryDirectory('onboarding-uat-shared'), env: { [declared.variable]: declared.value } });
   const opened: any[] = [];
   try {
+    const admin = (path: string, init: RequestInit = {}) => fetch(`${shared.url}${path}`, { ...init, headers: { Authorization: `Bearer ${shared.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'explicit-github', ...init.headers } }).then(response => response.json() as Promise<any>);
+    assert.equal((await admin('/api/merger', { method: 'POST', body: JSON.stringify({ merger: 'github', reason: 'this installation keeps GitHub as its merger' }) })).merger, 'github');
+
+    // The previous target reproduces the hold's failure: step 2 reads the shared install's github merger.
+    const before = await runCases([shipped], { url: shared.url, token: shared.token, launcher: dashboardLauncher() });
+    assert.equal(before.cases[0].verdict, 'failed');
+    assert.equal(before.cases[0].failingStep!.index, 1);
+    assert.equal(before.cases[0].failingStep!.reason, 'mode is "github", expected "control-plane"');
+
     // The repaired suite: the fixture case on an isolated normally onboarded project, every other uat case on the shared install.
     // The host as the uat job meets it: a supported runtime on PATH, and a home and configuration of its own that already
     // hold an install record and a worker credential, so normal init both proposes worker credentials and could read or write the host's.
@@ -136,6 +145,10 @@ test('integration:onboarding-uat-fresh-project-target — onboarding-delivery-de
     assert.ok(credentials.flat().every(path => !existsSync(path)));
     await assert.rejects(fetch(`${made.url}/healthz`));
 
+    // The shared install still records its explicit github merger, set once, by its admin.
+    const merger = await admin('/api/merger');
+    assert.equal(merger.mode, 'github');
+    assert.deepEqual(merger.history.map((entry: any) => entry.merger), ['github']);
 
     // The run clears the outcome's open hold under the hold's own rule.
     const hold: HoldRecord = { kind: 'open', outcome: 'onboarding-default-path', hold: 'onboarding-default-path', candidate: '20261017T132854Z', sha: 'f9b95ec94fc613e7647ffcdfa7826e1f851c254b', at: '2026-10-17T13:30:00.000Z',

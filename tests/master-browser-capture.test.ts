@@ -143,7 +143,7 @@ test('unit:master-browser-capture-keeps-views — master browser capture keeps t
   try {
     const { browserFlows, readAdministrationLedger, sudoFormRedaction } = await browser();
     assert.ok(browserFlows.includes('capture'), 'capture is a master browser flow');
-    await assert.rejects(fleet(root, ['bogus']), /master browser app-permissions\|installation-accept\|capture \[--dry-run\]/, 'the CLI names the capture flow');
+    await assert.rejects(fleet(root, ['bogus']), /master browser app-permissions\|installation-accept\|protection\|capture \[--dry-run\]/, 'the CLI names the capture flow');
     const github = new AppPermissionsPage('confirm');
     const { result, record } = await capture(root, config, github);
     assert.equal(result.flow, 'capture'); assert.equal(result.outcome, 'applied'); assert.equal(result.verified, true);

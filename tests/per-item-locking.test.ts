@@ -8,6 +8,7 @@ import { definiteRenewalRefusal } from '../src/supervisor.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { Refusal, unknownWorkCode } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1124 AC-1: commands on different items that read no fleet state (heartbeats) take only their
 // item's lock and run concurrently; commands that read fleet state still serialise on the fleet
@@ -34,7 +35,7 @@ before(async () => {
     (client as unknown as { query: (...args: unknown[]) => unknown }).query = (...args: unknown[]) => !queryLatencyMs || typeof args.at(-1) === 'function'
       ? query(...args) : sleep(queryLatencyMs).then(() => query(...args));
   });
-  await store.init();
+  await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator, ...workers];
 });

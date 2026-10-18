@@ -158,8 +158,6 @@ test('integration:generated-index-no-conflict — sync regenerates the managed A
     await page(main, 'docs/start.md', 'Start here', 1, 'start.', 'Main body.');
     git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'main edits'); git(main, 'push', '-q', 'origin', 'main');
     (shipped as any).delivery.mergeSha = git(main, 'rev-parse', 'HEAD');
-    // The loop fetches the shared object store; sync itself fetches nothing.
-    git(branch, 'fetch', '-q', 'origin');
     const first = await sync(branch, server.env);
     assert.equal(first.code, 1); assert.equal(first.output.merged, false);
     assert.deepEqual(first.output.conflicts, [{ path: 'docs/start.md', generated: false, shippedBy: ['GY-9'], landedSince: true }], 'the remaining conflict names the item that landed it, not every item that ever touched the path');

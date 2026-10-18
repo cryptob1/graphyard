@@ -18,6 +18,7 @@ import { leaseCommands } from './lease.js';
 import { workspaceCommands } from './workspace.js';
 import { goalCommands } from './goal.js';
 import { reviewCommands } from './review.js';
+import { mergerCommands } from './merger.js';
 import { scopeGuardCommands } from './scope-guard.js';
 import { versionCommands } from './version.js';
 import { upgradeCommands } from './upgrade.js';
@@ -30,7 +31,7 @@ export const commands: readonly CliCommand[] = [
   ...installCommands, ...onboardCommands, ...dbCommands, ...masterCommands, ...workCommands, ...policyCommands,
   ...validationCommands, ...deliveryCommands, ...releaseCommands, ...runnerCommands, ...scenarioCommands,
   ...grantsCommands, ...operatorAgentCommands, ...operatorCommands, ...leaseCommands, ...workspaceCommands,
-  ...goalCommands, ...reviewCommands, ...scopeGuardCommands, ...versionCommands, ...upgradeCommands,
+  ...goalCommands, ...reviewCommands, ...scopeGuardCommands, ...mergerCommands, ...versionCommands, ...upgradeCommands,
 ];
 
 export function renderHelp() {

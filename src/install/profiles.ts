@@ -27,7 +27,7 @@ export async function registerLocalProfiles(request: ProfileRequest): Promise<Pr
   try {
     // Before the App step the master is configured bound to "App pending", so `master environments`
     // and `master harness` already work while a human confirms the App; the run after it binds the real id.
-    await setupMaster(request.root, { url: request.url, token: request.coordinatorToken, cliPath: request.cliPath, hostId: request.hostId, credentialDirectory: request.installDirectory });
+    await setupMaster(request.root, { url: request.url, token: request.coordinatorToken, cliPath: request.cliPath, hostId: request.hostId, credentialDirectory: request.installDirectory, ...(request.appPending ? { allowPendingApp: true } : {}) });
     registration.master = { configured: true, kind: request.masterKind, detail: request.appPending ? 'configured while the GitHub App step is pending: master environments and master harness work now; the master binds the App once it is confirmed' : request.masterKind ? `run: graphyard master start ${request.masterKind}` : 'no authenticated agent runtime was detected for the master session' };
   } catch (error: any) { registration.master = { configured: false, kind: request.masterKind, detail: `master setup did not complete: ${error.message}` }; }
 

@@ -6,7 +6,7 @@ import { parseArgs } from 'node:util';
 import { agentOwner, listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
-import { protectionRun, type ProtectionRun } from '../../protection.js';
+import { applyProtection, ghApiFromRun, parseRetiredCheck, protectionPlan, protectionRun, protectionSnapshots, readProtection, readWorkflows, restoreRulesetSnapshot, retireOperatorRulesetCheck, type ProtectionRun } from '../../protection.js';
 import { demand } from '../../model/refusal.js';
 import { dequeuePullRequestEntry, pullRequestMergeState, withdrawEnqueuedPullRequests, type GraphqlTransport, type WithdrawClient, type WithdrawEntry } from '../../github.js';
 import { cleanupTipRefs } from '../../tip-cleanup.js';
@@ -138,6 +138,21 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
     if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
     return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
   }
+  if (id === 'protection') {
+    const { values } = parseArgs({ args, options: { apply: { type: 'boolean' }, retire: { type: 'string' }, proof: { type: 'string' }, restore: { type: 'string' } }, allowPositionals: false });
+    // Operator rulesets (GY-1926): a saved snapshot goes back to its ruleset, or one proven check leaves it.
+    if (values.restore) return print(await restoreRulesetSnapshot(ghApiFromRun(protectionRun), master, resolve(root, values.restore)));
+    if (values.retire) {
+      if (!values.proof || !/^\d+$/.test(values.proof)) throw new Error('Use master protection --retire CONTEXT@INTEGRATION --proof PR, PR the number of the pull request whose head proves the remaining checks');
+      return print(await retireOperatorRulesetCheck(ghApiFromRun(protectionRun), { ...master, snapshots: protectionSnapshots(root), now: Date.now(), check: parseRetiredCheck(values.retire), proof: Number(values.proof) }));
+    }
+    const snapshot = await masterApi('work-snapshot');
+    // The workflows are the managed checkout's: read them from the root the CLI discovered, never
+    // the process working directory, so the plan carries its CI advisories from any subdirectory.
+    const workflows = readWorkflows(root);
+    if (values.apply) return print(await applyProtection(master, snapshot.work, undefined, workflows, { snapshots: protectionSnapshots(root) }));
+    return print({ ...protectionPlan(readProtection(master), master, snapshot.work, undefined, workflows), apply: false, next: 'Rerun with --apply to reconcile branch protection with these policies' });
+  }
   // The one-time cleanup of the speculative-tip refs the removed merge queue left behind (GY-1236).
   if (id === 'tip-cleanup') {
     const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
@@ -149,8 +164,9 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
     if (positionals[0] === 'fixtures' && positionals.length === 1 && !values['dry-run']) return print(await listConfirmAccessFixtures(root));
     const flow = positionals[0] as BrowserFlow | undefined;
     if (!flow || !browserFlows.includes(flow)) throw new Error(`Use master browser ${browserFlows.join('|')} [--dry-run], or master browser fixtures`);
+    const snapshot = await masterApi('work-snapshot');
     // Installation state comes from the control plane's App credential, not the operator's gh token (GY-964).
-    const result = await runBrowserFlow(root, master, flow, { coordinator: coordinator.actor.id, dryRun: !!values['dry-run'], installation: () => masterApi('github/installation') });
+    const result = await runBrowserFlow(root, master, flow, { work: snapshot.work, coordinator: coordinator.actor.id, dryRun: !!values['dry-run'], installation: () => masterApi('github/installation') });
     if (result.outcome === 'refused') process.exitCode = 1;
     return print(result);
   }

@@ -14,6 +14,7 @@ import { loopBaseFailed, loopRework, type HandReworkLoop } from '../src/cli/hand
 import type { ExhaustedProof } from '../src/daemon/decisions.js';
 import { dropRetiredQueueFields, retiredQueueFields } from '../src/model/retired-queue.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-24..10-06 fixtures are folded at explicit nows (at(5), 2026-10-02T06:00); the Postgres half stamps observations and the report window from the real clock on items it creates itself.
 
 // GY-1389: 386 rework "interventions" at the review stage in seven days, every one of them the
@@ -226,7 +227,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1389;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('rework-rounds'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('rework_rounds_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/rework_rounds_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/rework_rounds_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials, null, undefined, { env: { ...process.env, GRAPHYARD_INTERVENTION_PATTERNS: '0' } });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

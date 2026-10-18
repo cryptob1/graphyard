@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { DEPLOY_KEY_FILE, deployKeyTitle, ensureDeployKey, publicKeyFingerprint } from '../src/install/deploy-key.js';
+import { DEPLOY_KEY_FILE, deployKeyTitle, ensureDeployKey, ensureMainWriteProtection, publicKeyFingerprint } from '../src/install/deploy-key.js';
 import type { GitHubCli } from '../src/install/github.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -138,4 +138,60 @@ test('unit:deploy-key-never-printed — nothing ensureDeployKey writes to stdout
     for (const restore of spies) restore();
     Object.assign(console, consoleOriginals);
   }
+});
+
+// GY-1839: ensureMainWriteProtection reads the read-only flag gh actually prints (`read_only`), or `readOnly`.
+const WRITER_LINE = `ssh-ed25519 ${PUBLIC_BODY} graphyard-merge-writer-box-1`;
+function protectionGitHub(keys: Record<string, unknown>[]) {
+  const writes: string[][] = [];
+  const json = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: '', code: 0 });
+  const gh: GitHubCli = async args => {
+    if (args[0] === 'repo' && args[2] === 'list') return json(keys);
+    const path = args.find((arg, index) => index > 0 && arg.startsWith('repos/'))!;
+    if (args.includes('--method')) { writes.push(args); return json({ id: 100 }); }
+    if (path.startsWith('repos/owner/project/rulesets?')) return json([]);
+    if (path.endsWith('/protection')) return { stdout: '', stderr: 'HTTP 404: Not Found', code: 1 };
+    if (path.includes('/rules/branches/')) return json([]);
+    throw new Error(`unexpected gh ${args.join(' ')}`);
+  };
+  return { gh, writes };
+}
+
+test('unit:deploy-key-read-only-field — a listed key is read-write when it carries read_only false (gh\'s field) or readOnly false; main is protected when the writer key is the only read-write key, and a key carrying neither flag refuses naming the missing flag', async () => {
+  // Imported here, not at the top, so the file still loads against a base that lacks the export and this case fails on its own.
+  const { deployKeyReadOnly } = await import('../src/install/deploy-key.js') as { deployKeyReadOnly: (entry: unknown) => boolean | null };
+  assert.equal(deployKeyReadOnly({ read_only: false }), false);
+  assert.equal(deployKeyReadOnly({ readOnly: false }), false);
+  assert.equal(deployKeyReadOnly({ read_only: true }), true);
+  assert.equal(deployKeyReadOnly({}), null);
+  for (const flag of [{ read_only: false }, { readOnly: false }]) {
+    const github = protectionGitHub([
+      { id: 166040516, key: WRITER_LINE, title: 'graphyard-merge-writer-box-1', ...flag },
+      { id: 2, key: `ssh-ed25519 ${OTHER_BODY}`, title: 'ci-reader', read_only: true },
+    ]);
+    const result = await ensureMainWriteProtection('owner/project', github.gh, { baseBranch: 'main', writerKey: WRITER_LINE });
+    assert.equal(result.state, 'created', `${JSON.stringify(flag)} reads as read-write`);
+    assert.equal(github.writes.length, 1);
+  }
+  const unflagged = protectionGitHub([{ id: 1, key: WRITER_LINE, title: 'graphyard-merge-writer-box-1' }]);
+  await assert.rejects(ensureMainWriteProtection('owner/project', unflagged.gh, { baseBranch: 'main', writerKey: WRITER_LINE }),
+    /deploy key list of owner\/project carried no read-only flag \(read_only or readOnly\) for graphyard-merge-writer-box-1, so main was not protected/);
+  assert.deepEqual(unflagged.writes, []);
+  const readOnlyWriter = protectionGitHub([{ id: 1, key: WRITER_LINE, title: 'graphyard-merge-writer-box-1', read_only: true }]);
+  await assert.rejects(ensureMainWriteProtection('owner/project', readOnlyWriter.gh, { baseBranch: 'main', writerKey: WRITER_LINE }), /not registered read-write on owner\/project/);
+});
+
+test('unit:deploy-key-other-writers-named — when other read-write deploy keys are listed, the refusal names each with the gh repo deploy-key delete ID -R OWNER/REPO command that removes it, and nothing is written', async () => {
+  const github = protectionGitHub([
+    { id: 1, key: WRITER_LINE, title: 'graphyard-merge-writer-box-1', read_only: false },
+    { id: 11, key: `ssh-ed25519 ${OTHER_BODY}`, title: 'graphyard-merge-writer-vishrog', read_only: false },
+    { id: 12, key: `ssh-ed25519 ${OTHER_BODY}`, title: 'graphyard-merge-writer-vishrog', read_only: false },
+    { id: 13, key: `ssh-ed25519 ${OTHER_BODY}`, title: 'ci-reader', read_only: true },
+  ]);
+  const refusal = await ensureMainWriteProtection('owner/project', github.gh, { baseBranch: 'main', writerKey: WRITER_LINE }).then(() => null, (error: Error) => error.message);
+  assert.ok(refusal, 'other read-write keys refuse');
+  assert.match(refusal!, /^Read-write deploy keys graphyard-merge-writer-vishrog, graphyard-merge-writer-vishrog on owner\/project would share the merge writer's bypass, so main was not protected/);
+  for (const id of [11, 12]) assert.ok(refusal!.includes(`\`gh repo deploy-key delete ${id} -R owner/project\` (graphyard-merge-writer-vishrog)`), `key ${id} is named with its delete command`);
+  assert.ok(!refusal!.includes('delete 1 ') && !refusal!.includes('delete 13 '), 'neither the writer key nor a read-only key is named for removal');
+  assert.deepEqual(github.writes, []);
 });

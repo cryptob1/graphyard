@@ -97,21 +97,27 @@ export async function automaticScopeGrounds(item: Work, request: ScopeRequestSta
   return grounds.length ? { grounds, refusal: refusals.join('; ') } : { refusal: refusals.join('; ') };
 }
 
+/** The merger each loop state last read, so a failed read keeps the known mode (GY-1528). */
+const knownMerger = new WeakMap<object, MergerMode>();
 /**
  * GY-1528. Whether the scope actions are off this cycle: the recorded merger is `control-plane`,
  * read as the merge writer step reads it. Nothing is refused on plannedFiles then, so the loop
  * raises, decides and widens no scope request and re-plans nothing. No merge writer reads keeps
- * GitHub's behaviour. A read that fails reads as the control plane, the only merge writer, so a
- * transient error never raises a scope request.
+ * GitHub's behaviour. A read that fails keeps the mode this loop last read; with none read yet it
+ * fails closed, and the scope actions wait for a cycle whose read succeeds, so a transient status
+ * error never raises a scope request under the control plane.
  */
 export async function controlPlaneMerger(cycle: Cycle): Promise<boolean> {
   const reads = cycle.effects.mergeWriter;
   if (!reads) return false;
+  const unknown = () => knownMerger.get(cycle.state) !== 'github';
   try {
     // GY-1774: a read carried past the step's bound is recorded as the step's waiting call, joined or consumed next cycle, and keeps the known mode meanwhile.
     const mode = await carriedCall<MergerMode | null>(cycle, 'scope', 'scope', 'mergeWriter', () => reads.merger(), () => null);
-    return mode === null || mode === 'control-plane';
-  } catch { return true; }
+    if (mode === null) return unknown();
+    knownMerger.set(cycle.state, mode);
+    return mode === 'control-plane';
+  } catch { return unknown(); }
 }
 
 /** Step 2: decide the open scope requests, and measure the decision budget over what is still waiting. */
