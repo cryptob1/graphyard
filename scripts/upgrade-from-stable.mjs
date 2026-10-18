@@ -1,13 +1,13 @@
 // The upgrade gate (GY-1963): a release candidate must upgrade an install of the previous stable
 // release with its work intact. In a scratch directory it installs the previous release with the
-// compose provider, records a goal-free work item, a lease and a decision through that release's
-// CLI, runs that CLI's `graphyard upgrade --to` towards the candidate, and reads everything back:
+// compose provider, gives its master the operator-agent identity `master decide` and `master release`
+// act as, records a goal-free work item, a decision and a lease through that release's CLI, runs that CLI's `graphyard upgrade --to` towards the candidate, and reads everything back:
 //
 //   health-reports-candidate  /healthz reports the candidate's version and commit
 //   item-unchanged            the item reads back with the fields it was recorded with
 //   history-unchanged         every history row recorded before the upgrade reads back identical
 //   decision-unchanged        the decision reads back with the action, input and reason it was requested with
-//   loop-cycle                the loop runs one cycle (master run --once) on the candidate's CLI
+//   loop-cycle                master run --once on the candidate's CLI reports a cycle and no failed one
 //   workflows-pin-candidate   the managed repository's generated workflows pin the candidate's commit
 //
 //   node --import tsx scripts/upgrade-from-stable.mjs --previous stable|VERSION --candidate SHA [--source DIR] [--work DIR] [--report FILE]
@@ -91,8 +91,8 @@ export async function upgradeFromStable(options, steps) {
 
 const git = (cwd, ...args) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const tryGit = (cwd, ...args) => { try { return git(cwd, ...args); } catch { return null; } };
-const sh = (command, args, options) => {
-  const run = spawnSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, ...options });
+const sh = (command, args, options = {}) => {
+  const run = spawnSync(command, args, { encoding: 'utf8', stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024, ...options });
   if (run.status !== 0) throw new Error(`${command} ${args.join(' ')} exited ${run.status ?? run.signal}: ${(run.stderr || run.stdout || '').trim().split('\n').slice(-20).join('\n')}`);
   return run.stdout;
 };
@@ -119,8 +119,9 @@ export function liveSteps(options) {
   const environment = Object.fromEntries(Object.entries(process.env).filter(([name]) => !['GH_TOKEN', 'GITHUB_TOKEN', 'GRAPHYARD_TOKEN', 'GRAPHYARD_URL', 'DATABASE_URL'].includes(name)));
   const plane = { url: null, admin: null, worker: null, database: null };
   // Synchronous; the seed and the read-back await it, so a test may hand them an asynchronous one.
-  const cli = (args, token = plane.admin, extra = {}) => {
-    const out = sh(process.execPath, [join(cliRoot, 'bin/graphyard.mjs'), ...args], { cwd: repoRoot, env: { ...environment, GRAPHYARD_CONFIG_HOME: configHome, ...(plane.url ? { GRAPHYARD_URL: plane.url } : {}), ...(token ? { GRAPHYARD_TOKEN: token } : {}), ...extra } });
+  // `input` is the command's stdin, for the commands that read a credential there.
+  const cli = (args, token = plane.admin, extra = {}, input) => {
+    const out = sh(process.execPath, [join(cliRoot, 'bin/graphyard.mjs'), ...args], { cwd: repoRoot, input, env: { ...environment, GRAPHYARD_CONFIG_HOME: configHome, ...(plane.url ? { GRAPHYARD_URL: plane.url } : {}), ...(token ? { GRAPHYARD_TOKEN: token } : {}), ...extra } });
     try { return JSON.parse(out); } catch { return out; }
   };
   const read = async file => (await readFile(file, 'utf8')).trim();
@@ -165,26 +166,56 @@ export function liveSteps(options) {
   };
 }
 
-/** A goal-free item, its lease (claimed by the install's worker) and a requested decision, each through the CLI, then the snapshot to compare with. */
+/**
+ * install writes master.json with the coordinator credential but no operator-agent identity, and
+ * `master decide` and `master release` act only as that identity: the previous release's own
+ * `master autonomy` provisions it, with the admin credential on stdin as onboarding passes it.
+ */
+export async function provisionMaster({ cli, plane }) {
+  const applied = await cli(['master', 'autonomy', '--admin-token-stdin', '--apply'], plane.admin, {}, `${plane.admin}\n`);
+  if (applied?.applied !== true) throw new Error(`master autonomy provisioned no operator-agent identity: ${JSON.stringify(applied)}`);
+  return applied;
+}
+
+/**
+ * The master's identity, then a goal-free item, a requested decision on it, its release by the
+ * master's operator-agent identity (create leaves new work unreleased, and only released work is
+ * claimable) and its lease (claimed by the install's worker), each through the CLI, then the
+ * snapshot to compare with.
+ */
 export async function seedThroughCli({ cli, plane, repoRoot }) {
+  await provisionMaster({ cli, plane });
   const file = join(repoRoot, '..', 'upgrade-item.json');
   await writeFile(file, JSON.stringify({ title: 'Upgrade gate: this item survives the upgrade', plannedFiles: ['README.md'], criteria: [{ id: 'AC-1', text: 'The item reads back after the upgrade', proofs: ['unit:upgrade-gate-fixture'] }] }));
   const created = await cli(['create', file]);
   const key = created?.key;
   if (!key) throw new Error(`create returned no key: ${JSON.stringify(created)}`);
-  await cli(['claim', key], plane.worker);
   const requested = await cli(['master', 'decide', key, 'release', '{}', 'Upgrade gate: this decision survives the upgrade']);
   const id = requested?.id ?? requested?.decision?.id;
   const decision = listOf(await cli(['master', 'decisions', key]), 'decisions').find(entry => entry?.id === id);
   if (!decision) throw new Error(`master decide recorded no decision on ${key} that master decisions lists: ${JSON.stringify(requested)}`);
+  await cli(['master', 'release', key, 'Upgrade gate: the fixture is released so the worker can claim it']);
+  await cli(['claim', key], plane.worker);
   return { key, item: await cli(['status', key]), history: await cli(['events', key, '--all', '--payload', 'full', '--order', 'asc']), decision };
+}
+
+/**
+ * master run --once exits 0 after a cycle that threw: the loop records the failure and reports it
+ * as failedCycles, and a held cycle reports none. Only a result naming a cycle and no failed one passes.
+ */
+export function loopVerdict(result) {
+  const cycles = result?.cycles, failed = result?.failedCycles;
+  if (typeof cycles !== 'number' || typeof failed !== 'number') return { ok: false, detail: `master run --once reported no cycle count: ${JSON.stringify(result)}` };
+  if (failed > 0) return { ok: false, detail: `${failed} cycle(s) failed: ${JSON.stringify(result.lastFailure ?? null)}` };
+  if (cycles < 1) return { ok: false, detail: 'no cycle ran' };
+  return { ok: true };
 }
 
 /** What the candidate serves after the upgrade, read back through its own CLI. */
 export async function observeThroughCli({ cli, plane, repoRoot, fetch: get }, seeded) {
   const health = await (await get(`${plane.url}/healthz`)).json();
   let loop;
-  try { await cli(['master', 'run', '--once']); loop = { ok: true }; } catch (error) { loop = { ok: false, detail: String(error?.message ?? error) }; }
+  try { loop = loopVerdict(await cli(['master', 'run', '--once'])); } catch (error) { loop = { ok: false, detail: String(error?.message ?? error) }; }
   const directory = join(repoRoot, '.github/workflows');
   const workflows = [];
   for (const name of (await readdir(directory).catch(() => [])).filter(name => /\.ya?ml$/.test(name)).sort())
