@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
@@ -69,21 +69,28 @@ export async function principalCommand(args: string[], dependencies: InstallDepe
   // The edit holds the installation's apply lock from reading the roster until it is persisted and read back,
   // so two edits, or an edit and an install --apply, never each deploy a roster missing the other's entry.
   const release = await acquireApplyLock(directory, (dependencies.now ?? Date.now)());
-  try {
-    if (entry && values['token-file']) await importPrincipalToken(directory, id, resolve(values['token-file']));
-    return await editRoster(root, directory, id, entry, dependencies);
-  } finally { await release(); }
+  try { return await editRoster(root, directory, id, entry, dependencies, values['token-file'] ? resolve(values['token-file']) : null); } finally { await release(); }
 }
-async function editRoster(root: string, directory: string, id: string, entry: ReturnType<typeof rosterEntry> | null, dependencies: InstallDependencies & { cwd: string }) {
+async function editRoster(root: string, directory: string, id: string, entry: ReturnType<typeof rosterEntry> | null, dependencies: InstallDependencies & { cwd: string }, tokenSource: string | null = null) {
   const record = await readInstallRecord(directory);
   if (!record) throw new Error(`No installation is recorded under ${directory}; run graphyard install --apply first`);
   const { roster, changed } = entry ? upsertRosterEntry(recordedRoster(record), entry) : removeRosterEntry(recordedRoster(record), id);
+  // GY-1998: --token-file is judged only after the edit is: a refused edit imports nothing. A
+  // self-contained host keeps every credential on the host and mints its own, so it is refused there.
+  if (tokenSource && record.selfContained) throw new Error(`--token-file restores a credential this machine keeps under ${directory}/tokens; a self-contained ${record.provider} installation keeps its credentials on the host, where principal add mints them. Nothing was imported; add ${id} without --token-file`);
   // The deployment is reached where install --apply reached it: its SSH host and user, local mode, port and image.
   const at = record.deployment;
   if (!at?.sshHost && !at?.local && (record.provider === 'docker-host' || record.provider === 'host')) throw new Error(`${directory}/install.json does not record the host this installation runs on; rerun graphyard install --apply once to record it, then edit the roster`);
-  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}), ...(record.noGithubApp ? { noGithubApp: true } : {}),
+  const imported = tokenSource ? await importPrincipalToken(directory, id, tokenSource, record.principals?.find(principal => principal.id === id)?.fingerprint ?? null) : null;
+  try {
+    const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}), ...(record.noGithubApp ? { noGithubApp: true } : {}),
     ...(at ? { sshUser: at.sshUser, ...(at.sshHost ? { sshHost: at.sshHost } : {}), ...(at.local ? { local: true } : {}), ...(at.port ? { port: at.port } : {}), ...(at.image ? { image: at.image } : {}) } : {}) }, dependencies, 'apply');
-  return applyRosterChange(session, record, roster, { id, changed, entry });
+    return await applyRosterChange(session, record, roster, { id, changed, entry });
+  } catch (error) {
+    // A credential imported for an edit that never reached install.json leaves with it, so no later add reuses it unasked.
+    if (imported?.created && !(await readInstallRecord(directory))?.principals?.some(principal => principal.id === id)) await rm(imported.path, { force: true });
+    throw error;
+  }
 }
 /** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
@@ -266,7 +273,7 @@ export const installCommands = defineCommands([
     '                                Add or remove one principal of this host\'s installation: writes its credential and its',
     '                                install.json roster entry, sets GRAPHYARD_PRINCIPALS alone on the deployment, and reads the',
     '                                roster back from the control plane. A producer needs an explicit --grant or --proof; --token-file',
-    '                                restores an existing credential instead of minting one; delivery:observe-sha is held alone, by a',
+    '                                restores an existing credential instead of minting one (not on a self-contained host); delivery:observe-sha is held alone, by a',
     '                                dedicated observer principal; a later install --apply keeps the entry. Repeating either command',
     '                                changes nothing.'], readsConnection: () => false,
     async run(context) { context.print(await principalCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { cwd: process.cwd(), cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line) })); } },

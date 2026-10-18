@@ -139,9 +139,24 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add --tok
     const deployed = deployedRoster(fixture.transport).find(entry => entry.id === 'graphyard-claude-1')!;
     assert.equal(deployed.token, formerToken, 'the deployment serves the imported credential');
     assert.equal((await readFile(tokenFile(directory, 'graphyard-claude-1'), 'utf8')).trim(), formerToken);
-    assert.equal(await importPrincipalToken(directory, 'graphyard-claude-1', former), tokenFile(directory, 'graphyard-claude-1'), 're-import of the same credential is a no-op');
-    await writeFile(join(fixture.root, 'other.token'), `${'b'.repeat(43)}\n`, { mode: 0o600 });
-    await assert.rejects(importPrincipalToken(directory, 'graphyard-claude-1', join(fixture.root, 'other.token')), /already holds a different credential/);
+    assert.deepEqual(await importPrincipalToken(directory, 'graphyard-claude-1', former), { path: tokenFile(directory, 'graphyard-claude-1'), created: false }, 're-import of the same credential is a no-op');
+    const other = join(fixture.root, 'other.token');
+    await writeFile(other, `${'b'.repeat(43)}\n`, { mode: 0o600 });
+    await assert.rejects(importPrincipalToken(directory, 'graphyard-claude-1', other), /already holds a different credential/);
+    assert.equal((await principal(fixture, ['add', 'graphyard-claude-1', '--role', 'worker', '--token-file', former])).changed, false, 'repeating the import changes nothing');
+
+    // A lost token file of an unchanged entry is restored only with the credential install.json fingerprints, which the deployment serves.
+    await rm(tokenFile(directory, 'graphyard-claude-1'));
+    await assert.rejects(principal(fixture, ['add', 'graphyard-claude-1', '--role', 'worker', '--token-file', other]), /not the credential install\.json records/);
+    await assert.rejects(stat(tokenFile(directory, 'graphyard-claude-1')), { code: 'ENOENT' }, 'a mismatched credential is never written');
+    assert.equal((await principal(fixture, ['add', 'graphyard-claude-1', '--role', 'worker', '--token-file', former])).changed, false);
+    assert.equal((await readFile(tokenFile(directory, 'graphyard-claude-1'), 'utf8')).trim(), formerToken, 'the matching credential restores the lost file');
+
+    // A refused edit imports nothing: the credential is placed only once the edit itself is accepted.
+    await assert.rejects(principal(fixture, ['add', 'owner-project-worker-1', '--role', 'worker', '--token-file', other]), /installer's own principals/);
+    assert.notEqual((await readFile(tokenFile(directory, 'owner-project-worker-1'), 'utf8')).trim(), 'b'.repeat(43), 'an installer-owned credential is never replaced');
+    await assert.rejects(principal(fixture, ['add', 'observer', '--role', 'producer', '--grant', 'delivery:observe-sha', '--grant', GRANT, '--token-file', other]), /dedicated observer/);
+    await assert.rejects(stat(tokenFile(directory, 'observer')), { code: 'ENOENT' });
     const proof = await principal(fixture, ['add', 'restored-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']);
     assert.equal(proof.changed, true);
     assert.deepEqual(proof.principal, { id: 'restored-producer', role: 'producer', sessionKind: 'ai', grants: [], proofs: ['integration:*', 'unit:*'] });
@@ -452,6 +467,14 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add reach
     assert.equal(installed.length, 1, 'install --apply deploys one sign-in claim');
     const added = await principal(host, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
     assert.ok(host.hostFiles.has(`${tokens}/huck-engineer.token`), 'the added credential is written on the host');
+    // GY-1998: the host mints its own credentials, so --token-file is refused there before anything is imported or deployed.
+    const former = join(host.root, 'former.token');
+    await writeFile(former, `${'c'.repeat(43)}\n`, { mode: 0o600 });
+    const hostWrites = lines(host.remotes.get('203.0.113.20')!).length;
+    await assert.rejects(principal(host, ['add', 'restored-worker', '--role', 'worker', '--token-file', former]), /self-contained host installation keeps its credentials on the host/);
+    await assert.rejects(stat(tokenFile(session.directory, 'restored-worker')), { code: 'ENOENT' }, 'no stray copy of the credential is left in the install directory');
+    assert.equal(lines(host.remotes.get('203.0.113.20')!).length, hostWrites, 'nothing reaches the host');
+    assert.ok(!deployedRoster(host.transport, host.remotes).some(entry => entry.id === 'restored-worker'));
     assert.deepEqual(claim(), installed, 'principal add keeps the deployed sign-in claim');
     assert.ok(!('signIn' in added), 'no new sign-in link is minted');
     await principal(host, ['remove', 'huck-engineer']);

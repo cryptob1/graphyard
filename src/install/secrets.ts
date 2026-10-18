@@ -210,21 +210,25 @@ export function rosterEntry(input: { id: string; role?: string; sessionKind?: st
 /**
  * Place an existing credential at the install token path `ensureTokens` reads, so `principal add`
  * restores a former identity instead of minting a new secret the dispatcher's credential file would
- * not match (GY-1998). Refuses to overwrite a different standing token for the same id.
+ * not match (GY-1998). Refuses to overwrite a different standing token for the same id, and, for an
+ * id the roster already records, any credential whose fingerprint differs from the recorded one: the
+ * deployment serves that credential, so a lost token file is restored only with the same secret.
+ * `created` is true when this call wrote the file.
  */
-export async function importPrincipalToken(directory: string, principal: string, source: string) {
+export async function importPrincipalToken(directory: string, principal: string, source: string, recorded: string | null = null) {
   const text = (await readFile(source, 'utf8')).trim();
   if (text.length < 32) throw new Error(`${source} does not contain a usable credential`);
   if (/[\r\n\0]/.test(text)) throw new Error(`${source} must be a single-line credential`);
+  if (recorded && fingerprint(text) !== recorded) throw new Error(`${source} is not the credential install.json records for ${principal} (fingerprint ${recorded}), which the deployment serves; nothing was written. Import the matching credential, or run graphyard principal remove ${principal} and add it again`);
   const dest = tokenFile(directory, principal);
   try {
     const standing = (await readFile(dest, 'utf8')).trim();
-    if (standing === text) return dest;
-    if (standing) throw new Error(`${dest} already holds a different credential for ${principal}; remove it with graphyard principal remove ${principal} before importing ${source}`);
+    if (standing === text) return { path: dest, created: false };
+    if (standing) throw new Error(`${dest} already holds a different credential for ${principal}; nothing was written. Import that credential instead, or run graphyard principal remove ${principal} and add it again with --token-file ${source}`);
   } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   await mkdir(resolve(directory, 'tokens'), { recursive: true, mode: 0o700 });
   await atomicPrivate(dest, `${text}\n`);
-  return dest;
+  return { path: dest, created: true };
 }
 const installersOwn = (roster: RosterPrincipal[], id: string) => {
   const existing = roster.find(principal => principal.id === id);
