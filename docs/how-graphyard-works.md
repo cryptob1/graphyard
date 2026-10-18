@@ -44,6 +44,6 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master, slice 
 
 ![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
 
-Text equivalent: mutations, events commit in locked Postgres transactions; reconciliation merges passing heads; webhooks wake jobs.
+Text equivalent: mutations, events commit in locked Postgres transactions; the merge writer trial-merges passing heads and pushes with its deploy key; no webhook is served (the diagram's GitHub webhook and check publishing predate GY-2010).
 
 Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
