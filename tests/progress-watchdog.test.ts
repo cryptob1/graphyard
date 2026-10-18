@@ -41,7 +41,7 @@ function item(key: string, overrides: Partial<Work> = {}): Work {
   } as Work;
 }
 /** A delivered item, merged `mergedAgo` minutes before NOW. */
-const delivered = (key: string, mergedAgo: number) => item(key, { stage: 'done', delivery: { mergeSha: sha(key), authorizationRevision: 1, mergedAt: at(-mergedAgo) } });
+const delivered = (key: string, mergedAgo: number) => item(key, { stage: 'done', stageEnteredAt: at(-mergedAgo), delivery: { mergeSha: sha(key), authorizationRevision: 1, mergedAt: at(-mergedAgo) } });
 /** The release reading the cursor keeps: promoted `promotedAgo` minutes before NOW. */
 const release = (promotedAgo: number | null) => promotedAgo === null ? null
   : promotionStateSchema.parse({ checkedAt: at(-1), mainSha: sha('main'), promotedSha: sha('release'), promotedAt: promotedAgo === null ? null : at(-promotedAgo), behind: 0, inFlight: false, runsReadAt: null, dispatchedAt: null, lastDispatchAt: null, nextDueAt: null, reason: null });
@@ -61,6 +61,13 @@ test('unit:progress-watchdog-no-progress — one line names the progress instant
   // A stage moved ten minutes ago: progress happened, so no line, whatever else is old.
   const moved = [item('GY-2', { stageEnteredAt: at(-10) }), item('GY-3', { stage: 'merge', stageEnteredAt: at(-200) })];
   assert.deepEqual(progressAttention(moved, release(180), NOW), []);
+
+  // Every item's stage entry is progress, open or not: a backlog item or a finished one that moved
+  // ten minutes ago holds the line off beside an old open item.
+  const backlogMoved = [item('GY-5', { stage: 'backlog', stageEnteredAt: at(-10) }), item('GY-3', { stage: 'build', stageEnteredAt: at(-200) })];
+  assert.deepEqual(progressAttention(backlogMoved, release(180), NOW), [], 'a backlog stage entry ten minutes ago is progress');
+  const doneMoved = [item('GY-6', { stage: 'done', stageEnteredAt: at(-10) }), item('GY-3', { stage: 'build', stageEnteredAt: at(-200) })];
+  assert.deepEqual(progressAttention(doneMoved, release(180), NOW), [], 'a done stage entry ten minutes ago is progress');
 
   // A delivery merged ten minutes ago is progress too, even with every stage entry and the release old.
   const merged = [delivered('GY-4', 10), item('GY-3', { stage: 'merge', stageEnteredAt: at(-200) })];
@@ -137,7 +144,7 @@ test('unit:progress-watchdog-master-status — master status lists both watchdog
   await writeDaemonState(master, cursor);
   const work = [item('GY-2', { stageEnteredAt: at(-180) }), delivered('GY-1', 120)];
   const masterApi = async (path: string) => path === 'work-snapshot' ? { work, now: new Date(NOW).toISOString() } : { decisions: [] };
-  const status = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { now: () => NOW }) as { attentionItems: { subject: string; text: string; kind?: string; faultClass?: string }[] };
+  const status = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { now: () => NOW }) as { attentionItems: { subject: string; text: string; kind?: string; faultClass?: string }[]; faults: { subjects: string[]; count: number }[] };
   const stall = status.attentionItems.findIndex(line => /^Nothing has progressed for \d+ minutes \(since /.test(line.text));
   const lag = status.attentionItems.findIndex(line => /^1 merged change\(s\) have not reached the running release for /.test(line.text));
   assert.ok(stall >= 0, `the no-progress line is listed: ${status.attentionItems.slice(0, 6).map(line => line.text).join(' | ')}`);
@@ -145,10 +152,13 @@ test('unit:progress-watchdog-master-status — master status lists both watchdog
   assert.match(status.attentionItems[stall].text, /: GY-2 has been in build since /);
   assert.match(status.attentionItems[lag].text, /the oldest is GY-1 merged at /);
   assert.match(status.attentionItems[lag].text, /; the release last moved at /);
-  // Both ride the loop attention, ahead of every work item. The builder sets no kind, so the
-  // fault step files nothing for them; the report's own blanket classification (GY-173) stamps
-  // every kind-less line unclassified for display, exactly as the standing-stall lines already are.
+  // Both ride the loop attention, ahead of every work item, and reach the final report as they
+  // were built: no kind, no fault class, and in no fault group, so nothing files or counts them.
   assert.ok(stall < 4 && lag < 4, `both lines sit in the report's loop attention (stall ${stall}, lag ${lag})`);
-  assert.equal(status.attentionItems[stall].faultClass, 'unclassified');
-  assert.equal(status.attentionItems[lag].faultClass, 'unclassified');
+  for (const index of [stall, lag]) {
+    assert.equal(status.attentionItems[index].kind, undefined);
+    assert.equal(status.attentionItems[index].faultClass, undefined);
+  }
+  assert.ok(!status.faults.some(group => group.subjects.includes('release')), 'no fault group names the release-lag line');
+  assert.equal(status.faults.reduce((total, group) => total + group.count, 0), status.attentionItems.filter(line => line.faultClass).length, 'the fault groups count only the classified lines');
 });

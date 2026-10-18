@@ -367,19 +367,19 @@ export function progressAttention(work: readonly Work[], release: Pick<Promotion
   const merged = work.flatMap(item => { const at = parseInstant(item.delivery?.mergedAt); return at === null ? [] : [{ key: item.key, at }]; });
   const promotedAt = parseInstant(release?.promotedAt ?? null);
   if (open.length) {
-    const progress = [...open.map(item => parseInstant(item.stageEnteredAt)), ...merged.map(entry => entry.at), promotedAt]
+    const progress = [...work.map(item => parseInstant(item.stageEnteredAt)), ...merged.map(entry => entry.at), promotedAt]
       .filter((at): at is number => at !== null);
     const newest = progress.length ? Math.max(...progress) : null;
     const waited = stalledOpenItem(open);
     if (newest !== null && waited && now - newest > progressStallMs)
-      items.push({ subject: waited.item.key,
+      items.push({ subject: waited.item.key, faultless: true,
         text: `Nothing has progressed for ${Math.round((now - newest) / 60_000)} minutes (since ${new Date(newest).toISOString()}): ${waited.item.key} has been in ${waited.item.stage} since ${waited.item.stageEnteredAt}`,
         ...agentOwner('master', `graphyard master status names what holds ${waited.item.key} in ${waited.item.stage}; judge and clear that wait — a restart clears only a loop that has stopped cycling, and this one says it has not`) });
   }
   const unreleased = merged.filter(entry => promotedAt === null || entry.at > promotedAt);
   const oldest = unreleased.slice().sort((a, b) => a.at - b.at)[0] ?? null;
   if (oldest && now - oldest.at > releaseLagMs)
-    items.push({ subject: 'release',
+    items.push({ subject: 'release', faultless: true,
       text: `${unreleased.length} merged change(s) have not reached the running release for ${Math.round((now - oldest.at) / 60_000)} minutes; the oldest is ${oldest.key} merged at ${new Date(oldest.at).toISOString()}; ${promotedAt === null ? 'no release has been observed' : `the release last moved at ${new Date(promotedAt).toISOString()}`}`,
       ...agentOwner('master', 'graphyard master status shows the promotion drive under promotion; judge why the release has not moved onto the merged heads and unblock it — the merges themselves are delivered') });
   return items;

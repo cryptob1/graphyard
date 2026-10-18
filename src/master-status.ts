@@ -179,8 +179,9 @@ export function attributeAttention(items: AttentionItem[], readings: ResourceRea
  * ledger and resource attribution — so an item rewritten to name a resource is counted as one.
  */
 export function faulted(items: AttentionItem[]) {
-  const attentionItems = classifyAttention(items);
-  return { attentionItems, faults: groupFaults(attentionItems) };
+  const classifiedItems = classifyAttention(items.filter(item => !item.faultless));
+  let next = 0;
+  return { attentionItems: items.map(item => item.faultless ? item : classifiedItems[next++]), faults: groupFaults(classifiedItems) };
 }
 
 /**

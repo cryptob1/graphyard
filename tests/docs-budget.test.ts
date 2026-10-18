@@ -109,7 +109,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1844: the release-candidate section states digest promotion: a candidate's recorded build promotes by its exact digests, never a rebuild.
   ['docs/delivery.md', /A recorded build promotes by digest, never rebuilt, once UAT names it/],
   // GY-1855 AC-2, reworded by GY-1980: an uncleared stall wakes the master session once per run and files nothing; the status listing stays.
-  ['docs/master-agent-reference.md', /a \[stall\]\(operations-reference\.md#master-coordination-loop\) uncleared past six failing cycles wakes the master session once per run; `master status` lists each stall's signature, count, remedy, owner, filing nothing/],
+  ['docs/master-agent-reference.md', /an unbound \[stall\]\(operations-reference\.md#master-coordination-loop\) wakes the master session once per run at three failing cycles \(bound: remedy refused, unverified or failing at six\); `master status` lists each stall's signature, count, remedy, owner, filing nothing/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
