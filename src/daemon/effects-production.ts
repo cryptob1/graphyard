@@ -375,17 +375,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       publishedEnvironment = environment;
     },
     // Imported when first run: only this step reads the install modules. Each run also registers the merge
-    // writer's deploy key with the host's gh login when it is missing (the credential-401 remedy's port);
-    // a key that cannot be registered fails the run after the setup itself ran.
+    // writer's deploy key when it is missing (setupRenewingDeployKey; soaked in tests/soak-deploy-key-renewal.test.ts).
     selfProvision: async () => {
-      const [{ loopSelfProvision, masterSetup }, { hostCredentialPorts }] = await Promise.all([import('../cli/master-setup.js'), import('./step-stalls.js')]);
+      const [{ loopSelfProvision, setupRenewingDeployKey }, { hostCredentialPorts }] = await Promise.all([import('../cli/master-setup.js'), import('./step-stalls.js')]);
       const config = current();
-      return loopSelfProvision(root, config, { setup: async (...args) => {
-        const key = hostCredentialPorts(config, root).renewDeployKey().then(() => null, (error: unknown) => error);
-        const report = await masterSetup(...args), failed = await key;
-        if (failed) throw failed;
-        return report;
-      } });
+      return loopSelfProvision(root, config, { setup: setupRenewingDeployKey(() => hostCredentialPorts(config, root).renewDeployKey()) });
     },
     publishMergeSettings: async () => {
       const config = { rerunFailedChecks: rerunFailedChecks(current()) };
