@@ -6,11 +6,11 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 ## One trip from setup to Done
 
 1. **Ready**: released, unblocked, criteria name proofs.
-2. **Build**: worker claims lease, worktree; submits PR.
+2. **Build**: worker claims lease, worktree; submits exact commit (`complete --head`), pushes nothing.
 3. **Review**: independent reviewer approves exact commit.
-4. **Test**: Graphyard observes CI.
+4. **Test**: merge writer trial-merges onto base, runs build and tests.
 5. **Acceptance**: granted producers report proofs its [lane](#risk-lanes) requires.
-6. **Done**: Graphyard rechecks gates, merges, observes.
+6. **Done**: Graphyard rechecks gates, pushes base with deploy key, observes.
 
 ## From goal to work items
 
@@ -42,8 +42,8 @@ Text equivalent: operator makes human-only decisions; Herdr hosts master, slice 
 
 ## Correctness rules
 
-![Control plane: callers, engine, Postgres, reconciliation worker, GitHub.](diagrams/control-plane-components.svg)
+![Control plane: callers, engine, Postgres, loop and merge writer, git remote.](diagrams/control-plane-components.svg)
 
-Text equivalent: mutations, events commit in locked Postgres transactions; the merge writer trial-merges passing heads and pushes with its deploy key; no webhook is served (the diagram's GitHub webhook and check publishing predate GY-2010).
+Text equivalent: mutations, events commit in locked Postgres transactions; the merge writer trial-merges passing heads and pushes with its deploy key; no webhook is served.
 
-Gates are deterministic checks of one candidate, `(PR, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
+Gates are deterministic checks of one candidate, `(change number, head SHA, base SHA)`; claims bump epoch; latest trusted proof wins; merge is not [delivery](delivery.md).
