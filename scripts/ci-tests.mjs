@@ -284,9 +284,9 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     shards.forEach((shard, at) => console.log(`shard ${at + 1}: ${shard.files.length} files, ${Math.round(shard.durationMs / 1000)}s recorded`));
     console.log(`imbalance ${(shardImbalance(shards) * 100).toFixed(1)}%`);
   } else if (command === 'affected') {
-    // The merge writer's trial selection never runs the advisory budget tests (GY-1528).
+    // The trials' selection (the shadow gate's and the merge writer's) never runs the advisory budget tests (GY-1528).
     const selection = selectAffected(args, dependencyMap(), preMergeTestFiles().filter(file => !isAdvisoryTest(file)));
-    // The files follow in both modes, so a caller (the merge writer's trial) runs exactly the pre-merge selection and never the release-candidate suites.
+    // The files follow in both modes, so a caller (the shadow gate's trial) runs exactly the pre-merge selection and never the release-candidate suites.
     console.log(`${selection.mode}: ${selection.reason}`); if (selection.files.length) console.log(selection.files.join('\n'));
   } else if (command === 'advisory') {
     // The advisory budget tests the loop runs once after each control-plane merge (GY-1528), in the `affected` output's shape.
