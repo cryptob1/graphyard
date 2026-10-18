@@ -7,7 +7,7 @@ import { actionRecordLimit, actionStall, actionStallThreshold } from '../src/mod
 import type { NextAction } from '../src/model/action-kinds.js';
 import { livenessCarry, livenessRetryLimit } from '../src/model/liveness.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
-import { appPermissionsFirst, recordStallRemedy, stallRemedy, standingRemedy, type FlowResult, type RemedyFlow } from '../src/stall-remedies.js';
+import { appPermissionsFirst, credential401Remedy, recordStallRemedy, stallRemedy, standingRemedy, type FlowResult, type RemedyFlow } from '../src/stall-remedies.js';
 import { owedRemedies, remedyStep } from '../src/daemon/cycle-remedies.js';
 import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { emptyDaemonState } from '../src/daemon/state.js';
@@ -31,7 +31,7 @@ const endedSince = (row: ActionRow) => actionStall({ ...row, history: row.histor
 const shift = (at: string, ms: number) => new Date(Date.parse(at) + ms).toISOString();
 
 /** An open item whose `kind` row failed `failures` times for `reason`, the last at `at`. */
-function stalledItem(key: string, kind: 'resync' | 'dispatch', reason: string, at: string, failures = actionStallThreshold) {
+function stalledItem(key: string, kind: 'resync' | 'dispatch' | 'verify-deployment' | 'request-review', reason: string, at: string, failures = actionStallThreshold) {
   const id = randomUUID(), binding = `${kind}:1`;
   const first = shift(at, -failures * 60_000);
   const history: ActionRecord[] = [{ at: shift(first, -60_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: `${key} needs ${kind}` }];
@@ -47,6 +47,11 @@ function stalledItem(key: string, kind: 'resync' | 'dispatch', reason: string, a
   const action = { kind, work: id, key, gate: 'build', refusal: null, reason: row.reason, inputs: row.inputs, llmRole: null, binding } as unknown as NextAction;
   return { work, row, action };
 }
+
+const endpoint4xx = (status = 404) => `Deployment endpoint answered ${status}`;
+const claim401 = 'Command failed: /home/vish/code/graphyard/bin/graphyard.mjs claim GY-1994\n{"error":"A valid Graphyard bearer token is required"}';
+const reviewerRefused = (key: string, status = 400) => `The control plane refused the reviewer launch of ${key} (${status}): Invalid input`;
+
 
 /** The loop's remedy step against `work`, with `flow` standing in for the master browser child and the record landing on the row as the control plane writes it. */
 async function runRemedyStep(work: Work[], flow: (name: RemedyFlow) => Promise<FlowResult>, at: string) {
@@ -88,10 +93,13 @@ test('unit:stall-remedy-binding — every stall reason the registry recognises b
   const workerPushHold = stallRemedy('App graphyard-worker installation lacks Workflows: write (installed with read), worker-push-shortfall; they are minted without it until it is granted, so a worker push that needs it is refused. Run graphyard master browser app-permissions, then graphyard master browser installation-accept, or accept the pending permission request at https://github.com/settings/installations/91011');
   assert.equal(workerPushHold?.kind, 'installation-accept');
   assert.equal(stallRemedy('reviewer agent reviewer-a is busy in Herdr'), null, 'a reason no entry recognises binds to nothing');
+  assert.equal(stallRemedy(endpoint4xx())?.kind, 'installation-setup');
+  assert.equal(stallRemedy(claim401)?.kind, 'credential-401');
+  assert.equal(stallRemedy(reviewerRefused('GY-1998'))?.kind, 'reviewer-identity');
 
   const at = '2026-09-29T05:41:27.620Z';
   const bound = stalledItem('GY-864', 'resync', holdReason('GY-864'), at);
-  const unknown = stalledItem('GY-9', 'request-review' as 'dispatch', 'reviewer agent reviewer-a is busy in Herdr', at);
+  const unknown = stalledItem('GY-9', 'request-review', 'reviewer agent reviewer-a is busy in Herdr', at);
   const raised = stalledActionAttention({ work: [bound.work, unknown.work], now: at });
   const named = raised.find(entry => entry.subject === 'GY-864')!;
   assert.doesNotMatch(named.next, generic, 'a bound reason no longer gets the generic instruction');
@@ -295,3 +303,51 @@ for (const instance of instances) {
     assert.deepEqual(stalledActionAttention({ work: [work], now: shift(instance.at, 180_000) }), [], 'and the stall does not recur');
   });
 }
+
+// ---- GY-2014: permanent installation-level reasons ----------------------------------------------
+
+test('unit:stall-remedy-deployment-endpoint-4xx — a verify-deployment row three failures deep on "Deployment endpoint answered 4xx" binds to the installation setup remedy', () => {
+  for (const status of [400, 401, 403, 404]) {
+    const bound = stallRemedy(endpoint4xx(status));
+    assert.equal(bound?.kind, 'installation-setup', `status ${status}`);
+    assert.equal(bound?.applies, 'decision');
+    assert.equal(bound?.owner, 'master');
+    assert.match(bound!.remedy, /deploymentUrl/);
+    assert.match(bound!.next, /deploymentUrl/);
+  }
+  assert.equal(stallRemedy('Deployment endpoint answered 503'), null, '5xx stays unbound: another service\'s fault');
+  assert.equal(stallRemedy('Deployment endpoint is unreachable: timeout'), null);
+  const at = '2026-10-18T03:00:00.000Z';
+  const { work } = stalledItem('GY-1963', 'verify-deployment', endpoint4xx(404), at);
+  assert.ok(work.actionQueue!.actions[0].stall, 'three failures classify as a stall');
+  assert.equal(stallRemedy(work.actionQueue!.actions[0].stall!.reason)?.kind, 'installation-setup');
+});
+
+test('unit:stall-remedy-claim-credential-401 — a dispatch row failing for the refused claim credential binds to the credential-401 remedy, and recordStallRemedy records one attempt per unchanged run', () => {
+  const bound = stallRemedy(claim401);
+  assert.equal(bound?.kind, 'credential-401');
+  assert.equal(bound?.applies, 'loop', 'one attempt may be recorded per run');
+  assert.equal(bound?.remedy, credential401Remedy);
+  assert.match(bound!.next, /credential-401/);
+  assert.doesNotMatch(bound!.next, generic);
+
+  const at = '2026-10-18T03:00:00.000Z';
+  const { work, row } = stalledItem('GY-1994', 'dispatch', claim401, at);
+  assert.equal(recordStallRemedy(work, row.id, { remedy: 'credential-401', reason: claim401, outcome: 'applied', detail: 'the fresh credential authenticates', flows: [] }, 'graphyard-master', new Date(at)).remedy?.outcome, 'applied');
+  assert.equal(standingRemedy(work, row.id, claim401)?.outcome, 'applied');
+  assert.throws(() => recordStallRemedy(work, row.id, { remedy: 'credential-401', reason: claim401, outcome: 'applied', detail: 'again', flows: [] }, 'graphyard-master', new Date(shift(at, 60_000))),
+    /already recorded for this unchanged run/);
+});
+
+test('unit:stall-remedy-reviewer-launch-refused — a request-review row failing for the refused reviewer launch binds to the reviewer-identity remedy the master owns', () => {
+  const reason = reviewerRefused('GY-1998', 400);
+  const bound = stallRemedy(reason);
+  assert.equal(bound?.kind, 'reviewer-identity');
+  assert.equal(bound?.applies, 'decision');
+  assert.equal(bound?.owner, 'master');
+  assert.match(bound!.remedy, /reviewer identity|reviewer setup/);
+  assert.match(bound!.next, /GY-2008/);
+  assert.equal(stallRemedy(reviewerRefused('GY-2009', 422))?.kind, 'reviewer-identity');
+  assert.equal(stallRemedy('The control plane refused the reviewer launch of GY-1 (500): unavailable'), null, '5xx stays unbound');
+  assert.equal(stallRemedy('reviewer agent reviewer-a is busy in Herdr'), null);
+});

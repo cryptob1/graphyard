@@ -14,10 +14,10 @@ export function assignment(work: Pick<Work, 'lease' | 'lastAssignment' | 'worksp
 }
 
 /**
- * GY-860 AC-2: the worktree command's refusal of a rework workspace whose PR branch moved past the
- * head Graphyard last observed — a docs-sync push, a base refresh, a worker's late push. The
- * release carrying it wakes the item's observation job ahead of the polled backlog (GY-1286): the
- * next dispatch can only succeed once that reading lands, and nothing else asks for it, so on
- * 2026-10-05 GY-1234 was refused six times in 30 minutes while its observation sat in the backlog.
+ * The refusal the rework workspace recorded while it still observed the submitted PR branch (GY-860
+ * AC-2), kept for the releases that carry it: since GY-2017 the workspace starts from the
+ * registered local head and observes no PR branch, so a release carrying this message predates
+ * that change. The release carrying it still wakes the item's observation job ahead of the polled
+ * backlog (GY-1286), as it did when the reading was what the next dispatch waited on.
  */
 export const submittedBranchMoved = 'Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace';
