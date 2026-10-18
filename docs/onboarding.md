@@ -102,4 +102,4 @@ CI workflows should cancel superseded pull-request runs: group `${{ github.workf
 
 `graphyard onboard inventory --repo OWNER/REPO [--mapping FILE] [--out FILE]` labels open PRs and drafts: `continue`, `hold` (draft), `adopt` (mergeable; protection, ruleset checks clean per App) or `superseded` (base holds the head). Read-only; `--mapping` binds keys.
 
-`master adopt GY-N --pr NUMBER --head SHA [--source-key KEY --source-url URL] REASON` binds an open non-draft PR at its live head (source kept); attempts use its branch, `complete` only it; a moved head or second owner is refused by name, a repeat is a no-op; GitHub is never written.
+`master adopt GY-N --pr NUMBER --head SHA …` is refused: adoption binds a PR's live head and Graphyard reads no GitHub API, so no new adoption binds; a replayed key answers from its receipt. Items adopted earlier keep their binding: attempts start at the stored adopted head from the shared object store and submit with `complete GY-N EPOCH --head`, never through the PR.
