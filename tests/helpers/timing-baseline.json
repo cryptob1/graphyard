@@ -413,7 +413,6 @@
     "tests/fault-class-stalled-gate.test.ts": 1175,
     "tests/fault-class-unclassified.test.ts": 522,
     "tests/fault-classes.test.ts": 3623,
-    "tests/flake-ledger-records.test.ts": 600,
     "tests/fleet-panel.test.ts": 357,
     "tests/fleet-sessions.test.ts": 963,
     "tests/flow-analytics.test.ts": 20962,
@@ -798,7 +797,6 @@
     "tests/soak-doctor.test.ts": 20000,
     "tests/soak-fault-class-filing.test.ts": 2000,
     "tests/soak-fault-class-linked-recurrence.test.ts": 3326,
-    "tests/soak-flake-ledger.test.ts": 1100,
     "tests/soak-fleet-alignment.test.ts": 40000,
     "tests/soak-goal-outright-refusals.test.ts": 1863,
     "tests/soak-harness-checkout.test.ts": 3186,
@@ -980,6 +978,7 @@
     "tests/soak-exact-candidates.test.ts": 32000,
     "tests/goal-candidate-promotion.test.ts": 5000,
     "tests/release-uat-after-read.test.ts": 400,
-    "tests/control-plane-rework-workspace.test.ts": 1500
+    "tests/control-plane-rework-workspace.test.ts": 1500,
+    "tests/no-flake-items.test.ts": 300
   }
 }
