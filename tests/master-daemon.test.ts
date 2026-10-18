@@ -421,24 +421,21 @@ test('deployment verification reports the served commit and which delivered item
     const run = (command: string, args: string[]) => {
       calls.push(`${command} ${args.join(' ')}`);
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      if (args[1] === 'graphql') { assert.match(args[3], /nodes\(ids: \["DE_9"\]\)/); return JSON.stringify({ data: { nodes: [{ databaseId: 9, latestStatus: { state: 'SUCCESS' } }] } }); }
-      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, node_id: 'DE_9', sha: head, ref: 'main', environment: 'production' }]);
       throw new Error(`unexpected ${args.join(' ')}`);
     };
-    const fromProvider = await observeDeployment(config(token), delivered, run, fetch, () => clock, { root: checkout });
-    assert.equal(fromProvider.source, 'github-deployment');
-    assert.equal(fromProvider.sha, head);
-    assert.deepEqual(fromProvider.deployed, ['GY-1', 'GY-2']);
-    assert.deepEqual(fromProvider.pending, ['GY-3'], 'a merge the running release does not contain is not deployed');
-    assert.equal(calls.filter(entry => entry.includes('/compare/')).length, 0, 'containment is local ancestry, never a compare per delivery');
-    assert.equal(fromProvider.requests, 2);
-    assert.deepEqual(fromProvider.containment, { release: head, settled: { 'GY-1': head, 'GY-2': head } }, 'what the release was shown to serve is retained for the next cycle');
+    const unconfigured = await observeDeployment(config(token), delivered, run, fetch, () => clock, { root: checkout });
+    assert.equal(unconfigured.source, 'unavailable', 'without an endpoint no release is read, from GitHub or anywhere else');
+    assert.deepEqual(unconfigured.pending, ['GY-1', 'GY-2', 'GY-3']);
+    assert.equal(calls.filter(entry => entry.startsWith('gh ')).length, 0);
 
     const endpoint = config(token, { run: { intervalSeconds: 20, deploymentUrl: 'https://app.example/version', deploymentShaField: 'build.commit' } });
     const fetcher = (async () => new Response(JSON.stringify({ build: { commit: head.toUpperCase() } }))) as typeof fetch;
     const fromEndpoint = await observeDeployment(endpoint, delivered, run, fetcher, () => clock, { root: checkout });
     assert.equal(fromEndpoint.source, 'endpoint');
     assert.equal(fromEndpoint.sha, head);
+    assert.deepEqual(fromEndpoint.deployed, ['GY-1', 'GY-2']);
+    assert.deepEqual(fromEndpoint.pending, ['GY-3'], 'a merge the running release does not contain is not deployed');
+    assert.deepEqual(fromEndpoint.containment, { release: head, settled: { 'GY-1': head, 'GY-2': head } }, 'what the release was shown to serve is retained for the next cycle');
     assert.equal(fromEndpoint.requests, 0);
 
     const silent = (async () => new Response(JSON.stringify({ ok: true }))) as typeof fetch;
