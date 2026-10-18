@@ -12,7 +12,7 @@ import { mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-
 import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../merge-writer/trial.js';
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import { loadProjectDelivery } from '../project-applications.js';
-import { mergeBatch, type BatchResult } from '../merge-writer/batch.js';
+import { defaultMergeBatch, mergeBatch, type BatchResult } from '../merge-writer/batch.js';
 import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { LoopFiledItem } from './effects.js';
@@ -70,7 +70,7 @@ export interface MergeWriterReads extends MergePorts {
    * every due merge starts.
    */
   admit?(): boolean;
-  /** GY-2088: how many queued heads one merge takes together (`run.mergeWriter.batch`); absent, one at a time. */
+  /** GY-2088: how many queued heads one merge takes together (`defaultMergeBatch`); absent, one at a time. */
   batch?: number;
   /** GY-1902: the item previews' ports (merge-writer/preview.ts `itemPreviewStep`); absent, no item is previewed. */
   itemPreviews?: ItemPreviewPorts;
@@ -100,7 +100,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     return sha;
   };
   return {
-    baseBranch: base, retrials: settings.retrials, batch: settings.batch, now: options.now ?? Date.now, merger: options.merger, record: options.record, ...(options.hold ? { hold: options.hold } : {}),
+    baseBranch: base, retrials: settings.retrials, batch: defaultMergeBatch, now: options.now ?? Date.now, merger: options.merger, record: options.record, ...(options.hold ? { hold: options.hold } : {}),
     fetch: async () => { await git('fetch', '--no-tags', 'origin', base); return tip(); },
     merge: async (head, baseTip) => {
       const merged = await trialMerge(gitAs, { head, baseTip });
@@ -432,7 +432,7 @@ export async function requestPendingReworks(cycle: Pick<Cycle, 'state' | 'effect
  * (delivered, refused, re-queued or failed), and every rework a trial failure grounds is requested
  * until the server confirms it (AC-3); then, with nothing in flight, every intent a crash left open is reconciled
  * against the base (AC-5) before anything new; then the queue is read from the snapshot and its
- * oldest heads, up to `run.mergeWriter.batch`, are merged together beside the cycle, one batch at a time (AC-1, GY-2088). A timeout measures the host, not
+ * oldest heads, up to `defaultMergeBatch`, are merged together beside the cycle, one batch at a time (AC-1, GY-2088). A timeout measures the host, not
  * the merge: the head stays queued and is tried again.
  */
 export async function mergeWriterStep(cycle: Cycle) {

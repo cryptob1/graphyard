@@ -14,7 +14,7 @@ Only Graphyard writes to main.
 
 ## Merge writer
 
-Oldest first, `run.mergeWriter.batch` (4) heads chained per trial and push, each delivered at its own commit; a conflicting head reworks; a failing batch merges singly. Steps: `merge.intent`; merge-commit trial (affected and proof tests; host-sized shards; one retry on no verdict; `merge.trial`: `outcome`, `phase`, `reason`, `phases`, `attempts`); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved-tip rejection waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Lost record replies replay exactly (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger. `master status`: `mergeWriter.queue`.
+Oldest first, four heads chained per trial and push, each delivered at its own commit; a conflicting head reworks; a failing batch merges singly. Steps: `merge.intent`; merge-commit trial (affected and proof tests; host-sized shards; one retry on no verdict; `merge.trial`: `outcome`, `phase`, `reason`, `phases`, `attempts`); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved-tip rejection waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Lost record replies replay exactly (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 

@@ -5,6 +5,8 @@ import { trialFailurePrefix } from '../model/rework-ground.js';
 import { criterionProofs, failureIsBase, mergeOne, trialFailureReason, trialFlaked, type MergeOutcome, type MergePorts } from './executor.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 
+/** How many queued heads one batch merges (GY-2088): one trial and one push for all of them. */
+export const defaultMergeBatch = 4;
 /** What one head of a batch came to: its merge outcome, or the error that left it queued. */
 export type BatchResult = { work: Work; outcome: MergeOutcome } | { work: Work; error: unknown };
 

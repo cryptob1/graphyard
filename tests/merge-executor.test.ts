@@ -241,9 +241,9 @@ test('unit:executor-push-leased-deploy-key-only — the push is `git push origin
   const fetch = git.calls.find(call => call.args.includes('fetch'))!;
   assert.deepEqual(fetch.args, ['-C', '/coordinator', 'fetch', '--no-tags', 'origin', 'main'], 'only the base is fetched: the head is already in the shared object store');
   // The deploy key defaults to the install's, under ~/.config/graphyard/<install>/deploy-key, and `~/` is the home directory.
-  assert.deepEqual(mergeWriterSettings({}, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/.config/graphyard/owner-project/deploy-key', retrials: defaultMergeWriterRetrials, batch: 4 });
+  assert.deepEqual(mergeWriterSettings({}, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/.config/graphyard/owner-project/deploy-key', retrials: defaultMergeWriterRetrials });
   assert.equal(defaultDeployKeyFile('owner-project', '/h'), '/h/.config/graphyard/owner-project/deploy-key');
-  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', retrials: 1, batch: 1 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', retrials: 1, batch: 1 });
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', retrials: 1 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', retrials: 1 });
   assert.throws(() => mergeWriterSettingsSchema.parse({ retrials: 11 }));
   assert.throws(() => mergeWriterSettingsSchema.parse({ deployKey: '/k' }), /unrecognized/i);
   assert.equal(masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: '/k', retrials: 2 } } }).run.mergeWriter?.retrials, 2, 'run.mergeWriter is a master.json setting');
