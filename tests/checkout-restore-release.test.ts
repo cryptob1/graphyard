@@ -32,6 +32,12 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // drifted checkout is adopted: settled, and restarted onto. The loop's own loaded code never serves:
 // when no sanctioned release can, the request fails naming why. The supervisor's watchdog is fed for
 // as long as the act runs (review of GY-1680).
+// GY-2016: the serve-loop unit proofs below (unit:clean-drift-settles-and-restarts,
+// unit:adoption-reverts-when-restart-fails) inject the act's quiesce instead of walking the host's
+// live /proc — a unit test that bet on the host process table raced its exits and failed once per
+// trial — and the scan itself judges a thread whose cwd link vanished between its stat read and its
+// cwd read as the exit it is, never unverifiable (checkout-writers.ts; spec'd in
+// checkout-writers-unreadable-cwd.test.ts).
 
 /**
  * The fixture's directory under the host's tmpdir, tracked for the file's after hook but carrying no
@@ -659,13 +665,19 @@ test('unit:clean-drift-settles-and-restarts — a request that finds no dirty pa
   // The request, served against the clean moved checkout.
   await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
   const settled: (string | null)[] = []; let restarts = 0;
-  const deps = { pid: 100, restart: async () => { restarts++; }, settle: async (adopt: string | null) => { settled.push(adopt); await guard.settle({ adopt }); } };
+  // GY-2016: this proof's subject is the serve loop's own logic — adopt, settle, restart, clean — not
+  // the host's process table, whose exit races once failed the serve here and passed on its rerun. The
+  // act quiesces through the seam every caller can inject (restoreInProcess takes it), counted instead
+  // of walked; the real scan keeps its own tests (the faked-proc suites, unit:freeze-ledger-and-stop-thaw).
+  let quiesced = 0, thawed = 0;
+  const deps = { pid: 100, restart: async () => { restarts++; }, settle: async (adopt: string | null) => { settled.push(adopt); await guard.settle({ adopt }); }, quiesce: () => { quiesced++; return { thaw: () => { thawed++; } }; } };
   const outcome = await serveCheckoutRestore(file, root, { ...deps, loaded: () => guard.expected() });
   assert.equal(outcome?.state, 'adopted', outcome?.detail);
   assert.equal(outcome!.commit, moved);
   assert.equal(outcome!.ref, null); assert.deepEqual(outcome!.paths, []);
   assert.equal(outcome!.detail, `the coordinator checkout at ${root} held no dirty path, but its HEAD ${moved.slice(0, 12)} is not ${loaded.slice(0, 12)}, the commit the loop runs; the loop adopts it (GY-1531) and restarts through its supervising unit onto it`);
   assert.deepEqual(settled, [moved]); assert.equal(restarts, 1);
+  assert.equal(quiesced, 1); assert.equal(thawed, 1, 'the act quiesced the checkout once and its thaw ended with the act');
   // The guard adopted the HEAD and settled the escalation before the restart.
   assert.equal(guard.expected(), moved);
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
@@ -686,6 +698,7 @@ test('unit:clean-drift-settles-and-restarts — a request that finds no dirty pa
   assert.equal(clean?.state, 'clean', clean?.detail);
   assert.equal(clean!.detail, `the coordinator checkout at ${root} held no dirty path and its HEAD ${moved.slice(0, 12)} is the commit the loop runs; nothing was restored and the loop was not restarted`);
   assert.deepEqual(settled, []); assert.equal(restarts, 0);
+  assert.equal(quiesced, 2); assert.equal(thawed, 2, 'the clean serve quiesced and thawed too, and settled and restarted neither');
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.restart, null);
   // A dirty checkout settles no adoption, and a HEAD the checkout no longer holds adopts nothing: the guard reports what it finds.
   git('checkout', '-q', '--detach', loaded);
@@ -730,7 +743,11 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
   const settled: (string | null)[] = [], unadopted: string[] = [], asked: string[] = [];
   let restartFails = true;
+  // GY-2016: the serve loop's logic again, not the host's process table — the act's quiesce is the
+  // injected seam, counted instead of walked, for the reason its sibling proof above names.
+  let quiesced = 0, thawed = 0;
   const deps = { pid: 100, loaded: () => guard.expected(),
+    quiesce: () => { quiesced++; return { thaw: () => { thawed++; } }; },
     restart: async () => { asked.push(guard.expected() ?? ''); if (restartFails) throw new Error('Failed to connect to bus: No medium found'); },
     settle: async (adopt: string | null) => { settled.push(adopt); await guard.settle({ adopt }); },
     unadopt: async (previous: string) => { unadopted.push(previous); await guard.settle({ revert: previous }); } };
@@ -772,6 +789,7 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   assert.equal(guard.expected(), loaded);
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', 'the drift escalation stands');
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome, null, 'the request stands unanswered for the next pass');
+  assert.equal(quiesced, 2); assert.equal(thawed, 2, 'the two serves that run the act quiesced and thawed it; the retry that only re-asks the owed restart runs no act');
 });
 
 /**
