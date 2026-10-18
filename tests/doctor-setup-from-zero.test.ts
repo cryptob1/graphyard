@@ -26,8 +26,6 @@ const appId = 7001;
 const status = () => ({
   actor: { role: 'admin' }, github: true, githubAppId: appId, githubRepository: { id: 1, fullName: 'owner/scratch' }, baseBranch: 'main',
   appPermissions: { verifiedAt: '2026-10-06T00:00:00.000Z', missing: [], attention: [] }, reviewerApps: [] as unknown[],
-  // Supervised: the operator merges, so the App lines are judged; an unsupervised install passes them as not required.
-  setup: { supervision: 'supervised' },
 });
 const json = (value: unknown) => `${JSON.stringify(value, null, 2)}\n`;
 const writePrivate = async (file: string, text: string) => { await writeFile(file, text); await chmod(file, 0o600); };
@@ -70,14 +68,14 @@ test('unit:doctor-setup-from-zero — a complete installation passes every named
   const complete = await setupFromZeroChecks(input(fixture));
   assert.deepEqual(complete.map(check => check.id), ['control-plane', 'credentials-file', 'github-app', 'reviewer-app', 'agent-environment:claude-a', 'agent-environment:codex-a', 'worker-sandbox']);
   assert.deepEqual(complete.filter(check => check.status !== 'pass').map(setupLine), [], 'a complete installation passes every line');
+  // GY-1978: the control plane is the only merge writer, so no App is required, whatever the supervision or the App bindings.
+  const appFree = await setupFromZeroChecks(input(fixture, { status: { ...status(), github: false, githubAppId: null, appPermissions: undefined, setup: { supervision: 'supervised' } } }));
+  assert.deepEqual(appFree.filter(check => check.status !== 'pass').map(setupLine), [], 'a supervised install with no App passes every line');
 
   const cases: [string, string, keyof typeof setupSteps, RegExp, (fixture: Fixture) => Promise<Partial<SetupFromZeroInput> | void>][] = [
     ['control plane unreachable', 'control-plane', 'install', /not reachable: connect ECONNREFUSED/, async () => ({ status: null, failure: 'connect ECONNREFUSED 127.0.0.1:4310' })],
     ['credentials file absent', 'credentials-file', 'install', /connection\.json does not exist/, async f => { await rm(join(f.root, '.graphyard/connection.json')); }],
     ['credentials file not 0600', 'credentials-file', 'install', /has mode 0644; it must be 0600/, async f => { await chmod(join(f.root, '.graphyard/connection.json'), 0o644); }],
-    ['GitHub App unbound', 'github-app', 'app', /no bound GitHub App/, async () => ({ status: { ...status(), github: false, githubAppId: null } })],
-    ['App permissions short', 'github-app', 'app', /missing permissions: deployments read/, async () => ({ status: { ...status(), appPermissions: { verifiedAt: '2026-10-06T00:00:00.000Z', missing: [{ permission: 'deployments', required: 'read' }], attention: [] } } })],
-    ['reviewer App unbound', 'reviewer-app', 'reviewer', /no reviewer App/, async f => { await writePrivate(join(f.root, '.graphyard/master.json'), json({})); }],
     ['Claude not logged in', 'agent-environment:claude-a', 'environments', /not logged in/, async f => { await rm(join(f.claude, '.credentials.json')); }],
     ['Claude consent not given', 'agent-environment:claude-a', 'environments', /bypass-permissions consent is not recorded/, async f => { await writePrivate(join(f.claude, 'settings.json'), json({})); }],
     ['Claude first run not complete', 'agent-environment:claude-a', 'environments', /first-run onboarding is not complete/, async f => { await writePrivate(join(f.claude, '.claude.json'), json({})); }],
@@ -86,8 +84,6 @@ test('unit:doctor-setup-from-zero — a complete installation passes every named
     ['no agent environment', 'agent-environments', 'environments', /no agent environment/, async f => ({ environments: join(f.directory, 'none') })],
     ['sandbox cannot write the shared Git paths', 'worker-sandbox', 'sandbox', /the worker confinement cannot write the shared Git paths: bubblewrap \(bwrap\) is not installed/, async () => ({ sandbox: () => 'bubblewrap (bwrap) is not installed' })],
   ];
-  // Lines judged from a missing prerequisite's answer fail with it, saying so; nothing else may.
-  const dependents: Record<string, string[]> = { 'control plane unreachable': ['github-app'] };
   for (const [name, id, step, detail, remove] of cases) {
     const missing = await installation();
     const overrides = (await remove(missing)) ?? {};
@@ -98,7 +94,7 @@ test('unit:doctor-setup-from-zero — a complete installation passes every named
     assert.match(check.detail, detail, `${name}: the ${id} line says what is missing`);
     assert.equal(check.step, setupSteps[step], `${name}: the ${id} line names the checklist step that fixes it`);
     assert.match(setupLine(check), new RegExp(`^FAIL ${id}: .*\\(fix: docs/setup-from-zero\\.md step \\d+ \\(`), `${name}: the printed line is named and points at the checklist`);
-    const others = checks.filter(entry => entry.id !== id && entry.status === 'fail' && !(dependents[name] ?? []).includes(entry.id));
+    const others = checks.filter(entry => entry.id !== id && entry.status === 'fail');
     assert.deepEqual(others.map(setupLine), [], `${name}: only the missing prerequisite fails`);
   }
 });
@@ -109,10 +105,9 @@ test('unit:doctor-setup-from-zero — graphyard doctor prints the named lines fo
   await mkdir(shims);
   // bwrap's confinement probe succeeds.
   await writeFile(join(shims, 'bwrap'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-  let reviewerApps: unknown[] = [];
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
-    if (request.url === '/api/status') return response.end(JSON.stringify({ ...status(), reviewerApps }));
+    if (request.url === '/api/status') return response.end(JSON.stringify(status()));
     if (request.url === '/api/validation/definitions') return response.end(JSON.stringify({ definitions: [] }));
     response.statusCode = 404; response.end('{}');
   });
@@ -132,11 +127,13 @@ test('unit:doctor-setup-from-zero — graphyard doctor prints the named lines fo
     assert.deepEqual(complete.setupFromZero.lines.filter((line: string) => !line.startsWith('PASS ')), [], 'every prerequisite of the complete fixture passes');
     assert.equal(complete.setupFromZero.ready, true);
     await writePrivate(join(fixture.root, '.graphyard/master.json'), json({}));
+    assert.equal((await doctor()).setupFromZero.ready, true, 'no reviewer App is required');
+    await writePrivate(join(fixture.claude, 'settings.json'), json({}));
     const missing = await doctor();
     assert.equal(missing.setupFromZero.ready, false);
-    assert.deepEqual(missing.setupFromZero.lines.filter((line: string) => line.startsWith('FAIL ')), [`FAIL reviewer-app: no reviewer App: GRAPHYARD_REVIEWER_APPS is empty and .graphyard/master.json binds no reviewer (fix: ${setupSteps.reviewer})`]);
-    reviewerApps = [{ id: 'scratch-reviewer', runtime: 'claude', appId: 7002, botUserId: 1 }];
-    assert.equal((await doctor()).setupFromZero.ready, true, 'a reviewer App the server serves counts as bound');
+    const failed = missing.setupFromZero.lines.filter((line: string) => line.startsWith('FAIL '));
+    assert.equal(failed.length, 1, failed.join('\n'));
+    assert.match(failed[0], new RegExp(`^FAIL agent-environment:claude-a: .*bypass-permissions consent is not recorded.*\\(fix: ${setupSteps.environments.replace(/[()]/g, '\\$&')}\\)$`));
   } finally { server.close(); }
 });
 

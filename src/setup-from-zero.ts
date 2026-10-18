@@ -5,7 +5,7 @@ import { dirname, resolve } from 'node:path';
 import { checkAgentEnvironment, discoverAgentEnvironments } from './master/environments.js';
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
-import { mergerNotRequired, statusSupervised } from './model/setup-checklist.js';
+import { mergerNotRequired } from './model/setup-checklist.js';
 import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
 import type { LoopCodeReading } from './repository-setup.js';
 
@@ -149,23 +149,6 @@ async function sandboxCheck(root: string, probe: (paths: string[]) => string | n
 }
 
 /**
- * The reviewer App is bound either on the server (GRAPHYARD_REVIEWER_APPS, for agent review
- * policies) or to the master (`master reviewer setup`/`bind`, recorded in .graphyard/master.json
- * with its 0600 credential outside the repository); either is a separate identity that can review.
- */
-async function reviewerCheck(root: string, status: any): Promise<SetupCheck> {
-  const check = (pass: boolean, detail: string): SetupCheck => ({ id: 'reviewer-app', status: pass ? 'pass' : 'fail', detail, step: setupSteps.reviewer });
-  const served = Array.isArray(status?.reviewerApps) ? status.reviewerApps : [];
-  if (served.length) return check(true, `GRAPHYARD_REVIEWER_APPS names ${served.map((app: any) => `${app.id} (App ${app.appId})`).join(', ')}`);
-  const bound = (await readJson(resolve(root, '.graphyard/master.json')))?.reviewer;
-  if (!bound?.credentialFile) return check(false, 'no reviewer App: GRAPHYARD_REVIEWER_APPS is empty and .graphyard/master.json binds no reviewer');
-  const info = await lstat(bound.credentialFile).catch(() => null);
-  if (!info?.isFile()) return check(false, `the bound reviewer App ${bound.slug ?? bound.appId}'s credential ${bound.credentialFile} is missing`);
-  if (info.mode & 0o077) return check(false, `the bound reviewer App's credential ${bound.credentialFile} has mode 0${(info.mode & 0o777).toString(8)}; it must be 0600`);
-  return check(true, `reviewer App ${bound.slug ?? ''} (App ${bound.appId}) is bound to the master`);
-}
-
-/**
  * GY-1614: whether the control plane would admit the follow-up a failed release candidate files
  * with GRAPHYARD_RELEASE_TOKEN, judged from the principal that token authenticates as, and whether
  * that principal holds more than the filing identity's `intent:create`.
@@ -218,17 +201,9 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push({ id: 'control-plane', status: status ? 'pass' : 'fail', step: setupSteps.install,
     detail: status ? `answered as role ${status.actor?.role ?? 'unknown'}` : `${input.reachable ? `reachable, credential ${credential}` : 'not reachable'}: ${input.failure ?? 'no answer'}` });
   lines.push(await credentialsCheck(input.root, env, input.masterCredential));
-  if (!statusSupervised(status)) {
-    // GY-1553: the control plane is the merge writer, so no App or reviewer App is needed: both lines
-    // pass as not required, in the same words the Setup checklist uses.
-    for (const [id, step] of [['github-app', setupSteps.app], ['reviewer-app', setupSteps.reviewer]] as const) lines.push({ id, status: 'pass', detail: mergerNotRequired, step });
-  } else {
-    const missing = status?.appPermissions?.missing ?? [];
-    const appBound = !!status?.github, verified = !!status?.appPermissions?.verifiedAt;
-    lines.push({ id: 'github-app', status: appBound && verified && !missing.length ? 'pass' : 'fail', step: setupSteps.app,
-      detail: !status ? 'depends on the control plane' : !appBound ? 'the server reports no bound GitHub App' : !verified ? 'the App-permission preflight has not run' : missing.length ? `missing permissions: ${missing.map((entry: any) => `${entry.permission} ${entry.required}`).join(', ')}` : `App ${status.githubAppId} is bound with every permission the plan needs` });
-    lines.push(await reviewerCheck(input.root, status));
-  }
+  // GY-1553: the control plane is the merge writer, so no App or reviewer App is needed: both lines
+  // pass as not required, in the same words the Setup checklist uses.
+  for (const [id, step] of [['github-app', setupSteps.app], ['reviewer-app', setupSteps.reviewer]] as const) lines.push({ id, status: 'pass', detail: mergerNotRequired, step });
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
   const loopCode = await loopCodeCheck(input.root, input.loopCode);

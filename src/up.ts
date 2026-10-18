@@ -1310,7 +1310,6 @@ export const upUsage = [
   '  --provider NAME            compose (default), railway, hetzner or local',
   '  --local                    --provider local: embedded Postgres on this machine, no Docker',
   '  --agent                    run every step non-interactively, JSON events on stderr; hand off only device approvals',
-  '  --reviewer NAME            the reviewer App and agent runtime (default claude); used only with --local',
   '  --master NAME              the master agent runtime, claude or codex (default claude)',
   '  --goal FILE                submit the goal in FILE once the checklist is green',
   "  --browser-profile PROFILE  the Chrome profile signed in to GitHub (default: the master's, else another install's for the same login); used only with --local",
@@ -1382,7 +1381,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 }
 
 /** The options `graphyard up` parses; upUsage gives each one line (GY-1510), and --sudo-code is read before them. */
-export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, reviewer: { type: 'string' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
+export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
   'confirm-price': { type: 'string' }, 'max-monthly': { type: 'string' }, 'ssh-key': { type: 'string' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' },
   'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
@@ -1406,7 +1405,7 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   let url: string | null = null;
   // The origin rule master init applies (serverOrigin): HTTPS, or HTTP only on loopback.
   if (values.url !== undefined) { try { url = serverOrigin(values.url); } catch { throw new Error('Use --url with the control plane\'s origin: HTTPS, or HTTP on loopback (such as http://127.0.0.1:4311); no credentials, query or path'); } }
-  return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
+  return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: 'claude', master: values.master ?? 'claude',
     goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null, merger: 'control-plane' as const,
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
