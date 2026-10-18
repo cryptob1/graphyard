@@ -61,7 +61,9 @@ test('unit:observe-only-repo-scope-suffices — a repo-only gh login passes the 
     assert.match(gh.detail, /scopes repo; --observe-only registers no webhook, so it needs no admin:repo_hook/);
     assert.ok(plan.preflight.every(item => item.ok), JSON.stringify(plan.preflight.filter(item => !item.ok)));
     const held = plan.actions.filter(action => action.state === 'held').map(action => action.id);
-    for (const id of ['github.app', 'github.protection', 'release.branches', 'release.railway.uat', 'release.railway.production']) assert.ok(held.includes(id), `${id} is not held`);
+    for (const id of ['github.app', 'release.branches', 'release.railway.uat', 'release.railway.production']) assert.ok(held.includes(id), `${id} is not held`);
+    // GY-2009: install never plans a branch-protection write, held or not.
+    assert.ok(!plan.actions.some(action => action.id === 'github.protection'), 'github.protection is not planned');
 
     const session = await prepare('apply');
     const summary = await applyInstall(session, await buildPlan(session));

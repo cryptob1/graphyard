@@ -31,7 +31,7 @@ Node 24, `OWNER/REPO` checkout, `export GRAPHYARD_CLI=/abs/path/graphyard/bin/gr
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 ```
 
-`--workers N`/`--producer-proof NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)). **Verify** `secretsRedacted`, `preflight[].ok`; human approves plan/`drift`. The plan lists the merge writer deploy key and no GitHub App, branch-protection or ruleset step. `--observe-only` (implies `--no-herdr`) deploys the control plane only; rest `held`. `app bind SLUG` still binds an imported App to an observation-only install that already chose one. `up` runs install, then registers the deploy key (idempotent).
+`--workers N`/`--producer-proof NAME` ([`init --scan`](operations-reference.md#setup-proposals-and-drift)). **Verify** `secretsRedacted`, `preflight[].ok` (else `fix`; `HUMAN:` ones human's); human approves plan/`drift`. The plan lists the merge writer deploy key and no GitHub App, branch-protection or ruleset step. Elsewhere-bound plugins fail `Herdr plugin` until `--herdr-instance`/`--herdr-rebind`/`--no-herdr`. `--observe-only` (implies `--no-herdr`) deploys the control plane only; rest `held`; `app bind SLUG [--plan]` (docker-host `--ssh-host`, Railway `--workspace`) binds `app import`'s App (`GITHUB_APP_ID`/`GITHUB_INSTALLATION_ID`/`GITHUB_PRIVATE_KEY`/`GITHUB_WEBHOOK_SECRET`/`GITHUB_CI_APP_IDS`; Railway serving-SUCCESS redeploy/refuse-latest≠SUCCESS/await/no-source-upload/no-`GRAPHYARD_BUILD_SHA`; else deploy) once `/api/status` confirms; `--observe-only` reruns keep it. `up` runs install, then registers the deploy key (idempotent), and prints Herdr's attach (`XDG_CONFIG_HOME=DIR herdr session attach NAME`).
 
 ## Step 2: apply
 
@@ -55,7 +55,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; redeploy; healthy `/healthz`.
+`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; redeploy; healthy `/healthz`. A bound App: `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `appPermissions.missing` empties.
 
 ## Failure handling
 
@@ -65,10 +65,19 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 | `Railway workspace` `false` | `--workspace`
 | `did not become healthy` | `install … --logs`
 | `deploy key` / `gh` refused | `gh auth login --scopes repo`, rerun
+| `Another install --apply` | let it finish, apply again (dead holders reclaimed)
+| `already binds`/`still holds GITHUB_APP_` | drop binding/variables
+| `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
+| fresh database (401) | `up` re-issues credentials
+| `Unknown option '--github-app'` (or `--reuse-app`, `--restore-protection`) | install takes no App or protection flag (GY-2009); drop it
 
-## Where the manual fallback lives
+## Agent execution contract
 
-Hosted variable edits that the installer does not own: [deployment manual fallback](deployment.md#manual-fallback).
+Run steps 1–3; never weaken gates.
+
+## Manual fallback (unsupported platforms)
+
+[Deployment](deployment.md#manual-fallback).
 
 ## Done when
 

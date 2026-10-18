@@ -6,7 +6,7 @@ import { gitleaksIgnorePath, gitleaksSha256, gitleaksVersion, secretScanArgv } f
 // GY-2009: the merge writer's trial runs the pinned gitleaks scan; ignore entries stay test-only.
 
 test('unit:secrets-scan-in-trial — the trial secret scan uses the pinned gitleaks and HEAD with the repo ignore file', () => {
-  const argv = secretScanArgv('/workspace');
+  const argv = secretScanArgv('/workspace', 'gitleaks', true);
   assert.ok(argv.includes('git'));
   assert.ok(argv.includes('--redact'));
   assert.ok(argv.includes('--log-opts=HEAD'));

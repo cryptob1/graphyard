@@ -630,10 +630,10 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
 
 export interface HostFleetRequest {
   url: string; adminToken: string; coordinatorToken: string; reviewer: string | null;
-  /** A one-hour GitHub App installation token for cloning the managed repository; used on standard input, never stored. */
-  cloneToken: string;
-  /** The Graphyard App, whose key the host keeps (0600) so workers can push and open pull requests. */
-  github: HostGithubApp;
+  /** A one-hour GitHub App installation token for cloning the managed repository; used on standard input, never stored. Null without an App (GY-2009): the clone uses the host's own git access. */
+  cloneToken: string | null;
+  /** The Graphyard App, whose key the host keeps (0600) so workers can push and open pull requests; null when install registers none (GY-2009). */
+  github: HostGithubApp | null;
   fetch: typeof fetch; log: (line: string) => void;
 }
 
@@ -848,15 +848,19 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
 
   // Workers push and open pull requests as the App: its key and the token helper go to <install>/github
   // (0600), gh is wrapped to take its token from the helper, and git is pointed at the helper.
-  ctx.vault.add(request.github.privateKey);
-  for (const file of hostGithubFiles(layout, ctx.repository, request.github, owner)) await remote.putFile(file.path, file.content, file.mode, file.owner);
-  for (const [name, value] of hostGitConfig(layout, request.github)) await asUser(remote, HOST_HOME, 'git', ['config', '--global', name, value]);
+  if (request.github) {
+    ctx.vault.add(request.github.privateKey);
+    for (const file of hostGithubFiles(layout, ctx.repository, request.github, owner)) await remote.putFile(file.path, file.content, file.mode, file.owner);
+    for (const [name, value] of hostGitConfig(layout, request.github)) await asUser(remote, HOST_HOME, 'git', ['config', '--global', name, value]);
+  }
 
   // A private repository needs a credential the graphyard account does not hold: the App's
   // installation token arrives on standard input and reaches git through a one-shot credential
   // helper, so it is never an argument, never in the remote URL and never written to disk.
-  const clone = `[ -d "$1/.git" ] || { GIT_TOKEN="$(cat)"; export GIT_TOKEN; git -c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' clone --quiet "$2" "$1"; }`;
-  const cloned = await asUser(remote, HOST_HOME, 'sh', ['-c', clone, 'managed-checkout', layout.checkout, `https://github.com/${ctx.repository}.git`], { input: request.cloneToken, allowFailure: true });
+  // Without an App (GY-2009) there is no token: the clone uses the graphyard account's own git access.
+  const clone = request.cloneToken === null ? `[ -d "$1/.git" ] || git clone --quiet "$2" "$1"`
+    : `[ -d "$1/.git" ] || { GIT_TOKEN="$(cat)"; export GIT_TOKEN; git -c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GIT_TOKEN"; }; f' clone --quiet "$2" "$1"; }`;
+  const cloned = await asUser(remote, HOST_HOME, 'sh', ['-c', clone, 'managed-checkout', layout.checkout, `https://github.com/${ctx.repository}.git`], { ...(request.cloneToken === null ? {} : { input: request.cloneToken }), allowFailure: true });
   if (cloned.code !== 0) throw new Error(`Cloning ${ctx.repository} into ${layout.checkout} on ${hostName} failed: ${failure(ctx, cloned)}`);
 
   // Herdr after the checkout its workspace opens in (GY-1511): a failure is named and leaves Herdr out

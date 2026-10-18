@@ -1506,12 +1506,13 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
     webhook = await verifyDelivery(bound.app, since, deps.wait);
   } catch (error: any) { webhook = { delivered: false, statusCode: null, event: null, at: null, detail: vault.scrub(`Could not publish the verification event: ${error.message}`) }; }
 
-  const fleet = context.host && bound && 'installFleet' in adapter
+  // GY-2009: a self-contained host installs its fleet whether or not an App is bound; without one it gets no App key.
+  const fleet = context.host && 'installFleet' in adapter
     ? await (adapter as ProviderAdapter & { installFleet: typeof installHostFleet }).installFleet(context, {
       url, adminToken: session.tokens.get(principalOfRole(session.principals, 'admin').id)!, coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
       reviewer: session.inputs.reviewer ?? null, fetch: deps.fetch, log,
-      cloneToken: vault.add((await installationToken(bound.facts, deps.fetch)).token),
-      github: { appId: bound.facts.appId, installationId: bound.facts.installationId, slug: bound.facts.slug, privateKey: bound.facts.privateKey, ...(bound.facts.botUserId ? { botUserId: bound.facts.botUserId } : {}) },
+      cloneToken: bound ? vault.add((await installationToken(bound.facts, deps.fetch)).token) : null,
+      github: bound ? { appId: bound.facts.appId, installationId: bound.facts.installationId, slug: bound.facts.slug, privateKey: bound.facts.privateKey, ...(bound.facts.botUserId ? { botUserId: bound.facts.botUserId } : {}) } : null,
     })
     : null;
   const freshCursor = fleet && session.inputs.freshCursor ? await resetHostCursor(await hostRemote(context), context.host!.layout.checkout, fleet) : null;
