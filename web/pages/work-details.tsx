@@ -60,19 +60,15 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
 }
 
 /**
- * One work item's page (GY-161). Its first screen answers, without scrolling or a click: what
- * state it is in (its group's badge), why (one plain sentence), who acts next (a role, never a
- * code name), where it is in the seven pull-request steps, and its pull request, linked once in
- * the header. A decision only the human may make is answered right here. Below it (GY-171), each
- * section answers one question, in this order: What is left (one plain line per unmet
- * requirement, grouped by step, naming who clears it; gate reasons only through `plainReason`),
- * Requirements (one line per criterion with its met or pending mark, the full text on expand),
- * Pull request (link, commit, changed files, checks, review), Test cases (the e2e cases linked to
- * the pull request, with their result on its head, GY-162) and Activity (the latest events, the
- * full history on expand). Everything technical — gate internals, sessions and their attach
- * commands, review provider, next action and executors, agent requests, evidence — is in one
- * collapsed "Technical details" section, in the control plane's own vocabulary, and policy
- * changes are in the admin Edit menu.
+ * One work item's page (GY-161). Its first screen answers, without scrolling or a click: the plain
+ * summary sentence (GY-2011; or the title when none), what state it is in (its group's badge), why
+ * (one plain sentence), who acts next (a role, never a code name), where it is in the seven
+ * pull-request steps, and its pull request, linked once in the header. A decision only the human
+ * may make is answered right here. The full description and criteria fold under Details. Below
+ * that (GY-171): What is left, Pull request, Test cases and Activity. Everything technical — gate
+ * internals, sessions and their attach commands, review provider, next action and executors, agent
+ * requests, evidence — is in one collapsed "Technical details" section, and policy changes are in
+ * the admin Edit menu.
  */
 export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -144,12 +140,15 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // policy the control plane serves on /api/status, the one its gates use (GY-1843).
   const risk = shownRisk(item, status?.repositoryPolicy);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
+  // GY-2011: open on the plain sentence (or the title) and the state; description and criteria fold under Details.
+  const plainLead = item.summary?.trim() || item.title;
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
     <div className="item-head">
       <div className="item-title">
         <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}<span>{item.type.replace(/^./, c => c.toUpperCase())} · priority {item.priority}</span>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
-        <h1 data-title>{item.title}</h1>
+        <h1 data-title data-plain-summary={item.summary ? 'true' : 'false'}>{plainLead}</h1>
+        {item.summary && item.summary.trim() !== item.title && <p className="item-title-full muted">{item.title}</p>}
       </div>
       {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key}/> on GitHub ↗</span>}
     </div>
@@ -163,14 +162,17 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
       {failedDelivery && postDeployment}
     </section>
+    <details className="panel item-details-fold" aria-label="Details"><summary>Details</summary>
+      {item.description ? <p className="item-description">{item.description}</p> : <p className="muted">No description.</p>}
+      <section className="requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
+        {item.criteria.map(ac => { const own = proofs.filter(p => p.criterion === ac.id); const met = own.length > 0 && own.every(p => p.status === 'passed');
+          return <div className={`criterion ${met ? 'criterion-met' : 'criterion-pending'}`} key={ac.id}>
+            <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
+            <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
+    </details>
     <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
       {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
       {laterLeft.length > 0 && <details className="later-steps"><summary>Later steps ({laterLeft.length})</summary>{laterLeft.map(leftGroup)}</details>}</section>
-    <section className="panel requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
-      {item.criteria.map(ac => { const own = proofs.filter(p => p.criterion === ac.id); const met = own.length > 0 && own.every(p => p.status === 'passed');
-        return <div className={`criterion ${met ? 'criterion-met' : 'criterion-pending'}`} key={ac.id}>
-          <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
-          <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
     <section className="panel" aria-label="Pull request"><h2>Pull request</h2>
       {item.candidate ? <dl className="facts">
         {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`Pull request on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
@@ -200,7 +202,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     {/* Everything technical, one click down, in the control plane's own vocabulary. */}
     <details className="more-details" aria-label="Technical details"><summary>Technical details</summary>
       <h3>About this item</h3>
-      <p>{item.description}</p>
       <dl className="facts">
         <div><dt>Owner</dt><dd className="assignment-details">{owner.active ? owner.label : owner.owner ? owner.text : 'Nobody yet'}</dd></div>
       </dl>

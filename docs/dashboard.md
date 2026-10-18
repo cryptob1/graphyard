@@ -27,7 +27,7 @@ Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent
 
 ## The status sentence
 
-**Build, Validate, Test, Review, Prove, Merge, Deploy**; done items headline their production state: *Merged, awaiting deployment*, *Deployed, awaiting verification*, *Production verified*, *Deployed with a failure*; *Live* once served. Item page: **What is left**, **Requirements**, **Pull request** (**Merge danger**), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker).
+**Build, Validate, Test, Review, Prove, Merge, Deploy**; done items headline their production state: *Merged, awaiting deployment*, *Deployed, awaiting verification*, *Production verified*, *Deployed with a failure*; *Live* once served. Item page opens on its plain summary (or title) and state; **Details** folds the description and criteria; then **What is left**, **Pull request** (**Merge danger**), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker). `master create` may set optional `summary` for the same plain sentence. Goal picture page `/goals/KEY`: plan summary, outcome cards, SVG flowchart (boxes by Todo/Doing/Checking/Done, arrows for `dependsOn`, **Play** walks build order).
 
 ## Insights
 
