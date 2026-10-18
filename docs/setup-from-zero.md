@@ -65,7 +65,7 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 4. Register the GitHub App
 
-Only `install --apply` without `--no-github-app`; never `up`. It serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
+Only `install --apply` without `--no-github-app`; never `up`. It serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` (permissions). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
 
 ## 6. Onboard the checkout
 

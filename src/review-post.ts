@@ -17,9 +17,6 @@ import { canonicalThreadIds, listedThreadLimit, parseFollowUpThreads, parseOverr
 export const reviewBindingFile = 'review-binding.json';
 export const reviewEvents = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] as const;
 export type ReviewEvent = typeof reviewEvents[number];
-/** How often, and for how long, review post waits for GitHub to recompute an UNKNOWN mergeable. */
-export const mergeablePollMs = 5_000, mergeablePollBoundMs = 120_000;
-
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 /** The verdict token a control-plane launch binds: 32 random bytes, hex; only its sha256 is kept anywhere but the binding. */
 export const verdictTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
@@ -100,7 +97,7 @@ export interface ReviewPostDependencies {
   run: ChildRun;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
-  /** How a control-plane verdict reaches the API; global fetch by default. Never called in github mode. */
+  /** How a control-plane verdict reaches the API; global fetch by default. */
   fetch?: typeof fetch;
 }
 
@@ -142,21 +139,6 @@ export async function postReview(input: { event: string | undefined; body: strin
     if (!response.ok) refuse(`the control plane refused the verdict (${response.status}): ${answer?.error ?? 'no reason given'}`);
     return { reviewId: answer.reviewId ?? null, event: event!, key: bound.key, pr: bound.pr, sha: bound.head!, recorded: 'control-plane' as const };
   }
-  const sleep = dependencies.sleep ?? (ms => new Promise<void>(done => setTimeout(done, ms)));
-  const now = dependencies.now ?? Date.now;
-  const env = { ...input.environment };
-  const started = now();
-  for (;;) {
-    let state: { mergeable?: unknown; mergeStateStatus?: unknown; headRefOid?: unknown };
-    try { state = JSON.parse(String(await dependencies.run('gh', ['pr', 'view', String(bound.pr), '--repo', bound.repository, '--json', 'mergeable,mergeStateStatus,headRefOid'], { env }))); }
-    catch (error) { refuse(`gh pr view ${bound.pr} could not be read (${(error instanceof Error ? error.message : String(error)).split('\n')[0]}); retry the same command`); }
-    if (state!.headRefOid !== bound.sha) refuse(`pull request #${bound.pr} head is ${String(state!.headRefOid)}, not ${bound.sha} this session was launched to review; post nothing for a different commit, and stop`);
-    if (state!.mergeable !== 'UNKNOWN') break;
-    if (now() - started + mergeablePollMs > mergeablePollBoundMs) refuse(`GitHub still reports mergeable UNKNOWN for pull request #${bound.pr} after ${mergeablePollBoundMs / 1000} seconds, and a verdict posted before it recomputes is dismissed; wait a minute and run the same command again`);
-    await sleep(mergeablePollMs);
-  }
-  const output = await dependencies.run('gh', ['api', '--method', 'POST', `repos/${bound.repository}/pulls/${bound.pr}/reviews`, '-f', `commit_id=${bound.sha}`, '-f', `event=${event}`, '-f', `body=${body}`], { env });
-  const review = JSON.parse(String(output));
-  if (typeof review?.id !== 'number') throw new Error(`GitHub answered the review post without a review id: ${String(output).slice(0, 200)}`);
-  return { reviewId: review.id as number, event: event!, key: bound.key, pr: bound.pr, sha: bound.sha };
+  // A github-mode binding (pull-request era) posts nothing: Graphyard reads and writes no GitHub review.
+  return refuse('this binding is a pull-request-era GitHub binding, and Graphyard no longer posts GitHub reviews; the loop launches the review again against the control plane');
 }

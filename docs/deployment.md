@@ -7,7 +7,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ## Variables
 
-`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH` (`owner/repo`/`main`); App `GITHUB_APP_ID`/`GITHUB_INSTALLATION_ID`/`GITHUB_PRIVATE_KEY` (or `_FILE`)/`GITHUB_WEBHOOK_SECRET`; trusted `GITHUB_CI_APP_IDS`; [reviewer](github.md#identity-bound-agent-review) `GRAPHYARD_REVIEWER_APPS`; [revert approver](delivery.md#pre-merge-gate-and-release-candidate-validation) `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA` (commit; else clean-build `GRAPHYARD_BUILD_REVISION`); `RAILWAY_API_TOKEN`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/[`s3`](recovery.md#artifact-backends-capacity-and-migration)); `GRAPHYARD_SIGNIN_CLAIM` ([host](install.md#self-contained-host) sign-in hash):
+`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH` (`owner/repo`/`main`); App `GITHUB_APP_ID`/`GITHUB_INSTALLATION_ID`/`GITHUB_PRIVATE_KEY` (or `_FILE`)/`GITHUB_WEBHOOK_SECRET`; trusted `GITHUB_CI_APP_IDS`; reviewer `GRAPHYARD_REVIEWER_APPS`; [revert approver](delivery.md#pre-merge-gate-and-release-candidate-validation) `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA` (commit; else clean-build `GRAPHYARD_BUILD_REVISION`); `RAILWAY_API_TOKEN`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/[`s3`](recovery.md#artifact-backends-capacity-and-migration)); `GRAPHYARD_SIGNIN_CLAIM` ([host](install.md#self-contained-host) sign-in hash):
 
 | Variable | Purpose
 | --- | ---
@@ -19,7 +19,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ### CI producer
 
-[CI proofs](github.md#proofs-in-ci) publish via one principal (`manual:*`, `e2e:*` refused):
+CI proofs publish via one principal (`manual:*`, `e2e:*` refused):
 
 ```json
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
@@ -43,9 +43,9 @@ Railway deploys `release/production` in ~1min. `/healthz` `commit` at tip: `grap
 
 Railway reports `<project> / production`. Startup uses `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `github-pages` if workflows run `actions/deploy-pages`, else `production`; the loop publishes it.
 
-### Webhook delivery
+### Webhook
 
-Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver (`webhooks.settingsUrl` Advanced).
+`/api/github/webhook` is not served (404): Graphyard registers no webhook and reads no delivery.
 
 ## Backup, upgrade, rollback
 

@@ -22,7 +22,6 @@ import { activeEngineers, delegationLimits, implementerIdentities, leadMay, prod
 import { unauthorizedMergeViolation } from './merge-queue.js';
 import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
-import { githubFromEnv } from './github.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -972,21 +971,14 @@ export class Engine {
   controlPlaneAppId?: number;
   /**
    * GY-1849: reads the pull request an adoption names, outside any coordination transaction. Left
-   * undefined, the deployment's GitHub App (from the environment) reads it; null reads none, and
+   * undefined, none is read, and
    * every adoption is refused as unverifiable, since a binding without its live head binds nothing.
    */
   adoptionObserver: ((pr: number) => Promise<AdoptedPull>) | null | undefined = undefined;
-  /** The reader `adoptionObserver` stands for while undefined: the deployment's own GitHub App, or none. */
+  /** The reader `adoptionObserver` stands for while undefined: none, since Graphyard reads no GitHub API. */
   private async adoptionReader(): Promise<((pr: number) => Promise<AdoptedPull>) | null> {
     if (this.adoptionObserver !== undefined) return this.adoptionObserver;
-    const github = await githubFromEnv();
-    this.adoptionObserver = github ? async pr => {
-      const pull = await github.request(`/pulls/${pr}`);
-      return { head: String(pull.head.sha), branch: String(pull.head.ref), state: pull.state === 'open' ? 'open' as const : 'closed' as const, draft: pull.draft === true,
-        headRepository: typeof pull.head.repo?.full_name === 'string' ? pull.head.repo.full_name : null,
-        baseRepository: typeof pull.base?.repo?.full_name === 'string' ? pull.base.repo.full_name : null,
-        baseRef: typeof pull.base?.ref === 'string' ? pull.base.ref : null };
-    } : null;
+    this.adoptionObserver = null;
     return this.adoptionObserver;
   }
   /**
@@ -1121,7 +1113,7 @@ export class Engine {
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
     if (data.head !== undefined) return this.observeSubmittedHead(actor, id, { epoch: data.epoch, head: data.head }, key);
-    if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
+    if (this.submissionObserver === undefined) this.submissionObserver = null;
     if (!this.submissionObserver || !id) return null;
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
@@ -1176,7 +1168,7 @@ export class Engine {
     // after submission passes the review gate; control-plane verdicts are kept beside them.
     const pr = work.submission?.pr;
     if (pr && !(await this.store.pool.query('SELECT 1 FROM change_numbers WHERE work_id=$1 AND number=$2', [work.id, pr])).rowCount) {
-      if (this.pullReviewReader === undefined) { const github = await githubFromEnv(); this.pullReviewReader = github ? number => github.pullReviews(number) : null; }
+      if (this.pullReviewReader === undefined) this.pullReviewReader = null;
       // An unreadable pull request keeps what was recorded: the head is still observed and handed on.
       const live = this.pullReviewReader ? await this.pullReviewReader(pr).catch(() => null) : null;
       if (live) {

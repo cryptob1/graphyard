@@ -1,8 +1,11 @@
 import { readFile } from 'node:fs/promises';
-import { startGithubSetup } from '../github-setup.js';
 import type { AppFacts } from './github.js';
 
-export interface ManifestOptions { port?: number; reviewer?: string; timeoutMs?: number; poll?: number; announce?: (message: string) => void; wait?: (ms: number) => Promise<void>; detectEveryMs?: number; dependencies?: Parameters<typeof startGithubSetup>[4] }
+async function startGithubSetup(..._args: unknown[]): Promise<any> {
+  throw new Error('GitHub App manifest setup is removed (GY-2010)');
+}
+
+export interface ManifestOptions { port?: number; reviewer?: string; timeoutMs?: number; poll?: number; announce?: (message: string) => void; wait?: (ms: number) => Promise<void>; detectEveryMs?: number; dependencies?: Record<string, unknown> }
 
 /**
  * Drives the App-manifest browser flow to completion. The installer prints one URL, the

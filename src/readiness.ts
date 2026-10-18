@@ -2,6 +2,7 @@ import { reportFormats, type ReportFormat } from './report-adapters.js';
 import type { SetupProposal } from './onboarding.js';
 import type { MainGuardReadiness } from './main-guard.js';
 import type { LoopCodeReading } from './repository-setup.js';
+import { mergerNotRequired } from './model/setup-checklist.js';
 
 /**
  * The completion profiles the delivery roadmap names. A profile says what "done" means
@@ -63,7 +64,6 @@ const all: CompletionProfile[] = [...completionProfiles];
 const scanFirst = {
   proposal: 'Run `graphyard init --scan` in the repository clone first; this item is judged from the stored proposal',
   server: 'Resolve the control-plane connection first; this item is judged from the server\'s answer',
-  github: 'Connect the dedicated GitHub App first; this item is judged from the permissions the server reports',
 };
 const beyondMerge: CompletionProfile[] = ['preview-validation', 'production-verification'];
 
@@ -94,30 +94,11 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
     detail: setup === null ? 'local setup state was not read' : setup.unreadable.length ? `unreadable: ${setup.unreadable.join(', ')}` : setup.appliedAt ? (setup.drift.length ? `applied ${setup.appliedAt}; drift: ${setup.drift.join('; ')}` : `applied ${setup.appliedAt}`) : setup.proposal ? `${setup.proposal} is stored but not applied` : 'no proposal stored',
     recovery: setup === null ? 'Run `graphyard doctor` inside the repository clone' : setup.unreadable.length ? 'Delete or repair the unreadable file under .graphyard/, then rerun `graphyard init --scan`' : setup.appliedAt && !setup.drift.length ? null : setup.proposal ? (setup.drift.length ? 'Rerun `graphyard init --scan`, review the refreshed .graphyard/setup-proposal.json, then `graphyard init --scan --apply --url SERVER_URL`' : 'Review .graphyard/setup-proposal.json, then run `graphyard init --scan --apply --url SERVER_URL`') : 'Run `graphyard init --scan`, review .graphyard/setup-proposal.json, then apply it with `graphyard init --scan --apply --url SERVER_URL`' });
 
-  const github = server?.reachable ? !!server.github : null;
-  item({ id: 'github-app', title: 'Dedicated GitHub App connected', profiles: all,
-    status: github === null ? (setup?.githubApp ? 'unknown' : 'missing') : github ? 'ready' : 'missing',
-    detail: github ? 'the control plane observes the repository through its App' : setup?.githubApp ? `App ${setup.githubApp.slug} (${setup.githubApp.appId}) is registered locally but the server does not report it` : 'no App is registered',
-    recovery: github ? null : setup?.githubApp ? 'Set GITHUB_APP_ID, GITHUB_INSTALLATION_ID, GITHUB_PRIVATE_KEY (or _FILE) and GITHUB_WEBHOOK_SECRET on the deployment from .graphyard/github-app.json, then redeploy; merge gates stay closed until the server reports the App' : 'Run `graphyard github-setup https://YOUR-GRAPHYARD` (or `init --scan --apply`) to register the App through the manifest flow, install it on the repository, then configure the deployment variables' });
-  const permissions = server?.githubPermissions ?? {};
-  const needed: [string, string[]][] = [['pull_requests', ['write']], ['checks', ['write']], ['contents', ['write']], ['issues', ['read', 'write']]];
-  const lacking = github ? needed.filter(([scope, accepted]) => !accepted.includes(permissions[scope] ?? '')).map(([scope]) => scope) : [];
-  // A verified preflight names the exact shortfall and the migration command that
-  // repairs it; the raw permission map only says which scopes look short.
-  const preflight = github && server?.appPermissions?.verifiedAt ? server.appPermissions : null;
-  const shortfall = preflight?.missing.map(entry => `${entry.permission} needs ${entry.required}${entry.granted ? ` (granted ${entry.granted})` : ''}`) ?? [];
-  item({ id: 'github-permissions', title: 'App permissions cover checks, reviews and the merge queue', profiles: all,
-    status: !github ? 'unknown' : preflight ? (shortfall.length ? 'missing' : 'ready') : lacking.length ? 'missing' : 'ready',
-    detail: !github ? 'depends on the GitHub App' : preflight ? (shortfall.length ? `preflight ${preflight.verifiedAt}: ${shortfall.join(', ')}` : `preflight ${preflight.verifiedAt}: every declared permission is granted`) : lacking.length ? `insufficient: ${lacking.join(', ')}` : 'pull_requests, checks, contents and issues are granted',
-    recovery: !github ? scanFirst.github : preflight ? (shortfall.length ? `Run \`graphyard github-setup --update-permissions\`: ${preflight.attention[0] ?? shortfall.join(', ')}` : null) : !lacking.length ? null : `Grant ${lacking.join(', ')} to the App under GitHub → Settings → Developer settings → GitHub Apps → Permissions, accept the new permissions on the installation, then rerun \`graphyard doctor\`` });
-
-  // GY-1335: an armed main guard without its revert approver cannot land a revert past main's
-  // last-push-approval rule, so the next merge that breaks main stays red; named before it does.
-  const guard = server?.reachable ? server.mainGuard ?? null : null;
-  item({ id: 'revert-approver', title: 'Main guard revert approver configured', profiles: all,
-    status: !guard ? 'unknown' : guard.attention ? 'missing' : 'ready',
-    detail: !guard ? (server?.reachable ? 'the server does not report the main guard' : 'depends on the control plane') : !guard.armed ? 'the main guard is not armed (no GitHub delivery with required checks)' : guard.attention ? `the main guard is armed on ${guard.required.join(', ')} with no revert approver App` : `revert approver App ${guard.revertApprover} approves the guard's reverts`,
-    recovery: !guard ? (server?.reachable ? 'Upgrade the control plane; this item is judged from its main guard report' : scanFirst.server) : guard.attention });
+  // GY-2010: the control plane is the only merge writer and holds no GitHub App, so the App, its
+  // permissions and the main guard's revert approver are not required; they pass in the same words the Setup checklist uses.
+  item({ id: 'github-app', title: 'Dedicated GitHub App connected', profiles: all, status: 'ready', detail: mergerNotRequired, recovery: null });
+  item({ id: 'github-permissions', title: 'App permissions cover checks, reviews and the merge queue', profiles: all, status: 'ready', detail: mergerNotRequired, recovery: null });
+  item({ id: 'revert-approver', title: 'Main guard revert approver configured', profiles: all, status: 'ready', detail: mergerNotRequired, recovery: null });
 
   // GY-1859: a live coordinator or executor is not proof the install runs the right code. One line
   // names both paths — the unit still on the old code, and this checkout — and the rerun that

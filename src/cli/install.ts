@@ -3,7 +3,6 @@ import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
 import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
-import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { acquireApplyLock, appCommand, applyInstall, applyRosterChange, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
 import { installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
@@ -13,6 +12,15 @@ import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { runDoctor } from './install-doctor.js';
+
+const appPageBusy = (port: number) => new Error(`GitHub App setup is removed (port ${port}); use control-plane install with a deploy key (GY-2010)`);
+const appPagePortFree = async () => true;
+async function startGithubSetup(..._args: unknown[]): Promise<any> {
+  throw new Error('graphyard github-setup is removed; the control-plane merger uses a deploy key and registers no GitHub App (GY-2010)');
+}
+async function updateAppPermissions(..._args: unknown[]): Promise<any> {
+  throw new Error('graphyard github-setup --update-permissions is removed (GY-2010)');
+}
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);

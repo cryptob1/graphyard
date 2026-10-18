@@ -3,7 +3,7 @@
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-Ask only: **Which provider**; **Provider login**; **GitHub App confirmation click** (none with `--no-github-app`/`--observe-only`); **Approval of the printed plan**. Never invent a fifth.
+Ask only: **Which provider**; **Provider login**; **Approval of the printed plan**. Graphyard registers no GitHub App; the merge writer pushes with the install deploy key.
 
 ## Hard rules
 
@@ -39,11 +39,13 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; [protects](github.md#require-the-check) branch (not `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`; `operator-rulesets.json`); one apply at once (`apply.lock`, partials too; dead/pid-reused holders reclaimed); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
+Writes credentials, [variables](deployment.md#variables); deploys; protects branch (not `--no-github-app`/`--observe-only`), recording prior protection once (`protection-record.json`; `operator-rulesets.json`); one apply at once (`apply.lock`, partials too; dead/pid-reused holders reclaimed); `--restore-protection --plan|--apply` restores, re-read-verified; unrecorded/unreadable/other-branch refuses. **Verify** `/healthz`.
 
 ## Step 3: App confirmation
 
 Skip with `--no-github-app`/`--observe-only`; else `--apply` serves `http://127.0.0.1:4311` (no browser) 900s; human installs App. **Verify** *App registered and installation verified*; unconfirmed: exit 1, `resume`.
+
+**Deploy key (GY-2010):** Graphyard calls no GitHub API, mints no installation token and serves no webhook; the control-plane merge writer pushes with a read-write ed25519 deploy key (registered by `up` through the `gh` CLI) over an SSH origin, so no App is required.
 
 ## Step 4: summary
 
@@ -65,7 +67,7 @@ Price: `--confirm-price`/`--max-monthly`; saved Apps (`--github-app FILE`/this i
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; checkout+`npm ci`/backup/recorded-roster redeploy/loop+executor restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (migrated: roll-forward). Beside `.graphyard/github-app.json`, `node "$GRAPHYARD_CLI" github-setup --update-permissions --wait 600` until `appPermissions.missing` empties. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
+`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; checkout+`npm ci`/backup/recorded-roster redeploy/loop+executor restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (migrated: roll-forward). `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
 
 ## Failure handling
 

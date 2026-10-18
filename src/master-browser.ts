@@ -6,8 +6,6 @@ import { relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { atomicPrivateWrite, privateFile, type MasterBrowser, type MasterConfig } from './master.js';
 import type { ProtectionRun } from './protection.js';
-import type { InstallationState } from './github.js';
-import { controlPlanePermissions as declaredPermissions, requiredPermissions } from './github-permissions.js';
 
 /**
  * GitHub administration the master performs itself, through the operator's own authenticated
@@ -26,12 +24,12 @@ import { controlPlanePermissions as declaredPermissions, requiredPermissions } f
 export const browserFlows = ['app-permissions', 'installation-accept', 'capture'] as const;
 export type BrowserFlow = typeof browserFlows[number];
 
-// What the control-plane App must hold for every path Graphyard exercises, read from the one
-// declaration of it (src/github-permissions.ts) so a permission a feature adds there — actions write
-// for failed CI reruns — is one these flows raise and accept, not one they report already granted
-// while the integration jobs it holds stay held (GY-949). Workflows write is registered on top: worker
-// pushes of base syncs that carry workflow changes need it, yet no preflight feature is held on it.
-export const controlPlanePermissions: Record<string, 'read' | 'write' | 'admin'> = { ...requiredPermissions(declaredPermissions), workflows: 'write' };
+// Graphyard holds no GitHub App (GY-2010): the control plane is the only merge writer, so no permission is
+// requested or accepted and the permission flows find nothing missing. The browser itself is still driven
+// for the sudo and capture flows.
+export const controlPlanePermissions: Record<string, 'read' | 'write' | 'admin'> = {};
+/** What the installation read (no longer served by the control plane) answers: the shape the permission flows judge. */
+interface InstallationState { appId?: number; installationId: number | string; slug: string; account?: string; accountType?: string; installationUrl?: string; suspended?: boolean; permissions: Record<string, string>; appPermissions?: Record<string, string>; app?: Record<string, string>; [key: string]: unknown }
 const level = (value: unknown) => value === 'admin' ? 3 : value === 'write' ? 2 : value === 'read' ? 1 : 0;
 /** Permissions still below what the control plane needs. */
 export function missingPermissions(actual: Record<string, unknown> | null | undefined, desired = controlPlanePermissions) {

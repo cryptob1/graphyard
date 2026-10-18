@@ -2,7 +2,7 @@ import { demand, type Principal } from '../../model.js';
 import { flagPathRefusal, RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
-import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
+import { isCiProducer, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { approveDecision, requestDecision } from '../decisions.js';
 import { listDecisions } from '../decision-ledger.js';
@@ -21,8 +21,6 @@ import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
 import { applyPreviewRecord, previewRecordBodySchema, previewSiteByteLimit, previewSiteFileLimit } from '../../project-previews.js';
 import type { Services } from '../routes.js';
-import { issuePushCredential } from '../push-credential.js';
-import { controlPlaneSyncPush } from '../../sync.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -150,22 +148,6 @@ export const workRoutes = defineRoutes('work', [
       return recordMergeEvent(context.services, context.actor, target, data, context.idempotencyKey());
     },
   },
-  // A worker session's short-lived push credential (GY-999), for the lease holder only.
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/push-credential$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'push-credential');
-      return issuePushCredential(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
-    },
-  },
-  // A base sync carrying the base branch's workflow changes, pushed by the control plane (GY-1098).
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/sync-push$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'sync-push');
-      return controlPlaneSyncPush(context.services, context.actor, decodeURIComponent(id), await parseJson(context, 64 * 1024 * 1024));
-    },
-  },
   {
     method: 'POST', path: /^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/,
     async handle(context, [id, command]) {
@@ -187,18 +169,10 @@ export const workRoutes = defineRoutes('work', [
         }
       }
       const input = JSON.parse(raw.toString() || '{}');
-      // CI-produced evidence is verified against the job GitHub reports, read here with the
-      // control plane's own App so provider I/O stays outside the coordination transaction.
-      // The engine repeats every judgement; this only supplies the observation it needs.
+      // CI-produced evidence is judged by the engine against the check run the control plane can read from
+      // its own checkout and ledger; no GitHub read supplies an observation, so the engine refuses it as unobserved.
       let ciRun: CiRunObservation | null | undefined;
-      if (attempted === 'evidence' && id && isCiProducer(actor as Principal)) {
-        const { services: { github, repository } } = context;
-        demand(github, 'GitHub integration is required to verify CI-produced evidence', 503);
-        const binding = ciRunBindingSchema.safeParse(input?.ciRun);
-        // A job GitHub cannot report (unknown id, a refused read) leaves nothing to verify against;
-        // the engine then refuses the record as unobserved rather than answering a server error.
-        try { ciRun = binding.success ? observeCiCheckRun(repository, await github.request(`/check-runs/${binding.data.jobId}`)) : null; } catch { ciRun = null; }
-      }
+      if (attempted === 'evidence' && id && isCiProducer(actor as Principal)) ciRun = null;
       try { return await engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey(), ciRun === undefined ? {} : { ciRun }); }
       catch (error) {
         // A renewal that failed server-side says what grace its recorded fault earned (GY-558), so the supervisor keeps retrying through it.

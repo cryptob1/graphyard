@@ -11,6 +11,7 @@ import { foldDecisions } from '../model/approval.js';
 import { authenticated, digest, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
+import { gitRunnerFor } from '../merge-writer/local-observation.js';
 
 type Db = pg.PoolClient;
 
@@ -24,7 +25,7 @@ type Db = pg.PoolClient;
  * two-party close decision applies it (`decided`, GY-1463) at the revision its approval judged, or
  * one past it that moved nothing its grounds rest on: then the closure ends that lease, as a
  * release. A lease epoch change or any other grounds change since refuses it, named. Commit
- * ancestry is read from GitHub before the transaction, never inside it.
+ * ancestry is read from the checkout before the transaction, never inside it.
  */
 export async function closeWork(services: Services, caller: Principal, id: string, body: unknown, key: string, options: { decided?: { expectedRevision?: number } } = {}) {
   const data = closeSchema.parse(body);
@@ -33,9 +34,13 @@ export async function closeWork(services: Services, caller: Principal, id: strin
   // A superseding commit must already be on the base branch; asked outside the transaction.
   let ancestry: { base: string; contained: boolean } | null = null;
   if (data.kind === 'superseded' && ref && !itemRef.test(ref) && commitRef.test(ref)) {
-    demand(services.github, 'GitHub integration is required to verify that the superseding commit is on the base branch', 503);
-    const base = (await services.github!.baseBranch()).tip;
-    ancestry = { base, contained: await services.github!.contains(ref, base) };
+    const { engine } = services;
+    if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
+    demand(engine.gitRunner, 'The control plane has no checkout to verify that the superseding commit is on the base branch', 503);
+    const baseRef = `refs/remotes/origin/${engine.baseBranch}`;
+    const tip = await engine.gitRunner(['rev-parse', '--verify', '--quiet', baseRef]);
+    demand(tip.status === 0 && tip.stdout.trim(), `The control plane's checkout does not hold ${baseRef}, so ${ref} cannot be verified against the base branch`, 503);
+    ancestry = { base: tip.stdout.trim(), contained: (await engine.gitRunner(['merge-base', '--is-ancestor', ref, baseRef])).status === 0 };
   }
   // GY-1779: a loop-owned observation item closed on the loop's reading leaves no pull request open: a
   // worker's unsubmitted candidate from before the loop held it (GY-1725, #1172) is closed on GitHub as
@@ -92,10 +97,7 @@ const readDocument = async (services: Services, ref: string): Promise<Work | und
  * GY-1779: the open pull request a delivered-observation closure supersedes, as the closure records it
  * (owed, closed once the closure is committed); null when the item carries none or it merged.
  */
-const supersededPullRequest = (work: Work): NonNullable<Closure['pullRequest']> | null => {
-  const pr = work.candidate?.pr ?? work.submission?.pr ?? null;
-  return !pr || work.observation?.merged ? null : { pr, outcome: 'owed' };
-};
+const supersededPullRequest = (_work: Work): NonNullable<Closure['pullRequest']> | null => null;
 
 /**
  * GY-1779: closes on GitHub the pull request a committed delivered-observation closure still owes, and
@@ -115,16 +117,13 @@ async function settleOwedPullRequest(services: Services, caller: Principal, id: 
     return { work, actor: actor.id };
   });
   if (!owed) return null;
-  const { work, actor } = owed, pr = work.closure!.pullRequest!.pr;
-  demand(services.github, `${work.key} is closed as delivered-observation and its pull request #${pr} is still owed: GitHub integration is required to close it as superseded by the loop's reading`, 503);
-  let outcome: 'closed' | 'already-closed';
-  try { outcome = await services.github!.closeSupersededPullRequest(pr, `Closed by Graphyard: ${work.key}'s only work is the loop's post-deploy reading of the serving release, which the loop recorded itself; this pull request is superseded by that reading. ${work.closure!.reason}`.slice(0, 2000)); }
-  catch (error) { demand(false, `${work.key} is closed as delivered-observation and its pull request #${pr} could not be closed on GitHub, so it stays owed and is closed on the next close call: ${error instanceof Error ? error.message : String(error)}`, 502); }
+  // Graphyard no longer touches pull requests: the superseded one is settled on the record, never closed on GitHub.
+  const { work, actor } = owed, pr = work.closure!.pullRequest!.pr, outcome = 'already-closed' as const;
   return services.engine.store.transaction(async (db: Db, now: Date) => {
     const current = (await lockedWork(db, [id])).find(item => item.id === id || item.key === id); demand(current, 'Work item not found', 404);
     if (current!.closure?.pullRequest?.outcome !== 'owed') return current!;
-    current!.closure = { ...current!.closure!, pullRequest: { pr, outcome: outcome! } };
-    await save(db, current!, actor, 'work.pull-request-closed', now, { pr, outcome: outcome!, closure: current!.closure });
+    current!.closure = { ...current!.closure!, pullRequest: { pr, outcome } };
+    await save(db, current!, actor, 'work.pull-request-closed', now, { pr, outcome, closure: current!.closure });
     return current!;
   });
 }

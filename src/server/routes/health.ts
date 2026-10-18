@@ -1,5 +1,5 @@
 import { releaseInfo, schemaVersion } from '../../release.js';
-import { planeVerdict, probeWrites, readDatabaseCapacity, readGitHubBudget } from '../../master-resources.js';
+import { planeVerdict, probeWrites, readDatabaseCapacity } from '../../master-resources.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
 import { demand } from '../../model.js';
 import { humanSignIn } from '../auth.js';
@@ -91,13 +91,13 @@ export const healthRoutes = defineRoutes('health', [
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued
     // behind them failed every deployment's health check (2026-09-23). The resource checks get a
     // bounded wait; past it the plane answers alive and names the checks it could not finish.
-    const checks = Promise.all([probeWrites(pool), readDatabaseCapacity(pool), readGitHubBudget(services.github)]);
+    const checks = Promise.all([probeWrites(pool), readDatabaseCapacity(pool)]);
     const settled = await Promise.race([checks, new Promise<null>(resolve => setTimeout(() => resolve(null), healthCheckWaitMs).unref())]);
     if (!settled) return { ok: true, healthy: true, readiness, writable: null, causes: [`resource checks did not finish within ${healthCheckWaitMs} ms; the database pool is busy`], resources: null,
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
-    const [writeError, database, github] = settled;
-    const verdict = planeVerdict(writeError, { database, github });
-    const body = { ok: verdict.healthy, healthy: verdict.healthy, readiness, writable: verdict.writable, causes: verdict.causes, resources: { database, github },
+    const [writeError, database] = settled;
+    const verdict = planeVerdict(writeError, { database });
+    const body = { ok: verdict.healthy, healthy: verdict.healthy, readiness, writable: verdict.writable, causes: verdict.causes, resources: { database },
       ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
     return verdict.healthy || !url.searchParams.has('strict') ? body : send(503, body);
   } },

@@ -16,7 +16,6 @@ import { stalledItemAttention } from './cli/status-attention.js';
 import { stalledActionAttention } from './cli/stalled-actions.js';
 import { actorlessAttention } from './cli/actorless-submissions.js';
 import { overlongSessionAttention } from './cli/overlong-sessions.js';
-import { githubBudgetAttention } from './cli/github-budget-attention.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './cli/unanswered-requests.js';
 import { consentHoldItems } from './cli/consent-holds.js';
 import { untriagedAttention } from './triage.js';
@@ -212,8 +211,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const stalled = stalledActionAttention(snapshot);
   // What waits on a judgment rather than on capacity, named once and counted apart (GY-104).
   const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], scopeRequests);
-  // The GitHub budget (GY-117): a pause as one incident, an exhaustion ahead, a silent webhook.
-  const budget = githubBudgetAttention(coordinator);
   const overlong = overlongSessionAttention(snapshot, { ...observed.runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   const stuck = stuckRequestReport({ reviews: observed.reviews, producers: observed.producers }, now).attentionItems;
   // A machine-filed item no triage has judged within a day of filing (GY-402).
@@ -235,6 +232,7 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)])
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
-  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog,
-    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items] };
+  // GY-2010: no GitHub budget attention — the App request budget is gone with the API client.
+  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
+    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...triage, ...owed.items] };
 }

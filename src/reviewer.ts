@@ -1,4 +1,3 @@
-import { assertGhNotPaused, ghPausedUntil, notePossibleGhRateLimit } from './gh-pause.js';
 import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
@@ -428,23 +427,10 @@ export function appJwt(appId: number, privateKey: string, now = Date.now()) {
 // The reviewer session receives an installation token scoped to one repository and to the two
 // permissions a review needs. GitHub caps installation tokens at one hour; anything longer,
 // broader, or able to write code is refused before it reaches a session.
-export async function mintReviewerToken(credential: ReviewerCredential, repository: string, fetcher: typeof fetch = fetch, now = Date.now()) {
-  if (credential.repository.toLowerCase() !== repository.toLowerCase()) throw new Error('The stored reviewer identity belongs to another repository; rerun master reviewer setup');
-  assertReviewerKey(credential.privateKey);
-  const response = await fetcher(`https://api.github.com/app/installations/${credential.installationId}/access_tokens`, {
-    method: 'POST', signal: AbortSignal.timeout(15_000),
-    headers: { Authorization: `Bearer ${appJwt(credential.appId, credential.privateKey, now)}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
-    body: JSON.stringify({ repositories: [repository.split('/')[1]], permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }),
-  });
-  if (!response.ok) throw new Error(`The reviewer App could not mint an installation token (${response.status}); check the App installation and its private key`);
-  const result: any = await response.json();
-  const expires = Date.parse(result?.expires_at);
-  if (typeof result?.token !== 'string' || result.token.length < 20) throw new Error('GitHub returned no reviewer installation token');
-  if (!Number.isFinite(expires) || expires <= now || expires > now + 3_600_000 + 60_000) throw new Error('GitHub returned a reviewer token without a short expiry; refusing to launch a review with it');
-  const permissions: Record<string, string> = result.permissions && typeof result.permissions === 'object' ? result.permissions : {};
-  if (permissions.contents === 'write' || permissions.administration || permissions.checks === 'write' || permissions.workflows) throw new Error('The reviewer App can write code, checks, or administration; a reviewer identity must not. Reinstall it with metadata read, contents read, and pull requests write only');
-  if (permissions.pull_requests !== 'write') throw new Error('The reviewer App cannot post a review; grant it Pull requests: write');
-  return { token: result.token as string, expiresAt: new Date(expires).toISOString(), permissions };
+export async function mintReviewerToken(credential: ReviewerCredential, repository: string, _fetcher: typeof fetch = fetch, _now = Date.now()): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
+  void credential; void repository;
+  // GY-2010: GitHub App installation tokens are gone; reviews post through the control plane.
+  throw new Error('GitHub App reviewer tokens are removed; reviews post through the control-plane review verdict');
 }
 
 export async function bindReviewer(root: string, input: { appId: number; installationId: number; slug: string; privateKey: string; credentialDirectory?: string },
@@ -904,8 +890,7 @@ export const answeredByPendingReview = (error: unknown, request: { sha: string }
  */
 async function pausedGhRead<T>(dependencies: { run?: ChildRun; now?: () => Date }, read: () => Promise<T>): Promise<T> {
   const at = (dependencies.now ?? (() => new Date()))().getTime();
-  assertGhNotPaused(at);
-  try { return await read(); } catch (error) { await notePossibleGhRateLimit(error, dependencies.run ?? defaultChildRun, at); throw error; }
+  try { return await read(); } catch (error) { throw error; }
 }
 
 /**
@@ -1027,7 +1012,6 @@ export async function launchReview(root: string, work: Work, profileName: string
   const postMerge = dependencies.postMerge;
   const plane = !!postMerge || work.observation?.source === 'control-plane';
   // A GitHub-backed launch (token mint, commit and thread reads) is deferred while the gh login is rate-limited, before any record is reserved.
-  if (!plane && !dependencies.mint) assertGhNotPaused((dependencies.now ?? (() => new Date()))().getTime());
   if (!config.reviewer && !plane) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.
   const reviewerApp = config.reviewer ?? null;
@@ -1507,8 +1491,8 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   let readFailed = false;
   const observe = async (record: ReviewRecord, identity: string, answered: Set<number>): Promise<ObservedVerdict | typeof unread> => {
     if (readFailed) return unread;
-    try { assertGhNotPaused((dependencies.now ?? (() => new Date()))().getTime()); return await readVerdict(record, identity, answered); }
-    catch (error) { readFailed = true; await notePossibleGhRateLimit(error, dependencies.run ?? defaultChildRun, (dependencies.now ?? (() => new Date()))().getTime()); return unread; }
+    try { return await readVerdict(record, identity, answered); }
+    catch (error) { readFailed = true; return unread; }
   };
   const now = (dependencies.now ?? (() => new Date()))();
   // The retry goes through the same confirmed delivery as the launch: a prompt the stopped
@@ -1674,7 +1658,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   // After a failed verdict read this pass reads nothing more from GitHub: the reads below would fail the
   // same way, and a failed mechanical-plan read is recorded as a permanent fallback, a thread resolution
   // spends its bounded attempts. The next pass does all of it.
-  const downstreamRun = readFailed || ghPausedUntil((dependencies.now ?? (() => new Date()))().getTime()) ? undefined : threadsRun;
+  const downstreamRun = readFailed ? undefined : threadsRun;
   const mechanical = await planMechanicalFixes(githubRecords, dependencies.work, config.repository, downstreamRun, now);
   const judged = await judgeFreshReads(githubRecords, config.repository, downstreamRun, record, now);
   changed += mechanical.changed + judged.changed;
@@ -1817,13 +1801,9 @@ async function approvalGaps(repository: string, record: ReviewRecord, reviewId: 
   } catch (error) { return `the approval could not be read to check which listed threads it accounts for (${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)})`; }
 }
 /** Withdraw a verdict as the reviewer App that gave it — an incomplete approval, or a change request past the review-round cap (GY-1118): GitHub's review dismissal, with a short-lived reviewer token. */
-export async function dismissApproval(root: string, reviewerApp: MasterConfig['reviewer'], repository: string, pr: number, reviewId: number, message: string) {
-  if (!reviewerApp) throw new Error('no reviewer App is registered');
-  const { token } = await mintReviewerToken(await readReviewerCredential(root, reviewerApp.credentialFile), repository);
-  const response = await fetch(`https://api.github.com/repos/${repository}/pulls/${pr}/reviews/${reviewId}/dismissals`, { method: 'PUT', signal: AbortSignal.timeout(15_000),
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
-    body: JSON.stringify({ message, event: 'DISMISS' }) });
-  if (!response.ok) throw new Error(`GitHub refused to dismiss review ${reviewId} (${response.status})`);
+export async function dismissApproval(_root: string, _reviewerApp: MasterConfig['reviewer'], _repository: string, _pr: number, _reviewId: number, _message: string) {
+  // GY-2010: dismissals went through the reviewer App; control-plane reviews need no GitHub dismissal.
+  throw new Error('GitHub review dismissals are removed; control-plane reviews settle without them');
 }
 
 /** Whether a completed approval binds the item's current candidate, or the head whose approval was carried onto it. */
@@ -2115,12 +2095,7 @@ export function summarizeReviews(records: ReviewRecord[]) {
 
 // Independent confirmation that the App is installed on the managed repository, using a token
 // minted the same way a review session's token is minted.
-export async function verifyReviewerInstallation(credential: ReviewerCredential, fetcher: typeof fetch = fetch) {
-  const minted = await mintReviewerToken(credential, credential.repository, fetcher);
-  const response = await fetcher('https://api.github.com/installation/repositories?per_page=100', { headers: { Authorization: `Bearer ${minted.token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) throw new Error(`The reviewer installation could not list its repositories (${response.status})`);
-  const body: any = await response.json();
-  const match = (Array.isArray(body?.repositories) ? body.repositories : []).find((entry: any) => String(entry?.full_name).toLowerCase() === credential.repository.toLowerCase());
-  if (!match) throw new Error('The reviewer App installation does not include the managed repository');
-  return { repository: String(match.full_name), permissions: minted.permissions };
+export async function verifyReviewerInstallation(credential: ReviewerCredential, _fetcher?: typeof fetch): Promise<{ repository: string; permissions: Record<string, string> }> {
+  void credential;
+  throw new Error('GitHub App reviewer installation verification is removed; bind no reviewer App under the control-plane merger');
 }

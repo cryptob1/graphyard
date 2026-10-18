@@ -5,8 +5,6 @@ import { parseEventHistoryQuery, readEventHistory } from '../../events-history.j
 import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, loopSupervision, loopSupervisionHeader, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
-import { installationSettingsUrl, mainGuardStatus, webhookCorroboration, webhookState } from '../../github.js';
-import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { openHumanOnly } from '../../model/human-request.js';
 import { humanOnlySubjects } from '../waits.js';
@@ -33,14 +31,8 @@ export const statusRoutes = defineRoutes('status', [
   {
     method: 'GET', path: '/api/status',
     async handle({ actor, req, url, services, operatorVisible }) {
-      const { engine, github, repository, principals, limits, build, production } = services;
+      const { engine, repository, principals, limits, build, production } = services;
       const jobs = actor.role === 'operator-agent' ? [] : (await engine.store.pool.query('SELECT work_id,available_at,locked_until,attempts,error,held_until FROM jobs WHERE error IS NOT NULL ORDER BY available_at LIMIT 50')).rows;
-      const githubRepository = github ? await github.reviewRepository() : null;
-      const githubPermissions = github ? await github.reviewPermissions() : {};
-      const dispatchAvailable = !!githubRepository && githubPermissions.pull_requests === 'write' && ['read', 'write'].includes(githubPermissions.issues) && githubPermissions.checks === 'write';
-      // The declared-permission preflight: what the installation grants against what every
-      // feature needs, with the operator sentences the dashboard and master status raise.
-      const appPermissions = github ? github.permissionReport() ?? { appId: github.config.appId, installationId: github.config.installationId, app: String(github.config.appId), account: null, installationUrl: installationSettingsUrl(github.config.installationId), observedAt: null, verifiedAt: null, error: 'Permission preflight has not run yet', suspended: false, required: requiredPermissions(controlPlanePermissions), granted: null, missing: [], blockedFeatures: [], attention: ['GitHub App permissions have not been verified yet; the preflight runs at startup and every five minutes'] } : null;
       const heldJobs = actor.role === 'operator-agent' ? 0 : (await engine.store.heldJobs()).length;
       // Observation jobs rescheduled three times in a row without an observation (GY-506): the
       // merge-queue deadlock shape, raised by master status rather than left for someone to diagnose.
@@ -56,32 +48,18 @@ export const statusRoutes = defineRoutes('status', [
       // name `master verify-deployment` and the flow report's production phase use.
       const productionEnvironment = await resolvedProductionEnvironment(engine.store.pool);
       const humanOnly = openHumanOnly(await humanOnlySubjects(services, visibleWork), observedAt.getTime());
-      // The GitHub request budget and the observation schedule spending it (GY-117): what is
-      // left, how fast it goes, the pause in force, what each observation cost; and whether the
-      // webhook is delivering at all, against the pull requests that are open to be woken.
-      const githubBudget = github?.budget?.(observedAt.getTime()) ?? null;
-      // GitHub's own delivery log corroborates a receipts gap (GY-1649): the last attempt it logged and
-      // the attempts after the last receipt that failed, from one cached app-level read, never per call.
-      const liveness = await engine.store.webhookLiveness();
-      const corroboration = github?.webhookDeliveries ? webhookCorroboration(await github.webhookDeliveries(observedAt.getTime()), liveness.lastDeliveryAt, observedAt.getTime(), { installationId: github.config.installationId, repositoryId: githubRepository?.id ?? null }) : null;
-      const webhooks = { ...liveness, configured: !!process.env.GITHUB_WEBHOOK_SECRET, settingsUrl: github?.webhookSettingsUrl?.() ?? null, ...corroboration,
-        openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length,
-        state: webhookState({ ...liveness, ...corroboration }, observedAt.getTime()) };
       // The fleet as the dashboard needs it (GY-105): how many executors are alive, and each kind
       // of pending action none of them serves, with its wait and what to start.
       // A pending merge row waits on a loop that merges, never on an executor (GY-916).
       // Presence recorded durably by any process counts, so a restart or deploy reads the fleet live (GY-1289).
       const executors = executorReport(visibleWork, executorRegistry(engine), observedAt, undefined, await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt), await durablePresence(presenceQuery(engine)));
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, starvedJobs, jobs, githubBudget, webhooks,
+        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', github: false, check: 'Graphyard / merge', reviewProviders: ['github'], reviewerApps: engine.reviewerApps, githubAppId: null, heldJobs, starvedJobs, jobs,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
         delegationLimits: services.delegationLimits, build, repositoryPolicy: repositoryPolicy(), production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { rerunFailedChecks: engine.rerunFailedChecks },
-        // The main guard (GY-1335): whether it is armed and whether a revert it opens can pass main's
-        // last-push-approval rule, which doctor and master status raise before any merge breaks main.
-        mainGuard: await mainGuardStatus(engine.store.pool, github),
         // The documentation policy this control plane stamps on new items, which doctor compares
         // with the checkout's committed graphyard.json (GY-293).
         documentation: engine.documentation,
@@ -126,17 +104,6 @@ export const statusRoutes = defineRoutes('status', [
       // A scope ask's command reads the routed decisions the engine's guard reads (GY-1388).
       return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: await resolvedProductionEnvironment(engine.store.pool),
         production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds, scopeDecisions: await routedScopeDecisions(engine.store.pool, work) });
-    },
-  },
-  {
-    // The installation and the App's requested permissions, read now with the App's own credential
-    // (GY-964): `master browser app-permissions` and `installation-accept` decide and verify from
-    // this, never from whatever the operator's gh token happens to be scoped to see.
-    method: 'GET', path: '/api/github/installation',
-    async handle({ actor, services: { github } }) {
-      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-      demand(github, 'GitHub is not configured on this control plane', 503);
-      return github.installationState();
     },
   },
   {

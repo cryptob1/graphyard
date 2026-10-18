@@ -96,8 +96,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1607 AC-4: the deployment page says CI and release-candidate runners pull Docker Hub images through the mirror.
   ['docs/deployment.md', /CI and release-candidate runners pull Docker Hub images through the `mirror\.gcr\.io` mirror/],
   ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; verified promotions repin\./],
-  // GY-1778 AC-2: the GitHub page names the bounded plan read and the one place its bounds are named.
-  ['docs/github.md', /\*\*plan\*\* reads `\/api\/status` and `GET \/api\/work\?pr=N` \(never the work list\) bounded by `planReads` \(`scripts\/enumerate-ci-proofs\.mjs`\)/],
+  // GY-1778 AC-2: plan-read bounds live on the protocol read-endpoints page (docs/github.md deleted in GY-2010).
   ['docs/protocol/read-endpoints.md', /`\/api\/work`: the fleet \(open items whole, settled deliveries summarized\), `\?pr=N` only the item whose candidate or submission names pull request N \(else `\[\]`\)/],
   // GY-1686 AC-3: both master-agent pages name master browser capture as the remedy for a criterion needing a live Confirm-access fixture, never a human.
   ['docs/master-agent.md', /Live Confirm-access fixtures: \[`master browser capture`\]\(master-agent-reference\.md#github-administration-through-the-browser\), never a human/],

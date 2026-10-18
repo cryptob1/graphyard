@@ -29,6 +29,6 @@ Workers build, run request-named fast gates (tests/module-budgets.test.ts, tests
 
 ## Ship in under thirty minutes
 
-[Speed](master-agent-reference.md#pipeline-speed), [CI proofs](github.md#proofs-in-ci). `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict`: rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts). Polls save only on moved submission/candidate/policy/queue tip; three unsaved escalate (`observation-starved`).
+[Speed](master-agent-reference.md#pipeline-speed), CI proofs. `graphyard diagnose GY-N` names holds; `base-behind`/`base-conflict`: rework or, docs-only, [docs-sync](development.md#documentation-that-rarely-conflicts). Polls save only on moved submission/candidate/policy/queue tip; three unsaved escalate (`observation-starved`).
 
 App-permission holds run `master browser installation-accept` (`app-permissions` first) once/run; refusals escalate once; roles: `master registry role set ROLE ACCOUNT… --concurrency N`.

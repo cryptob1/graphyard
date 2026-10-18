@@ -13,7 +13,7 @@ import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, t
 import { adapterFor, carriesCredential, hetznerAddress, publishedPort, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { applyOperatorRulesetAdd, inheritedRefusal, missingGraphyardChecks, protectionSnapshots, readOperatorRulesets, rulesetTarget, type OperatorRulesets } from '../protection.js';
-import { applyProtection, applyRestore, observeRestore, protectionRecordFile, readProtectionRecord, recordProtectionOnce, restoreChanges, type ProtectionRecord, type RestoreChange, appClient, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, installationClient, installationToken, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
+import { applyProtection, applyRestore, observeRestore, protectionRecordFile, readProtectionRecord, recordProtectionOnce, restoreChanges, type ProtectionRecord, type RestoreChange, configureWebhook, detectCiAppIds, effectiveReviewCount, headSha, githubCli, protectionSatisfied, readProtection, GRAPHYARD_CHECKS, readWebhookConfig, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { repositoryPolicyAssignment } from '../model/repository-policy.js';
@@ -21,7 +21,6 @@ import { applicationProblems, caseIdsOf, projectDeliveryAssignment, projectDeliv
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalRecords, principalsVariable, readInstallRecord, reconcileRoster, recordedRoster, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord, type RosterPrincipal } from './secrets.js';
 import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
-import { appRoles, importApp, listApps, publiclyReachable, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
 import { HerdrSetupFailure } from '../herdr-host.js';
@@ -30,6 +29,22 @@ import { localDatabaseVariable, localSettings, type LocalSupervisor } from './lo
 import { localPaths } from './local-runtime.js';
 import { durableCheckoutPreflight, loopStopTimeoutSeconds, underTestRunner } from '../supervisor.js';
 import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
+
+function appApiRemoved(): never { throw new Error('GitHub App API clients are removed; the merge writer uses the deploy key (GY-2010)'); }
+async function removedRepositoryInstall(..._args: unknown[]): Promise<number | null> { return appApiRemoved(); }
+function removedInstallationClient(..._args: unknown[]): any { return appApiRemoved(); }
+async function mintGone(..._args: unknown[]): Promise<{ token: string }> { return appApiRemoved(); }
+function removedAppClient(..._args: unknown[]): any { return appApiRemoved(); }
+
+const appRoles = ['control-plane', 'reviewer', 'revert-approver'] as const;
+type AppRole = typeof appRoles[number];
+type AppCredentials = { appId: number; slug: string; privateKey: string; webhookSecret?: string; installationId?: number };
+type SavedRegistration = { file: string; role: AppRole; app: AppCredentials & { installationId: number } };
+function publiclyReachable(_url: string) { return false; }
+function savedRegistrations(_dirs: string[]): SavedRegistration[] { return []; }
+async function importApp(..._args: unknown[]): Promise<any> { throw new Error('GitHub App import is removed (GY-2010)'); }
+async function listApps(..._args: unknown[]): Promise<any> { throw new Error('GitHub App listing is removed (GY-2010)'); }
+async function reuseExistingApp(..._args: unknown[]): Promise<any> { throw new Error('GitHub App reuse is removed (GY-2010)'); }
 
 export * from './types.js';
 export { adapterFor, type ProviderAdapter } from './adapters.js';
@@ -350,7 +365,7 @@ async function findSavedApp(root: string, directory: string, inputs: InstallInpu
   const installed = async (file: string): Promise<SavedApp | null> => {
     const app = await readUninstalledApp(file).catch(() => null);
     if (!app || !forRepository(app)) return null;
-    const installationId = await repositoryInstallation(app.facts, inputs.repository, fetcher).catch(() => null);
+    const installationId = await removedRepositoryInstall(app.facts, inputs.repository, fetcher).catch(() => null);
     return installationId ? { file, repository: app.repository, facts: { ...app.facts, installationId }, detected: true } : null;
   };
   if (inputs.githubAppFile) {
@@ -1503,7 +1518,7 @@ const keptRegistration = (session: Pick<InstallSession, 'record' | 'registration
 function keptAppEnv(session: InstallSession): EnvValue[] {
   const github = session.record?.github, kept = session.inputs.observeOnly && github ? keptRegistration(session) : null;
   if (!github || !kept || typeof session.adapter.applyVariables === 'function') return [];
-  return githubEnv({ appId: github.appId, slug: github.slug, installationId: github.installationId, privateKey: kept.app.privateKey, webhookSecret: kept.app.webhookSecret }, github.ciAppIds);
+  return githubEnv({ appId: github.appId, slug: github.slug, installationId: github.installationId, privateKey: kept.app.privateKey, webhookSecret: kept.app.webhookSecret ?? '' }, github.ciAppIds);
 }
 
 /**
@@ -1723,15 +1738,15 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   else if (bound.polling) webhook = { delivered: false, skipped: true, statusCode: null, event: null, at: null, detail: 'skipped: a local install registers no webhook; the control plane polls GitHub' };
   else if (bound.webhookElsewhere) webhook = { delivered: false, statusCode: null, event: null, at: null, detail: `the reused App's webhook still serves ${bound.webhookElsewhere}; this installation receives no GitHub events until it is moved here with --migrate` };
   else try {
-    await triggerDelivery(installationClient(bound.facts, deps.fetch), session.inputs.repository, await headSha(gh, session.inputs.repository, session.inputs.baseBranch));
-    webhook = await verifyDelivery(bound.app, since, deps.wait);
+    await triggerDelivery(removedInstallationClient(bound.facts, deps.fetch), session.inputs.repository, await headSha(gh, session.inputs.repository, session.inputs.baseBranch));
+    webhook = await verifyDelivery(removedAppClient(bound.facts, deps.fetch), since, deps.wait);
   } catch (error: any) { webhook = { delivered: false, statusCode: null, event: null, at: null, detail: vault.scrub(`Could not publish the verification event: ${error.message}`) }; }
 
   const fleet = context.host && bound && 'installFleet' in adapter
     ? await (adapter as ProviderAdapter & { installFleet: typeof installHostFleet }).installFleet(context, {
       url, adminToken: session.tokens.get(principalOfRole(session.principals, 'admin').id)!, coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
       reviewer: session.inputs.reviewer ?? null, fetch: deps.fetch, log,
-      cloneToken: vault.add((await installationToken(bound.facts, deps.fetch)).token),
+      cloneToken: vault.add((await mintGone(bound.facts, deps.fetch)).token),
       github: { appId: bound.facts.appId, installationId: bound.facts.installationId, slug: bound.facts.slug, privateKey: bound.facts.privateKey, ...(bound.facts.botUserId ? { botUserId: bound.facts.botUserId } : {}) },
     })
     : null;
@@ -1774,7 +1789,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
 
 /** The App an apply bound (never with --no-github-app): its facts, the CI Apps beside it, and how its webhook stands. */
 interface BoundApp {
-  facts: Awaited<ReturnType<typeof resolveApp>>; ciApps: { appId: number; slug: string }[]; app: ReturnType<typeof appClient>;
+  facts: Awaited<ReturnType<typeof resolveApp>>; ciApps: { appId: number; slug: string }[]; app: { appId: number; slug: string; installationId: number };
   /** No webhook: a local install, or an origin GitHub cannot reach. */
   polling: boolean;
   /** The live installation the reused App's webhook keeps serving, when it is not moved here. */
@@ -1813,7 +1828,7 @@ async function bindApp(session: InstallSession, url: string, record: InstallReco
   await adapter.deploy(context);
   if (!await waitForHealth(session, url)) throw new Error('The service did not return to health after the GitHub credentials were written');
 
-  const app = appClient(facts, deps.fetch);
+  const app = removedAppClient(facts, deps.fetch);
   // An App registered for an origin GitHub cannot reach (loopback, private) has no hook, whatever
   // the provider: PATCHing its /app/hook/config 404s, so it is configured and proved like a local
   // install's, which is to say not at all (GY-1476).
@@ -1879,7 +1894,7 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   if (saved && saved.role === 'control-plane' && !(bound && bound.appId !== saved.app.appId) && ghStatus.code === 0 && url) try {
     const reuse = await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), false);
     installationId = reuse.app.installationId;
-    deselected = !!bound && !await reachesRepository(session, saved.app, installationId);
+    deselected = !!bound && installationId !== null && !await reachesRepository(session, saved.app, installationId);
     preflight.push({ name, ok: true, detail: `the imported control-plane App ${saved.app.slug} (app ${saved.app.appId}) holds the permissions it needs and is installed on ${reuse.account}${reuse.selection === 'all' ? ' for every repository' : bound && !deselected ? '' : `; --apply adds ${repository} to that installation${deselected ? `, which no longer reaches it` : ''}`}` });
   } catch (error) { preflight.push({ name, ok: false, detail: error instanceof Error ? error.message : String(error), fix: importFix }); }
 
@@ -1889,7 +1904,7 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   // binds again, writing the variables, deploying and setting the webhook secret.
   const alreadyBound = !!saved && !!bound && bound.appId === saved.app.appId && bindingCurrent(bound, saved.app, installationId);
   const rebinding = !!saved && !!bound && bound.appId === saved.app.appId && !alreadyBound;
-  if (rebinding) preflight.push({ name: `Rebind App ${slug}`, ok: true, detail: `the imported registration of ${saved!.app.slug} differs from the one bound ${bound!.webhookFingerprint !== fingerprint(saved!.app.webhookSecret) ? '(it was imported again, so its private key and webhook secret are new)' : `(its installation is now ${installationId}, not ${bound!.installationId})`}; --apply writes the App variables, deploys and sets the webhook secret again` });
+  if (rebinding) preflight.push({ name: `Rebind App ${slug}`, ok: true, detail: `the imported registration of ${saved!.app.slug} differs from the one bound ${bound!.webhookFingerprint !== fingerprint(saved!.app.webhookSecret ?? '') ? '(it was imported again, so its private key and webhook secret are new)' : `(its installation is now ${installationId}, not ${bound!.installationId})`}; --apply writes the App variables, deploys and sets the webhook secret again` });
   // CI Apps are detected again on every run: a bind that observed none, or a publisher added or
   // replaced since, writes the App variables and deploys once the detected set differs.
   const detected = alreadyBound && ghStatus.code === 0 ? (await detectCiAppIds(gh, repository, session.inputs.baseBranch, saved!.app.appId)).map(app => app.appId) : [];
@@ -1899,7 +1914,7 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
   const webhookUrl = url ? webhookUrlFor(url) : '<service URL>/api/github/webhook';
   // Whether the App's one webhook already delivers here is read as the App itself; a bind that is
   // not recorded yet always writes it, since GitHub does not know the imported App's fresh secret.
-  const hook = saved && alreadyBound && !polling ? await readWebhookConfig(appClient({ appId: saved.app.appId, privateKey: saved.app.privateKey }, session.deps.fetch)) : null;
+  const hook = saved && alreadyBound && !polling ? await readWebhookConfig(removedAppClient({ appId: saved.app.appId, privateKey: saved.app.privateKey }, session.deps.fetch)) : null;
   const merges = typeof adapter.applyVariables === 'function';
   // A rewrite adapter writes the control-plane variables again beside the App's; a bind refuses any it would change.
   const rewritten = url && !merges ? await rewrittenCoreVariables(session) : [];
@@ -1955,7 +1970,7 @@ async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
  * account's installation, and so the binding, still stands.
  */
 const reachesRepository = async (session: InstallSession, app: Pick<AppFacts, 'appId' | 'privateKey'>, installationId: number) =>
-  await repositoryInstallation(app, session.inputs.repository, session.deps.fetch) === installationId;
+  await removedRepositoryInstall(app, session.inputs.repository, session.deps.fetch) === installationId;
 
 /**
  * What a rewrite adapter's bind would change besides the App variables (GY-1877): `setEnv` writes
@@ -2012,7 +2027,7 @@ async function performBindApp(session: InstallSession, plan: InstallPlan): Promi
   };
   let write = !alreadyBound;
   if (alreadyBound) {
-    facts = { appId: saved.app.appId, slug: saved.app.slug, installationId: record.github!.installationId, privateKey: saved.app.privateKey, webhookSecret: saved.app.webhookSecret };
+    facts = { appId: saved.app.appId, slug: saved.app.slug, installationId: record.github!.installationId, privateKey: saved.app.privateKey, webhookSecret: saved.app.webhookSecret ?? '' };
     // CI Apps are detected on every rerun: a publisher added or replaced since the last bind is written.
     const detected = await detect();
     const recorded = record.github!.ciAppIds;
@@ -2054,7 +2069,7 @@ async function performBindApp(session: InstallSession, plan: InstallPlan): Promi
   let webhookDetail: string;
   if (pollsGitHub(context.provider)) webhookDetail = 'skipped: a local install registers no webhook; the control plane polls GitHub';
   else {
-    const app = appClient(facts, deps.fetch);
+    const app = removedAppClient(facts, deps.fetch);
     const hook = alreadyBound ? await readWebhookConfig(app) : null;
     if (hook?.url === webhookUrl) webhookDetail = `skipped: the App webhook already delivers to ${webhookUrl}`;
     else {
@@ -2316,7 +2331,7 @@ async function resolveApp(session: InstallSession, url: string, record: InstallR
     // A saved registration is used only once GitHub mints an installation token from it, so a
     // deleted App or an uninstalled repository is found here rather than by the fleet.
     try {
-      await installationToken(saved.facts, deps.fetch);
+      await mintGone(saved.facts, deps.fetch);
       const own = appCredentialFile(session);
       // An installation found through the App's JWT is recorded with the registration (GY-1476).
       if (saved.detected) { await writeFile(own, JSON.stringify({ ...JSON.parse(await readFile(saved.file, 'utf8')), installationId: saved.facts.installationId }, null, 2), { mode: 0o600 }); await chmod(own, 0o600); }

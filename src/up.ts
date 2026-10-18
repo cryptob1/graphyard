@@ -8,7 +8,6 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
-import { appImportRoute, githubOwnerType } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
@@ -28,6 +27,12 @@ import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupF
 import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, unitLauncherCheckout, executorDeclarationFile, executorDeclarationSchema, type LoopCodeReading } from './repository-setup.js';
 import { loopCodeRoot } from './daemon/checkout-state.js';
 import { recordHerdrInstance } from './master/config.js';
+
+/** GY-2010: App-import routes are gone; quote the control-plane up path instead. */
+function appImportRoute(repository: string, upFlags = '', _org = false, _ownerType?: string) {
+  return `graphyard up --repo ${repository}${upFlags} (GitHub App registration is removed; the merge writer uses the deploy key)`;
+}
+async function githubOwnerType(_owner: string): Promise<'User' | 'Organization' | null> { return 'User'; }
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,

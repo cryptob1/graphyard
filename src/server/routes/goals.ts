@@ -1,14 +1,11 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
-import { CHECK_NAME, demand, operatorCapability, type OperatorCapability, type Principal, type Work } from '../../model.js';
+import { demand, operatorCapability, type OperatorCapability, type Principal, type Work } from '../../model.js';
 import { appendGoal, applyGoalCommand, goalCommandSchemas, goalHistory, goalKeyPattern, goalSummary, implementersOf, readGoals, recordGoal, type Goal, type GoalCommand, type Landing } from '../../model/goal.js';
 import { planItemInput, planItemMark, planOrder, servedInProduction } from '../../model/goal-plan.js';
 import type { Engine } from '../../engine.js';
-import { landableCarried } from '../../landable-check.js';
-import type { GitHub } from '../../github.js';
 import type { Store } from '../../store.js';
 import { gitRunnerFor, type GitResult, type GitRunner } from '../../merge-writer/local-observation.js';
-import { revertApproverVariables } from '../../main-guard.js';
 import { Refusal } from '../../model/refusal.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 
@@ -56,58 +53,6 @@ async function once<T>(context: RouteContext, input: unknown, run: (db: pg.PoolC
     await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [context.actor.id, key, fingerprint, JSON.stringify(result)]);
     return result;
   });
-}
-
-export type LandingGitHub = Pick<GitHub, 'config' | 'request' | 'pages' | 'graphql' | 'upsertLandable' | 'approveAcceptance'>;
-const mergeMutation = 'mutation($id: ID!, $head: GitObjectID!, $method: PullRequestMergeMethod!) { mergePullRequest(input: { pullRequestId: $id, expectedHeadOid: $head, mergeMethod: $method }) { pullRequest { id } } }';
-const mergeMethod = () => (['MERGE', 'SQUASH', 'REBASE'] as const).find(method => method === process.env.GITHUB_MERGE_METHOD?.toUpperCase()) ?? 'MERGE';
-
-/**
- * Lands an approved acceptance pull request (GY-1417). It is no work item, so nothing else publishes
- * the App-bound `Graphyard / merge` and `graphyard/landable` verdicts a managed base branch requires:
- * here the control-plane App publishes both on exactly the approved head — the approval by an identity
- * other than its author is its gate — and merges head-bound, as the main guard lands a revert. GitHub
- * still enforces CI and its review rules, so a merge it refuses is `waiting`; since GY-1795 the
- * independent approver App (GY-1291's) approves exactly the verified head first, so the last-pusher
- * rule on a branch the control-plane App pushed no longer strands an approved goal. A pull request
- * whose head moved off the approved one, or that conflicts with its base, is never landed; one GitHub
- * merged at any other head or base (an administrative bypass) is `unapproved`, never accepted after the fact.
- */
-export async function landAcceptance(github: LandingGitHub, goal: Goal): Promise<Landing> {
-  const { pr } = goal.acceptance!, { head, by, reason } = goal.approval!;
-  demand(pr !== null, `${goal.key}'s acceptance change has no pull request; the merge writer lands it`, 422);
-  const pull = await github.request(`/pulls/${pr}`);
-  const elsewhere = () => `acceptance pull request #${pr} is at ${String(pull.head?.sha).slice(0, 12)} on ${pull.base?.ref}, not its approved head ${head.slice(0, 12)} on ${github.config.base}`;
-  const approvedHead = () => pull.head?.sha === head && pull.base?.ref === github.config.base;
-  if (pull?.merged) return approvedHead() ? { state: 'merged', mergeSha: pull.merge_commit_sha ?? null, detail: `#${pr} merged` }
-    : { state: 'unapproved', mergeSha: pull.merge_commit_sha ?? null, detail: `${elsewhere()}, yet GitHub merged it: no approver judged what merged, so no case is protected` };
-  if (pull?.state !== 'open') return { state: 'closed', mergeSha: null, detail: `acceptance pull request #${pr} was closed without merging` };
-  if (!approvedHead()) return { state: 'moved', mergeSha: null, detail: elsewhere() };
-  if (pull.mergeable === false || pull.mergeable_state === 'dirty') return { state: 'conflicting', mergeSha: null, detail: `acceptance pull request #${pr} conflicts with ${github.config.base}` };
-  const summary = `Acceptance of ${goal.key} at ${head}: approved by ${by}, not its author ${goal.acceptance!.author}: ${reason}`.slice(0, 4000);
-  const existing = (await github.pages(`/commits/${head}/check-runs?check_name=${encodeURIComponent(CHECK_NAME)}&filter=latest`, 'check_runs')).find(run => run.app?.id === github.config.appId);
-  const body = { name: CHECK_NAME, head_sha: head, status: 'completed', conclusion: 'success', external_id: goal.id, output: { title: 'Acceptance approved', summary } };
-  if (!(existing?.status === body.status && existing.conclusion === body.conclusion && existing.external_id === body.external_id && existing.output?.title === body.output.title && existing.output?.summary === body.output.summary))
-    await github.request(existing ? `/check-runs/${existing.id}` : '/check-runs', existing ? 'PATCH' : 'POST', body);
-  await github.upsertLandable(landableCarried(goal, head, 'Landable', summary));
-  // GY-1795: the base requires an approval from someone other than the last pusher, and the control-plane
-  // App pushed the acceptance branch, so its own App-bound verdicts above never satisfy the rule (GOAL-1
-  // sat approved and unmerged on it). The independent approver App approves exactly the verified head, as
-  // the main guard's reverts are approved (GY-1291); a refused approval still tries the merge, as the
-  // guard's do, and an unconfigured approver is named when the merge is refused (GY-1335's wording).
-  let unconfigured = false, approvalRefusal: string | null = null;
-  try { unconfigured = await github.approveAcceptance(pr, head, `Graphyard's acceptance landing: ${summary}`) === 'unconfigured'; }
-  catch (error) { approvalRefusal = error instanceof Error ? error.message : String(error); }
-  try { await github.graphql(mergeMutation, { id: pull.node_id, head, method: mergeMethod() }); }
-  catch (error) {
-    const refused = `GitHub has not merged #${pr} yet: ${error instanceof Error ? error.message : String(error)}`;
-    const why = [refused,
-      unconfigured ? `no independent approver App is configured (${revertApproverVariables.join(', ')}), so nobody other than the last pusher can approve it` : null,
-      approvalRefusal ? `the independent approver's approval was refused: ${approvalRefusal}` : null].filter(Boolean).join('; ');
-    return { state: 'waiting', mergeSha: null, detail: why.slice(0, 1000) };
-  }
-  const merged = await github.request(`/pulls/${pr}`);
-  return merged?.merged && merged.head?.sha === head ? { state: 'merged', mergeSha: merged.merge_commit_sha ?? null, detail: `#${pr} merged` } : { state: 'waiting', mergeSha: null, detail: `GitHub accepted the merge of #${pr} but has not reported it merged yet` };
 }
 
 /**
@@ -239,7 +184,7 @@ export const goalRoutes = defineRoutes('goals', [
     async handle(context, [ref]) {
       intent(context);
       const body = goalCommandSchemas.land.parse(await parseJson(context, 1024, '{}'));
-      const { engine, github } = context.services;
+      const { engine } = context.services;
       const goal = find(await readGoals(engine.store.pool), decodeURIComponent(ref));
       demand(goal, 'Goal not found', 404);
       if (goal.merged && goal.stage !== 'accepted') return { goal, landing: { state: 'merged', mergeSha: goal.merged.mergeSha, detail: goal.merged.pr === null ? `merged as ${goal.merged.mergeSha}` : `#${goal.merged.pr} merged` } };
@@ -254,17 +199,8 @@ export const goalRoutes = defineRoutes('goals', [
         const landing: Landing = { state: 'merged', mergeSha: body.mergeSha, detail: `the merge writer merged ${goal.key}'s acceptance change as ${body.mergeSha}` };
         return { goal: await recordLanding(engine.store, goal, landing, context.actor), landing };
       }
-      demand(!body.mergeSha, `${goal.key}'s acceptance is pull request #${goal.acceptance.pr}: GitHub reports its merge, so no merge commit is named`, 422);
-      demand(github, 'No GitHub App is configured on this control plane, so no acceptance pull request can be landed', 503);
-      const landing = await landAcceptance(github, goal);
-      if (landing.state === 'waiting') return { goal, landing };
-      const { pr, branch } = goal.acceptance;
-      if (landing.state === 'moved' || landing.state === 'conflicting') {
-        await github.request(`/issues/${pr}/comments`, 'POST', { body: `Closed by Graphyard: ${landing.detail}. ${goal.key}'s outcomes are opened again on a new pull request from the current base and judged again.` });
-        await github.request(`/pulls/${pr}`, 'PATCH', { state: 'closed' });
-        if (branch.startsWith('graphyard/')) await github.request(`/git/refs/heads/${branch}`, 'DELETE').catch(() => undefined);
-      }
-      return { goal: await recordLanding(engine.store, goal, landing, context.actor), landing };
+      // An acceptance pull request is no longer landed: the control plane is the only merge writer and a change reaches the base through the merge writer's landing alone.
+      demand(false, `${goal.key}'s acceptance is pull request #${goal.acceptance.pr}; Graphyard no longer lands pull requests, so the merge writer lands the acceptance change and names its merge commit`, 422);
     },
   },
   {

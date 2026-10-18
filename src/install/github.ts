@@ -31,55 +31,10 @@ export function appJwt(appId: number, privateKey: string, now = Date.now()) {
   return `${unsigned}.${createSign('RSA-SHA256').update(unsigned).sign(privateKey, 'base64url')}`;
 }
 
-export interface AppClient { request(method: string, path: string, body?: unknown): Promise<any> }
-
-export function appClient(facts: Pick<AppFacts, 'appId' | 'privateKey'>, fetcher: typeof fetch = fetch): AppClient {
-  return {
-    async request(method, path, body) {
-      const response = await fetcher(`https://api.github.com${path}`, {
-        method,
-        headers: { Authorization: `Bearer ${appJwt(facts.appId, facts.privateKey)}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
-        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000),
-      });
-      if (!response.ok) throw new Error(`GitHub ${method} ${path} failed (${response.status})`);
-      return response.status === 204 ? null : response.json();
-    },
-  };
-}
-
-/** A one-hour installation token of the App, with its expiry. */
-export async function installationToken(facts: Pick<AppFacts, 'appId' | 'privateKey' | 'installationId'>, fetcher: typeof fetch = fetch): Promise<{ token: string; expires: number }> {
-  const response = await fetcher(`https://api.github.com/app/installations/${facts.installationId}/access_tokens`, { method: 'POST', headers: { Authorization: `Bearer ${appJwt(facts.appId, facts.privateKey)}`, Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(20_000) });
-  if (!response.ok) throw new Error(`GitHub installation authentication failed (${response.status})`);
-  const result: any = await response.json();
-  return { token: String(result.token), expires: Date.parse(result.expires_at) };
-}
-
-/**
- * The App's installation on REPOSITORY, read as the App itself (GET /repos/OWNER/NAME/installation),
- * or null when it has none: an App installed outside the setup page is found here (GY-1476).
- */
-export async function repositoryInstallation(facts: Pick<AppFacts, 'appId' | 'privateKey'>, repository: string, fetcher: typeof fetch = fetch): Promise<number | null> {
-  const response = await fetcher(`https://api.github.com/repos/${repository}/installation`, { headers: { Authorization: `Bearer ${appJwt(facts.appId, facts.privateKey)}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' }, signal: AbortSignal.timeout(20_000) });
-  if (response.status === 404) return null;
-  if (!response.ok) throw new Error(`GitHub GET /repos/${repository}/installation failed (${response.status})`);
-  const id = ((await response.json()) as any)?.id;
-  return Number.isSafeInteger(id) && id > 0 ? id : null;
-}
-
-export function installationClient(facts: AppFacts, fetcher: typeof fetch = fetch): AppClient {
-  let token = ''; let expires = 0;
-  return {
-    async request(method, path, body) {
-      if (expires < Date.now() + 60_000) ({ token, expires } = await installationToken(facts, fetcher));
-      const response = await fetcher(`https://api.github.com${path}`, {
-        method, headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json', 'X-GitHub-Api-Version': '2022-11-28' },
-        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(20_000),
-      });
-      if (!response.ok) throw new Error(`GitHub ${method} ${path} failed (${response.status})`);
-      return response.status === 204 ? null : response.json();
-    },
-  };
+/** GY-2010: App API clients and installation tokens are removed. */
+export type AppClient = { request(method: string, path: string, body?: unknown): Promise<any> };
+export function removedAppClient(): AppClient {
+  return { request: async () => { throw new Error('GitHub App API clients are removed; the merge writer uses the deploy key and plain git (GY-2010)'); } };
 }
 
 // ---------------------------------------------------------------------------
