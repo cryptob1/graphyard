@@ -24,7 +24,7 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinn
 
 ## The merger
 
-The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read (`/api/status` `mergeWriter`). Launches get no push credential or keyring proxy. Setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`; AGENTS.md: `--head SHA`. Pull-request candidates are observed from the shared object store, queued for the writer.
+The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read (`/api/status` `mergeWriter`). Launches get no push credential or keyring proxy. Setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`; AGENTS.md: `--head SHA`. Candidates come from the shared object store, queued oldest first, `Hotfix: …` first.
 
 `POST /api/work/:id/merge-record` (coordinator, `Idempotency-Key`) records each step; `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
 

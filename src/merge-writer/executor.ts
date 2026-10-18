@@ -52,6 +52,8 @@ const gate = (item: Work, name: string) => item.gates.find(entry => entry.name =
  * or an unreconciled push blocks the whole queue: `reconcileIntents` settles it before any new merge,
  * so never more than one merge is in flight.
  */
+/** A hotfix (an item titled `Hotfix: …`) is merged before every other queued head, so a fix to a bottleneck never waits out the queue. */
+export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.title ?? '');
 export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number): MergeQueue {
   const blocking = Object.values(ledger).find(open);
   const owed = work.filter(item => {
@@ -69,11 +71,11 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     // GY-1834: a head held for a base failure waits `baseFailureHoldMs` before it is trialled again on whatever the tip then is.
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;
     return true;
-  }).sort((a, b) => submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
+  }).sort((a, b) => Number(isHotfix(b)) - Number(isHotfix(a)) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
   const queue = owed.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
   return { next: blocking ? null : owed[0] ?? null, queue, blockedBy: blocking?.key ?? null };
 }
-/** The oldest-submitted candidate due a merge, or null while nothing is due or an open intent blocks the queue (AC-1). */
+/** The oldest-submitted candidate due a merge (hotfixes first), or null while nothing is due or an open intent blocks the queue (AC-1). */
 export const nextToMerge = (work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number) => mergeQueue(work, ledger, now).next;
 
 // ---- The ledger events the executor records --------------------------------------------------------
