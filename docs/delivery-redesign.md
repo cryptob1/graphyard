@@ -9,12 +9,12 @@ Only Graphyard writes to main.
 
 1. **Head submission under a lease:** `complete GY-N EPOCH --head SHA`; the lease ends in the same transaction.
 2. **One serial merge writer** records merge intent, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip; between them it trial-merges and runs build and fast tests on the merged tree.
-3. **Candidates every ~10 merges or 15 quiet minutes.** E2E runs on UAT; the exact tested commit is promoted. On E2E failure the newest item related to the failing cases is reverted.
+3. **Candidates every ~10 merges or 15 quiet minutes.** The exact tested commit is promoted. On E2E failure the newest item related to the failing cases is reverted.
 4. **One independent reviewer per item.** Sensitive diffs get a blocking review before step 2; the rest a non-blocking review after merge.
 
 ## Merge writer
 
-Oldest first, one in flight: `merge.intent`; merge-commit trial (affected and proof tests; no tests without `scripts/ci-tests.mjs`, build without `package.json`; failed probes: runner failures; host-sized, slot-declared shards; one retry on timeout, cancel, host failure; `merge.trial`: `outcome`, `phase`, `reason`, `phases`, `attempts`); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved-tip rejection waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Record keys name persisted attempts: lost replies replay exactly (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger, then retry anew. `master status`: `mergeWriter.queue`.
+Oldest first, one in flight: `merge.intent`; merge-commit trial (affected and proof tests; no tests without `scripts/ci-tests.mjs`, build without `package.json`; host-sized shards; one retry on timeout, cancel, host failure (`merge.trial`)); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved rejection waits; a failed trial reworks (`mergeWriter.reworks`). A trial timeout yields the turn: tried after every queued head; timed out twice while another head's trial passes, the head is refused to rework (`trial failed`, the slow files). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Record keys name persisted attempts: lost replies replay exactly (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger, then retry anew. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 
@@ -24,9 +24,9 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinn
 
 ## The merger
 
-The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read (`/api/status` `mergeWriter`). Launches get no push credential or keyring proxy. Setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`; AGENTS.md: `--head SHA`. Candidates come from the shared object store, queued oldest first, `Hotfix: …` first.
+The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`. Pull-request candidates come from the shared object store, queued oldest first, `Hotfix: …` first.
 
-`POST /api/work/:id/merge-record` (coordinator, `Idempotency-Key`) records each step; `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
+`POST /api/work/:id/merge-record` (coordinator, `Idempotency-Key`) records each step; `pushed`/`reconciled` name the open intent's merge commit, else 409.
 
 ## Rollout
 

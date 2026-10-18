@@ -39,18 +39,19 @@ export async function plannerWorld(dayStart: number, accepted: Record<string, st
   const criteria = (text: string) => [{ id: 'AC-1', text, proofs: [PROOF] }];
   const planItem = (goal: Goal, ref: string, plannedFiles: string[], dependsOn: string[] = []) => {
     const outcome = goal.acceptance!.outcomes[0];
-    return { ref, title: `${named(goal.key)}: build the ${ref}`, description: `The ${ref} of ${goal.key}`, type: 'feature' as const, priority: 2,
+    return { ref, title: `${named(goal.key)}: build the ${ref}`, plain: `Customers get the ${ref} of ${named(goal.key)}.`, description: `The ${ref} of ${goal.key}`, type: 'feature' as const, priority: 2,
       outcomes: [outcome.id], cases: [outcome.case.id], criteria: criteria(`The ${ref} serves ${outcome.title}`), plannedFiles, dependsOn };
   };
   const note = (goal: Goal) => `A small ${named(goal.key)} module under src/goal/${named(goal.key)}/, served by the existing API and deployed with the service.`;
+  const summary = (goal: Goal) => `Customers get ${named(goal.key)}. It is built as small modules. Each lands before what depends on it.`;
   const planOf = (goal: Goal): GoalPlan => {
     const name = named(goal.key), runs = day.runs.filter(run => run.goal === name && run.role === 'plan').length;
     const base = `src/goal/${name}`;
-    if (name === 'signup' && runs === 1) return { note: note(goal), items: [planItem(goal, 'api', [`${base}/api.ts`, `${base}/shared.ts`]), planItem(goal, 'ui', [`${base}/ui.ts`, `${base}/shared.ts`])] };
-    if (name === 'signup') return { note: note(goal), items: [planItem(goal, 'api', [`${base}/api.ts`, `${base}/shared.ts`]), planItem(goal, 'ui', [`${base}/ui.ts`, `${base}/shared.ts`], ['api'])] };
-    if (name === 'rewrite') return { note: note(goal), items: [planItem(goal, 'model', [`${base}/**`]), planItem(goal, 'view', [`${base}/view.ts`])] };
-    if (name === 'audit') return { note: note(goal), items: [planItem(goal, 'log', [`${base}/log.ts`]), planItem(goal, 'report', [`${base}/report.ts`])] };
-    return { note: note(goal), items: [planItem(goal, 'invoice', [`${base}/invoice.ts`])] };
+    if (name === 'signup' && runs === 1) return { summary: summary(goal), note: note(goal), items: [planItem(goal, 'api', [`${base}/api.ts`, `${base}/shared.ts`]), planItem(goal, 'ui', [`${base}/ui.ts`, `${base}/shared.ts`])] };
+    if (name === 'signup') return { summary: summary(goal), note: note(goal), items: [planItem(goal, 'api', [`${base}/api.ts`, `${base}/shared.ts`]), planItem(goal, 'ui', [`${base}/ui.ts`, `${base}/shared.ts`], ['api'])] };
+    if (name === 'rewrite') return { summary: summary(goal), note: note(goal), items: [planItem(goal, 'model', [`${base}/**`]), planItem(goal, 'view', [`${base}/view.ts`])] };
+    if (name === 'audit') return { summary: summary(goal), note: note(goal), items: [planItem(goal, 'log', [`${base}/log.ts`]), planItem(goal, 'report', [`${base}/report.ts`])] };
+    return { summary: summary(goal), note: note(goal), items: [planItem(goal, 'invoice', [`${base}/invoice.ts`])] };
   };
   const runner = (role: 'plan' | 'judge', goal: Goal): Runner => ({ name: 'soak-planner', start<T>(_prompt: string, options: RunOptions<T>) {
     const name = named(goal.key);
