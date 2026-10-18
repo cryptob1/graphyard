@@ -184,7 +184,7 @@ test('unit:snapshot-bounded — the work snapshot sends open items whole and set
   assert.equal(snapshot.body.view, 'bounded');
 
   // Settled deliveries and closures: key, stage and delivery, and none of their history.
-  const summaries = work.filter(isSummary);
+  const summaries = (work as unknown[]).filter(isSummary);
   assert.equal(summaries.length, SETTLED);
   for (const entry of summaries) {
     assert.equal(entry.stage, 'done');
