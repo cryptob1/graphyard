@@ -2,7 +2,7 @@
 import { cappedReview, cappedReworkBinding, cappedRevisionMark, detailChanged, standingVerdict, type CappedReview } from './decisions.js';
 import { decisionKey } from './reconcile.js';
 import { decisionBindingMax, decisionSituation, uncitedRefusals, type DecisionSituation } from '../model/approval.js';
-import { defaultReviewRoundCap, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
+import { defaultReviewRoundCap, controlPlaneWithdrawal, pastReviewCap, reviewRound, reviewRoundCapOf } from '../review-cap.js';
 import { nextAction } from '../model/next-action.js';
 import { agentOwner, type AttentionItem } from '../master/attention.js';
 import { record } from './effects.js';
@@ -363,8 +363,15 @@ async function reviewCapStepWithin(cycle: Cycle) {
     if (!effects.withdrawReview)
       return escalate(`${capped.reason}, and this loop runs without the reviewer App it needs to withdraw the request`);
     // GY-1774: only failures count toward the cap; a withdrawal carried past the bound is still in flight, and its row counts the sends made, never the cycles waited.
-    if (previous?.state === 'failed' && previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
-    if (!readyToRetry(previous, state.cycle)) return;
+    // GY-2078: attempts a control-plane item's withdrawal spent against GitHub — its only pre-control-plane path, refused because the head has no
+    // pull request to dismiss a review on — are not this withdrawal's budget: it now runs in the control plane's own review record, so the step
+    // retries it there at once instead of escalating, and an item stranded by those failures is picked up on the next cycle with no hand action.
+    // A withdrawal that failed anywhere else keeps its cap and backoff, whatever the mode.
+    const recovery = !!previous && previous.state === 'failed' && controlPlaneWithdrawal(item, capped.reviewId) && previous.detail.includes('GitHub refused to dismiss review');
+    if (previous?.state === 'failed' && !recovery) {
+      if (previous.attempts >= maxCappedFilingAttempts) return escalate(`${capped.reason}; withdrawing it failed ${previous.attempts} times (${previous.detail.slice(0, 300)})`);
+      if (!readyToRetry(previous, state.cycle)) return;
+    }
     if (closing.has(item.key) || await closeStanding(reads, item, cycle.snapshot.work, closing)) return;
     if (!history) {
       const due = await decisionHistory(), refused = due ? refusedCappedRework(due, capped, item) : null, standing = refused ? await rereviewed(due!, refused) : null;

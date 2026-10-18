@@ -15,7 +15,7 @@ import { recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 import { recordDecomposition } from '../../decomposition.js';
 import { recordShadowVerdict } from '../shadow-verdict.js';
-import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
+import { recordReviewLaunch, recordReviewVerdict, withdrawReviewVerdict } from '../review-verdict.js';
 import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
@@ -135,6 +135,16 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'review-launch' ? recordReviewLaunch(context.services, context.actor, target, data, key) : recordReviewVerdict(context.services, context.actor, target, data, key);
+    },
+  },
+  // GY-2078: the loop's withdrawal of a control-plane review verdict — a capped change request an
+  // independent approver refused as non-blocking — recorded in the control plane's own review record,
+  // with no GitHub request: a control-plane head has no pull request to dismiss a review on.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/review-withdraw$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'review-withdraw');
+      return withdrawReviewVerdict(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // The merge writer's ledger (GY-1524): intent, trial, pushed, reconciled and refused, recorded by the

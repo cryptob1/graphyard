@@ -748,7 +748,7 @@ export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
     + 'master verify-deployment checks it on the serving release after delivery and files a follow-up naming the delivered item when it fails. ';
 }
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
-  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification);
+  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification, cappedRefusal);
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
     rounds = roundsOrMemory;
@@ -813,7 +813,7 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + repetitionReviewSection(documentation?.files);
 }
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
-function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
+function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, cappedRefusal?: CappedRefusalContext | null) {
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') rounds = roundsOrMemory;
   else if (roundsOrMemory && !memory) memory = roundsOrMemory as ProjectMemory;
@@ -828,6 +828,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     : '';
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
     + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, own, documentation, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history, rounds) })
+    + cappedRefusalSection(cappedRefusal)
     + (research ? researchReviewSection(research) : '')
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
@@ -1225,8 +1226,9 @@ export async function launchReview(root: string, work: Work, profileName: string
         pane = created.pane; tabId = created.tab;
         const memory = await readProjectMemory(root).catch(() => null);
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
-        // Past the cap, a head whose capped rework an approver refused is re-reviewed with that refusal (GY-1575 AC-2).
-        const refusal = plane || !reviewerApp || !pastReviewCap(work, reviewRoundCapOf(config)) ? null
+        // Past the cap, a head whose capped rework an approver refused is re-reviewed with that refusal (GY-1575 AC-2); a
+        // control-plane launch carries the same section, so the re-review lists the refused findings as FOLLOW-UP there too (GY-2078).
+        const refusal = !reviewerApp || !pastReviewCap(work, reviewRoundCapOf(config)) ? null
           : await (dependencies.cappedRefusal ?? (dependencies.mint ? async () => null : readCappedRefusal(config)))(work, binding.sha);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).

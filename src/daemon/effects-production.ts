@@ -23,6 +23,7 @@ import { readProducerLedger, saveProducerLedger, launchProducer } from '../produ
 import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
+import { controlPlaneWithdrawal } from '../review-cap.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
@@ -324,7 +325,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     get withdrawReview() {
       const reviewer = current().reviewer;
-      return reviewer ? (work: Work, reviewId: number, message: string) => dismissApproval(root, reviewer, current().repository, work.candidate!.pr, reviewId, message) : undefined;
+      if (!reviewer) return undefined;
+      return (work: Work, reviewId: number, message: string) => {
+        // GY-2078: a control-plane verdict is withdrawn in the control plane's own review record; no GitHub request is made.
+        if (controlPlaneWithdrawal(work, reviewId)) return mutate(`work/${work.id}/review-withdraw`, { reviewId, reason: message.slice(0, 7000) }, randomUUID()).then(() => {});
+        return dismissApproval(root, reviewer, current().repository, work.candidate!.pr, reviewId, message);
+      };
     },
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {

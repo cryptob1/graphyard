@@ -34,6 +34,20 @@ export function withReviewRounds<R extends { key: string }>(rows: R[], work: rea
   return rows.map(row => { const item = items.get(row.key); return { ...row, reviewRound: item ? reviewRoundStatus(item, cap) : null }; });
 }
 
+/**
+ * GY-2078: whether the change request `reviewId` names is withdrawn in the control plane's own review
+ * record rather than through GitHub's dismissal. A control-plane verdict stands in the control plane's
+ * observation of a head it observed itself — there is no pull request for GitHub to dismiss it on —
+ * so the loop withdraws it where it stands. Every reader of that choice goes through here: the loop's
+ * withdraw effect picks the record it mutates by it, and the review-cap step's recovery of a
+ * withdrawal that exhausted its attempts against GitHub's missing pull request keys on it.
+ */
+export function controlPlaneWithdrawal(work: { observation?: { source?: string; reviews: readonly { id?: number; source?: string }[] } | null } | undefined, reviewId: number | null | undefined): boolean {
+  const observation = work?.observation;
+  if (!observation || observation.source !== 'control-plane' || typeof reviewId !== 'number') return false;
+  return observation.reviews.some(review => review.id === reviewId && review.source === 'control-plane');
+}
+
 /** How much of a change request's body an observation keeps: enough to file its findings, bounded like a decision reason. */
 export const reviewBodyMax = 2000;
 /**
