@@ -115,6 +115,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Requests, conflicts, stalls, executors, owed judgments: derivedAttention (the loop reads it too).
   const { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
+      // GY-2015: the writer summary the cursor holds, so a trial refusal its queue holds reads as its motion here as the loop reads it.
+      mergeWriter: cycling?.mergeWriter ?? null,
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
@@ -190,7 +192,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
 
 /** What the report adds after buildMasterStatus; the loop reads it too, to track every class (GY-173). */
 export async function reportedAttention(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
-  observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & Pick<Parameters<typeof derivedAttention>[5], 'rows' | 'trees' | 'standalone' | 'approvals'> & { commit: string | null;
+  observed: Omit<Parameters<typeof resourceStatus>[2], 'work' | 'agents'> & Pick<Parameters<typeof terminalDecisions>[2], 'approvals' | 'runtime'> & Pick<Parameters<typeof derivedAttention>[5], 'rows' | 'trees' | 'standalone' | 'approvals' | 'mergeWriter'> & { commit: string | null;
     /** How the slow intervention report is read (report-cache.ts): the loop's `background`, status's `bounded`, or live. */
     reports?: 'background' | 'bounded'; reportBoundMs?: number; sections?: ReportSections }) {
   const generatedFiles: AttentionItem[] = [];

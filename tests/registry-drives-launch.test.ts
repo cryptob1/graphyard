@@ -117,7 +117,7 @@ test('integration:registry-drives-launch — a role\'s policy change in the regi
   const probe = { registry: registry.client, quota: false as const, cacheMs: 0 };
 
   const calls: string[][] = [];
-  const first = await launchApprover(root, item('GY-701'), decision, undefined, { agents: [], available: true }, herdr(calls), probe);
+  const first = await launchApprover(root, item('GY-701'), decision, undefined, { agents: [], available: true }, herdr(calls), probe, undefined, { filesystem: durable });
   assert.equal(first.runtime, 'claude', 'the registry\'s account decides the runtime, not run.runtimes');
   const one = typed(calls);
   assert.equal(one.kind, 'claude');
@@ -132,7 +132,7 @@ test('integration:registry-drives-launch — a role\'s policy change in the regi
   // The operator changes the role's policy in the registry: a stricter permission mode flag set, a wider tool list and another model.
   const revision = registry.mutate('role.set', { role: { name: 'approver', accounts: ['claude-b'], concurrency: 4, policy: { args: ['--disallowedTools', 'WebFetch'], tools: ['Read', 'Grep', 'Bash(git:*)'], model: 'sonnet' } }, reason: 'Approvers read and run git only, on the cheaper model' });
   calls.length = 0;
-  await launchApprover(root, item('GY-702'), decision.replace('0170', '0171'), undefined, { agents: [], available: true }, herdr(calls), probe);
+  await launchApprover(root, item('GY-702'), decision.replace('0170', '0171'), undefined, { agents: [], available: true }, herdr(calls), probe, undefined, { filesystem: durable });
   const two = typed(calls);
   assert.ok(!two.args.includes('--verbose'), 'the old flag is gone');
   assert.equal(valueOf(two.args, '--disallowedTools'), 'WebFetch', 'the new flag');
@@ -144,7 +144,7 @@ test('integration:registry-drives-launch — a role\'s policy change in the regi
 
   // A policy that limits tools on a runtime with no tools flag is refused, and its session given back.
   registry.mutate('runtime.set', { runtime: { ...proposedRuntimes.find(runtime => runtime.name === 'claude')!, launch: { ...proposedRuntimes.find(runtime => runtime.name === 'claude')!.launch, toolsFlag: null } }, reason: 'no tools flag' });
-  await assert.rejects(launchApprover(root, item('GY-703'), decision.replace('0170', '0172'), undefined, { agents: [], available: true }, herdr([]), probe), /names no tools flag, so the session would run with every tool/);
+  await assert.rejects(launchApprover(root, item('GY-703'), decision.replace('0170', '0172'), undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable }), /names no tools flag, so the session would run with every tool/);
   assert.ok(registry.current().sessions.at(-1)!.endedAt, 'the refused launch gave its registry session back');
 });
 
@@ -158,12 +158,12 @@ test('unit:approver-inventory-availability — an approver launch judges the rol
   registry.current().sessions.push(earlier);
 
   const calls: string[][] = [];
-  await assert.rejects(launchApprover(root, item('GY-721'), decision.replace('0170', '0174'), undefined, { agents: [], available: false }, herdr(calls), probe), /Herdr's session inventory could not be read/);
+  await assert.rejects(launchApprover(root, item('GY-721'), decision.replace('0170', '0174'), undefined, { agents: [], available: false }, herdr(calls), probe, undefined, { filesystem: durable }), /Herdr's session inventory could not be read/);
   assert.equal(earlier.endedAt, null, 'an unreadable inventory proves no session gone');
   assert.ok(registry.current().sessions.at(-1)!.endedAt, 'the refused launch gave its registry session back');
   assert.ok(!calls.some(args => args[0] === 'tab'), 'no session is launched into a Herdr it could not read');
 
-  await launchApprover(root, item('GY-722'), decision.replace('0170', '0175'), undefined, { agents: [], available: true }, herdr([]), probe);
+  await launchApprover(root, item('GY-722'), decision.replace('0170', '0175'), undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable });
   assert.match(earlier.endReason ?? '', /approver session for GY-720 is gone from Herdr/, 'an inventory that was read ends the session it no longer lists');
 });
 

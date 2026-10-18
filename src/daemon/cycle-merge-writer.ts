@@ -525,4 +525,6 @@ export async function mergeWriterStep(cycle: Cycle) {
 /** The `mergeWriter` section of `master status` and the daemon summary: the queue, the merge in flight, the last delivery, the newest refusals and the reworks still owed. */
 export const mergeWriterSummary = (writer: MergeWriterState | null | undefined) =>
   writer ? { queue: writer.queue, inFlight: writer.inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals, reworks: writer.reworks } : { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] };
+/** That section's shape, as the owed-attention reader takes it (owed-report.ts, GY-2015): the summary master status and the fault step both hold. */
+export type MergeWriterSummary = ReturnType<typeof mergeWriterSummary>;
 export type { MergeRecordEvent };

@@ -34,7 +34,11 @@ import type { Services } from './routes.js';
  */
 const sha = z.string().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const hex64 = z.string().regex(/^[0-9a-f]{64}$/);
-const identifier = z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/);
+// A reviewer identity: a principal name, or a GitHub App bot login — the launcher registers the
+// configured reviewer App as `${slug}[bot]` (reviewer.ts), so the bracketed suffix is part of the
+// launcher/API contract (GY-2008). Nothing else about the shape loosens: a malformed identity is
+// still a 400, never a weakened check.
+const identifier = z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*(?:\[bot\])?$/);
 const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
 export const reviewLaunchBodySchema = z.object({ reviewer: identifier, head: sha, baseTip: sha, tokenHash: hex64, expiresAt: instant, postMerge: z.boolean().default(false) }).strict();
 export const reviewVerdictBodySchema = z.object({ event: z.enum(reviewEvents), body: z.string().trim().min(1).max(65_536), sha, token: hex64 }).strict();
