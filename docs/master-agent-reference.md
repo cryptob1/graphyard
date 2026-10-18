@@ -44,7 +44,7 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Merge trial
 
-The merge writer's trial is the loop's only trial: the merge commit's build and affected tests, credential-free in a sticky tmp-reclaimed `TMPDIR` (`gy-t*`), killed after 20 minutes with no verdict. The shadow gate is gone (GY-2087): no `run.shadowGate`, no `shadowGate` in `master status`, and a cursor's old `shadow` verdicts are dropped on load.
+The loop's only trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium` into the host's shared cache, pre-provisionable, failure retried as the host's; then `npm run test:browser`), credential-free in a sticky `TMPDIR` (`gy-t*`), killed after 20 minutes. The shadow gate is gone (GY-2087).
 
 ## Pipeline speed
 

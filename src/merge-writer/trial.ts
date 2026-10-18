@@ -355,7 +355,7 @@ export class TrialEnvironmentError extends Error {
   }
 }
 /** The paths whose change runs the browser suite in a trial (GY-2092): the dashboard, its tests and tooling, and the server routes it calls. */
-export const dashboardPaths = ['web/', 'browser-tests/', 'src/server/routes/', 'src/server/routes.ts', 'playwright.config.ts', 'vite.config.ts'];
+export const dashboardPaths = ['web/', 'browser-tests/', 'src/server/routes/', 'src/server/routes.ts', 'src/model/board.ts', 'scripts/dashboard-fixture.mjs', 'playwright.config.ts', 'vite.config.ts'];
 export const touchesDashboard = (files: readonly string[]) => files.some(file => dashboardPaths.some(path => file === path || (path.endsWith('/') && file.startsWith(path))));
 /** The failing entry a trial records when `npm run test:browser` fails. */
 export const browserSuite = 'browser-tests/';
@@ -629,8 +629,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
         // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
+        // Chromium installs into the host's shared Playwright cache (a no-op once present); an install that fails is the host's, retried, never the merge's.
         if (scripts?.['test:browser'] && touchesDashboard(input.changedFiles)) {
           enter('tests');
+          const chromium = await child('tests', 'npx', ['playwright', 'install', 'chromium']);
+          if (!chromium.ok) throw runnerFailure('tests', chromium);
           const browser = await child('tests', 'npm', ['run', 'test:browser']);
           if (hostEnded(browser)) throw runnerFailure('tests', browser);
           if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });

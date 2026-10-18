@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { defaultChildRun } from '../src/child-runner.js';
-import { browserSuite, runTrial, trialMerge } from '../src/merge-writer/trial.js';
+import { browserSuite, runTrial, trialAttempts, trialMerge } from '../src/merge-writer/trial.js';
 import { trialFailureReason } from '../src/merge-writer/executor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -22,7 +22,7 @@ test('unit:trial-runs-browser-suite — a trial of a change touching web/ runs n
   write('web/app.tsx', 'one\n'); write('src/daemon/cycle.ts', 'one\n');
   gitIn(root, 'add', '-A'); gitIn(root, 'commit', '-q', '-m', 'base');
   const base = gitIn(root, 'rev-parse', 'HEAD');
-  const trialOf = async (path: string, browserFails: boolean) => {
+  const trialOf = async (path: string, browserFails: boolean, chromiumFails = false) => {
     gitIn(root, 'checkout', '-q', '--detach', base); write(path, 'two\n'); gitIn(root, 'commit', '-q', '-am', `edit ${path}`);
     const head = gitIn(root, 'rev-parse', 'HEAD'); gitIn(root, 'checkout', '-q', 'main');
     const merged = await trialMerge(async args => String(await defaultChildRun('git', ['-C', root, ...args], { env: { ...process.env, ...identity } })), { head, baseTip: base });
@@ -30,26 +30,35 @@ test('unit:trial-runs-browser-suite — a trial of a change touching web/ runs n
     // The recording runner: git runs for real, every npm script is recorded and answered.
     const npm: string[] = [];
     const run = (async (command: string, args: string[], options: never) => {
-      if (command !== 'npm') return defaultChildRun(command, args, options);
-      npm.push(args.join(' '));
+      if (command !== 'npm' && command !== 'npx') return defaultChildRun(command, args, options);
+      npm.push(`${command} ${args.join(' ')}`);
+      if (command === 'npx' && chromiumFails) throw Object.assign(new Error('Command failed: npx playwright install chromium'), { status: 1, signal: null, stdout: 'Failed to download Chromium\n', stderr: '' });
       if (args[1] === 'test:browser' && browserFails) throw Object.assign(new Error('Command failed: npm run test:browser'), { status: 1, signal: null, stdout: '1 failed\n  dashboard.spec.ts:12 board shows the lanes\n', stderr: '' });
       return '';
     }) as never;
     const verdict = await runTrial({ root, base: await temporaryDirectory('trial-browser-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: [path], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, retries: 0 });
     return { verdict, npm };
   };
+  const ran = ['npm run build', 'npx playwright install chromium', 'npm run test:browser'];
 
   const dashboard = await trialOf('web/app.tsx', true);
-  assert.deepEqual(dashboard.npm, ['run build', 'run test:browser'], 'a change to web/ runs the browser suite after the build');
+  assert.deepEqual(dashboard.npm, ran, 'a change to web/ provisions Chromium and runs the browser suite after the build');
   assert.deepEqual(dashboard.verdict.tests.failed, [browserSuite]);
   assert.match(trialFailureReason({ run: dashboard.verdict })!, /tests browser-tests\//, 'a failing browser test refuses the merge');
   assert.match(dashboard.verdict.logTail, /dashboard\.spec\.ts:12/, 'the failing browser test is in the log');
 
   const passing = await trialOf('web/app.tsx', false);
-  assert.deepEqual(passing.npm, ['run build', 'run test:browser']);
+  assert.deepEqual(passing.npm, ran);
   assert.equal(trialFailureReason({ run: passing.verdict }), null, 'a passing browser suite lets the merge through');
 
+  await assert.rejects(trialOf('web/app.tsx', true, true), error => {
+    const [attempt] = trialAttempts(error);
+    assert.equal(attempt.outcome, 'host-failure', 'a Chromium install that fails is the host\'s, retried, never a failing test of the merge');
+    assert.equal(attempt.phase, 'tests');
+    return true;
+  });
+
   const daemon = await trialOf('src/daemon/cycle.ts', true);
-  assert.deepEqual(daemon.npm, ['run build'], 'a change touching only src/daemon/ never runs the browser suite');
+  assert.deepEqual(daemon.npm, ['npm run build'], 'a change touching only src/daemon/ never runs the browser suite');
   assert.equal(trialFailureReason({ run: daemon.verdict }), null);
 });
