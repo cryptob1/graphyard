@@ -69,9 +69,12 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   writeFileSync(join(proc, '810', 'task', '811', 'stat'), '811 (proc 810) S 1 810 810 0 -1 4194560\n'); // live at its stat read; its cwd link is already gone
 
   // pid 800 is live when its stat is first read and has become a zombie when its cwd read fails.
+  // GY-2016 rework: pid 810's leader read is refused EACCES, the host's own non-dumpable refusal, so
+  // the scan's verdict for it is named by the contract rather than the mock's plain-file EINVAL.
   const readlink = fs.readlinkSync;
   fs.readlinkSync = ((path: string, ...rest: unknown[]) => {
     if (String(path) === join(proc, '800', 'cwd')) writeFileSync(join(proc, '800', 'stat'), '800 (proc 800) Z 1 800 800 0 -1 4194316\n');
+    if (String(path) === join(proc, '810', 'cwd')) throw Object.assign(new Error(`EACCES: permission denied, readlink '${String(path)}'`), { code: 'EACCES', errno: -13, syscall: 'readlink', path: String(path) });
     return (readlink as (...args: unknown[]) => unknown)(path, ...rest);
   }) as typeof fs.readlinkSync;
   syncBuiltinESMExports();
@@ -82,6 +85,8 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   assert.match(scan.unverifiable[0].error, /EINVAL/);
   assert.match(scan.unverifiable[1].error, /live thread 421's cwd cannot be read either/);
   assert.ok(!scan.unverifiable.some(entry => entry.pid === 810) && !scan.writers.includes(810), 'a thread whose cwd link vanished between its stat read and its cwd read has exited in between, and never makes its process unverifiable');
+  assert.deepEqual(scan.skipped.map(entry => entry.pid).filter(pid => pid === 810), [810], 'the exited ghost judged nothing, so the leader stands on its own refused read: the GY-1672 skip, never a silent drop from every list');
+  assert.match(scan.skipped.find(entry => entry.pid === 810)!.error, /EACCES/);
   fs.readlinkSync = readlink; syncBuiltinESMExports();
 
   // The freeze stops that zombie leader's live sibling rather than reading the leader as gone: SIGSTOP
@@ -102,7 +107,8 @@ test('unit:checkout-writers-unreadable-cwd — a process of this user whose cwd 
   await assert.rejects(freezeCheckoutWriters(root, { scan: () => [410], signal: (pid, name) => { groupSent.push(`${name}:${pid}`); }, state: pid => processStateOf(pid, proc), settleMs: 20, pollMs: 1 }), /writer\(s\) 410 did not stop.*nothing was restored/);
   assert.deepEqual(groupSent, ['SIGSTOP:410', 'SIGCONT:410']);
 
-  for (const pid of ['800', '410', '420', '430']) rmSync(join(proc, pid), { recursive: true, force: true });
+  // pid 810's spec has been judged above; its unreadable leader would only stand beside pid 200 here.
+  for (const pid of ['800', '810', '410', '420', '430']) rmSync(join(proc, pid), { recursive: true, force: true });
   assert.throws(() => checkoutWriterProcesses(root, 100, proc, uid), /pid 200 \(EINVAL[^)]*\) cannot be read.*nothing was restored/);
   // Another user's process is not this user's to judge.
   assert.deepEqual(writers.checkoutProcessScan(root, 100, proc, uid + 1).unverifiable, []);
