@@ -1,16 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { classifyAttention, faultClassOf, faultClassPolicyDefaults, landedAt, predateLanding, recurringClasses, releaseOvertakenLinks, trackFaults } from '../src/model/fault-classes.js';
-import { finishedSessionGraceMs, hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, describeReclaim, tmpErrorPrefix, unownedPaneConfirmMs, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
+import { finishedSessionGraceMs, hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, readTmpInodes, reclaimResources, resourceAttention, describeReclaim, settleTmpReclaim, tmpErrorPrefix, unownedPaneConfirmMs, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
 import * as masterResources from '../src/master-resources.js';
 import { diskThresholdBytes, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { judgeWorktreeDisk, worktreePassCurrentMs } from '../src/master/worktree-disk.js';
-import { reclaimTmpDirectories, testTempMinAgeMs } from '../src/tmp-reclaim.js';
+import { foreignObstruction, ForeignSubtreeError, readTempResidue, reclaimTmpDirectories, settleForeignResidue, tempResidueMarker, tempResidueStands, testTempMinAgeMs, writeTempResidue } from '../src/tmp-reclaim.js';
 import { acquireVerificationSlot, bytesPerSuiteFile, declareSlotFiles, heldSlots, othersDeclaredFiles } from '../src/master/verification-slots.js';
 import { suiteBreadth } from './helpers/run-tests.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -755,4 +756,221 @@ test('integration:reclaim-worker-launch-in-flight-spared — the worker branch s
   assert.deepEqual(stuckCloses, [pane], 'confirmed unowned past the launch bound, the pass closes it');
   assert.equal(stuckReport.closed[0].pane, pane);
   assert.match(stuckReport.closed[0].reason, /holds no active assignment and Herdr reports it unknown/);
+});
+
+// ---- GY-1967: the class recurred — 3 action:reclaim faults on the evening of 17 October 2026 ---
+//
+// Every instance is one entry and one refusal: the loop's /tmp pass could not remove /tmp/gy-tY0unUD
+// — a merge trial's own temporary directory (src/merge-writer/trial.ts), exported as TMPDIR to the
+// checkout's test run — because a writer inside that sandboxed run had planted
+// graphyard-goal-compose-preview-ExM37A in it under another account (nobody:nobody on the host):
+// the goal Compose preview test's scratch, made through the tests' shared helper under the TMPDIR
+// it was handed. rm cannot empty a directory another account owns, makeOwnerWritable deliberately
+// leaves such directories alone ("a directory another user owns is never touched — it is theirs,
+// and chmod would refuse it anyway"), and the pass carried the entry in its unfinished removals —
+// so every pass met the same refusal and recorded the same failed action: three faults in four
+// minutes, and recurrence forever while the subtree stood.
+//
+// The candidate: the pass settles the refusal as kept residue (GY-1967). The entry stays, a marker
+// beside it names the directory that holds it, and later passes honour the marker with one stat
+// instead of meeting the refusal again — no error, no carried retry, no repeating fault — until
+// the obstruction is gone, when the marker goes and the entry is due like any other. The report
+// counts the settled entry as `residue`, the action line names it without failing (a pass whose
+// only outcome is the residue records no action row at all), and the resources reading shows what
+// stands.
+//
+// The reproduction runs the recorded shape for real: the planted directory is created by the same
+// account that created the recorded one (uid 65534 in a container, as the Compose previews'
+// fixtures do), so the kernel refuses the removal exactly as the instances record — EACCES, rmdir,
+// the foreign account's directory. The foreign judgement itself — whose uid the pass reads as
+// another account's — is pinned beside it without a container, the way the base's foreign-skip
+// rule is pinned.
+
+const gy1967 = [
+  { at: '2026-10-17T22:05:57.024Z', subject: 'reclaim:resources:2026-10-17T22:05:57.019Z' },
+  { at: '2026-10-17T22:06:52.279Z', subject: 'reclaim:resources:2026-10-17T22:06:52.275Z' },
+  { at: '2026-10-17T22:09:14.122Z', subject: 'reclaim:resources:2026-10-17T22:09:14.117Z' },
+];
+const gy1967Entry = 'gy-tY0unUD', gy1967Planted = 'graphyard-goal-compose-preview-ExM37A';
+const docker = spawnSync('docker', ['compose', 'version'], { encoding: 'utf8' }).status === 0 && spawnSync('docker', ['image', 'inspect', 'alpine:3'], { encoding: 'utf8' }).status === 0;
+/** Run one alpine command as the sandbox account that planted the recorded directories (uid 65534, nobody on the host), on `directory` mounted at /w. */
+const asPlantedAccount = (directory: string, command: string) => execFileSync('docker', ['run', '--rm', '--user', '65534:65534', '--workdir', '/w', '-e', 'TZ=UTC', '-v', `${directory}:/w`, 'alpine:3', 'sh', '-c', command], { encoding: 'utf8' });
+/** A `touch -d` stamp, for the container's own account to age what this account may not touch. */
+const touchStamp = (ms: number) => new Date(ms).toISOString().replace('T', ' ').slice(0, 19);
+/** The trial-shaped entry the instances name, holding the scratch the sandboxed run planted under the TMPDIR it was handed. */
+async function plantedEntry(base: string, now: number) {
+  const tmp = join(base, 'tmp'), entry = join(tmp, gy1967Entry), planted = join(entry, gy1967Planted);
+  await mkdir(tmp); await mkdir(entry, { mode: 0o1700 });
+  // The sandbox's writer needed the same write the trial's sticky-private mode denies a stranger:
+  // the fixture grants it, the way the exported TMPDIR did, and the planted tree is the account's own.
+  await chmod(entry, 0o1777);
+  asPlantedAccount(entry, `mkdir -p '${gy1967Planted}/worktrees' && touch -d '${touchStamp(now - 3 * 3_600_000)}' '${gy1967Planted}' '${gy1967Planted}/worktrees'`);
+  const age = now - testTempMinAgeMs - 3_600_000;
+  await utimes(entry, new Date(age), new Date(age));
+  return { tmp, entry, planted };
+}
+
+test('manual:fault-class-resources — GY-1967 lists 3 instances, and every one is replayed below', () => {
+  assert.equal(gy1967.length, 3);
+  assert.equal(new Set(gy1967.map(instance => instance.at)).size, 3);
+  assert.ok(gy1967.every(instance => faultClassOf('action:reclaim') === 'resources'));
+  assert.ok(gy1967.every(instance => instance.subject.startsWith('reclaim:resources:')));
+  assert.ok(gy1967.every(instance => Date.parse(instance.at) - Date.parse(gy1967[0].at) < 24 * 3_600_000), 'all three inside the class window');
+});
+
+test('manual:fault-class-resources — GY-1967 reproduces and does not recur: the pass meets the planted subtree, reports nothing from the second pass on, and frees the entry once it is gone', async t => {
+  if (!docker) { assert.ok(!process.env.CI, 'CI runs the Compose previews'); t.skip('no Docker Compose or alpine:3 image on this host'); return; }
+  const base = await temporaryDirectory('fault-class-resources-1967');
+  const now = Date.parse(gy1967[1].at);
+  const { tmp, entry, planted } = await plantedEntry(base, now);
+  // Whatever an assertion leaves behind: the planted tree is what the pass cannot remove, so it
+  // goes first, or this test would leave the very residue it is here to settle.
+  t.after(() => { try { asPlantedAccount(entry, `rm -rf '${gy1967Planted}'`); } catch { /* already gone */ } });
+
+  // REPRODUCE against the base: the removal the base's pass ran fails exactly as the instances
+  // record — EACCES on rmdir of the foreign account's empty worktrees directory — and the entry
+  // stands, so the next pass meets the same entry and fails the same way: one unresolved refusal
+  // is how three instances accumulated in four minutes.
+  const baseError = await rm(entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
+  assert.equal(baseError?.code, 'EACCES');
+  assert.match(baseError!.message, new RegExp(`^EACCES: permission denied, rmdir '.*${gy1967Planted.replace(/-/g, '\\-')}/worktrees'$`));
+  assert.equal(existsSync(entry), true, 'the base frees nothing: the entry stands');
+  const again = await rm(entry, { recursive: true, force: true, maxRetries: 3, retryDelay: 10 }).then(() => null, error => error as NodeJS.ErrnoException);
+  assert.equal(again?.code, 'EACCES', 'the second pass fails the same way');
+  const recorded = describeReclaim({ at: gy1967[0].at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [`${tmpErrorPrefix}/tmp/${gy1967Entry}: ${baseError!.message.replace(join(tmp, gy1967Entry), `/tmp/${gy1967Entry}`)}`] } as unknown as ResourceReclaimReport)!;
+  assert.match(recorded, /^Resource reclaim: 1 could not be reclaimed: Tmp reclaim: \/tmp\/gy-tY0unUD: EACCES: permission denied, rmdir '\/tmp\/gy-tY0unUD\/graphyard-goal\-compose\-preview\-ExM37A\/worktrees'$/, 'the instance line, word for word');
+
+  // CANDIDATE, first pass (at the first instance's instant): the refusal is settled as kept
+  // residue — the entry stays, the marker beside it names the directory that holds it, and no
+  // error the action record would fail on is reported. A pass whose only outcome is the residue
+  // records no action row at all.
+  const first = await reclaimTmpDirectories({ tmpRoot: tmp, now, held: new Set(), unfinished: new Set() });
+  assert.deepEqual(first.errors, [], 'no error is reported for the planted subtree');
+  assert.equal(first.residue, 1, 'the entry is counted as settled residue');
+  assert.deepEqual(first.removed, [], 'kept residue is not removed');
+  assert.equal(existsSync(entry), true);
+  const marker = await readTempResidue(entry);
+  assert.equal(marker?.obstruction, planted, 'the marker names the directory that holds the entry');
+  assert.equal(existsSync(tempResidueMarker(entry)), true);
+  const firstLine = describeReclaim({ at: first.at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [], tmpPass: { residue: first.residue } } as unknown as ResourceReclaimReport);
+  assert.equal(firstLine, null, 'a residue-only pass records no action row: the state is steady, not an event');
+
+  // …and at the third instance's instant the pass honours the marker with one stat: settled
+  // again, reported never. The recurring fault is gone while the obstruction stands.
+  // The root is below its inode headroom, so the pass escalates and sweeps it twice more: the one
+  // settled entry is still counted once, never once a sweep.
+  const second = await reclaimTmpDirectories({ tmpRoot: tmp, now: Date.parse(gy1967[2].at), held: new Set(), unfinished: new Set(), volume: async () => ({ files: 1_048_576, ffree: 1_000 }) });
+  assert.deepEqual(second.errors, [], `the pass at ${gy1967[2].at} reports nothing: the instance never opens`);
+  assert.equal(second.escalated?.length, 2, 'the pass escalated through both steps');
+  assert.equal(second.residue, 1, 'one settled entry is one residue, however many sweeps meet it');
+  assert.equal(existsSync(entry), true);
+
+  // The resources reading shows what stands: the report carries the residue and the status names it.
+  // The pass runs beside the cycle, so the first call starts it and the second records what it found.
+  const reportRoot = await temporaryDirectory('fault-class-resources-1967-status');
+  const passOptions = { tmpRoot: tmp, tmpPass: (pass: Parameters<typeof reclaimTmpDirectories>[0]) => reclaimTmpDirectories({ ...pass, held: new Set(), unfinished: new Set() }) } as const;
+  await reclaimResources(reportRoot, { reviewers: [], producers: [] }, { work: [], agents: [] }, passOptions);
+  await settleTmpReclaim();
+  await reclaimResources(reportRoot, { reviewers: [], producers: [] }, { work: [], agents: [] }, passOptions);
+  await settleTmpReclaim();
+  const inodes = await readTmpInodes(reportRoot, tmp, async () => ({ files: 1_048_576, ffree: 354_178 }));
+  assert.equal(inodes?.latest?.residue, 1, 'the latest pass\'s residue count reaches the record');
+  const reading = readResources({ now, reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, revision: null, disk: null, tmp: inodes, profiles: { workers: [], reviewers: [], producers: [] } }).find(entry2 => entry2.id === 'tmp-inodes');
+  assert.match(reading?.detail ?? '', /1 entry held as another account's residue, marked beside it until its obstruction is gone/);
+
+  // The obstruction is gone (the sandbox's account takes its tree back): the marker no longer
+  // stands, and the same pass clears both — the entry is due like any other and goes whole. Its
+  // own mtime moved when the tree left it, so the fixture ages the freed entry as the bound would
+  // find it a bound later; the marker is what makes the pass free it, not the age.
+  // A marker the sandbox's account plants beside another of this user's entries is no marker: the
+  // sticky root lets it create the name, never make the pass keep what it names.
+  const victim = join(tmp, 'gy-tVictim1');
+  await mkdir(victim);
+  await chmod(tmp, 0o1777);
+  asPlantedAccount(tmp, `printf '%s' '${JSON.stringify({ obstruction: join(victim, 'x'), uid: 65534, at: gy1967[0].at })}' > gy-tVictim1.foreign`);
+  const victimAge = Date.parse(gy1967[2].at) - testTempMinAgeMs - 3_600_000;
+  await utimes(victim, new Date(victimAge), new Date(victimAge));
+  assert.equal(await readTempResidue(victim), null, 'another account\'s marker is not read as one');
+  const planted2 = await reclaimTmpDirectories({ tmpRoot: tmp, now: Date.parse(gy1967[2].at), held: new Set(), unfinished: new Set() });
+  assert.deepEqual(planted2.removed.map(removed => removed.path), [victim], 'the entry beside a planted marker is reclaimed as due');
+  assert.equal(planted2.residue, 1, 'only the genuinely settled entry is residue');
+
+  asPlantedAccount(entry, `rm -rf '${gy1967Planted}'`);
+  const freedAge = Date.parse(gy1967[2].at) - testTempMinAgeMs - 3_600_000;
+  await utimes(entry, new Date(freedAge), new Date(freedAge));
+  const third = await reclaimTmpDirectories({ tmpRoot: tmp, now: Date.parse(gy1967[2].at) + 60_000, held: new Set(), unfinished: new Set() });
+  assert.deepEqual(third.errors, []);
+  assert.deepEqual(third.removed.map(removed => removed.path), [entry], 'the entry is freed whole once its obstruction is gone');
+  assert.equal(third.classes?.testTemp, 1);
+  assert.equal(existsSync(entry), false);
+  assert.equal(await readTempResidue(entry), null, 'the residue marker went with it');
+  const doneLine = describeReclaim({ at: third.at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: third.removed.length, bytes: third.bytes }, errors: [], tmpPass: { residue: third.residue } } as unknown as ResourceReclaimReport)!;
+  assert.match(doneLine, /freed \d+ (MB|GB) from 1 stale \/tmp entry/);
+  assert.equal(doneLine.includes('could not be reclaimed'), false, 'the action records done: the instances\' fault never opens');
+});
+
+test('unit:fault-class-resources-foreign-residue — the foreign judgement names the shallowest directory another account owns, the marker stands only while it does, and the settle keeps the entry without reporting it', async t => {
+  const base = await temporaryDirectory('fault-class-resources-1967-unit');
+  const tmp = join(base, 'tmp');
+  const entry = join(tmp, 'gy-unit000'), planted = join(entry, 'graphyard-goal-compose-preview-UNIT00'), worktrees = join(planted, 'worktrees');
+  await mkdir(tmp); await mkdir(entry, { mode: 0o1777 }); await mkdir(planted, { mode: 0o1777 }); await mkdir(worktrees);
+  // mkdir's mode is the umask's subject: grant the world-writable bits the walk descends through
+  // explicitly, so the shallowest refusal is the planted account's, not the fixture's own mask.
+  await chmod(entry, 0o1777); await chmod(planted, 0o1777);
+  const getuid = process.getuid, realUid = getuid!.call(process);
+  try {
+    process.getuid = () => realUid + 1;
+    // The pass's own ownership reading: a directory the pass may write through is descended, and
+    // the shallowest foreign one whose modes keep the pass out is what a settled removal names.
+    assert.equal(await foreignObstruction(entry, realUid + 1), worktrees, 'the planted directory is walked through, the refusing one is named');
+    assert.equal(await foreignObstruction(worktrees, realUid + 1), worktrees);
+    assert.equal(await foreignObstruction(entry, realUid), null, 'the same tree, read as this user\'s own, holds no obstruction');
+
+    // The marker a settled entry carries, and the standing judgement later passes honour.
+    await writeTempResidue(entry, worktrees, Date.parse(gy1967[0].at));
+    const residue = await readTempResidue(entry, realUid);
+    assert.equal(residue?.obstruction, worktrees);
+    assert.equal(await readTempResidue(entry, realUid + 1), null, 'a marker another account owns is no marker: anyone may create the name on a sticky /tmp');
+    assert.equal(residue?.uid, realUid, 'the marker records the obstruction\'s owner as the tree holds it');
+    assert.equal(await tempResidueStands(residue!, realUid + 1), true, 'another account\'s directory keeps the pass out: the entry is skipped with one stat');
+    assert.equal(await tempResidueStands(residue!, realUid), false, 'read as this user\'s own, the same directory never stands: the entry is due again');
+    await rm(worktrees, { recursive: true });
+    assert.equal(await tempResidueStands(residue!, realUid + 1), false, 'a cleared obstruction does not stand');
+    assert.equal(await tempResidueStands({ obstruction: null, uid: null, at: '' }, realUid + 1), false, 'a settlement that named no directory is re-probed, never kept for good');
+
+    // The settle: the entry stays, counted, marked — and any other failure is the caller's.
+    const counted: { residue?: number } = {};
+    assert.equal(await settleForeignResidue(entry, new ForeignSubtreeError(planted), counted), true);
+    assert.equal(counted.residue, 1);
+    assert.equal((await readTempResidue(entry, realUid))?.obstruction, planted, 'the marker names the obstruction for the later passes');
+    await writeFile(tempResidueMarker(entry), `${JSON.stringify({ obstruction: tmp, uid: 0, at: gy1967[0].at })}\n`);
+    assert.equal(await readTempResidue(entry, realUid), null, 'a marker naming a directory outside its entry is no marker');
+    assert.equal(await settleForeignResidue(entry, new Error('EACCES: something else'), {}), false, 'a failure the pass may cure is carried and reported as before');
+  } finally { process.getuid = getuid; }
+
+  // The marker is the pass's own bookkeeping: never a removal candidate nor a scratch entry, and
+  // taken back when its entry is gone — in the root, the compile cache and a runtime scratch root
+  // alike. A `.foreign` file no pass wrote is someone else's, and stays.
+  const orphanBase = await temporaryDirectory('fault-class-resources-1967-orphan');
+  const orphanTmp = join(orphanBase, 'tmp'), cache = join(orphanTmp, 'node-compile-cache'), scratch = join(orphanTmp, 'runtime-scratch');
+  await mkdir(cache, { recursive: true }); await mkdir(scratch);
+  const orphanNow = Date.parse(gy1967[2].at), old = new Date(orphanNow - 6 * 3_600_000);
+  const orphans = [join(orphanTmp, 'gy-gone000'), join(cache, 'v22.9.0-gone'), join(scratch, 'packet-gone')];
+  for (const gone of orphans) { await writeTempResidue(gone, join(gone, 'held'), orphanNow); await utimes(tempResidueMarker(gone), old, old); }
+  const unrelated = [join(orphanTmp, 'report.foreign'), join(orphanTmp, 'gy-gone001.foreign')];
+  for (const file of unrelated) { await writeFile(file, '{}'); await utimes(file, old, old); }
+  // A live scratch entry's marker is kept and never ranked: the cap of one keeps the one real entry.
+  const kept = join(scratch, 'packet-live');
+  await mkdir(kept); await writeTempResidue(kept, join(kept, 'held'), orphanNow);
+  const swept = await reclaimTmpDirectories({ tmpRoot: orphanTmp, now: orphanNow, held: new Set(), unfinished: new Set(), runtimeScratchRoots: ['runtime-scratch'], runtimeScratchCap: 1, volume: async () => ({ files: 1_048_576, ffree: 1_000 }), escalation: [{ limit: 2_000, cacheAgeMs: 3_600_000, workMs: 5_000 }] });
+  assert.deepEqual(swept.errors, []);
+  for (const gone of orphans) assert.equal(existsSync(tempResidueMarker(gone)), false, `${gone}'s marker is taken back once its entry is gone`);
+  for (const file of unrelated) assert.equal(existsSync(file), true, `${file} is no marker of this pass's: it stays`);
+  assert.equal(existsSync(kept), true, 'the marker never took the live entry\'s slot under the cap');
+  assert.equal(existsSync(tempResidueMarker(kept)), true);
+
+  // And the action line names the residue without ever failing on it.
+  const line = describeReclaim({ at: gy1967[0].at, reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 1, bytes: 1024 }, errors: [], tmpPass: { residue: 1 } } as unknown as ResourceReclaimReport)!;
+  assert.match(line, /^Resource reclaim: freed .* from 1 stale \/tmp entry; 1 tmp entry held as another account's residue$/);
+  assert.equal(line.includes('could not be reclaimed'), false, 'the action records done: the instance\'s fault never opens');
 });

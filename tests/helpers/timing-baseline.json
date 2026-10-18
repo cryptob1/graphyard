@@ -406,7 +406,7 @@
     "tests/fault-class-decision.test.ts": 621,
     "tests/fault-class-deployment.test.ts": 338,
     "tests/fault-class-human-decision.test.ts": 3500,
-    "tests/fault-class-resources.test.ts": 450,
+    "tests/fault-class-resources.test.ts": 3500,
     "tests/fault-class-review-convergence.test.ts": 1047,
     "tests/fault-class-scope.test.ts": 760,
     "tests/fault-class-session-liveness.test.ts": 12616,
