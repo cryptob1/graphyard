@@ -41,9 +41,7 @@ export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' 
  */
 export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass; resource?: string;
   /** Until when the loop is itself carrying what the line names (GY-1315): shown in master status, counted as a fault only past it. */
-  inMotionUntil?: string;
-  /** An informational line (the GY-1980 watchdog): reported as is, never classified, grouped or filed as a fault. */
-  faultless?: true }
+  inMotionUntil?: string }
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
 /** The sources of installation attention; each is also its fault kind. */

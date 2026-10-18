@@ -361,8 +361,8 @@ const stalledOpenItem = (work: readonly Work[]) =>
  *     their oldest before one line counts them and names that oldest merge. Every merged item
  *     behind the release is progress; none is lag.
  */
-export function progressAttention(work: readonly Work[], release: Pick<PromotionState, 'promotedAt'> | null | undefined, now: number): AttentionItem[] {
-  const items: AttentionItem[] = [];
+export function progressAttention(work: readonly Work[], release: Pick<PromotionState, 'promotedAt'> | null | undefined, now: number): (AttentionItem & { faultless: true })[] {
+  const items: (AttentionItem & { faultless: true })[] = [];
   const open = work.filter(item => watchdogOpenStages.has(item.stage));
   const merged = work.flatMap(item => { const at = parseInstant(item.delivery?.mergedAt); return at === null ? [] : [{ key: item.key, at }]; });
   const promotedAt = parseInstant(release?.promotedAt ?? null);

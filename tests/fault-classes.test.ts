@@ -190,7 +190,7 @@ test('unit:fault-classes — master status and the dashboard group open problems
     { subject: 'loop', text: 'The master loop has not cycled', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'restart', kind: 'loop-liveness' as const },
   ];
   const report = faulted(items);
-  assert.ok(report.attentionItems.every(entry => entry.faultClass && faultClasses.includes(entry.faultClass)), 'every listed item carries its class');
+  assert.ok(report.attentionItems.every(entry => faultClasses.includes(entry.faultClass)), 'every listed item carries its class');
   assert.deepEqual(report.faults.map(group => [group.faultClass, group.count]), [['scope', 2], ['resources', 1], ['loop', 1]]);
   assert.deepEqual(report.faults[0].subjects, ['GY-1', 'GY-2']);
   assert.equal(report.faults.reduce((total, group) => total + group.count, 0), report.attentionItems.length, 'the counts add up to the list');
