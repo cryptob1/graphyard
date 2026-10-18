@@ -1,8 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -13,6 +15,7 @@ import { principalCommand } from '../src/cli/install.js';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
 import { fingerprint, importPrincipalToken, plannedPrincipals, reconcileRoster, rosterEntry, tokenFile } from '../src/install/secrets.js';
 import { externalRunsImportGrant } from '../src/server/principals.js';
+import { cliPath } from '../src/cli/context.js';
 import { freePort } from '../src/cli/test-isolation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deployedRoster, harness, REPOSITORY, type Harness } from './install-harness.js';
@@ -505,7 +508,7 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add reach
   } finally { await host.cleanup(); }
 });
 
-test('manual:local-plane-principals-restored — a local plane booted on the old plane\'s database with only the installer\'s roster refuses the dispatched worker\'s existing credential and reports proof-authority gaps; principal add --token-file/--proof, read back from that real plane as each roster redeploys, restores the claim with the existing credential file, brings the gap count master status reports to 0, and leaves every former producer\'s effective grant exactly as the old plane recorded it (GY-1998)', async () => {
+test('manual:local-plane-principals-restored — a local plane booted on the old plane\'s database with only the installer\'s roster refuses the dispatched worker process\'s existing credential file and reports proof-authority gaps; principal add --token-file/--proof, read back from that real plane as each roster redeploys, restores the claim with the existing credential file, brings the gap count master status reports to 0, and leaves every former producer\'s effective grant exactly as the old plane recorded it (GY-1998)', async () => {
   const fixture = await harness({ provider: 'railway' });
   const planes: { url: string; roster: string; close: () => Promise<void> }[] = [];
   try {
@@ -558,9 +561,10 @@ test('manual:local-plane-principals-restored — a local plane booted on the old
     const incident = await boot(installed);
     const credentialFile = join(fixture.root, 'graphyard-claude-1.token');
     await writeFile(credentialFile, `${workerToken}\n`, { mode: 0o600 });
-    const existing = (await readFile(credentialFile, 'utf8')).trim();
-    const refused = await api(incident, `work/${items[1].id}/claim`, existing, {});
-    assert.equal(refused.status, 401); assert.match(refused.body.error, /A valid Graphyard bearer token is required/);
+    /** The dispatched worker: the real CLI process, handed only the plane's URL and its existing credential file. */
+    const dispatch = (plane: { url: string }) => promisify(execFile)(process.execPath, [cliPath, 'claim', items[1].key], { cwd: fixture.root,
+      env: { ...process.env, GRAPHYARD_URL: plane.url, GRAPHYARD_TOKEN_FILE: credentialFile, GRAPHYARD_TOKEN: undefined, GRAPHYARD_REQUEST_ID: undefined } });
+    await assert.rejects(dispatch(incident), (error: any) => /A valid Graphyard bearer token is required/.test(error.stderr) && error.code === 1);
     assert.equal(await gapCount(), items.length, 'no producer the plane serves holds unit:* or integration:*');
     assert.deepEqual((await api(incident, 'proof-grants', admin.token)).body.authorities.map((entry: { principalId: string }) => entry.principalId), [admin.id]);
     await incident.close(); planes.pop();
@@ -580,12 +584,11 @@ test('manual:local-plane-principals-restored — a local plane booted on the old
       assert.deepEqual(restored.readback.proofAuthority, producer.patterns, `${producer.principalId} reads back the grant the old plane recorded`);
     }
     const local = planes.at(-1)!;
-    assert.equal(JSON.parse(local.roster).find((entry: { id: string }) => entry.id === 'graphyard-claude-1').token, existing, 'the plane serves the existing credential, not a minted one');
+    assert.equal(JSON.parse(local.roster).find((entry: { id: string }) => entry.id === 'graphyard-claude-1').token, (await readFile(credentialFile, 'utf8')).trim(), 'the plane serves the existing credential, not a minted one');
 
-    // AC-1: the dispatched worker claims with its existing credential file, and master status counts no proof-authority gap.
-    const claimed = await api(local, `work/${items[1].id}/claim`, existing, {});
-    assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
-    assert.equal(claimed.body.lease.owner, 'graphyard-claude-1');
+    // AC-1: the dispatched worker process claims with its existing credential file, and master status counts no proof-authority gap.
+    const claimed = JSON.parse((await dispatch(local)).stdout);
+    assert.equal(claimed.lease.owner, 'graphyard-claude-1', JSON.stringify(claimed));
     assert.equal(await gapCount(), 0);
     // No widening: the producers' effective authority and every grant record are the old plane's, byte for byte.
     const after = (await api(local, 'proof-grants', admin.token)).body;
