@@ -517,20 +517,25 @@ export function detectedBaseBranch(remoteBranches: string): 'master' | null {
 }
 /**
  * What a compose install mounts for the server to read submitted heads from (GY-1675): the checkout at
- * `/repo`, and, when the checkout is a linked worktree or a submodule, whose `.git` is a file naming a
- * directory outside it, that Git directory's common directory at its own host path too, so git inside
- * the container follows the pointer to the object store and refs. Mounting the worktree alone left
- * `/repo/.git` pointing at a path the container does not have. A checkout with no `.git` mounts nothing.
+ * `/repo`. Run from a linked worktree, that is the main checkout the worktree belongs to (the parent of
+ * the common Git directory), never the worktree itself: a worker's worktree is reclaimed with its
+ * attempt, and a server whose /repo was reclaimed could observe no submitted head (GY-2054). A checkout
+ * whose `.git` is a file naming a directory outside it that is not a linked worktree of a checkout (a
+ * submodule) mounts that Git directory's common directory at its own host path too, so git inside the
+ * container follows the pointer to the object store and refs. A checkout with no `.git` mounts nothing.
  */
 export function composeCheckoutMounts(root: string): { repoCheckout: string | null; repoGitDir: string | null } {
   const dotGit = resolve(root, '.git');
   if (!existsSync(dotGit)) return { repoCheckout: null, repoGitDir: null };
   if (statSync(dotGit).isDirectory()) return { repoCheckout: root, repoGitDir: null };
   let common: string;
-  try { common = execFileSync('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  try { common = resolve(execFileSync('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); }
   catch (error: any) { throw new Error(`${root} is a linked worktree whose main repository could not be read (${error?.message ?? 'git rev-parse failed'}); run the compose install from a checkout whose Git directory is reachable`); }
+  // A linked worktree's common directory is its main checkout's own .git directory.
+  const main = resolve(common, '..');
+  if (resolve(main, '.git') === common && existsSync(common) && statSync(common).isDirectory()) return { repoCheckout: main, repoGitDir: null };
   // A worktree's own gitdir lives under the common directory's worktrees/, so that one mount covers both.
-  return { repoCheckout: root, repoGitDir: resolve(common) };
+  return { repoCheckout: root, repoGitDir: common };
 }
 
 export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & RestoreProtectionChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
