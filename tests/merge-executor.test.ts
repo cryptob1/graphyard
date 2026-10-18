@@ -752,3 +752,10 @@ test('unit:hotfix-merges-first — a head titled "Hotfix: …" is merged before 
   assert.deepEqual(mergeQueue([old, fix, olderFix, plain], {}, start).queue.map(entry => entry.key), ['GY-3', 'GY-2', 'GY-1', 'GY-4']);
   assert.equal(nextToMerge([old, fix], {}, start)?.key, 'GY-2');
 });
+
+test('unit:oldest-item-first — among non-hotfix heads the item filed first merges first, so a head redone after a refusal does not rejoin at the back', () => {
+  const fresh = submitted(1, 50, ['src/app.ts'], { createdAt: iso(start - 60 * minute) }), redone = submitted(2, 1, ['src/app.ts'], { createdAt: iso(start - 300 * minute) });
+  assert.deepEqual(mergeQueue([fresh, redone], {}, start).queue.map(entry => entry.key), ['GY-2', 'GY-1']);
+  const fix = submitted(3, 1, ['src/app.ts'], { title: 'Hotfix: x', createdAt: iso(start - minute) });
+  assert.equal(nextToMerge([fresh, redone, fix], {}, start)?.key, 'GY-3', 'a hotfix still goes first');
+});
