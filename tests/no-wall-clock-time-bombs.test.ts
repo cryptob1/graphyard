@@ -952,7 +952,6 @@ export const allowances: Record<string, Allowance> = {
   'tests/throughput-owner-standing.test.ts': { why: 'the 2026-10-07 base is past and every measurement takes an explicit now/clock; the Date.now() cycles drive a s', dates: ['2026-10-07'], readings: 19 },
   'tests/timeline-backfill.test.ts': { why: 'the 2026-09-01 attempt instants are pure mergeTimeline inputs no clock judges; Date.now() stamps live DB deliv', dates: ['2026-09-01'], readings: 6 },
   'tests/timing-baseline-companion.test.ts': { why: 'the 2026-09-30 and 2026-10-04 scope-request ats are past refusal fixtures judged on plannedFiles, not the cloc', dates: ['2026-09-30', '2026-10-04'], readings: 12 },
-  'tests/trial-merge.test.ts': { why: 'the 2030-03-01 start is both the loop\'s injected now and its snapshot\'s now, so the fixture\'s stamps are judge', dates: ['2030-03-01'], readings: 1 },
   'tests/unattended-cycle.test.ts': { why: 'the 2031-03-01 clockStart is the loop\'s injected now and every verdict/lease instant and loopLiveness call tak', dates: ['2031-01-01', '2031-03-01'], readings: 1 },
   'tests/unresolved-threads.test.ts': { why: 'the 2026-09-23/24 instants are past PR fixtures and explicit now values for evaluate/routineDecision; the new ', dates: ['2026-09-23', '2026-09-24'], readings: 4 },
   'tests/upgrade-slot-restart.test.ts': { why: 'the 2026-10-07 now is past and handed explicitly to the registry, report and snapshot; slot down time is measu', dates: ['2026-10-07'], readings: 13 },

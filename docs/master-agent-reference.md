@@ -42,9 +42,9 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 `faultClass` (`master status` `faults`): recurring classes file one item each; a cycle over 60s: attention naming its slowest steps, no item; a [stall](operations-reference.md#master-coordination-loop) uncleared past six failing cycles files one item per signature with its evidence into `master.json` `upstream` (`url`, absolute `credentialFile`), else this install as operator-agent (`master autonomy --apply`), and `master status` lists each stall's signature, count, remedy, owner; an owed trial refusal (`merge writer has not trialled …`) the writer's queue holds is its motion, never `owed-decision`, until 30min past its newest step, one `merge-writer` stall (`stalled-step`) for a queue it cannot move; `fleet-capacity`/`unanswered-request` (past `settledAnswerGraceMs`), `configuration`/`decision-unanswered`/`unclassified` unless (`plane-unavailable`/`fix-item`/`decision-stale`/`overlong-session`). Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; gh pauses `github-budget`. Fleet-held claimable items past 20min file `concurrency-starved` (`capacity:<id>`). `no master role` blockers group as `configuration`, not `stalled-gate`.
 
-## Shadow merge gate
+## Merge trial
 
-`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free, pushing nothing; control-plane: base-only fetch, head from shared object store (absent: skipped); `shadow.verdict` joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`). `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
+The merge writer's trial is the loop's only trial: build and affected tests of the merge commit, credential-free in a sticky tmp-reclaimed `TMPDIR` (`gy-t*`), killed after 20 minutes without verdict. The shadow gate is gone (GY-2087): no `run.shadowGate` or `shadowGate` status; old `shadow` cursor verdicts drop on load.
 
 ## Pipeline speed
 

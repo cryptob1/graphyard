@@ -256,8 +256,8 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
     goals: async () => (await request(coordinator, 'goals?open=1')).goals,
     runner: async (role, attempt, goalAtHand) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
       ? { goal: goalAtHand.key, verdict: 'approve', reason: 'One small item a worker finishes in one change' }
-      : { goal: goalAtHand.key, note: 'A greeting module under src/, served by the existing application.',
-        items: [{ ref: 'greeting', title: 'Greet the customer', description: 'Add the greeting module', type: 'feature', priority: 2,
+      : { goal: goalAtHand.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
+        items: [{ ref: 'greeting', title: 'Greet the customer', plain: 'Customers see a greeting.', description: 'Add the greeting module', type: 'feature', priority: 2,
           outcomes: ['greeting'], cases: ['greeting'],
           criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], plannedFiles: ['src/greeting.ts', 'public/greeting.json'], dependsOn: [] }] }, runs) }),
     plan: (goalAtHand, plan) => request(operatorAgent, `goals/${goalAtHand.key}/plan`, plan, `planner:${goalAtHand.id}:${goalAtHand.revision}`),
@@ -341,7 +341,7 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
       recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
       github: new Proxy({}, { get: (_, name) => { throw new Error(`the delivery called GitHub (${String(name)})`); } }),
       merge: new Proxy({}, { get: (_, name) => { throw new Error(`the delivery called GitHub's merge (${String(name)})`); } }),
-      shadow: null, mergeWriter: writerReads } as unknown as DaemonEffects;
+      mergeWriter: writerReads } as unknown as DaemonEffects;
     await runCycle(config, state, effects, () => clock);
     await mergeWriterIdle(state);
     await runCycle(config, state, effects, () => clock);
