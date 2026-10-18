@@ -17,7 +17,11 @@ import { maxApproverLaunches } from '../src/daemon/decisions.js';
 // GY-1346's bound is read through the namespace too, so the base exercise loads this file and its replays fail on their assertions.
 import * as decisions from '../src/daemon/decisions.js';
 import { humanNeededAttention, mergeWriterMotionBoundMs, mergeWriterMovement, mergeWriterStallAttention, owedAttention } from '../src/cli/owed-report.js';
-import { trialRefusal } from '../src/model/gates.js';
+import { githubUnobservedRefusal, pushRefusal, trialRefusal } from '../src/model/gates.js';
+// GY-2053's own exports are read through namespaces (and its summary type as a type), so the base exercise loads this file and each new replay fails on its assertion.
+import * as owed from '../src/cli/owed-report.js';
+import * as mergeWriterModule from '../src/daemon/cycle-merge-writer.js';
+import type { MergeWriterSummary } from '../src/daemon/cycle-merge-writer.js';
 import { readDecisions } from '../src/server/decision-ledger.js';
 import { humanNeeded, type NextAction } from '../src/model/next-action.js';
 import { approverSessionName } from '../src/master.js';
@@ -1278,6 +1282,18 @@ test('manual:fault-class-decision — owed-decision|GY-1834|2026-10-16T22:35:33.
 // of an owed decision per head. Each instance is replayed as the item and the writer stood when
 // the loop recorded it, with the line master status reported. Against the base each subtest
 // fails: the instance reproduces.
+//
+// GY-2053 extends the accounting to the flight the same loop recorded that afternoon: the same
+// shape fired again at 09:32:04.594Z from one fault pass — a 36m52s flight (a timeout-plus-retrial
+// chain) whose flat 30-minute inMotionUntil had expired 47s before the pass, two queued heads
+// behind it counted, and the front head's merge-gate push refusal (`merge writer has not pushed
+// …`, pushRefusal) had never been held at all, because the hold required the test gate. The hold
+// now covers both control-plane refusals of a head the queue holds or has in flight, and the
+// bound is the writer's own configured worst case for one flight ((retrials + 1) × shadow
+// timeoutMinutes plus a cycle, mergeWriterFlightBoundMs) with the attempt progress (a retrial's
+// intent, a trial verdict, a push, a reconcile) recorded beside every ledger write keeping the
+// movement fresh inside a multi-attempt flight — a hold expires only when no flight is in progress
+// and no movement stands inside that bound.
 
 const gy2015Base = '9bc46db8f4e8'.padEnd(40, '0');
 const gy2015Heads: Record<string, string> = { 'GY-1999': '19b8c5d6eaa2'.padEnd(40, '0'), 'GY-2007': 'bc6e928cd5b4'.padEnd(40, '0'), 'GY-2001': '9d824e1ed743'.padEnd(40, '0') };
@@ -1288,8 +1304,8 @@ const gy2015Instances = [
 ];
 
 /** The item as the instance stood: a candidate the test gate refuses because the merge writer has not trialled its head on the base tip yet. */
-function trialRefused(subject: string, requestedAt: string): Work {
-  const sha = gy2015Heads[subject]!;
+function trialRefused(subject: string, requestedAt: string, heads: Record<string, string> = gy2015Heads): Work {
+  const sha = heads[subject]!;
   const work = standing({ subject, detail: '', owedMs: 0, owed: '' }, requestedAt);
   const refusal = trialRefusal(sha, gy2015Base);
   const action: NextAction = { kind: 'escalate', work: work.id, key: subject, gate: 'test', refusal,
@@ -1302,8 +1318,29 @@ function trialRefused(subject: string, requestedAt: string): Work {
   return work;
 }
 
+/**
+ * GY-2053: the item as GY-2011 stood at 09:32:04 — its test gate passed, the merge gate refuses
+ * `merge writer has not pushed <head>` (pushRefusal) until the ledger records the push reconciled,
+ * and the push is the writer's own next step, never a judgment.
+ */
+function pushRefused(subject: string, requestedAt: string, heads: Record<string, string> = gy2015Heads): Work {
+  const sha = heads[subject]!;
+  const work = trialRefused(subject, requestedAt, heads);
+  const refusal = pushRefusal(sha);
+  const action: NextAction = { kind: 'escalate', work: work.id, key: subject, gate: 'merge', refusal,
+    reason: `${subject} is refused at the merge gate and no executor step answers it: ${refusal}`,
+    inputs: { kind: 'escalate', trigger: 'merge', detail: refusal } as NextAction['inputs'], llmRole: null,
+    binding: `merge:1:${sha.slice(0, 12)}:${refusal}` };
+  Object.assign(work, { stage: 'merge', nextAction: { ...action, needsHuman: humanNeeded(action)! } });
+  Object.assign(work.actionQueue!.actions[0], { kind: 'escalate', gate: 'merge', binding: action.binding, refusal, reason: action.reason });
+  return work;
+}
+
+/** The writer's own motion bound, as the loop now holds it: the configured worst case for one flight at the default settings — (3 retrials + 1) × 20-minute shadow timeout plus a 20-second cycle — inside which GY-2011's 37-minute flight stays in motion. Read lazily, so the base exercise loads this file. */
+const gy2015MotionBound = () => mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 });
+
 /** The writer state the loop held while the instance stood: the serial queue with all three heads, one trial in flight, the last delivery recorded. */
-function gy2015Writer(observedAt: string, inFlight = true) {
+function gy2015Writer(observedAt: string, inFlight = true): MergeWriterSummary {
   const now = Date.parse(observedAt);
   const queue = Object.entries(gy2015Heads).map(([subject, sha], index) => ({ key: subject, id: `work-${subject}`, head: sha.toLowerCase(),
     submittedAt: new Date(now - (72 - index * 6) * 60_000).toISOString(), waitingMs: (72 - index * 6) * 60_000 }));
@@ -1311,7 +1348,7 @@ function gy2015Writer(observedAt: string, inFlight = true) {
     lastMergeAt: new Date(now - 9 * 60_000).toISOString(), queue,
     inFlight: inFlight ? { key: queue[0]!.key, id: queue[0]!.id, head: queue[0]!.head, startedAt: new Date(now - 2 * 60_000).toISOString() } : null,
     refusals: [{ key: 'GY-1978', head: 'a'.repeat(40), reason: 'base moved 3 times', at: new Date(now - 14 * 60_000).toISOString() }],
-    reworks: [],
+    reworks: [], progress: undefined, motionBoundMs: gy2015MotionBound(),
   };
 }
 
@@ -1321,10 +1358,12 @@ for (const entry of gy2015Instances) test(`manual:fault-class-decision — owed-
   const writer = gy2015Writer(entry.at);
   const reported = humanNeededAttention({ work: [work], now: entry.at }, writer);
   // The line master status reported is the instance's own text, so the replay is the instance;
-  // the writer's newest movement bounds it (GY-1315), the flight started two minutes before.
+  // the writer's newest movement bounds it (GY-1315), the flight started two minutes before, inside
+  // the writer's own worst-case bound for one flight (GY-2053), not the flat default any more.
   assert.deepEqual(reported.map(line => line.text),
     [`${entry.subject} is refused at the test gate and no executor step answers it: merge writer has not trialled ${gy2015Heads[entry.subject]!.slice(0, 12)} on ${gy2015Base.slice(0, 12)} — no executor may run it; resolving ${entry.subject}'s test refusal has been owed for ${entry.owed}`]);
-  assert.equal(reported[0]!.inMotionUntil, new Date(now - 2 * 60_000 + mergeWriterMotionBoundMs).toISOString());
+  assert.equal(reported[0]!.inMotionUntil, new Date(now - 2 * 60_000 + owed.mergeWriterMotionBound(writer)).toISOString());
+  assert.equal(owed.mergeWriterMotionBound(writer), gy2015MotionBound(), "the summary's own bound, not the flat default");
   const counted = cycleFaults(emptyDaemonState(config()), [work], now, { config: config(), reported }).filter(fault => fault.faultClass === 'decision');
   assert.deepEqual(counted.map(fault => fault.kind), [], `${entry.subject}'s head was queued behind the writer's serial trials when the loop recorded it`);
   // The queue's one stall line does not stand beside moving heads: the writer is at work.
@@ -1332,12 +1371,13 @@ for (const entry of gy2015Instances) test(`manual:fault-class-decision — owed-
 });
 
 test('manual:fault-class-decision — the queue\'s one writer-level stall stands for held heads once the writer itself cannot move', () => {
-  // The bound past: no trial in flight and no movement for 40 minutes — the writer cannot serve
-  // the queue it still holds. The per-item lines are gone (the stall stands for them), and the
-  // cycle counts one stalled step on the writer, no owed decision per head.
+  // The bound past: no trial in flight and no movement for 90 minutes — past the writer's own
+  // worst-case bound for a flight — so the writer cannot serve the queue it still holds. The
+  // per-item lines are gone (the stall stands for them), and the cycle counts one stalled step
+  // on the writer, no owed decision per head.
   const at = '2026-10-18T05:20:00.000Z', now = Date.parse(at);
-  const writer = { ...gy2015Writer(at, false), lastMergeAt: new Date(now - 40 * 60_000).toISOString(), refusals: [], reworks: [], inFlight: null };
-  const works = gy2015Instances.map(entry => trialRefused(entry.subject, new Date(now - entry.owedMs - 60 * 60_000).toISOString()));
+  const writer = { ...gy2015Writer(at, false), lastMergeAt: new Date(now - 90 * 60_000).toISOString(), refusals: [], reworks: [], inFlight: null };
+  const works = gy2015Instances.map(entry => trialRefused(entry.subject, new Date(now - entry.owedMs - 2 * 60 * 60_000).toISOString()));
   const reported = humanNeededAttention({ work: works, now: at }, writer);
   assert.deepEqual(reported.map(line => line.text), [], 'the stall stands for the held heads, not beside them');
   const stall = mergeWriterStallAttention(writer, now)!;
@@ -1347,9 +1387,9 @@ test('manual:fault-class-decision — the queue\'s one writer-level stall stands
   assert.match(stall.next!, /merge-writer step/);
   const counted = cycleFaults(emptyDaemonState(config()), works, now, { config: config(), reported: [...reported, stall] });
   assert.deepEqual(counted.map(fault => `${fault.kind}|${fault.subject}`), ['stalled-step|merge-writer'], 'one writer-level stall for the queue');
-  // The writer's newest movement is the reading the stall text carries; the movement bound is what it is past.
+  // The writer's newest movement is the reading the stall text carries; the writer's own bound is what it stands past.
   assert.equal(mergeWriterMovement(writer)!.at, Date.parse(writer.lastMergeAt));
-  assert.ok(now - mergeWriterMovement(writer)!.at > mergeWriterMotionBoundMs);
+  assert.ok(now - mergeWriterMovement(writer)!.at > owed.mergeWriterMotionBound(writer));
 });
 
 test('manual:fault-class-decision — a trial refusal whose head the writer does not hold, and every other test-gate refusal, still count', () => {
@@ -1358,7 +1398,7 @@ test('manual:fault-class-decision — a trial refusal whose head the writer does
   const entry = gy2015Instances[0]!;
   const now = Date.parse(entry.at);
   const work = trialRefused(entry.subject, new Date(now - entry.owedMs).toISOString());
-  const writer = { ...gy2015Writer(entry.at), queue: gy2015Writer(entry.at).queue.slice(1) }; // GY-1999 absent
+  const writer = { ...gy2015Writer(entry.at), queue: gy2015Writer(entry.at).queue.slice(1), inFlight: null }; // GY-1999 absent from the queue and from the flight
   const counted = cycleFaults(emptyDaemonState(config()), [work], now, { config: config(), reported: humanNeededAttention({ work: [work], now: entry.at }, writer) }).filter(fault => fault.faultClass === 'decision');
   assert.deepEqual(counted.map(fault => fault.kind), ['owed-decision'], 'a head the queue does not hold is nobody\'s motion');
   // A test-gate refusal that is not the writer's trial refusal is never held: the rerun-grounded
@@ -1379,8 +1419,8 @@ test('manual:fault-class-decision — a trial refusal whose head the writer does
 
 test('manual:fault-class-decision — owedAttention carries the writer stall and drops only the held heads it replaces', () => {
   const at = '2026-10-18T05:20:00.000Z', now = Date.parse(at);
-  const writer = { ...gy2015Writer(at, false), lastMergeAt: new Date(now - 40 * 60_000).toISOString(), refusals: [], reworks: [], inFlight: null };
-  const works = gy2015Instances.map(entry => trialRefused(entry.subject, new Date(now - entry.owedMs - 60 * 60_000).toISOString()));
+  const writer = { ...gy2015Writer(at, false), lastMergeAt: new Date(now - 90 * 60_000).toISOString(), refusals: [], reworks: [], inFlight: null };
+  const works = gy2015Instances.map(entry => trialRefused(entry.subject, new Date(now - entry.owedMs - 2 * 60 * 60_000).toISOString()));
   const owed = owedAttention({ work: works, now: at }, works.map(item => ({ key: item.key, attention: null })), [] as never[], writer);
   assert.deepEqual(owed.items.map(item => `${item.subject}`), ['merge-writer'], 'the stall is the queue\'s one line');
   // A queue with a trial in flight keeps the held heads as items, each bounded by the writer's movement (the
@@ -1390,4 +1430,254 @@ test('manual:fault-class-decision — owedAttention carries the writer stall and
   assert.deepEqual(moving.items.map(item => !!item.inMotionUntil), works.map(() => true), 'each held line carries the movement bound');
   assert.deepEqual(owedAttention({ work: works, now: at }, works.map(item => ({ key: item.key, attention: null })), [] as never[]).items.map(item => item.subject), works.map(item => item.key), 'no writer summary, every line stands');
   assert.deepEqual(owedAttention({ work: works, now: at }, works.map(item => ({ key: item.key, attention: null })), [] as never[]).items.map(item => !!item.inMotionUntil), works.map(() => false));
+});
+
+// GY-2053 names this file for its proofs. The same accounting fired again at 09:32:04.594Z from one
+// fault pass while the writer was mid-flight on GY-2011: a 36m52s flight (a timeout-plus-retrial
+// chain against the 20-minute shadow timeout) whose flat 30-minute inMotionUntil had expired 47s
+// before the pass — so the two heads queued behind it (GY-2004, GY-2012) counted — and whose own
+// head's merge-gate push refusal had never been held at all, because the hold required the test
+// gate. No decision was owed: graphyard diagnose cannot trial or push, and `no executor may run it`
+// is true because nobody should. The tests below replay that shape and hold the writer's own work
+// out of the class for the whole live flight.
+
+/** The base tip and the three heads of the 09:32:04Z shape, as the incident's own journal names them. */
+const gy2053Base = 'c26cd7bcac37'.padEnd(40, '0');
+const gy2053Heads: Record<string, string> = { 'GY-2011': '66f37f2604f1'.padEnd(40, '0'), 'GY-2004': '0b0a397ad79f'.padEnd(40, '0'), 'GY-2012': 'c1f59287e8c5'.padEnd(40, '0') };
+const gy2053Flight = '2026-10-18T09:01:17.024Z', gy2053Pass = '2026-10-18T09:32:04.594Z', gy2053Settled = '2026-10-18T09:38:09.377Z';
+/** The flight the writer ran on the front head: 36m52s, past the flat 30-minute bound, inside its own configured worst case. */
+const gy2053FlightMs = Date.parse(gy2053Settled) - Date.parse(gy2053Flight);
+
+/**
+ * The writer as the 09:32:04Z shape held it: the serial queue oldest first with GY-2011 at the front
+ * and its flight 36m52s in, the last delivery 38 minutes back, no progress named yet (a flight of
+ * one attempt names none until its first retrial), the bound the loop now holds — its own configured
+ * worst case for one flight at the default settings.
+ */
+function writer2053(at: string, overrides: Partial<MergeWriterSummary> = {}): MergeWriterSummary {
+  const now = Date.parse(at);
+  const queue = Object.entries(gy2053Heads).map(([subject, sha], index) => ({ key: subject, id: `work-${subject}`, head: sha.toLowerCase(),
+    submittedAt: new Date(now - (38 + (2 - index) * 4) * 60_000).toISOString(), waitingMs: (38 + (2 - index) * 4) * 60_000 }));
+  return { queue, inFlight: { key: 'GY-2011', id: 'work-GY-2011', head: gy2053Heads['GY-2011']!.toLowerCase(), startedAt: gy2053Flight },
+    lastMergeAt: new Date(Date.parse(gy2053Flight) - 7 * 60_000).toISOString(),
+    refusals: [{ key: 'GY-2011', head: gy2053Heads['GY-2011']!.toLowerCase(), reason: 'base moved 3 times', at: new Date(Date.parse(gy2053Flight) - 30 * 60_000).toISOString() }],
+    reworks: [], progress: undefined, motionBoundMs: mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 }), ...overrides };
+}
+
+/** The decision-class faults one observation counts, with the lines `master status` derived for it. */
+function observedFaults(works: Work[], at: string, writer: MergeWriterSummary | null) {
+  const reported = humanNeededAttention({ work: works, now: at }, writer);
+  const counted = cycleFaults(emptyDaemonState(config()), works, Date.parse(at), { config: config(), reported }).filter(fault => fault.faultClass === 'decision');
+  return { reported, counted };
+}
+
+test('unit:writer-flight-hold-past-thirty-minutes — GY-2011\'s 37-minute flight replayed holds the queued trial refusals past the flat bound, and no owed decision opens while the flight is alive', () => {
+  // The instance instant, replayed: the flight is 30m47s in, its flat inMotionUntil (flight start +
+  // 30 minutes) expired 47s before the pass, and the two heads queued behind it are refused at the
+  // test gate. The writer's own worst case — (3 retrials + 1) × 20 minutes plus a cycle — still
+  // bounds the flight, so both lines stand deferred and the class opens nothing.
+  const now = Date.parse(gy2053Pass);
+  const writer = writer2053(gy2053Pass);
+  assert.ok(now - Date.parse(gy2053Flight) > mergeWriterMotionBoundMs, 'the flight had outlived the flat 30-minute bound the pass counted it against');
+  assert.ok(now - Date.parse(gy2053Flight) < owed.mergeWriterMotionBound(writer), 'the same flight stands inside the writer\'s own worst case');
+  const queued = ['GY-2004', 'GY-2012'].map(subject => trialRefused(subject, new Date(now - 38 * 60_000).toISOString(), gy2053Heads));
+  const { reported, counted } = observedFaults(queued, gy2053Pass, writer);
+  assert.deepEqual(reported.map(line => line.subject), ['GY-2004', 'GY-2012'], 'both lines stand, each named');
+  assert.deepEqual(reported.map(line => line.inMotionUntil), ['GY-2004', 'GY-2012'].map(() => new Date(Date.parse(gy2053Flight) + owed.mergeWriterMotionBound(writer)).toISOString()),
+    'each is bounded by the writer\'s own worst case from the flight\'s start, not the flat bound');
+  assert.deepEqual(counted.map(fault => fault.kind), [], 'a flight of (retrials + 1) × timeoutMinutes plus a cycle raises nothing however long it runs');
+  // A retrial inside the flight keeps the hold: the retrial's own recorded intent moves the newest movement forward.
+  const retried = writer2053(gy2053Pass, { progress: { at: new Date(Date.parse(gy2053Flight) + 20 * 60_000).toISOString(),
+    what: mergeWriterModule.attemptProgressLine({ key: 'GY-2011' }, { kind: 'intent', head: gy2053Heads['GY-2011']!, baseTip: gy2053Base, mergeSha: 'd'.repeat(40), risk: 'low', at: gy2053Pass }) } });
+  assert.equal(mergeWriterMovement(retried)!.at, Date.parse(gy2053Flight) + 20 * 60_000, 'the retrial is the newest movement');
+  assert.deepEqual(observedFaults(queued, gy2053Pass, retried).counted.map(fault => fault.kind), []);
+});
+
+test('unit:writer-hold-expires-without-flight — the hold expires only when no flight is in progress and no movement stands inside the bound', () => {
+  const now = Date.parse(gy2053Pass);
+  const queued = ['GY-2004', 'GY-2012'].map(subject => trialRefused(subject, new Date(now - 38 * 60_000).toISOString(), gy2053Heads));
+  // The flight settled (its refusal recorded 36m52s after it started) and the next head's flight is
+  // 40 seconds in: the newest movement — the settled refusal and the retrial that followed — is
+  // seconds old, so every still-held line stands deferred and the class opens nothing.
+  const next = writer2053(gy2053Settled, { queue: writer2053(gy2053Settled).queue.slice(1),
+    inFlight: { key: 'GY-2004', id: 'work-GY-2004', head: gy2053Heads['GY-2004']!.toLowerCase(), startedAt: gy2053Settled },
+    refusals: [{ key: 'GY-2011', head: gy2053Heads['GY-2011']!.toLowerCase(), reason: 'trial failed: tests tests/item-page-structure.test.ts', at: gy2053Settled }],
+    progress: { at: new Date(Date.parse(gy2053Settled) + 40_000).toISOString(), what: mergeWriterModule.attemptProgressLine({ key: 'GY-2004' }, { kind: 'intent', head: gy2053Heads['GY-2004']!, baseTip: gy2053Base, mergeSha: 'e'.repeat(40), risk: 'low', at: gy2053Settled }) } });
+  const held = ['GY-2004', 'GY-2012'].map(subject => trialRefused(subject, new Date(now - 38 * 60_000).toISOString(), gy2053Heads));
+  assert.deepEqual(observedFaults(held, gy2053Settled, next).counted.map(fault => fault.kind), [], 'the next flight is movement in the bound\'s own terms');
+  // Past the bound with no flight and no movement, the same hold expires: the lines are gone and the
+  // queue's one stall stands for them (asserted beside it below), each head reading stalled.
+  const stalledAt = new Date(Date.parse(gy2053Settled) + mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 }) + 60_000).toISOString();
+  const stalled = { ...next, inFlight: null, queue: writer2053(gy2053Settled).queue.slice(1) };
+  for (const work of held) assert.equal(owed.mergeWriterHolds(work, stalled, Date.parse(stalledAt)), 'stalled', `${work.key}: no flight, movement ${Math.round((Date.parse(stalledAt) - Date.parse(gy2053Settled)) / 60_000)} minutes old`);
+  // The hold does not expire while a flight is alive, whatever the movement's age says: the flight itself is the writer moving.
+  const oldMovement = { ...stalled, inFlight: { key: 'GY-2004', id: 'work-GY-2004', head: gy2053Heads['GY-2004']!.toLowerCase(), startedAt: gy2053Settled } };
+  for (const work of held) assert.equal(owed.mergeWriterHolds(work, oldMovement, Date.parse(stalledAt)), 'moving', `${work.key}: the flight outlives any bound`);
+  assert.equal(mergeWriterStallAttention(oldMovement, Date.parse(stalledAt)), null, 'no stall line stands beside a live flight');
+});
+
+test('unit:push-refusal-held-while-writer-works — a merge-gate push refusal of a head the writer holds is held exactly like a trial refusal', () => {
+  const now = Date.parse(gy2053Pass);
+  // GY-2011 as the pass counted it: test gate passed, merge gate refused `merge writer has not
+  // pushed 66f37f2604f1` — the writer's own next step, which its queue held at the front and its
+  // flight was working, never a judgment. The line stands deferred, and the class opens nothing.
+  const front = pushRefused('GY-2011', new Date(now - 38 * 60_000).toISOString(), gy2053Heads);
+  assert.equal(owed.mergeWriterHolds(front, writer2053(gy2053Pass), now), 'moving', 'the front head, in flight, is the writer\'s work');
+  const { reported, counted } = observedFaults([front], gy2053Pass, writer2053(gy2053Pass));
+  assert.deepEqual(reported.map(line => line.text),
+    ['GY-2011 is refused at the merge gate and no executor step answers it: merge writer has not pushed 66f37f2604f1 — no executor may run it; resolving GY-2011\'s merge refusal has been owed for 38m']);
+  assert.ok(Date.parse(reported[0]!.inMotionUntil!) > now, 'the push refusal is bounded like the trial refusal beside it');
+  assert.deepEqual(counted.map(fault => fault.kind), []);
+  // The same hold for a queued head the flight has not reached: the writer knows it and will push it.
+  const behind = pushRefused('GY-2004', new Date(now - 31 * 60_000).toISOString(), gy2053Heads);
+  assert.equal(owed.mergeWriterHolds(behind, writer2053(gy2053Pass), now), 'moving', 'a queued head\'s push refusal waits for the writer too');
+  assert.deepEqual(observedFaults([behind], gy2053Pass, writer2053(gy2053Pass)).counted.map(fault => fault.kind), []);
+});
+
+test('unit:unheld-push-refusal-still-counts — a push refusal whose head the writer does not hold still counts as an owed decision', () => {
+  const now = Date.parse(gy2053Pass);
+  // The head is in neither the queue nor the flight: the writer will never reach it on its own, so
+  // the line stands unbounded and the class counts it, as it counted every genuine judgment (past
+  // the master's turn, which a row 31 minutes old is).
+  const unheld = pushRefused('GY-2011', new Date(now - 31 * 60_000).toISOString(), gy2053Heads);
+  const writer = writer2053(gy2053Pass, { queue: writer2053(gy2053Pass).queue.slice(1), inFlight: null });
+  assert.equal(owed.mergeWriterHolds(unheld, writer, now), null, 'a head the queue does not hold is nobody\'s motion');
+  const { reported, counted } = observedFaults([unheld], gy2053Pass, writer);
+  assert.equal(reported[0]!.inMotionUntil, undefined, 'no bound rides a line nobody\'s motion defers');
+  assert.deepEqual(counted.map(fault => fault.kind), ['owed-decision']);
+  // A merge-gate refusal that is not the writer's push refusal is never held either: GitHub's own
+  // `not observed` refusal is a gate nobody is working, writer moving or not.
+  const unobserved = pushRefused('GY-2004', new Date(now - 31 * 60_000).toISOString(), gy2053Heads);
+  const githubRefusal = githubUnobservedRefusal;
+  const action = unobserved.nextAction as NextAction;
+  Object.assign(unobserved, { nextAction: { ...action, refusal: githubRefusal, inputs: { ...action.inputs, kind: 'escalate', trigger: 'merge', detail: githubRefusal } } });
+  Object.assign(unobserved.actionQueue!.actions[0], { refusal: githubRefusal });
+  assert.equal(owed.mergeWriterHolds(unobserved, writer2053(gy2053Pass), now), null, 'only the exact push refusal is the writer\'s next step');
+  assert.deepEqual(observedFaults([unobserved], gy2053Pass, writer2053(gy2053Pass)).counted.map(fault => fault.kind), ['owed-decision']);
+  // Without the writer summary — an older caller, or a status read before the writer ran — every push refusal stands as before.
+  assert.equal(owed.mergeWriterHolds(front2053(), null, now), null);
+  assert.deepEqual(observedFaults([front2053()], gy2053Pass, null).counted.map(fault => fault.kind), ['owed-decision']);
+});
+
+/** GY-2011's own item, for the no-summary reads. */
+function front2053(): Work { return pushRefused('GY-2011', new Date(Date.parse(gy2053Pass) - 38 * 60_000).toISOString(), gy2053Heads); }
+
+test('unit:writer-attempt-progress-moves — a retrial or reconcile inside a flight moves the summary\'s newest movement, and a live flight never raises per-head owed lines beside it', () => {
+  const started = Date.parse(gy2053Flight);
+  const item = { key: 'GY-2011' };
+  const head = gy2053Heads['GY-2011']!, lower = head.toLowerCase();
+  // The steps one flight records, in the order the executor writes them: the intent, the trial's no-verdict
+  // record (a timeout), the retrial's intent on the new tip, the push, the reconcile. Each moves the movement.
+  const steps = [
+    { kind: 'intent', head, baseTip: gy2053Base, mergeSha: 'd'.repeat(40), risk: 'low', at: gy2053Flight },
+    { kind: 'trial', head, baseTip: gy2053Base, mergeSha: 'd'.repeat(40), outcome: 'timeout', phase: 'tests', reason: 'the trial outlived its bound', phases: {}, attempts: [], durationMs: 20 * 60_000 },
+    { kind: 'intent', head, baseTip: 'f'.repeat(40), mergeSha: '9'.repeat(40), risk: 'low', at: new Date(started + 20 * 60_000).toISOString() },
+    { kind: 'pushed', mergeSha: '9'.repeat(40), pushedAt: new Date(started + 36 * 60_000).toISOString() },
+    { kind: 'reconciled', mergeSha: '9'.repeat(40), observedTip: 'f'.repeat(40) },
+  ] as const;
+  let at = started - 1;
+  for (const step of steps) {
+    at += 60_000;
+    const writer = writer2053(new Date(at).toISOString(), { progress: { at: new Date(at).toISOString(), what: mergeWriterModule.attemptProgressLine(item, step as never) } });
+    assert.equal(mergeWriterMovement(writer)!.at, at, `${step.kind}: the newest attempt step is the newest movement`);
+    assert.match(mergeWriterMovement(writer)!.what, /attempt step was recorded/);
+    // A flight alive with fresh progress holds every queued head, however long the flight has run in all.
+    const queued = ['GY-2004', 'GY-2012'].map(subject => trialRefused(subject, new Date(started - 60_000).toISOString(), gy2053Heads));
+    assert.deepEqual(observedFaults(queued, new Date(at).toISOString(), writer).counted.map(fault => fault.kind), [], `${step.kind}: no owed line stands beside a live flight`);
+    assert.equal(mergeWriterStallAttention(writer, at), null, `${step.kind}: the stall waits for a writer with no attempt alive`);
+  }
+  // The progress lines name their steps in the reader's words.
+  assert.match(mergeWriterModule.attemptProgressLine(item, steps[0] as never), /GY-2011's head 66f37f2604f1 recorded its merge intent on base tip c26cd7bcac37/);
+  assert.match(mergeWriterModule.attemptProgressLine(item, steps[1] as never), /recorded its trial \(timeout\)/);
+  assert.match(mergeWriterModule.attemptProgressLine(item, steps[3] as never), /was recorded pushed/);
+  assert.match(mergeWriterModule.attemptProgressLine(item, steps[4] as never), /was reconciled: the base holds it/);
+});
+
+test('unit:stalled-writer-single-line — the single stalled-step line stands only when no attempt is alive, and never beside per-head owed lines', () => {
+  const now = Date.parse(gy2053Pass), queued = ['GY-2004', 'GY-2012'].map(subject => trialRefused(subject, new Date(now - 38 * 60_000).toISOString(), gy2053Heads));
+  // An attempt alive: no stall line, whatever the movement's age — the flight is the writer moving.
+  const live = writer2053(gy2053Pass, { lastMergeAt: new Date(now - 3 * 60 * 60_000).toISOString() });
+  assert.equal(mergeWriterStallAttention(live, now), null, 'the stall waits for a writer with no flight');
+  assert.deepEqual(observedFaults(queued, gy2053Pass, live).counted.map(fault => fault.kind), [], 'a live flight raises no owed line either');
+  // No attempt alive and movement inside the bound: still no stall — the writer moved recently enough
+  // to be between flights, which a serial queue is, between one head's settle and the next cycle's start.
+  const between = writer2053(gy2053Pass, { inFlight: null, refusals: [{ key: 'GY-2011', head: gy2053Heads['GY-2011']!.toLowerCase(), reason: 'trial failed', at: new Date(now - 60_000).toISOString() }], lastMergeAt: new Date(now - 3 * 60 * 60_000).toISOString() });
+  assert.equal(mergeWriterStallAttention(between, now), null, 'movement inside the bound is a writer between flights, not a stalled one');
+  // No attempt alive and movement past the bound: exactly one stall line for the queue, counted once.
+  const stalledAt = new Date(now + owed.mergeWriterMotionBound(between) + 60_000).toISOString(), stalledNow = Date.parse(stalledAt);
+  const stall = mergeWriterStallAttention(between, stalledNow)!;
+  assert.match(stall.text, /queue holds 3 head\(s\) it cannot move: no trial is in flight and its newest movement is the newest refusal was recorded/);
+  assert.deepEqual(humanNeededAttention({ work: queued, now: stalledAt }, between).map(line => line.subject), [], 'the stall stands for the held heads, not beside them');
+  const counted = cycleFaults(emptyDaemonState(config()), queued, stalledNow, { config: config(), reported: [stall] });
+  assert.deepEqual(counted.map(fault => `${fault.kind}|${fault.subject}`), ['stalled-step|merge-writer'], 'one line for the queue the writer cannot move');
+});
+
+test('integration:owed-decision-writer-flight-replay — the 09:32:04Z shape opens no owed decision while the writer moves, and the decision class stays quiet across a full serial queue drain', () => {
+  const state = emptyDaemonState(config());
+  const decided = (at: string, works: Work[], writer: MergeWriterSummary | null) => {
+    const { reported, counted } = observedFaults(works, at, writer);
+    trackFaults(state.faults, counted, at);
+    return { reported, counted };
+  };
+  const trialQueue = () => ['GY-2004', 'GY-2012'].map(subject => trialRefused(subject, new Date(Date.parse(gy2053Pass) - 38 * 60_000).toISOString(), gy2053Heads));
+  // 09:32:04.594Z, the pass that filed the three instances: the front head's push refusal standing,
+  // two queued trial refusals behind its 37-minute flight. Nothing is owed while the writer moves.
+  const first = decided(gy2053Pass, [...trialQueue(), front2053()], writer2053(gy2053Pass));
+  assert.deepEqual(first.counted.map(fault => fault.kind), [], 'the flight holds its queue and its own head\'s push refusal');
+  assert.equal(mergeWriterStallAttention(writer2053(gy2053Pass), Date.parse(gy2053Pass)), null);
+  // The same instant against the shape the base held — no writer bound on the summary, so the flat
+  // 30-minute bound applies and the flight's inMotionUntil has expired — reproduces the instances
+  // the loop filed: two queued heads plus the front head's never-held push refusal.
+  const flat = writer2053(gy2053Pass, { motionBoundMs: undefined });
+  assert.equal(owed.mergeWriterMotionBound(flat), mergeWriterMotionBoundMs);
+  const reproduced = observedFaults([...trialQueue(), front2053()], gy2053Pass, flat);
+  assert.deepEqual(reproduced.counted.map(fault => `${fault.kind}|${fault.subject}`).sort(),
+    ['owed-decision|GY-2004', 'owed-decision|GY-2011', 'owed-decision|GY-2012'], 'the three instances, replayed as the base counted them');
+  // The drain: each flight settles, the writer starts the next head the same cycle, and every
+  // observation between — retrials, deliveries, the queue emptying — stays quiet in the class.
+  let queue = writer2053(gy2053Pass).queue, cursor = Date.parse(gy2053Settled);
+  const heads = [...Object.keys(gy2053Heads)];
+  for (let index = 0; index < heads.length; index++) {
+    const key = heads[index]!, head = gy2053Heads[key]!, flightStart = cursor;
+    // GY-2011's trial failed (its rework applied moves the item back to a worker); the others deliver.
+    const failed = key === 'GY-2011';
+    const settleAt = flightStart + (failed ? gy2053FlightMs : 20 * 60_000 + 60_000);
+    const settleIso = new Date(settleAt).toISOString();
+    const remaining = queue.slice(1), next = remaining[0] ?? null;
+    const writer: MergeWriterSummary = {
+      queue: remaining,
+      inFlight: next ? { key: next.key, id: next.id, head: next.head, startedAt: settleIso } : null,
+      lastMergeAt: failed ? writer2053(gy2053Pass).lastMergeAt : settleIso,
+      refusals: [{ key, head: head.toLowerCase(), reason: failed ? 'trial failed: tests tests/item-page-structure.test.ts' : 'base moved 3 times', at: settleIso }],
+      reworks: failed ? [{ key, id: `work-${key}`, head: head.toLowerCase(), reason: 'trial failed: tests tests/item-page-structure.test.ts', refusedAt: settleIso, attempts: 1, lastError: null }] : [],
+      progress: { at: settleIso, what: mergeWriterModule.attemptProgressLine({ key }, failed
+        ? { kind: 'refused', head, reason: 'trial failed: tests tests/item-page-structure.test.ts' }
+        : { kind: 'reconciled', mergeSha: '9'.repeat(40), observedTip: gy2053Base }) },
+      motionBoundMs: mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 }),
+    };
+    // The item the flight settled moves as the writer's own action moved it: a failed trial's rework
+    // returns it to a worker; a delivered one's gate clears. Either way its head leaves the queue.
+    const works = trialQueue().filter(item => remaining.some(entry => entry.key === item.key));
+    const observed = decided(settleIso, works, writer);
+    assert.deepEqual(observed.counted.map(fault => fault.kind), [], `${key} settled: the writer's next flight is movement, and nothing is owed`);
+    assert.equal(mergeWriterStallAttention(writer, settleAt), null, `${key} settled: the next attempt is alive, or the movement is seconds old`);
+    // Observations inside the flight, one every five minutes: quiet, retrial after retrial.
+    for (let step = 1; step <= 3; step++) {
+      const at = settleAt + step * 5 * 60_000;
+      const retried: MergeWriterSummary = { ...writer, progress: { at: new Date(at).toISOString(), what: mergeWriterModule.attemptProgressLine({ key: next?.key ?? key }, { kind: 'intent', head: next?.head ?? head, baseTip: gy2053Base, mergeSha: 'd'.repeat(40), risk: 'low', at: new Date(at).toISOString() }) } };
+      const inside = decided(new Date(at).toISOString(), works, retried);
+      assert.deepEqual(inside.counted.map(fault => fault.kind), [], `${key}'s flight, +${step * 5}m: the retrial's intent is movement`);
+    }
+    queue = remaining;
+    cursor = settleAt + 15 * 60_000;
+  }
+  // The queue drained; the writer is between flights with its delivery fresh: still quiet.
+  assert.deepEqual(queue, [], 'the serial queue drained, one head at a time');
+  const drained: MergeWriterSummary = { queue: [], inFlight: null, lastMergeAt: new Date(cursor).toISOString(), refusals: [], reworks: [],
+    progress: { at: new Date(cursor).toISOString(), what: mergeWriterModule.attemptProgressLine({ key: 'GY-2012' }, { kind: 'reconciled', mergeSha: '9'.repeat(40), observedTip: gy2053Base }) },
+    motionBoundMs: mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 }) };
+  const quiet = decided(new Date(cursor).toISOString(), [], drained);
+  assert.deepEqual(quiet.counted.map(fault => fault.kind), [], "the drained queue owes nothing while the writer's delivery stands inside the bound");
+  // The whole replay filed not one decision instance: the writer's own flight was never a judgment.
+  assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'decision'), []);
 });
