@@ -19,7 +19,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ### CI producer
 
-CI proofs publish via one principal (`manual:*`, `e2e:*` refused):
+CI proofs publish via one principal (`manual:*`, `e2e:*` refused); its posted run binding (repository, run, job, conclusion) is Graphyard's record of the job, never read back from GitHub (GY-2010):
 
 ```json
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}

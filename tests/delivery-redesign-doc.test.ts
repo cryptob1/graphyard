@@ -56,7 +56,7 @@ test('unit:delivery-redesign-doc-statements — docs/delivery-redesign.md opens 
   assert.equal(flow.length, 4, 'the flow is exactly four numbered steps');
   const rollout = section(page, 'Rollout').split('\n').filter(line => /^\d+\. /.test(line));
   assert.equal(rollout.length, 4, 'the rollout is exactly four numbered stages');
-  assert.match(rollout[0], /Shadow mode/); assert.match(rollout[1], /`control-plane`/); assert.match(rollout[2], /Snake pilot/); assert.match(rollout[3], /delete the github-mode gate code/);
+  assert.match(rollout[0], /Shadow mode/); assert.match(rollout[1], /`control-plane`/); assert.match(rollout[2], /Snake pilot/); assert.match(rollout[3], /github-mode API client.*deleted/);
   for (const heading of ['One rule', 'Flow', 'Merge writer', 'Removed and kept', 'The merger', 'Rollout', 'Measures']) section(page, heading);
 });
 
@@ -76,18 +76,20 @@ test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under
   assert.ok(entries.some(source => /Only Graphyard writes to main/.test(source)), 'one entry pins the one rule');
 });
 
-/** Every CLI command name and HTTP route docs/delivery.md and docs/github.md named before the trim (AC-3). */
+/**
+ * Every CLI command name and HTTP route docs/delivery.md and docs/github.md named before the trim (AC-3),
+ * less the GitHub App, pull-request push and queue-ref commands GY-2010 deleted with docs/github.md.
+ */
 const NAMED_BEFORE_TRIM = [
   '`release cut', '`release uat', '`release validate', '`release promote', '`release verify', '`release follow-up', '`release soak', '`release status', '`release GY-N EPOCH`',
   'graphyard master config promoteEveryMinutes', '`init --scan`', '`install --plan`', '`graphyard delivery sweep`', '`graphyard delivery`', '`graphyard doctor`', '`graphyard release`',
-  '`master tip-cleanup --apply`', '`graphyard app import', '`graphyard app list`', '`sync GY-N --push-via-control-plane',
-  '`master browser app-permissions`', '`master browser installation-accept`', '`master reviewer setup`', '`github-setup --update-permissions', 'github-setup URL --reviewer claude', '`graphyard reviewpolicy',
+  '`master browser app-permissions`', '`master browser installation-accept`', '`master reviewer setup`',
   '`POST /api/delivery/lease`', '`POST /api/delivery/build`', '`POST /api/delivery/release`', '`POST /api/delivery/approve`', '`POST /api/delivery/observe`', '`POST /api/delivery/notify`',
-  '`POST /api/validation/result`', '`GET /api/analytics/attribution`', '`POST /api/work/:id/sync-push`',
+  '`POST /api/validation/result`', '`GET /api/analytics/attribution`',
 ];
 const TOTAL_TARGET = 15_950;
 
-test('unit:delivery-redesign-doc-total-under-headroom — README.md and docs/ total at most 15,950 words as tests/docs-budget.test.ts counts them; delivery.md\'s One delivery path is two sentences linking the redesign, github.md\'s Failed checks and Bindings and carry are links, and every command and route those pages named is still named on a budgeted page', () => {
+test('unit:delivery-redesign-doc-total-under-headroom — README.md and docs/ total at most 15,950 words as tests/docs-budget.test.ts counts them; delivery.md\'s One delivery path is two sentences linking the redesign, docs/github.md is gone, and every command and route those pages named is still named on a budgeted page', () => {
   const budget = docsWordBudgetOf(parseRepositoryConfig(read('graphyard.json')).documentation)!;
   const pages = ['README.md', 'AGENTS.md', ...readdirSync(`${root}docs`, { recursive: true, withFileTypes: true })
     .filter(entry => entry.isFile())
@@ -101,13 +103,7 @@ test('unit:delivery-redesign-doc-total-under-headroom — README.md and docs/ to
   assert.equal(onePath.length, 2, `One delivery path is two sentences: ${onePath.join(' | ')}`);
   assert.match(section(delivery, 'One delivery path', '###'), /\]\(delivery-redesign\.md\)/, 'and links the redesign page');
 
-  const github = read('docs/github.md');
-  for (const heading of ['Failed checks', 'Bindings and carry']) {
-    const body = section(github, heading, heading === 'Failed checks' ? '##' : '###').trim();
-    const withoutLinks = body.replace(/\[[^\]]*\]\([^)]*\)/g, '').replace(/`[^`]*`/g, '');
-    assert.ok(words(withoutLinks) <= 12, `${heading} is links, not prose (${words(withoutLinks)} words outside links and code: ${withoutLinks.trim()})`);
-    assert.ok((body.match(/\]\(/g) ?? []).length >= 2, `${heading} links where the detail now lives`);
-  }
+  assert.ok(!pages.includes('docs/github.md'), 'docs/github.md is deleted (GY-2010)');
   const everything = pages.map(read).join('\n');
   for (const name of NAMED_BEFORE_TRIM) assert.ok(everything.includes(name), `${name} is still named on a budgeted page`);
 });

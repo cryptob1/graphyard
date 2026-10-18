@@ -156,22 +156,19 @@ test('unit:review-post-control-plane-api — the binding gains mode, head, baseT
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
-test('unit:review-post-github-snapshot — a github-mode binding and review post are unchanged: no mode fields, gh pr view then the review POST, the same result', async () => {
+test('unit:review-post-github-snapshot — a pull-request-era github binding still writes and reads unchanged, and its review post is refused naming the control plane, running no gh and calling no API (GY-2010)', async () => {
   const directory = await temporaryDirectory('review-verdict-github');
   try {
     const binding = bindingOf();
     await writeReviewBinding(directory, binding);
     assert.deepEqual(JSON.parse(await readFile(join(directory, reviewBindingFile), 'utf8')), binding, 'the github binding carries no control-plane field');
     const gh: string[][] = [];
-    const run = async (_command: string, args: string[]) => { gh.push(args); return args[0] === 'pr' ? JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: H }) : JSON.stringify({ id: 9001 }); };
-    const fetcher = (async () => { throw new Error('github mode never calls the API'); }) as unknown as typeof fetch;
+    const run = async (_command: string, args: string[]) => { gh.push(args); return ''; };
+    const fetcher = (async () => { throw new Error('a github binding never calls the API'); }) as unknown as typeof fetch;
     const body = 'AC-1 met.\nResolved threads: none\nFollow-up threads: none\nOverridden threads: none';
-    const posted = await postReview({ event: 'APPROVE', body, cliPath: launcher, environment: { GH_CONFIG_DIR: directory, GRAPHYARD_REVIEW: `GY-7@${H}`, GRAPHYARD_URL: 'https://graphyard.example' } }, { run, fetch: fetcher, sleep: async () => {} });
-    assert.deepEqual(posted, { reviewId: 9001, event: 'APPROVE', key: 'GY-7', pr: 7, sha: H });
-    assert.deepEqual(gh, [
-      ['pr', 'view', '7', '--repo', 'owner/project', '--json', 'mergeable,mergeStateStatus,headRefOid'],
-      ['api', '--method', 'POST', 'repos/owner/project/pulls/7/reviews', '-f', `commit_id=${H}`, '-f', 'event=APPROVE', '-f', `body=${body}`],
-    ]);
+    await assert.rejects(postReview({ event: 'APPROVE', body, cliPath: launcher, environment: { GH_CONFIG_DIR: directory, GRAPHYARD_REVIEW: `GY-7@${H}`, GRAPHYARD_URL: 'https://graphyard.example' } }, { run, fetch: fetcher, sleep: async () => {} }),
+      /pull-request-era GitHub binding, and Graphyard no longer posts GitHub reviews; the loop launches the review again against the control plane/);
+    assert.deepEqual(gh, [], 'no gh ran');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

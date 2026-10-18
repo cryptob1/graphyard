@@ -2,7 +2,7 @@ import { demand, type Principal } from '../../model.js';
 import { flagPathRefusal, RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
-import { isCiProducer, type CiRunObservation } from '../../model/ci-proofs.js';
+import { boundCiRun, ciRunBindingSchema, isCiProducer, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { approveDecision, requestDecision } from '../decisions.js';
 import { listDecisions } from '../decision-ledger.js';
@@ -160,10 +160,13 @@ export const workRoutes = defineRoutes('work', [
         }
       }
       const input = JSON.parse(raw.toString() || '{}');
-      // CI-produced evidence is judged by the engine against the check run the control plane can read from
-      // its own checkout and ledger; no GitHub read supplies an observation, so the engine refuses it as unobserved.
+      // CI-produced evidence is judged by the engine against the CI producer's own run binding, recorded
+      // as Graphyard's record of the job (GY-2010): nothing is read back from GitHub.
       let ciRun: CiRunObservation | null | undefined;
-      if (attempted === 'evidence' && id && isCiProducer(actor as Principal)) ciRun = null;
+      if (attempted === 'evidence' && id && isCiProducer(actor as Principal)) {
+        const binding = ciRunBindingSchema.safeParse(input?.ciRun);
+        ciRun = binding.success && typeof input.sha === 'string' && typeof input.proof === 'string' && (input.result === 'pass' || input.result === 'fail') ? boundCiRun(binding.data, input) : null;
+      }
       try { return await engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey(), ciRun === undefined ? {} : { ciRun }); }
       catch (error) {
         // A renewal that failed server-side says what grace its recorded fault earned (GY-558), so the supervisor keeps retrying through it.

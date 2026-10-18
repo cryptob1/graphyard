@@ -18,9 +18,6 @@ const appPagePortFree = async () => true;
 async function startGithubSetup(..._args: unknown[]): Promise<any> {
   throw new Error('graphyard github-setup is removed; the control-plane merger uses a deploy key and registers no GitHub App (GY-2010)');
 }
-async function updateAppPermissions(..._args: unknown[]): Promise<any> {
-  throw new Error('graphyard github-setup --update-permissions is removed (GY-2010)');
-}
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -275,35 +272,4 @@ export const installCommands = defineCommands([
     '                                never printed) for --reuse-app without sudo; list reusable Apps per role',
     '  app bind SLUG [--plan] [--ssh-host H] [--workspace W]  Bind an imported App to the observe-only install'], readsConnection: () => false,
     async run(context) { context.print(await appCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { root: context.repositoryRoot() })); } },
-  {
-    name: 'github-setup',
-    help: [
-      '  github-setup HTTPS_URL [--reviewer NAME]',
-      '                                Register the control-plane or a reviewer GitHub App',
-      '                                through the local App-manifest browser flow',
-      '  github-setup --update-permissions [--reviewer NAME] [--wait SECONDS]',
-      '                                Compare a registered App with its declared permissions,',
-      '                                print the exact migration steps, and verify acceptance',
-    ],
-    async run(context) {
-      const root = context.repositoryRoot();
-      const discovered = await discover(root);
-      if (!discovered.repository) throw new Error('Set origin to the GitHub repository being managed first');
-      const { values, positionals } = parseArgs({ args: [context.id, ...context.args].filter((value): value is string => value !== undefined), options: { reviewer: { type: 'string' }, 'update-permissions': { type: 'boolean' }, wait: { type: 'string' } }, allowPositionals: true });
-      if (values['update-permissions']) {
-        const waitSeconds = values.wait === undefined ? 0 : Number(values.wait);
-        if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 3600) throw new Error('Use --wait with whole seconds up to 3600');
-        const result = await updateAppPermissions(root, { reviewer: values.reviewer, waitMs: waitSeconds * 1000 });
-        context.print(result);
-        if (!result.verified) process.exitCode = 1;
-        return;
-      }
-      if (values.wait !== undefined) throw new Error('--wait only applies to --update-permissions');
-      const deployment = positionals[0];
-      if (!deployment || positionals.length > 1) throw new Error('Use github-setup HTTPS_URL to register an App, or github-setup --update-permissions to migrate a registered one');
-      const setup = await startGithubSetup(root, discovered.repository, deployment, 4311, {}, values.reviewer);
-      console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in ${setup.file}; do not share that file. Press Ctrl+C when finished.`);
-      const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop);
-    },
-  },
 ]);

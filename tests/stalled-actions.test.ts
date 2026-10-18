@@ -20,6 +20,7 @@ import { credential401Remedy, recordStallRemedy } from '../src/stall-remedies.js
 import WorkCard from '../web/components/work-card.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // Time-bomb allowance (GY-1694): the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merge are past inside an open-ended window; the 2026-10-18 GY-2014 fixtures pass their own fixed ISO clocks into stalledActionAttention and recordStallRemedy; Date.now()/new Date() only stamp live DB rows in the integration cases.
 
 /**
@@ -427,15 +428,14 @@ function assertSettled(item: Work, path: string) {
 }
 
 test('integration:done-retires-actions — an item delivered by the gated merge observation or by the direct-merge sweep has its next action recomputed, its pending rows retired and its queue entry cleared in the same transaction', async () => {
-  // The gated path: a merge GitHub made of a candidate passing every gate, observed. A queue entry
-  // left from before GY-1235 is seeded so its clearing is still checked.
-  const { work: queued, observation } = await queuedCandidate();
-  assert.deepEqual(queued.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate passes every gate');
-  assert.equal(queued.nextAction ?? null, null, 'and nobody owes its merge: GitHub makes it');
+  // The gated path: the merge writer's trial, push and reconcile of a candidate whose review and
+  // proofs passed (GY-2010). A queue entry left from before GY-1235 is seeded so its clearing is still checked.
+  const { work: queued } = await queuedCandidate();
+  assert.deepEqual(queued.gates.filter(gate => !gate.passed).map(gate => gate.name), ['test', 'merge'], 'only the merge writer\'s trial and push stand');
+  assert.equal(queued.nextAction ?? null, null, 'and nobody owes its merge: the merge writer makes it');
   await seed(queued, [leftover(queued, 'dispatch', 'dispatch:0')], { queue: queueEntry(8999) });
-  const committed = await reload(queued);
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  const merged = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  const merged = await deliverThroughLedger(engine, queued.id, 'e'.repeat(40), mergedAt);
   assertSettled(merged, 'gated merge observation');
   assertSettled(await reload(queued), 'gated merge observation, as stored');
 
@@ -455,10 +455,9 @@ test('integration:done-retires-actions — an item delivered by the gated merge 
 test('integration:done-rows-never-claimed — a done item\'s pending dispatch and merge rows are never offered, reconcile retires them and its queue entry, and a row failing for one unchanged reason is not claimed again before a backoff that grows with each failure', async () => {
   // A delivered item as production held 44 of them: a pending dispatch and a pending merge, a
   // queue entry, and a next action from before its delivery.
-  const { work: queued, observation } = await queuedCandidate();
-  const committed = await reload(queued);
+  const { work: queued } = await queuedCandidate();
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  const done = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'c'.repeat(40) });
+  const done = await deliverThroughLedger(engine, queued.id, 'c'.repeat(40), mergedAt);
   assert.equal(done.stage, 'done');
   // GY-1824: its serving release is recorded, as the executor's verify-deployment row records it, so
   // the delivery owes nothing and only the leftovers below are left to settle.

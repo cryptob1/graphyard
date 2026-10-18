@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { routineDecision } from '../src/master-daemon.js';
 import { checkRerunHeld, requiredCheckRun, type RequiredCheck } from '../src/merge-queue.js';
-import { evaluate } from '../src/model/gates.js';
 import type { Work } from '../src/model.js';
 
 // GY-1060: the follow-ups of GY-430's approved review. A protection-only required check is read
@@ -25,32 +24,22 @@ function item(checks: Check[], requiredChecks: { name: string; appId: number | n
     ...extra,
   } as unknown as Work;
 }
-const testGate = (work: Work) => evaluate(work, [work], now, ciAppIds).gates.find(gate => gate.name === 'test')!;
 const passing: Check[] = [{ name: 'test', result: 'success' }, { name: 'typecheck', result: 'success' }];
 
-test('unit:required-checks-followups — a check bound to no app prefers the configured CI apps, and a commit status counts as its run', () => {
+test('unit:required-checks-followups — a check bound to no app prefers the configured CI apps, and a commit status counts as its run, in the rework rule over a pull-request-era observation (the test gate reads only the merge writer, GY-2010)', () => {
   const secrets: RequiredCheck = { name: 'secrets', policy: false, appId: null };
-  // Another app's failing run beside CI's passing one neither fails nor reworks the candidate.
+  // Another app's failing run beside CI's passing one does not rework the candidate.
   const shadowed = item([...passing, { name: 'secrets', result: 'success' }, { name: 'secrets', result: 'failure', appId: 4242 }]);
   assert.equal(requiredCheckRun(secrets, shadowed.observation!.checks, ciAppIds)?.result, 'success');
-  assert.equal(testGate(shadowed).passed, true);
   assert.equal(routineDecision(shadowed, { autoMerge: true }, now.getTime()), null);
-  // Nor does another app's passing run satisfy it while CI's run failed.
-  assert.deepEqual(testGate(item([...passing, { name: 'secrets', result: 'failure' }, { name: 'secrets', result: 'success', appId: 4242 }])).reasons, ['Required check secrets failed on the current candidate']);
-  // With no CI app reporting it, any source counts, as GitHub counts it.
-  assert.equal(testGate(item([...passing, { name: 'secrets', result: 'success', appId: 4242 }])).passed, true);
-  // A commit-status context: success passes, a failure reworks, pending is waited on.
+  // A commit-status context: a failure reworks; success and pending ask for nothing.
   const status = (result: string) => item([...passing, { name: 'ci/legacy', result, appId: 0, source: 'status' }], [{ name: 'ci/legacy', appId: null }]);
-  assert.equal(testGate(status('success')).passed, true);
-  assert.deepEqual(testGate(status('failure')).reasons, ['Required check ci/legacy failed on the current candidate']);
   assert.equal(routineDecision(status('failure'), { autoMerge: true }, now.getTime())?.binding, `${head}:ci:ci/legacy`);
-  assert.deepEqual(testGate(status('pending')).reasons, ['Required CI check ci/legacy has not passed on the current candidate']);
+  assert.equal(routineDecision(status('success'), { autoMerge: true }, now.getTime()), null);
+  assert.equal(routineDecision(status('pending'), { autoMerge: true }, now.getTime()), null);
   // Another app's stray run of the context's name never hides its commit status (finding 19).
   const strayed = item([...passing, { name: 'ci/legacy', result: 'queued', appId: 4242 }, { name: 'ci/legacy', result: 'success', appId: 0, source: 'status' }], [{ name: 'ci/legacy', appId: null }]);
   assert.equal(requiredCheckRun({ name: 'ci/legacy', policy: false, appId: null }, strayed.observation!.checks, ciAppIds)?.source, 'status');
-  assert.equal(testGate(strayed).passed, true);
-  // A status never satisfies a policy check: app 0 is no configured CI app.
-  assert.equal(testGate(item([{ name: 'test', result: 'success', appId: 0, source: 'status' }, { name: 'typecheck', result: 'success' }], [])).passed, false);
 });
 
 test('unit:required-checks-followups — a rerun owed on a protection-only check bound to another app holds its failure', () => {

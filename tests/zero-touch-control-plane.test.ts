@@ -170,7 +170,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   assert.deepEqual(world.ghCalls, [['repo', 'view', repository, '--json', 'name']], 'the operator\'s gh login only looked the repository up');
   assert.equal(world.deployKeys.length, 1);
   const status = await request(operatorAgent, 'status');
-  assert.equal(status.github, false, 'the plane runs with no GitHub App');
+  assert.equal('github' in status, false, 'the plane runs with no GitHub App: its status reports none (GY-2010)');
   assert.equal(status.mergeWriter.merger, 'control-plane', 'the control plane is the merge writer');
   assert.ok(result.goal, 'the goal was submitted');
   const key = result.goal!;

@@ -640,12 +640,12 @@ test('unit:release-candidate-zero-touch-suite — every release candidate runs t
   assert.match(validate, /--suite 'zero-touch=node --import tsx --eval "import\(\\"\.\/src\/release-candidate\.ts\\"\)\.then\(m => m\.runZeroTouchSuite\(\)\)"'/, 'release validate runs the zero-touch suite');
   assert.doesNotMatch(uat.slice(0, uat.indexOf('node bin/graphyard.mjs release validate')), /continue-on-error/);
   assert.match(workflow.slice(workflow.indexOf('\n  promote:\n')), /needs: \[candidate, uat, imports, upgrade\]\n\s+if: needs\.uat\.result == 'success' && needs\.upgrade\.result == 'success'/, 'promotion follows only a passed UAT validation and upgrade gate, after its import hold is read');
-  assert.equal(zeroTouchScenario, 'tests/zero-touch-onboarding.test.ts');
-  assert.match(await readFile(new URL(`../${zeroTouchScenario}`, import.meta.url), 'utf8'), /test\('unit:zero-touch-onboarding — /, 'the suite runs the zero-touch scenario');
+  assert.equal(zeroTouchScenario, 'tests/zero-touch-control-plane.test.ts');
+  assert.match(await readFile(new URL(`../${zeroTouchScenario}`, import.meta.url), 'utf8'), /test\('unit:zero-touch-control-plane — /, 'the suite runs the zero-touch scenario');
 
   // The suite runs the scenario through the test runner on this checkout; its failing step becomes the suite's detail.
   const runs: string[][] = [];
-  let outcome = { status: 1, stdout: '✖ failing tests:\n\ntest at tests/zero-touch-onboarding.test.ts:1:1\n✖ unit:zero-touch-onboarding\n  AssertionError [ERR_ASSERTION]: no human step but the one App approval: a person had to merge on GitHub: #1 merged by hand\n' };
+  let outcome = { status: 1, stdout: '✖ failing tests:\n\ntest at tests/zero-touch-control-plane.test.ts:1:1\n✖ unit:zero-touch-control-plane\n  AssertionError [ERR_ASSERTION]: no human step: a person had to answer a prompt: #1 answered by hand\n' };
   const fake = ((program: string, args: string[]) => { runs.push([program, ...args]); return { ...outcome, stderr: '', signal: null }; }) as unknown as typeof spawnSync;
   const scratch = await temporaryDirectory('release-candidate-zero-touch'), detailFile = join(scratch, 'detail');
   const exitCode = process.exitCode, written = process.stdout.write;
@@ -653,12 +653,12 @@ test('unit:release-candidate-zero-touch-suite — every release candidate runs t
   let failed, passed;
   try {
     failed = runZeroTouchSuite({ GRAPHYARD_SUITE_DETAIL: detailFile }, fake);
-    outcome = { status: 0, stdout: '✔ unit:zero-touch-onboarding\n' };
+    outcome = { status: 0, stdout: '✔ unit:zero-touch-control-plane\n' };
     passed = runZeroTouchSuite({}, fake);
   } finally { (process.stdout as any).write = written; process.exitCode = exitCode; }
   assert.deepEqual(runs[0], [process.execPath, '--import', 'tsx', 'tests/helpers/run-tests.ts', zeroTouchScenario]);
   assert.equal(failed.passed, false);
-  assert.equal(failed.detail, `${zeroTouchScenario} failed: AssertionError [ERR_ASSERTION]: no human step but the one App approval: a person had to merge on GitHub: #1 merged by hand`);
+  assert.equal(failed.detail, `${zeroTouchScenario} failed: AssertionError [ERR_ASSERTION]: no human step: a person had to answer a prompt: #1 answered by hand`);
   assert.equal((await readFile(detailFile, 'utf8')).trim(), failed.detail, 'release validate reads the detail the suite wrote');
   assert.equal(passed.passed, true);
 
@@ -672,7 +672,7 @@ test('unit:release-candidate-zero-touch-suite — every release candidate runs t
     { base: 'main', push: true, timeoutMs: 60_000, fetcher: deployment([sha]).fetcher, sleep: async () => {}, file: async item => { filed.push(item); return 'GY-971'; } });
   assert.equal(record.record.result, 'failed');
   assert.match(filed[0].title, /failed UAT suite zero-touch/);
-  assert.match(filed[0].description, /a person had to merge on GitHub/, 'the follow-up names the step that needed a person');
+  assert.match(filed[0].description, /a person had to answer a prompt/, 'the follow-up names the step that needed a person');
   const refused = promote(repo.git, candidate.id, { base: 'main', push: true, now: new Date() });
   assert.equal(refused.promoted, false); assert.match(refused.refusals!.join(' '), /failed UAT \(zero-touch\)/, 'a failing scenario blocks promotion');
   const next = repo.merge('GY-72', 702);

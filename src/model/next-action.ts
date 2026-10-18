@@ -6,6 +6,7 @@ import { deliveryState, deploymentUnrecorded } from './delivery.js';
 import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
+import { mergeWriterRefusal } from './ci-refusal.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, type Work } from './work.js';
 import { observationPass } from './loop-observation.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
@@ -215,6 +216,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     // An unfinished dependency is the dependency's dispatch, not this item's; nothing waits here.
     const dependency = failing.name === 'ready' ? refusal.match(/^Dependency (.+) is unfinished$/) : null;
     if (dependency) return waits({ kind: 'dependency', on: dependency[1], detail: `${key} waits on ${dependency[1]}: ${refusal}` }, failing.name, refusal);
+    // GY-2010: the merge writer trials and pushes every candidate it admits, so a refusal it alone
+    // answers is a wait on it, never a row an executor claims or an escalation.
+    if (mergeWriterRefusal(failing.name, refusal)) return waits({ kind: 'session', on: 'merge-writer', detail: `${key} is queued for the merge writer, which trials and pushes it: ${refusal}` }, failing.name, refusal);
     const kind = refusalAction(work, failing.name, refusal, all, now);
     const binding = `${failing.name}:${work.policyRevision}:${short(work.candidate?.sha)}:${short(work.candidate?.baseSha)}:${refusal}`;
     if (kind === 'dispatch') {
@@ -292,10 +296,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
 
   if (work.violations.length) return make('escalate', `${key} carries ${work.violations.length} violation(s): ${work.violations[0]}`,
     { kind: 'escalate', trigger: 'violation', detail: work.violations[0] }, `violation:${work.violations[0]}`);
-  // GitHub merges a candidate whose every gate passed on its head (docs/delivery.md): no executor
-  // step runs it, and the merged observation records the delivery.
-  if (work.candidate && !work.observation?.merged) return waits({ kind: 'session', on: 'github', detail: `${key} has passed every gate on ${short(work.candidate.sha)}; GitHub merges it on its branch protection and the merged observation records the delivery` });
-  if (work.candidate) return waits({ kind: 'settled', on: null, detail: `${key} merged as ${short(work.observation?.mergeSha)} and no gate refuses it; the delivery record follows on the next reading` });
+  // Every gate passed: the merge writer pushed and reconciled the head (GY-2010), and its
+  // reconciled record delivers the item; nothing is left for an executor.
+  if (work.candidate) return waits({ kind: 'settled', on: null, detail: `${key} has passed every gate on ${short(work.candidate.sha)}; the merge writer merged it${work.mergeLedger?.mergeSha ? ` as ${short(work.mergeLedger.mergeSha)}` : ''} and its delivery record follows` });
   // Open, released, nothing refusing and no candidate: the gates have not been evaluated at all.
   // Every other path above named something, so there is no rule left to reach — the item would
   // simply sit here, which is precisely what must never happen quietly.

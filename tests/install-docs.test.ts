@@ -44,15 +44,14 @@ test('docs/install.md is an agent-executable runbook with commands, verification
   assert.ok(steps.some(step => step[2].includes('install --provider PROVIDER --repo OWNER/REPO --apply')));
   assert.ok(steps.filter(step => /Verify|Expected output|Verification/.test(step[2])).length >= 3, 'each step must state what to verify');
 
-  // The four human inputs, and the secret rules, are stated explicitly.
+  // The three human inputs (GY-2010: no GitHub App confirmation), and the secret rules, are stated explicitly.
   for (const rule of ['Never print, echo, `cat`, log, paste, or commit a credential', 'One principal per role', 'Workers never receive an admin, coordinator, or producer credential', 'Proof producers get explicit grants only', '`0700`', '`0600`']) {
     assert.ok(runbook.includes(rule), `the runbook must state: ${rule}`);
   }
   assert.match(runbook, /Which provider/);
   assert.match(runbook, /Provider login/);
-  assert.match(runbook, /GitHub App confirmation click/);
   assert.match(runbook, /Approval of the printed plan/);
-  assert.match(runbook, /Never invent a fifth/);
+  assert.match(runbook, /^Ask only: \*\*Which provider\*\*; \*\*Provider login\*\*; \*\*Approval of the printed plan\*\*\. Graphyard registers no GitHub App/m);
 
   // A missing provider CLI is not a fifth thing to ask a human for: every provider row carries
   // the command that installs it, so a live install stops only for the account behind it.

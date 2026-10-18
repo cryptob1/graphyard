@@ -311,14 +311,14 @@ async function plant(shape: Work): Promise<Work> {
 }
 
 /** GY-1799: the close path's services with the store's clock replaced — every transaction the close opens (src/server/close.ts judges the worker lease against the transaction's `now`) is handed the fixture's `now`, so the live-lease refusal is judged against the fixture's own clock, never the database's wall clock. */
-function clockedServices(github: unknown): Services {
+function clockedServices(): Services {
   const clocked = Object.assign(Object.create(engine), { store: Object.assign(Object.create(store), {
     transaction: (fn: Parameters<Store['transaction']>[0], options?: Parameters<Store['transaction']>[1]) => store.transaction((db, at) => fn(db, new Date(now)), options),
   }) as Store });
-  return { engine: clocked, github, repository, principals: [] } as unknown as Services;
+  return { engine: clocked, repository, principals: [] } as unknown as Services;
 }
 
-test('integration:loop-records-due-observation-reading — the coordinator records the reading as trusted evidence bound to the serving release, refuses one off the parent\'s merge or on another item, and the delivered-observation close closes the superseded pull request', async () => {
+test('integration:loop-records-due-observation-reading — the coordinator records the reading as trusted evidence bound to the serving release, refuses one off the parent\'s merge or on another item, and and the delivered-observation close closes the item, touching no pull request', async () => {
   const { loopObservation } = model as unknown as { loopObservation: (work: Work, at: Date, all: Work[]) => { due: boolean } | null };
   const delivered = await plant(parent);
   const item = await plant({ ...followUp(0, { stage: 'build', epoch: 2, candidate: { pr: 1172, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-x-2', createdAt: iso(now - hour) } } as Partial<Work>), description: `Post-deploy follow-up: post-deploy:${delivered.id}:AC-2:${proof}:${filed}\n\nowed` } as Work);
@@ -327,39 +327,33 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   await assert.rejects(engine.execute(worker, 'reading', item.id, reading, randomUUID()), /Coordinator permission required/);
   await assert.rejects(engine.execute(coordinator, 'reading', code.id, { ...reading, proof: 'unit:code' }, randomUUID()), /not a loop-owned observation item/);
   await assert.rejects(engine.execute(coordinator, 'reading', item.id, { ...reading, baseSha: sha('f') }, randomUUID()), /bound to the parent delivery's merge/);
-  const closedPulls: { pr: number; reason: string }[] = [];
-  const github = { closeSupersededPullRequest: async (pr: number, reason: string) => { closedPulls.push({ pr, reason }); return 'closed' as const; } };
   const { closeWork } = await import('../src/server/close.js');
-  const services = clockedServices(github);
+  const services = clockedServices();
   const close = (principal: Principal, id: string, ref: string | null = serving) => closeWork(services, principal, id, { kind: 'delivered-observation', reason: 'read', ref }, randomUUID());
-  // No reading yet: the close is refused, and the pull request is not touched. A worker never closes; neither does the kind close a code item.
+  // No reading yet: the close is refused. A worker never closes; neither does the kind close a code item.
   await assert.rejects(close(coordinator, item.id), /carries no passing reading of manual:webhook-deliveries-clean-24h-on-serving-release as the loop reads one/);
   await assert.rejects(close(worker, item.id), /Only the master \(coordinator or operator agent\) or an admin may close work/);
   await assert.rejects(close(coordinator, code.id), /is not a loop-owned observation item/);
   // Only a failed reading: still refused.
   await engine.execute(coordinator, 'reading', item.id, { ...reading, result: 'fail', detail: '2 failed deliveries' }, randomUUID());
   await assert.rejects(close(coordinator, item.id), /carries no passing reading/);
-  assert.equal(closedPulls.length, 0, 'a refused close leaves the pull request open');
   const read = await engine.execute(coordinator, 'reading', item.id, reading, randomUUID()) as Work;
   const entry = read.evidence.at(-1)!;
   assert.deepEqual([entry.trusted, entry.producer, entry.sha, entry.baseSha, entry.result, entry.reading], [true, coordinator.id, serving, mergeSha, 'pass', { detail: reading.detail }]);
   assert.equal(loopObservation(read, new Date(now), [delivered]), null, 'the loop\'s reading on the later serving release ends the wait');
-  // The pass is on the serving release: a close naming another release, or none, is refused before GitHub is touched; so is one while a worker lease is live.
+  // The pass is on the serving release: a close naming another release, or none, is refused; so is one while a worker lease is live.
   await assert.rejects(close(coordinator, item.id, null), /names the release its reading was taken on/);
   await assert.rejects(close(coordinator, item.id, filed), /passing reading was taken on release bbbbbbbbbbbb, not aaaaaaaaaaaa/);
   // The close judges the lease against the fixture-clocked store's `now` (clockedServices), so the fixture's own expiry — now + 24 h — stays live on any wall-clock date (GY-1799, superseding GY-1795's wall-clock lease).
   const leased = await plant({ ...followUp(0, { stage: 'build', epoch: 2, lease: { owner: worker.id, epoch: 2, expiresAt: iso(now + 24 * hour) }, candidate: { pr: 1174, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-y-2', createdAt: iso(now - hour) }, evidence: [{ ...entry, id: randomUUID() }] } as Partial<Work>), description: `Post-deploy follow-up: post-deploy:${delivered.id}:AC-2:${proof}:${filed}\n\nowed` } as Work);
   await assert.rejects(close(coordinator, leased.id), /has a live worker lease/);
-  assert.equal(closedPulls.length, 0, 'no refused close closed a pull request');
-  // The close as delivered-observation closes the open pull request as superseded by the reading, then the item.
+  // The close as delivered-observation closes the item on the reading; since GY-2010 no pull request is touched or recorded.
   const closed = await closeWork(services, coordinator, item.id, { kind: 'delivered-observation', reason: `${read.key}'s reading passed on the serving release`, ref: serving }, randomUUID()) as Work;
   assert.deepEqual([closed.stage, closed.closure?.kind, closed.closure?.ref, closed.closure?.by, isClosed(closed)], ['done', 'delivered-observation', serving, coordinator.id, true]);
-  assert.deepEqual(closedPulls.map(pull => pull.pr), [1172]);
-  assert.match(closedPulls[0].reason, /superseded by that reading/);
   const audit = (await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='work.closed'", [item.id])).rows[0].payload;
-  assert.deepEqual(audit.details.pullRequest, { pr: 1172, outcome: 'owed' }, 'the closure records the pull request as owed before GitHub is touched');
-  assert.deepEqual(closed.closure?.pullRequest, { pr: 1172, outcome: 'closed' }, 'the settled closure names the outcome of the close on GitHub');
-  assert.equal((await store.pool.query("SELECT 1 FROM events WHERE work_id=$1 AND kind='work.pull-request-closed'", [item.id])).rowCount, 1);
+  assert.equal(audit.details.pullRequest, undefined, 'the closure records no pull request');
+  assert.equal(closed.closure?.pullRequest, undefined);
+  assert.equal((await store.pool.query("SELECT 1 FROM events WHERE work_id=$1 AND kind='work.pull-request-closed'", [item.id])).rowCount, 0);
 });
 
 test('unit:observation-reading-close-judges-fixture-clock — the delivered-observation close judges a live worker lease against the fixture clock it is handed, never the wall clock', async () => {
@@ -371,10 +365,10 @@ test('unit:observation-reading-close-judges-fixture-clock — the delivered-obse
   // item would close — the time bomb this proof pins shut.
   const leased = await owed({ lease: { owner: worker.id, epoch: 2, expiresAt: iso(now + 24 * hour) }, evidence: [{ ...reading, id: randomUUID() }] });
   const { closeWork } = await import('../src/server/close.js');
-  await assert.rejects(closeWork(clockedServices({ closeSupersededPullRequest: async () => 'closed' as const }), coordinator, leased.id, { kind: 'delivered-observation', reason: 'read', ref: serving }, randomUUID()), /has a live worker lease/);
+  await assert.rejects(closeWork(clockedServices(), coordinator, leased.id, { kind: 'delivered-observation', reason: 'read', ref: serving }, randomUUID()), /has a live worker lease/);
   // The same close through the same clocked path on an unleased twin closes: the refusal is the lease
   // itself, judged live at the fixture's now, not the handed clock refusing everything.
   const free = await owed({ evidence: [{ ...reading, id: randomUUID() }] });
-  const closed = await closeWork(clockedServices({ closeSupersededPullRequest: async () => 'closed' as const }), coordinator, free.id, { kind: 'delivered-observation', reason: 'read', ref: serving }, randomUUID()) as Work;
+  const closed = await closeWork(clockedServices(), coordinator, free.id, { kind: 'delivered-observation', reason: 'read', ref: serving }, randomUUID()) as Work;
   assert.deepEqual([closed.stage, closed.closure?.kind, isClosed(closed)], ['done', 'delivered-observation', true]);
 });
