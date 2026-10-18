@@ -198,6 +198,47 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   });
 }
 
+// GY-1979: the four item states on every moving row, and the one release line in the top bar —
+// at desktop and phone width, from the same board API the Work page renders.
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
+  test(`the four-state bar and the release line show on ${viewport.name}`, async ({ page }) => {
+    const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60000).toISOString();
+    const state = (key: string, stage: string, submission: boolean, minutesAgo: number, lease = false) => ({ ...work, id: `fixture-${key.toLowerCase()}`, key, stage, stageEnteredAt: at(minutesAgo), submission: submission ? { epoch: 1 } : null, candidate: null,
+      ...(lease ? { lease: { owner: 'worker-1', epoch: 1, expiresAt: at(30) } } : {}) });
+    const items = [state('GY-2', 'ready', false, 45), state('GY-3', 'build', false, 30, true), state('GY-4', 'review', true, 890)];
+    const status = { actor: { id: 'fixture', role: 'admin', sessionKind: 'human' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [],
+      production: { observedAt: at(1), serving: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345a6b', error: null, pending: ['GY-9'], incidents: [] } };
+    await page.setViewportSize(viewport);
+    await page.route('**/api/**', async route => {
+      if (route.request().headers().authorization !== 'Bearer browser-fixture') return route.fulfill({ status: 401, json: { error: 'Rejected' } });
+      const path = new URL(route.request().url()).pathname;
+      if (path.endsWith('/status')) return route.fulfill({ json: status });
+      if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: items, now: new Date().toISOString() } });
+      if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(items as any, Date.now(), status) });
+      return route.fulfill({ json: [] });
+    });
+    await page.goto('/'); await login(page);
+    // The release line: the served commit, its health, and the merged change it does not carry yet.
+    const release = page.locator('[data-release-line="serving"]');
+    await expect(release).toHaveAttribute('data-healthy', 'true');
+    await expect(release).toHaveAttribute('data-pending', '1');
+    await expect(release).toContainText('Serving a1b2c3d4');
+    await expect(release).toContainText('healthy');
+    await expect(release).toContainText('1 merged change not carried yet');
+    // The four states, in order, over the Moving rows; each row shows its own current state.
+    await expect(page.locator('[data-group-section="moving"] .work-row')).toHaveCount(2);
+    await expect(page.locator('.step-name')).toHaveText(['Todo', 'Doing', 'Checking', 'Done']);
+    await expect(row(page, 'GY-3').locator('.step-seg[data-step="doing"][data-state="current"]')).toHaveCount(1);
+    await expect(row(page, 'GY-4').locator('.step-seg[data-step="checking"][data-state="current"]')).toHaveCount(1);
+    await expect(row(page, 'GY-4')).toContainText('Checking ·');
+    // The todo item is not on the moving rows: it waits in Up next, off the step track.
+    await expect(row(page, 'GY-2').locator('.steps-track')).toHaveCount(0);
+    // Nothing clips at this width: the bar fits its row and the line wraps within the page.
+    const clipped = await page.locator('.steps-track, .release-line').evaluateAll(nodes => nodes.map(element => element.scrollWidth > element.clientWidth + 1));
+    expect(clipped).not.toContain(true);
+  });
+}
+
 // GY-108: the board never said for how long, so an item waiting forty seconds looked exactly
 // like one waiting fifty minutes. Every card now carries the time it has held its current status
 // and says, in red and in words, when that is past the operator's thirty-minute threshold.

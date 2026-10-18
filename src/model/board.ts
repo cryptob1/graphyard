@@ -1,15 +1,14 @@
 import { loopObservation, observationWindowHold, type Work } from './work.js';
 import { isClosed } from './closure.js';
-import { deliveryState } from './delivery.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
 import { humanAsk } from './human-ask.js';
 import { scopeRefusalBlocker } from './scope.js';
 import { scopeAskCommand, type RoutedScopeDecision } from './scope-provenance.js';
-import { deliveryOutcome, shortShas } from './format.js';
+import { shortShas } from './format.js';
 import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { blockerSummary, phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
 import { prSteps, stepSince } from './pr-steps.js';
-import { leftFlowAt, noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
+import { noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
 import { stalledCards } from './actionless.js';
 import { resourceConflicts } from '../coordination.js';
 import { blockerCounts, blockerView, routineBlocker, type BlockerView } from './blocker-class.js';
@@ -20,20 +19,16 @@ import { blockerCounts, blockerView, routineBlocker, type BlockerView } from './
  * classification: the server serves it at `GET /api/board`, the Work page renders what that
  * returns, and `master status` lists from it what the master owes, so the operator's view and an
  * agent's cannot disagree. Pure over the work, the clock, the human-only rows and the release
- * view — no I/O and nothing the browser bundle cannot load. Delivered work is `shipped`
- * (`leftFlowAt`): a per-item deployment record is written only for policies that ask for a
- * post-deployment check, so its absence never holds work back. Merged work is moving at Deploy
- * while its check is outstanding or while the production watch observes that production does not
- * serve it yet (src/model/release.ts), and blocked when the check or the deployment failed. Within
- * Shipped, an item is live only once the release is observed serving it (`servedAt`, under the
- * configured production environment); until then it reads "Merged" and is not counted as shipped
- * this week. Closed work is in none.
+ * view — no I/O and nothing the browser bundle cannot load. Only the four states Todo, Doing and
+ * Checking are on the board (GY-1979): a merged item is Done and leaves it — the top bar's one
+ * release line names the commit production serves, its health and the merged changes it does not
+ * carry yet (src/model/release.ts) — and closed work is in none.
  *
  * - `needs-you`: waits on a decision only the human operator may make (a parked item, or an
  *   approval no agent identity can give). Listed here and nowhere else — never also as Blocked.
  * - `blocked`: will not move until an agent fixes or decides something (a recorded blocker, a
  *   failing step nobody is moving, a conflict).
- * - `moving`: somebody is on it, from building to deploying.
+ * - `moving`: somebody is on it, from building to merging.
  * - `up-next`: released for work, waiting for a worker (or for the item it depends on).
  * - `backlog`: not released for work, so no clock runs.
  */
@@ -78,15 +73,13 @@ export function mergedAt(work: Work): number {
 const windowHeld = (work: Work, now: number) => phaseOf(work, now) === 'needs-worker' && !work.violations.length && !!observationWindowHold(work, new Date(now));
 
 /** The group of one item. `humanOnly` is the set from `humanOnlyIds`; `stalled` the ids nothing is moving. */
-export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set(), release: ReleaseView = noRelease): Group | null {
+export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set(), _release: ReleaseView = noRelease): Group | null {
   if (isClosed(work)) return null;
-  if (work.stage === 'done') {
-    // Shipped whether or not a per-item deployment record exists; only an outstanding
-    // post-deployment check, or production observed not serving it yet, keeps it at Deploy.
-    // Work merged before delivery records existed has nothing left to wait on.
-    if (!work.delivery || leftFlowAt(work, release)) return 'shipped';
-    return deliveryState(work) === 'delivered-with-failure' || release.failed.has(work.key) ? 'blocked' : 'moving';
-  }
+  // Merged work is Done (GY-1979): it has left the board, whichever delivery state it is in — the
+  // top bar's release line carries the commit production serves, its health and what it does not
+  // carry yet. It still counts as shipped this week only once the release is observed serving it
+  // (`shippedThisWeek`), and `leftFlowAt` stays the delivery record's own rule.
+  if (work.stage === 'done') return 'shipped';
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);
   if (phase === 'not-started') return 'backlog';
@@ -147,9 +140,9 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
     return dependency && work.ready ? { who: 'Nobody yet', does: plainReason(dependency, 'ready').text } : { who: 'Master agent', does: 'Release it for work when it is a priority' };
   }
   // Blocked means the step's own actor cannot clear it (a recorded blocker, a stall, a violation,
-  // a refusal no retry fixes, a failed check after deploying): the master agent acts next.
+  // a refusal no retry fixes): the master agent acts next.
   const routine = group === 'blocked' ? routineBlocker(work) : null; if (routine) return routine; // GY-1008: the loop's to clear
-  if (group === 'blocked') return { who: 'Master agent', does: release.failed.has(work.key) && work.stage === 'done' ? 'Find out why production has not deployed it, and record the cause' : 'Clear what blocks it, or hand the decision to an approver agent' };
+  if (group === 'blocked') return { who: 'Master agent', does: 'Clear what blocks it, or hand the decision to an approver agent' };
   if (group === 'up-next') {
     const held = upNextHold(work, all, now);
     return held ? { who: 'Nobody yet', does: held.text } : { who: 'Graphyard (assigns a builder)', does: 'Hands it to the next free builder agent' };
@@ -221,7 +214,6 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
   if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker)) return scopeAskCommand(work, now, scopeDecisions);
   if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
-  if (work.stage === 'done') return actor === 'master' ? `graphyard master verify-deployment ${key}` : null;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
   return null;
 }
@@ -240,8 +232,6 @@ export interface BoardItem {
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
   overdue: boolean;
-  /** GY-1845: a done row's outcome — the production state `deliveryOutcome` headlines ('Merged, awaiting deployment', 'Deployed, awaiting verification', 'Production verified' or 'Deployed with a failure', with the serving release when known), never the word Done, never Merged alone; absent on open rows, which have no outcome yet. */
-  outcome?: string;
   /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008); `summary` is the one plain sentence a Work page row shows for it (GY-1739), and `until` the instant a wait names. */ blocker?: BlockerView & { summary: string; until?: string };
 }
 export interface Board {
@@ -267,9 +257,8 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
     const view = blockerView(entry), wait = view && blockerSummary(entry.blocker!, now, entry, 'UTC'), blocker = view && wait && { ...view, summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
-    const outcome = entry.stage === 'done' && !isClosed(entry) ? deliveryOutcome(entry) : null; // GY-1845: a done row headlines its production state, never a bare merge.
     return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(outcome ? { outcome } : {}), ...(blocker ? { blocker } : {}) };
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,

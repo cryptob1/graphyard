@@ -2,29 +2,30 @@ import { isClosed, type Gate, type Work } from '../src/model';
 import { humanRequestBlocker, parkedOnHuman } from '../src/model/human-request';
 import { fileConflicts } from '../src/coordination';
 import { plainReason } from '../src/model/plain-status';
-import { prSteps, stepGate, stepIds, stepLabel, waitsOn, type StepId } from '../src/model/pr-steps';
+import { prSteps, stateIds, stateLabel, stepGate, waitsOn, type StateId } from '../src/model/pr-steps';
 import { noRelease, type ReleaseView } from '../src/model/release';
 
 /**
  * The item page below its first screen (GY-171), as plain data the page renders: what is left,
- * grouped by the pull-request step that owns it and naming who clears it; the latest activity in
- * plain words; and planned-file overlaps as one line. Every gate reason reaches the reader through
- * `plainReason`; the raw text stays under Technical details.
+ * grouped by the item state that owns it (GY-1979: Todo, Doing, Checking — Done has nothing left)
+ * and naming who clears it; the latest activity in plain words; and planned-file overlaps as one
+ * line. Every gate reason reaches the reader through `plainReason`; the raw text stays under
+ * Technical details.
  */
 
 export interface LeftGroup {
-  step: StepId;
+  state: StateId;
   label: string;
-  /** Who clears this step's requirements, as a role (the same roles the step bar names). */
+  /** Who clears this state's requirements, as a role (the same roles the state bar names). */
   who: string;
   lines: string[];
-  /** The step the bar shows as current; the other groups are later steps. */
+  /** The state the bar shows as current; the other groups are later states. */
   current: boolean;
 }
 
-/** The step whose requirement a gate states. The build gate is Build until the work is handed in, then Validate. */
-const stepOfGate = (gate: string, handedIn: boolean): StepId | undefined =>
-  ({ ready: 'build', build: handedIn ? 'validate' : 'build', test: 'test', review: 'review', acceptance: 'prove', merge: 'merge' } as Record<string, StepId>)[gate];
+/** The recorded step whose refusal a gate's lines answer, for the who-clears-it reading. */
+const stepOfGate = (gate: string, handedIn: boolean): keyof typeof stepGate | 'build' | undefined =>
+  ({ ready: handedIn ? 'validate' : 'build', build: handedIn ? 'validate' : 'build', test: 'test', review: 'review', acceptance: 'prove', merge: 'merge' } as Record<string, keyof typeof stepGate | 'build'>)[gate];
 
 /**
  * One gate's reasons in plain words, each once: a proof still owed is named by the proof. A parked
@@ -54,32 +55,36 @@ export function readyOwner(work: Work, gate: Gate): string | undefined {
 }
 
 /**
- * Every unmet requirement, one plain line each, grouped by step. The current step comes first —
- * its lines are the refusal of that step's own gate (Test before Review, unlike the evaluation
- * order), or, before the hand-in, whatever holds the build — then every later step in the order a
- * pull request travels. Merged work held at Deploy is left with what the release lacks; work closed
- * without merging has nothing left.
+ * Every unmet requirement, one plain line each, grouped by state. The current state comes first —
+ * its lines are the refusals that hold it there (all of Checking's folded gates at once: the test,
+ * review, proof and merge requirements, with the build gate's while it is not observed yet) — then
+ * every later state in the order the states travel. Merged work is Done and has nothing left; work
+ * closed without merging has nothing left.
  */
 export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRelease): LeftGroup[] {
   if (isClosed(work)) return [];
   const steps = prSteps(work, now, release);
-  if (!steps.current) return [];
-  if (steps.current === 'deploy') return [{ step: 'deploy', label: stepLabel.deploy, who: steps.who, lines: [`${steps.detail.replace(/^./, c => c.toUpperCase())}.`], current: true }];
+  if (!steps.current || steps.current === 'done') return [];
+  const handedIn = steps.current === 'checking';
   const unmet = work.gates.filter(gate => !gate.passed);
-  const own = steps.current !== 'build' ? work.gates.find(gate => gate.name === stepGate[steps.current!] && !gate.passed) : undefined;
-  const failing = own ?? unmet[0];
-  const handedIn = steps.current !== 'build';
-  const groups: LeftGroup[] = [{ step: steps.current, label: stepLabel[steps.current], who: (failing?.name === 'ready' ? readyOwner(work, failing) : undefined) ?? steps.who, lines: failing ? plainLines(failing, work, now) : [], current: true }];
+  const stateOf = (gate: Gate): StateId => gate.name === 'ready' && !handedIn ? 'todo' : 'checking';
+  const groups: LeftGroup[] = [];
   for (const gate of unmet) {
-    if (gate === failing) continue;
-    const step = stepOfGate(gate.name, handedIn);
-    if (!step) continue;
-    const group = groups.find(entry => entry.step === step);
-    if (group) { group.lines = [...new Set([...group.lines, ...plainLines(gate, work, now)])]; continue; }
-    groups.push({ step, label: stepLabel[step], who: (gate.name === 'ready' ? readyOwner(work, gate) : undefined) ?? waitsOn(step, gate, work, now, release).who, lines: plainLines(gate, work, now), current: false });
+    const state = stateOf(gate);
+    let group = groups.find(entry => entry.state === state);
+    if (!group) {
+      // The current state's who is the bar's own reading (the folded gates in travel order); the
+      // ready gate's refusal names its own clearer, and a later state's, its step's actor.
+      const who = state === 'todo' ? (readyOwner(work, gate) ?? waitsOn('build', undefined, work, now, release).who)
+        : state === steps.current ? steps.who
+          : waitsOn(stepOfGate(gate.name, handedIn) ?? 'merge', gate.name === 'ready' ? undefined : gate, work, now, release).who;
+      group = { state, label: stateLabel[state], who, lines: [], current: state === steps.current };
+      groups.push(group);
+    }
+    group.lines = [...new Set([...group.lines, ...plainLines(gate, work, now)])];
   }
-  const [current, ...later] = groups;
-  return [current, ...later.sort((a, b) => stepIds.indexOf(a.step) - stepIds.indexOf(b.step))].filter(group => group.lines.length > 0);
+  // The current state first, then the later ones in the order the states travel.
+  return groups.sort((a, b) => (a.current ? -1 : b.current ? 1 : stateIds.indexOf(a.state) - stateIds.indexOf(b.state)));
 }
 
 /**

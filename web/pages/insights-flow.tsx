@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { classify, shippedThisWeek } from '../groups';
 import { releaseView } from '../../src/model/release';
-import { prSteps, stepIds, stepLabel, type StepId } from '../../src/model/pr-steps';
+import { flowStep, stepIds, stepLabel, type StepId } from '../../src/model/pr-steps';
 import { positionsAt, replayFrames, replaySeconds, replayWindowMs, transitionsFromRows, type ReplayFrame } from '../flow-replay';
 import { formatDuration } from '../../src/model/duration';
 import { readStepRows } from '../step-moves';
@@ -190,17 +190,19 @@ export function WhereTimeGoes({ report }: { report: any }) {
 }
 
 /**
- * The items the Now view draws: every open item that has a current step. That is the Moving and
- * Blocked groups, and also rework waiting for a builder while its pull request is still open —
- * the Work page files it under Up next, but its candidate is in the flow, back at Build.
+ * The items the Now view draws: every open item that has a current recorded step. That is the
+ * Moving and Blocked groups, and also rework waiting for a builder while its candidate is still
+ * open — the Work page files it under Up next, but its candidate is in the recorded flow, back at
+ * Build. The Now view draws the recorded steps the step history keeps (Build to Deploy,
+ * src/model/pr-steps.ts `flowStep`), not the four states the Work page draws: one column per
+ * recorded step, so a dot stands exactly where the recorded history put it.
  */
 export function flowNow(work: Dashboard['work'], now: number, status: Dashboard['status']) {
   const release = releaseView(status);
   const { byGroup } = classify(work, now, status?.humanOnly, release);
-  // Merged work still waiting on its release is in Moving (or Blocked) at Deploy, like the Work page.
   const rework = byGroup['up-next'].filter(item => !!item.candidate);
   const inFlow = [...byGroup.moving, ...byGroup.blocked, ...rework];
-  const entries = inFlow.map(item => ({ item, steps: prSteps(item, now, release) })).filter(entry => entry.steps.current);
+  const entries = inFlow.map(item => ({ item, steps: flowStep(item, now, release) })).filter(entry => entry.steps.current);
   return { byGroup, release, entries, outside: { upNext: byGroup['up-next'].length - rework.length } };
 }
 
@@ -377,12 +379,15 @@ export function ReplaySection({ frames, truncated, initial, clock = browserClock
  * shipping pulse and flow analytics detail folded behind one Show details toggle. The detail is
  * mounted only once opened, so a visit that never opens it reads none of its reports.
  *
- * The Flow panel is build to live, one column per pull-request step.
+ * The Flow panel is the recorded flow, one column per recorded step (Build to Deploy, the steps
+ * the step history and the replay keep).
  *
- * - **Now** places every open item at its true step (`prSteps`, the same reading the Work page
- *   draws) straight from the work snapshot, before either read below answers. A dot is keyed by its
- *   item, so it moves only when that item's step changes. A column wraps its dots and shows at most
- *   `nowColumnLimit` before a '+N more' control, so a busy step never makes the panel tall (GY-705).
+ * - **Now** places every open item at its true recorded step (`flowStep`, the same reading the
+ *   recorded gate facts use), straight from the work snapshot, before either read below answers.
+ *   A dot is keyed by its item, so it moves only when that item's step changes. A column wraps its
+ *   dots and shows at most `nowColumnLimit` before a '+N more' control, so a busy step never makes
+ *   the panel tall (GY-705). The Work page's board and item bar show the four item states instead
+ *   (GY-1979); this panel is the recorded step history's own view.
  * - **Last 24 hours, replayed** plays the recorded step changes (web/flow-replay.ts) in
  *   twenty seconds, once the viewer presses its play button; a return to Build is rework and is drawn red.
  * - **Landed on main per day** and **where the time goes** are the flow report's own daily
