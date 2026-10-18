@@ -1,4 +1,4 @@
-// Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, tip-cleanup, browser, harness.
+// Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, browser, harness.
 import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -6,7 +6,6 @@ import { parseArgs } from 'node:util';
 import { agentOwner, listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { readReviewLedger, reviewCommand as launchReview } from '../../reviewer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
-import { cleanupTipRefs } from '../../tip-cleanup.js';
 import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
 import { browserFlows, listConfirmAccessFixtures, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
@@ -92,11 +91,6 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
     const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
     if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
     return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
-  }
-  // The one-time cleanup of the speculative-tip refs the removed merge queue left behind (GY-1236).
-  if (id === 'tip-cleanup') {
-    const { values } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: false });
-    return print(cleanupTipRefs(master, { apply: !!values.apply }));
   }
   if (id === 'browser') {
     const { values, positionals } = parseArgs({ args, options: { 'dry-run': { type: 'boolean' } }, allowPositionals: true });

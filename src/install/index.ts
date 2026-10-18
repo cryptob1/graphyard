@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
 import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentation.js';
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
-import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
+import { deploymentAdapters, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, hetznerAddress, publishedPort, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostDeployKeyFile, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { githubCli, type GitHubCli } from './github.js';
@@ -748,8 +748,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
   // production resource the deployment adapter would create, cost-bearing ones marked human.
   if (candidateModel) {
-    const ghReady = preflight.some(item => item.name === 'GitHub CLI' && item.ok);
-    const wiring = wiringActions(session.delivery.context, ghReady ? await observeReleaseWiring(gh, session.inputs.repository) : null);
+    const wiring = wiringActions(session.delivery.context);
     const environments = session.delivery.adapter.plan(session.delivery.context);
     // Observation-only reads the release refs and creates none: a missing one is held, not created.
     if (observeOnly) actions.push(...wiring.map(action => action.state === 'satisfied' ? action : held(action, action.id === 'release.branches' ? 'missing release refs are not created' : 'missing GitHub environments are not created')),
@@ -1087,14 +1086,13 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const deployKey = observeOnly || context.host ? null : await ensure(session.directory, session.inputs.repository, gh);
   if (deployKey) log(`Deploy key ${deployKey} is registered read-write on ${session.inputs.repository} for the merge writer`);
 
-  // The release pipeline's free wiring, then the adapter's environments: paid ones only with
-  // --create-environments, every other one left pending with its exact command.
+  // The adapter's environments: paid ones only with --create-environments, every other one left
+  // pending with its exact command, beside the free wiring the operator runs once.
   const release: InstallSummary['release'] = { mode: session.delivery.policy.mode, adapter: session.delivery.policy.deploy.adapter, created: [], pending: [] };
   if (release.mode === 'release-candidate' && !observeOnly) {
-    release.created.push(...await applyWiring(gh, session.delivery.context));
     const provisioned = await session.delivery.adapter.provision(session.delivery.context, { createPaid: !!session.inputs.createEnvironments });
     release.created.push(...provisioned.created);
-    release.pending = provisioned.pending.map(action => ({ id: action.id, ...(action.command ? { command: action.command } : {}), ...(action.human ? { human: action.human } : {}) }));
+    release.pending = [...wiringActions(session.delivery.context), ...provisioned.pending].map(action => ({ id: action.id, ...(action.command ? { command: action.command } : {}), ...(action.human ? { human: action.human } : {}) }));
   }
   const releaseCreated = [...new Set([...(record.release?.created ?? []), ...release.created.filter(id => !id.startsWith('release.branches') && !id.startsWith('release.github'))])];
   record = { ...record, release: { adapter: release.adapter, created: releaseCreated } };

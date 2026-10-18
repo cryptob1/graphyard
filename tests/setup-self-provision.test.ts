@@ -306,7 +306,7 @@ function releaseFilingHost(options: { agents?: any[]; secretUpdatedAt?: string |
   }) as unknown as typeof fetch;
   const gh: NonNullable<ReleaseFilingDeps['gh']> = async (args, input) => {
     ghCalls.push({ args, ...(input === undefined ? {} : { input }) });
-    if (args[0] === 'api') return secret ? { code: 0, stdout: JSON.stringify({ name: 'GRAPHYARD_RELEASE_TOKEN', created_at: secret, updated_at: secret }), stderr: '' } : { code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' };
+    if (args[0] === 'secret' && args[1] === 'list') return { code: 0, stdout: JSON.stringify(secret ? [{ name: 'GRAPHYARD_RELEASE_TOKEN', updatedAt: secret }] : []), stderr: '' };
     if (args[0] === 'secret' && args[1] === 'set') { if (options.setFails) return { code: 1, stdout: '', stderr: 'HTTP 403: Resource not accessible by personal access token' }; secret = options.storeUpdatedAt ?? '2026-10-11T06:31:00.000Z'; return { code: 0, stdout: '', stderr: '' }; }
     return { code: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` };
   };
@@ -325,14 +325,14 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   assert.equal(planned.state, 'planned');
   assert.match(planned.detail, /graphyard master setup --apply would issue graphyard-release-follow-up holding only intent:create over cryptob1\/graphyard and store its token as the uat GRAPHYARD_RELEASE_TOKEN \(the one stored 2026-10-05T04:08:40Z predates the identity\)/);
   assert.deepEqual(host.planeCalls.map(call => call.method), ['GET'], 'a plan reads and writes nothing');
-  assert.deepEqual(host.ghCalls.map(call => call.args[0]), ['api']);
+  assert.deepEqual(host.ghCalls.map(call => call.args.slice(0, 2).join(' ')), ['secret list']);
   const applied = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
   assert.equal(applied.state, 'provisioned', applied.detail);
   assert.match(applied.detail, /provisioned graphyard-release-follow-up \(intent:create over cryptob1\/graphyard\) and stored its token as the uat GRAPHYARD_RELEASE_TOKEN of cryptob1\/graphyard through gh/);
   const setup = host.planeCalls.find(call => call.path === 'operator-agents' && call.method === 'POST')!;
   assert.deepEqual([setup.body.id, setup.body.displayName, setup.body.capabilities, setup.body.scope, setup.body.token], ['graphyard-release-follow-up', 'Release follow-up', ['intent:create'], filingScope, 'b'.repeat(64)]);
   assert.match(setup.body.reason, /^A failed release candidate files its follow-up\. GY-1692/);
-  const stored = host.ghCalls.find(call => call.args[0] === 'secret')!;
+  const stored = host.ghCalls.find(call => call.args[1] === 'set')!;
   assert.deepEqual(stored.args, ['secret', 'set', 'GRAPHYARD_RELEASE_TOKEN', '--repo', 'cryptob1/graphyard', '--env', 'uat']);
   assert.equal(stored.input, 'b'.repeat(64), 'the token goes to gh over standard input, never as an argument');
   assert.ok(!JSON.stringify(applied).includes('b'.repeat(64)) && !JSON.stringify(host.audits).includes('b'.repeat(64)), 'neither the report nor the audit carries the token');
@@ -343,7 +343,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   const current = await provisionReleaseFiling(filingMaster, { apply: true }, host.deps);
   assert.equal(current.state, 'current', current.detail);
   assert.match(current.detail, /is the credential the master stored/);
-  assert.equal(host.ghCalls.filter(call => call.args[0] === 'secret').length, 1, 'nothing is stored again');
+  assert.equal(host.ghCalls.filter(call => call.args[1] === 'set').length, 1, 'nothing is stored again');
 });
 
 test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692): a secret older than the identity\'s credential is rotated with a transition, a broader identity is narrowed, a failed store is retried by the next run, and a host without the admin credential names the administrator\'s step in the setup attention, never a park', async () => {
@@ -367,7 +367,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   assert.match(narrowed.detail, /also holds intent:ready/);
   const configure = broad.planeCalls.find(call => call.path.endsWith('/configure'))!;
   assert.deepEqual([configure.body.expectedRevision, configure.body.capabilities, configure.body.scope], [2, ['intent:create'], filingScope]);
-  assert.equal(broad.ghCalls.some(call => call.args[0] === 'secret'), false);
+  assert.equal(broad.ghCalls.some(call => call.args[1] === 'set'), false);
   // gh refuses the store: the identity was rotated, so the next run sees the secret older than the credential and rotates again.
   const refusedStore = releaseFilingHost({ setFails: true, agents: [{ id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: filingScope, revision: 1, createdAt: '2026-10-10T00:00:00.000Z', lastMutation: { kind: 'setup', at: '2026-10-10T00:00:00.000Z' } }] });
   const failedStore = await provisionReleaseFiling(filingMaster, { apply: true }, refusedStore.deps);
@@ -386,7 +386,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   assert.deepEqual([reinstate.path, reinstate.body.id, reinstate.body.capabilities, reinstate.body.scope], ['operator-agents', 'graphyard-release-follow-up', ['intent:create'], filingScope], 'reissued through setup, never rotated');
   assert.match(reinstate.body.reason, /reinstated after the revocation of 2026-10-10T00:00:00.000Z: token leaked in a workflow log/);
   assert.deepEqual([revoked.agents[0].revokedAt, revoked.agents[0].revision, revoked.agents[0].fingerprints], [null, 4, ['old1old1old1old1', 'old2old2old2old2', fingerprintOf('b'.repeat(64))]]);
-  assert.equal(revoked.ghCalls.filter(call => call.args[0] === 'secret').length, 1);
+  assert.equal(revoked.ghCalls.filter(call => call.args[1] === 'set').length, 1);
   assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, revoked.deps)).state, 'current');
   // A credential the plane refuses is a failure the master owns.
   const notAdmin = releaseFilingHost({ admin: 'worker-token-' + 'w'.repeat(32) });
@@ -469,7 +469,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
   assert.equal(rotated.state, 'rotated', rotated.detail);
   assert.equal(host.planeCalls.filter(call => call.path.endsWith('/configure')).length, 1, 'the identity is narrowed once');
   assert.equal((await provisionReleaseFiling(filingMaster, { apply: true }, host.deps)).state, 'current');
-  assert.equal(host.ghCalls.filter(call => call.args[0] === 'secret').length, 1, 'the secret is stored once, by the rotation that succeeded');
+  assert.equal(host.ghCalls.filter(call => call.args[1] === 'set').length, 1, 'the secret is stored once, by the rotation that succeeded');
 
   // A document kept before credentialIssuedAt was recorded: its last mutation bounds the issue from above, so a
   // configure after an unseen rotation still rotates once more, and a secret newer than every mutation is current.

@@ -1033,7 +1033,7 @@ type Observed = { installation: { id: number; slug: string; account: string; acc
 const apiRun: ProtectionRun = (command, args, input) => execFileSync(command, args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
 
 function githubLogin(api: ProtectionRun) {
-  try { const user = JSON.parse(api('gh', ['api', 'user'])); return typeof user?.login === 'string' ? user.login : null; } catch { return null; }
+  try { return api('gh', ['config', 'get', 'user', '-h', 'github.com']).trim() || null; } catch { return null; }
 }
 /**
  * The control-plane App's installation and the permissions the App requests, as the App's own

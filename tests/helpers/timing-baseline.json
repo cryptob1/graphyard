@@ -745,7 +745,6 @@
     "tests/throughput-owner-standing.test.ts": 1727,
     "tests/timeline-backfill.test.ts": 2937,
     "tests/timing-stability.test.ts": 1171,
-    "tests/tip-branch-cleanup.test.ts": 300,
     "tests/tmp-cleanup.test.ts": 16049,
     "tests/tmp-leaks.test.ts": 7136,
     "tests/tmp-reclaim-package-store.test.ts": 1752,

@@ -46,6 +46,7 @@ const gone = [
   'src/main-guard.ts',
   'src/cli/onboard.ts',
   'src/model/import-plan.ts',
+  'src/tip-cleanup.ts',
 ] as const;
 
 const sha = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -66,12 +67,9 @@ test('unit:github-client-removed — the GitHub API client modules are gone, no 
     assert.doesNotMatch(text, /api\.github\.com/, `${file} must not call api.github.com`);
     assert.doesNotMatch(text, /\/app\/installations\/[^/\s]+\/access_tokens/, `${file} must not request a GitHub App installation token`);
     assert.doesNotMatch(text, /mintPushToken|installationToken\s*\(/, `${file} must not mint an App installation token`);
-    // Delegating the request to a subprocess (`gh api repos/R/pulls…`) still calls api.github.com:
-    // no pull request listing or detail, check run or commit status is read by any route.
-    assert.doesNotMatch(text, /repos\/[^'"`\n]*\/(?:check-runs|status\b|pulls(?:\?|\/\$\{[^}]+\}(?:['"`]|\/reviews)))/, `${file} must not read pull requests, their reviews, check runs or commit statuses through GitHub's API`);
-    assert.doesNotMatch(text, /['"]api['"],\s*['"]graphql['"]/, `${file} must not call GitHub's GraphQL API (review threads, thread resolution)`);
-    // Branch protection and rulesets are neither read nor written: install --restore-protection is gone with them.
-    assert.doesNotMatch(text, /['"`]repos\/[^'"`\n]*\/(?:branches\/[^'"`\n]*\/protection|rulesets)/, `${file} must not read or write branch protection or rulesets through GitHub's API`);
+    // Delegating the request to a subprocess still calls api.github.com: no file runs `gh api` (an
+    // argument list that opens with 'api'), whatever the endpoint, GraphQL included.
+    assert.doesNotMatch(text, /\[\s*['"]api['"]\s*,/, `${file} must not call GitHub's API through \`gh api\``);
   }
   const { installRequestFromArgs } = await import('../src/install/index.js');
   assert.throws(() => installRequestFromArgs(['--repo', 'owner/project', '--restore-protection', '--plan']), /Unknown option '--restore-protection'/);

@@ -42,7 +42,6 @@ export const masterCommands = defineCommands([
       '                                Plan, or set, each deployment variable derived from credentials',
       '                                saved on this host that the deployment lacks (the revert approver',
       '                                from the reviewer App); secrets piped, audited by fingerprint',
-      '  master tip-cleanup [--apply]  Delete the speculative-tip refs the removed merge queue left',
       '  master browser FLOW [--dry-run]',
       "                                Perform GitHub administration through the operator's browser",
       '                                profile: app-permissions or installation-accept;',

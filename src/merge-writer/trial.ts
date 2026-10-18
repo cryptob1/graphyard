@@ -48,7 +48,7 @@ const exitOf = (error: unknown) => error as { status?: number | null; stdout?: u
  * `refs/graphyard/trial/<head>`. Nothing under `refs/heads/*`, no remote and no checkout is
  * touched. A conflicting merge gives the conflicted paths and writes no commit. Retention: one
  * ref per tried head, overwritten by that head's next trial and never pruned here, so a recorded
- * verdict's mergeSha keeps resolving; a cleanup belongs beside tip-cleanup if the refs ever matter.
+ * verdict's mergeSha keeps resolving, and nothing deletes them.
  */
 export async function trialMerge(git: TrialGit, input: { head: string; baseTip: string }): Promise<TrialMergeResult> {
   const head = input.head.toLowerCase(), baseTip = input.baseTip.toLowerCase();
