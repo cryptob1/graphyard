@@ -8,7 +8,7 @@ import type { Work } from '../model/work.js';
 import type { Goal } from '../model/goal.js';
 import { pendingAtCut } from '../release-pending.js';
 import { installIdFor } from '../install/types.js';
-import { candidateSettings, mergeWriterSettings } from '../master/merge-writer-settings.js';
+import { candidateSettings, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { parseVerificationMap, type VerificationMap } from '../model/verification-maps.js';
 import { contractFile, loadContract, parseContract } from '../e2e/case.js';
 import { installServesDeliveries, type E2eReport } from '../e2e/runner.js';
@@ -224,7 +224,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       }
     },
     trial: options.trial ?? (async (revertSha, files) => {
-      const trial = await runMergeTrial({ root, base: options.base, mergeSha: revertSha, changedFiles: files, proofs: [], proofFiles: [], timeoutMs: writer.trialTimeoutMinutes * 60_000, key: 'candidate-revert', run, environment });
+      const trial = await runMergeTrial({ root, base: options.base, mergeSha: revertSha, changedFiles: files, proofs: [], proofFiles: [], timeoutMs: trialTimeoutMinutes * 60_000, key: 'candidate-revert', run, environment });
       return { build: trial.build, tests: trial.tests, durationMs: trial.durationMs };
     }),
     push: async (revertSha, baseTip) => {

@@ -54,9 +54,9 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   // version does not declare; they parse, ride every write, and are written back unchanged, so a
   // rollback or a held-CLI snapshot neither fails nor silently drops what the newer loop recorded.
   // Declared fields are still validated: a malformed one refuses the read as before.
-  const state = toleratedStateSchema().parse(JSON.parse(raw));
-  // GY-2010: the shadow gate's verdicts retired with the gate; a retired key is dropped, not carried.
-  delete (state as { shadow?: unknown }).shadow;
+  // GY-2087: the shadow gate's verdicts an older loop kept are dropped, not carried.
+  const { shadow: _shadow, ...stored } = JSON.parse(raw);
+  const state = toleratedStateSchema().parse(stored);
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
   return state;
 }
@@ -188,7 +188,6 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
   for (const clock of Object.values(state.clocks)) clock.key = cut(clock.key, 40);
   for (const sample of state.latency) sample.work = cut(sample.work, 40);
-  for (const subject of Object.values(state.silence.subjects)) Object.assign(subject, { work: cut(subject.work, 40), kind: cut(subject.kind, 40), detail: cut(subject.detail, 500) });
   for (const entry of state.scope) entry.work = cut(entry.work, 200);
   for (const orphan of Object.values(state.orphans)) Object.assign(orphan, { owner: cut(orphan.owner, 200), unit: cut(orphan.unit, 200) });
   for (const watch of Object.values(state.approvals)) {

@@ -9,7 +9,7 @@ import { pendingCaseChanges } from './master-status-case-changes.js';
 import { installationMerger } from '../executor.js';
 import { leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { loopCodeRoot } from '../daemon/checkout-state.js';
-import { baseFailureAttention, daemonSummary, loopAttention, readDaemonState } from '../master-daemon.js';
+import { baseFailureAttention, daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
 import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
@@ -36,7 +36,7 @@ import { hotspots } from './hotspots.js';
 import { stallAttention } from './stall-attention.js';
 import { coordinationStep } from './coordination-snapshot.js';
 import { buildPipelineStatus, reconcileLedgers } from './master-status-pipeline.js';
-import { stallStatusAttention } from '../daemon/stall-upstream.js';
+import { stallStatusAttention } from '../daemon/step-stalls.js';
 import { assembleReportedAttention, assembleStatusSections } from './master-status-sections.js';
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
@@ -95,8 +95,9 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention, ...loopMemoryAttention(cycling)];
   // Loop health first, standing stalls beside it (GY-1855): a stalled coordinator is why nothing else moves.
   const stallItems = stallStatusAttention(cursor, master.cliPath);
+  const watchdogItems = progressAttention(snapshot.work, cursor?.promotion ?? null, Date.parse(snapshot.now) || Date.now());
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, silence: cycling.silence, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling), ...baseFailureAttention(cycling.baseFailures, master.baseBranch)]
+    ? [...loopAttention({ liveness: cycling.liveness, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...watchdogItems, ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling), ...baseFailureAttention(cycling.baseFailures, master.baseBranch)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };

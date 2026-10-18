@@ -623,7 +623,6 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     assert.equal(state.deployment!.pending.length, 200, 'the newest 200 deliveries are kept');
     assert.equal(state.deployment!.pending.at(-1), 'GY-1249');
     assert.ok(state.deployment!.reason!.length <= 500 && state.deployment!.reason!.endsWith('…'));
-    assert.ok(Object.values(state.silence.subjects).every(subject => subject.detail.length <= 500), 'every silence subject fits its bound');
     // The failed observation keeps every delivery pending: the catch path is bounded too.
     observe = async () => { throw new Error(reason); };
     const again = await runCycle(master, state, deps, () => clock + 20_000);

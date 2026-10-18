@@ -44,7 +44,7 @@ const STATEMENTS: [string, RegExp][] = [
   ['the single merger', /The control plane is every install's only merge writer: nothing sets another, and old `policy\.merger\.set` events are never read/],
   ['the switch is done', /\*\*Switch\*\* `control-plane`: done, for every install/],
   ['the three weekly measures', /Weekly: defects reaching production \(escapes\), merge-queue wait, human touches/],
-  ['the deferred controls', /Deferred until one demands it: pre-merge review for medium risk, batched merge validation, a per-test flake ledger/],
+  ['the deferred controls', /Deferred until one demands it: pre-merge review for medium risk, a per-test flake ledger/],
 ];
 
 test('unit:delivery-redesign-doc-statements — docs/delivery-redesign.md opens with its page line, stays within 1,000 words, and states the one rule, the four flow steps, the removed and kept lists, the single merger, the four rollout stages, and the weekly measures', () => {

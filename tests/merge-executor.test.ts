@@ -11,7 +11,7 @@ import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type Daem
 import { daemonEffects } from '../src/daemon/effects.js';
 import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstParentHolds, mergeOne, mergeQueue, nextToMerge, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
-import { defaultDeployKeyFile, defaultMergeWriterRetrials, defaultTrialTimeoutMinutes, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
+import { defaultDeployKeyFile, defaultMergeWriterRetrials, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { deliveredReason, otherHeadRefusal, unheldShaRefusal, unintendedShaRefusal } from '../src/server/merge-record.js';
 import { mergeWriterApprover, mergeWriterTrialGround, reworkGround, trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
@@ -241,11 +241,10 @@ test('unit:executor-push-leased-deploy-key-only — the push is `git push origin
   const fetch = git.calls.find(call => call.args.includes('fetch'))!;
   assert.deepEqual(fetch.args, ['-C', '/coordinator', 'fetch', '--no-tags', 'origin', 'main'], 'only the base is fetched: the head is already in the shared object store');
   // The deploy key defaults to the install's, under ~/.config/graphyard/<install>/deploy-key, and `~/` is the home directory.
-  assert.deepEqual(mergeWriterSettings({}, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/.config/graphyard/owner-project/deploy-key', retrials: defaultMergeWriterRetrials, trialTimeoutMinutes: defaultTrialTimeoutMinutes });
+  assert.deepEqual(mergeWriterSettings({}, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/.config/graphyard/owner-project/deploy-key', retrials: defaultMergeWriterRetrials });
   assert.equal(defaultDeployKeyFile('owner-project', '/h'), '/h/.config/graphyard/owner-project/deploy-key');
-  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', retrials: 1, trialTimeoutMinutes: 45 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', retrials: 1, trialTimeoutMinutes: 45 });
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', retrials: 1 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', retrials: 1 });
   assert.throws(() => mergeWriterSettingsSchema.parse({ retrials: 11 }));
-  assert.throws(() => mergeWriterSettingsSchema.parse({ trialTimeoutMinutes: 121 }), 'a trial runs at most two hours');
   assert.throws(() => mergeWriterSettingsSchema.parse({ deployKey: '/k' }), /unrecognized/i);
   assert.equal(masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: '/k', retrials: 2 } } }).run.mergeWriter?.retrials, 2, 'run.mergeWriter is a master.json setting');
 });
@@ -296,7 +295,7 @@ function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => nu
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(world.now()), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.mergeWriter, ...(world.decide ? { decide: world.decide } : {}),
+    github: githubDouble, merge: githubDouble, mergeWriter: world.mergeWriter, ...(world.decide ? { decide: world.decide } : {}),
   } as unknown as DaemonEffects;
 }
 /** Reads over fake ports, switched by `merger`. */
@@ -306,7 +305,7 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   const work = [submitted(2, 5), submitted(1, 30)], now = () => start;
   const { metrics } = await runCycle(config, emptyDaemonState(config), effectsFor({ work: () => [], now, mergeWriter: null }), now);
   const steps = (metrics.timings?.steps ?? []).map(step => step.step);
-  assert.ok(steps.indexOf('merge writer') > steps.indexOf('merges') && steps.indexOf('merge writer') < steps.indexOf('deployment verification'), `the step runs right after the merge step: ${steps.join(', ')}`);
+  assert.ok(steps.indexOf('merge writer') === steps.indexOf('merges') + 1 && !steps.includes('shadow gate'), `the step runs right after the merge step: ${steps.join(', ')}`);
   const bare = emptyDaemonState(config);
   await runCycle(config, bare, effectsFor({ work: () => work, now, mergeWriter: null }), now);
   assert.deepEqual(bare.mergeWriter, emptyMergeWriterState());
@@ -322,8 +321,11 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   assert.equal(live.mergeWriter.lastMergeAt, iso(start));
   assert.ok(recorded.actions.some(action => action.state === 'done' && /^Merged GY-1 head/.test(action.detail)), JSON.stringify(recorded.actions.map(action => action.detail)));
   assert.deepEqual(on.events.slice(0, 4).map(event => event.kind), ['intent', 'trial', 'pushed', 'reconciled']);
+  assert.equal(live.mergeWriter.inFlight, null, 'the cycle that lands a merge starts no trial');
+  await runCycle(config, live, effects, now);
   assert.deepEqual([live.mergeWriter.queue.map(entry => entry.key), inFlightKey(live)], [['GY-2'], 'GY-2'], 'the delivered head leaves the queue and the next one is merged, one at a time');
   await mergeWriterIdle(live);
+  await runCycle(config, live, effects, now);
   await runCycle(config, live, effects, now);
   assert.deepEqual([live.mergeWriter.queue, live.mergeWriter.inFlight, on.recorded.filter(row => row.event.kind === 'reconciled').map(row => row.key)], [[], null, ['GY-1', 'GY-2']]);
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(live))).mergeWriter, live.mergeWriter, 'the state round-trips through the daemon state schema');
@@ -743,4 +745,10 @@ test('integration:executor-reconcile-after-crash — holds reads the whole first
   assert.ok(secondParents.length >= 2, 'the merged heads are second parents');
   for (const head of secondParents) assert.equal(await reads.holds(head), false, `${head.slice(0, 12)} is only a second parent`);
   assert.equal(await reads.holds('b'.repeat(40)), false);
+});
+
+test('unit:hotfix-merges-first — a head titled "Hotfix: …" is merged before older queued heads; among hotfixes and among the rest the oldest submission goes first', () => {
+  const old = submitted(1, 50), fix = submitted(2, 1, ['src/app.ts'], { title: 'Hotfix: unblock the queue' }), olderFix = submitted(3, 5, ['src/app.ts'], { title: 'hotfix: earlier one' }), plain = submitted(4, 20);
+  assert.deepEqual(mergeQueue([old, fix, olderFix, plain], {}, start).queue.map(entry => entry.key), ['GY-3', 'GY-2', 'GY-1', 'GY-4']);
+  assert.equal(nextToMerge([old, fix], {}, start)?.key, 'GY-2');
 });

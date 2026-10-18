@@ -146,7 +146,7 @@ test('unit:cycle-failure-backoff — consecutive failures wait longer each time 
     const summary = (entry: DaemonState, at: number) => daemonSummary(entry, at, 5, 'machine-a');
     assert.equal(summary(three, Date.parse(three.failures.last!.at)).failures.consecutive, 3);
     assert.equal(summary(three, Date.parse(three.failures.last!.at)).failures.last?.reason, 'The operation was aborted due to timeout');
-    const attention = (entry: DaemonState, at: number) => { const view = summary(entry, at); return loopAttention({ liveness: view.liveness, silence: view.silence, budget: view.budget, failures: view.failures }); };
+    const attention = (entry: DaemonState, at: number) => { const view = summary(entry, at); return loopAttention({ liveness: view.liveness, budget: view.budget, failures: view.failures }); };
     assert.deepEqual(attention(two, Date.parse(two.failures.last!.at)), [], 'two failures are a retry, not attention');
     const raised = attention(three, Date.parse(three.failures.last!.at));
     assert.equal(raised.length, 1);

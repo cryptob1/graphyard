@@ -1,9 +1,9 @@
-// Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, the unbound stall's master wake and five-minute backoff, and when an uncleared stall files upstream (GY-1855).
+// Concern: loop-step stall signatures (GY-1854) — the normalised signature of a failing call, the three-consecutive-cycle stall rule, the bound remedy applied once per run and verified, the five-minute backoff, and the standing-stall listing master status shows (GY-1980 moved it here when the upstream filer was deleted; the unbound stall's master wake lives in cycle-master.ts, its only consumer).
 import { createHash } from 'node:crypto';
 import { chmod, readdir, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { runChild } from '../child-runner.js';
-import type { ActionableSubject } from './metrics.js';
+import { type AttentionItem, agentOwner } from '../master/attention.js';
 import type { DaemonAction, DaemonState, StepStall, StepStallRemedyRecord } from './state.js';
 import { applyStepStallRemedy, stepStallRemedy, type BoundStepStallRemedy, type StepStallRemedyKind, type StepStallRemedyOutcome } from '../stall-remedies.js';
 import type { MasterConfig } from '../master.js';
@@ -20,8 +20,8 @@ import { localTransport } from '../install/transport.js';
 import { DispatchReservedError } from '../master/dispatch-reservation.js';
 import { setupAgentEnvironments } from '../master/environments.js';
 
-/** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1); past twice that an uncleared stall files its one upstream item (GY-1855 AC-2, stallFilesUpstream in ./stall-upstream.ts): woken at three, the master holds one stall-length more. */
-export const stallCycleBound = 3, stallUpstreamCycles = 2 * stallCycleBound;
+/** Consecutive cycles one signature must fail for the run to be recorded as one stall (GY-1854 AC-1). */
+export const stallCycleBound = 3;
 /**
  * A stalled call is attempted at most once per five minutes while its stall stands (GY-1854 AC-1):
  * `noteStepFailure` arms one window per attempt, failures inside it are that attempt still failing,
@@ -377,34 +377,24 @@ export async function remedyStalledSteps(state: DaemonState, runner: StepStallRe
 export const stallSubjectKey = (signature: string) => `stall:${createHash('sha256').update(signature).digest('hex').slice(0, 12)}`;
 
 /**
- * Whether a stall needs the master session: no remedy binds to it, or its one bound remedy was
- * refused or did not verify, or a verified remedy has stood through a second full run of failures —
- * otherwise the loop would back the call off indefinitely and nobody would be told.
+ * `master status`'s standing-stall listing (GY-1855 AC-2, moved here from the deleted upstream
+ * filer by GY-1980): one attention line per standing stall with its signature, count, remedy and
+ * owner. A stall files nothing by itself: the line shows the problem and names its master, as the
+ * progress watchdog's lines do.
  */
-export function stallNeedsMaster(stall: StepStall): boolean {
-  if (!stall.stalledAt) return false;
-  if (!stall.remedy) return true;
-  return stall.remedy.outcome === 'refused' || !stall.remedy.verified || stall.count >= 2 * stallCycleBound;
-}
-
-/**
- * The task an unbound stall wakes the master session with: the signature, the step, the stall's own
- * recording instant, and the remedy attempt when one was made (GY-1854 AC-1). Everything in it is
- * stable for as long as one run stands — the live count and last error stay on the cursor, where
- * `master status` reads them — so the digest machinery wakes the session once per run, never once
- * per cycle and never again per backed-off attempt of a standing stall.
- */
-export function stallWakeTask(stall: StepStall, cliPath: string): string {
-  const remedy = !stall.remedy ? ''
-    : stall.remedy.outcome === 'started' ? ` Its ${stall.remedy.kind} remedy was started once at ${stall.remedy.at} and never reported: ${stall.remedy.detail}`
-      : ` Its ${stall.remedy.kind} remedy was applied once at ${stall.remedy.at} and ${stall.remedy.outcome}${stall.remedy.verified ? ', verified' : ', unverified'}: ${stall.remedy.detail}`;
-  return `Loop-step stall: the ${stall.step} call failed with one signature on ${stallCycleBound} consecutive cycles and stands stalled since ${stall.stalledAt}.${remedy} Step: ${stall.step}. Signature: ${stall.signature}. The call is attempted at most once per five minutes while this stands. Run node ${cliPath} master status (daemon.stepStalls, subject ${stallSubjectKey(stall.signature)}) for the failing attempts so far, judge the cause, and clear it or file what does.`;
-}
-
-/** The stalls that need the master session, as master-wake subjects the digest machinery wakes once per changed task. */
-export function stallWakeSubjects(state: DaemonState, cliPath: string): ActionableSubject[] {
-  return Object.values(state.stepStalls).filter(stallNeedsMaster)
-    .map(stall => ({ key: stallSubjectKey(stall.signature), kind: 'wake' as const, work: null, detail: stallWakeTask(stall, cliPath) }));
+export function stallStatusAttention(state: DaemonState | null, cliPath: string): AttentionItem[] {
+  if (!state) return [];
+  return Object.values(state.stepStalls).filter(run => run.stalledAt).map(run => {
+    const subject = stallSubjectKey(run.signature);
+    const remedy = !run.remedy ? 'no remedy binds to it'
+      : run.remedy.outcome === 'started' ? `its ${run.remedy.kind} remedy was started at ${run.remedy.at} and never reported`
+        : `its ${run.remedy.kind} remedy was applied once at ${run.remedy.at} and ${run.remedy.outcome}${run.remedy.verified ? ', verified' : ', unverified'}`;
+    return {
+      subject,
+      text: `Loop-step stall: the ${run.step} call failed ${run.count} cycle(s) with one signature, standing since ${run.stalledAt}: ${run.signature}; ${remedy}. The stalled call is attempted at most once per five minutes while this stands.`,
+      ...agentOwner('master', `node ${cliPath} master status (daemon.stepStalls, subject ${subject}) names the failing attempts; judge the cause and clear it`),
+    };
+  });
 }
 
 /**
@@ -703,7 +693,7 @@ export function stallRemedyRunner(config: () => MasterConfig, state: () => Daemo
  * writer's `admit` answers false, so it starts no new merge while the window stands (a settled
  * flight is still recorded, replays and owed reworks still run); its `merger` read, made before
  * admission every cycle, is held as an effect call. Every other effect call — a top-level port,
- * or a method of a structured port (`mergeWriter.record`, `mainWatch.*`, `promotion.*`, …), named
+ * or a method of a structured port (`mainWatch.*`, `promotion.*`, …), named
  * `port.method` — is watched per invocation: its failure is noted with the resource its first
  * argument names (`noteCallFailure`, `callResource`), and once a stall holds that invocation, a
  * call of it inside the window answers the hold — thrown, or rejected when it failed as a promise —

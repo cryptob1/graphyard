@@ -79,7 +79,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['installation attention sources', installationSources],
     ['escalation triggers', escalationTriggers.map(escalationFaultKind)],
     ['failed loop actions', daemonActionKinds.map(daemonActionFaultKind)],
-    ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
+    ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
     ['master status builders', ['disk-pressure', 'resource-bound', 'docs-headroom', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'request-remedy', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless',
@@ -242,7 +242,7 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   assert.equal(faultClassOf('action:diagnosis'), 'unclassified');
   assert.ok(isFaultKind('action:fault') && isFaultKind('action:diagnosis'), 'still catalogued, under unclassified');
   // Every kind main's loop entry listed, but the two moved out; later additions to the entry are allowed.
-  const mainLoopKinds = ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped'];
+  const mainLoopKinds = ['loop-liveness', 'loop-cost', 'loop-failures', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped'];
   for (const kind of mainLoopKinds) assert.equal(faultClassOf(kind), 'loop', `${kind} stays loop`);
   assert.ok(!(faultCatalogue.loop as readonly string[]).some(kind => kind === 'action:fault' || kind === 'action:diagnosis'));
   // Three failed actions of the moved kinds, each its own run, reach no loop recurrence threshold.
@@ -889,13 +889,12 @@ test('unit:recurring-class-item — a starved reviewer or producer role reaches 
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'concurrency-starved').map(entry => entry.faultClass), ['capacity'], 'the starved role is a tracked capacity instance');
 });
 
-test('unit:recurring-class-item — the loop tracks its own cost, silence and delivery-budget lines', async () => {
+test('unit:recurring-class-item — the loop tracks its own cost and delivery-budget lines', async () => {
   const state = emptyDaemonState(config());
-  const lines = loopAttention({ liveness: { state: 'running', detail: 'ok', restart: 'restart' } as never, budget: { met: false, reasons: ['approval→merge p90 is 3h, over 1h'] } as never,
-    silence: { breached: true, budgetMs: 30 * 60_000, actionable: 2, longest: { work: 'GY-9', detail: 'GY-9 merge', idleMs: 45 * 60_000 } } as never });
-  assert.deepEqual(lines.map(line => line.kind).sort(), ['delivery-budget', 'loop-silence']);
+  const lines = loopAttention({ liveness: { state: 'running', detail: 'ok', restart: 'restart' } as never, budget: { met: false, reasons: ['approval→merge p90 is 3h, over 1h'] } as never });
+  assert.deepEqual(lines.map(line => line.kind).sort(), ['delivery-budget']);
   trackFaults(state.faults, cycleFaults(state, [], clock, { config: config(), loop: lines }), iso(0));
-  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]).sort(), [['delivery-budget', 'loop'], ['loop-silence', 'loop']]);
+  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]).sort(), [['delivery-budget', 'loop']]);
   // The running loop passes them itself: a latency budget it misses is a loop instance without any report read.
   const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }), faultClassPolicy: policy, persist: async () => {} } as unknown as DaemonEffects;
