@@ -1,11 +1,11 @@
 <!-- page: Operate Graphyard | 5 | loop, merges. -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest. `master guide` prints its role instructions, then this page.
+The master (`coordinator`) routes and administers GitHub unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people ([who decides](glossary.md#who-decides)); it decides the rest. `master guide` prints its role instructions, then this page; AGENTS.md carries the worker block.
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches; merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)). The deployment-verification step records each loop-owned observation item's due reading on the serving release (a pass closes it `delivered-observation`; a fail escalates, naming the measured values); `master reading GY-N pass|fail DETAIL` records one by hand. Live Confirm-access fixtures: [`master browser capture`](master-agent-reference.md#github-administration-through-the-browser), never a human. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, merges verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production`: main ahead of production.
+Keep cycling: `master status`; `master run` dispatches; merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)). The deployment-verification step records each loop-owned observation item's due reading on the serving release (a pass closes it `delivered-observation`; a fail escalates, naming the measured values); `master reading GY-N pass|fail DETAIL` records one by hand. Live Confirm-access fixtures: [`master browser capture`](master-agent-reference.md#github-administration-through-the-browser), never a human. `controlPlane.production`: main ahead of production.
 
 `master restart` (stalled loop) runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` (or pin) `master run`, else detached; never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). Loop sleeps `run.intervalSeconds` (≤30s actionable).
 
@@ -35,13 +35,13 @@ Review follow-ups fixed in-PR; Pi (`run.research`) triages follow-ups, faults.
 
 ## Automatic dispatch at submit
 
-Past the build gate (`autoDispatch`): a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`; github mode only), then a review once passed. **The loop launches each request within 30 seconds**, starting the reviewer (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json)). Reviewer launches await head's bot reviews (`run.awaitReviewers`) ≤`awaitReviewersMinutes` (8, 0 disables), skipping a bot under a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`, `dispatch.botReviewers`).
+Past the build gate (`autoDispatch`): a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`; github mode only), then a review once passed. **The loop launches each request within 30 seconds**, starting the reviewer (`run.reviewerProfile`) and one producer session per proof group on a `master producer add FILE` profile ([template](../examples/master/claude-producer.json); `.graphyard/reviews.json`, `.graphyard/producers.json`). Reviewer launches await head's bot reviews (`run.awaitReviewers`) ≤`awaitReviewersMinutes` (8, 0 disables), skipping a bot under a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`, `dispatch.botReviewers`).
 
 - **Concurrency is per role**: `concurrency` (1–20, default 1; above 1 each takes a name unique to its request; `run.reviewerProfile` and producer profiles default to 4 sessions) applies without a restart; lowering it drains first (`longestWaitMs`); starved minutes: `counts.concurrencyStarved`.
 - `pane_not_found` panes close. No request outlives its own token: one expired and unreported by Herdr settles `expired` (`dispatch.sessionReconcile.stuck` counts pending). Unanswered sessions relaunch, then `dispatch.abandoned`; exhausted producers raise `escalation:proof-exhausted`, then rework.
 - **Every role fails over on spent quota** or waits as one `capacity` line.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops; a stranded post-merge request is probed hourly and launches once the refusal's cause is gone.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops; a stranded post-merge request is probed hourly and launches once its cause is gone.
 
 ### Proofs must exercise their criterion
 
