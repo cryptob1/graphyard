@@ -379,7 +379,7 @@ export function mechanicalWorkerSection(repository: string, cliPath: string, wor
   const request = reviewId === null ? undefined : requests.find(entry => entry.key === work.key && entry.head === work.candidate?.sha && entry.reviewId === reviewId && entry.epoch < epoch);
   if (!request) return '';
   return `This attempt is a mechanical-fix round, not a rework of substance. ${mechanicalFixPrompt(repository, request)} `
-    + `Push the commit to the pull request's branch and submit it with node ${cliPath} complete ${work.key} ${epoch} ${request.pr}; unless the fixes are to documentation, add --no-docs "mechanical review fixes only; no documented behaviour changed". `;
+    + `Commit on the assigned branch and submit it with node ${cliPath} complete ${work.key} ${epoch} --head; unless the fixes are to documentation, add --no-docs "mechanical review fixes only; no documented behaviour changed". `;
 }
 
 /** A head as GitHub reports its commit: parents, changed files and time. */

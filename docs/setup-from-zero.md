@@ -12,11 +12,11 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-Only legacy `--merger github` needs a human (GitHub Mobile).
+No step needs a human.
 
 Hetzner waits (exit 3) for price approval: `--confirm-price`, `--max-monthly` or `--ssh-key`.
 
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key, merger setting (legacy: `github` only), master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity holding intent:create; neither present: exit 2, never the install's worker credential). The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers rebind (declared slots restart); foreign refused; the loop reports its CLI's checkout, never the managed repository's, self-upgrading only when managing its project (same directory, worktree, origin); else `upgrade:refused`; `up` upgrades. Its `.graphyard/held-cli` pin and snapshots live there: `master status` names, `up` lifts, units read.
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity holding intent:create; neither present: exit 2, never the install's worker credential). The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers rebind (declared slots restart); foreign refused; the loop reports its CLI's checkout, never the managed repository's, self-upgrading only when managing its project (same directory, worktree, origin); else `upgrade:refused`; `up` upgrades. Its `.graphyard/held-cli` pin and snapshots live there: `master status` names, `up` lifts, units read.
 
 ## The Setup page
 
@@ -24,9 +24,9 @@ A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`
 
 | Item | Button
 | --- | ---
-| GitHub App, reviewer App | **Create the GitHub App** opens `up`'s App page (legacy merger); [control-plane](delivery-redesign.md#the-merger-setting): Done, not required
+| GitHub App, reviewer App | Done, not required ([merger](delivery-redesign.md#the-merger))
 | Coding and reviewing accounts | **Connect an account** (API key or subscription sign-in)
-| Branch protection, coordinator running | none (automatic; control-plane: Done, not required)
+| Coordinator running | none (automatic)
 | Onboarding change: its wait | **Open the change**
 
 Once green, **Describe what you want built** records a goal.
@@ -61,11 +61,11 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ### Control-plane merger
 
-`up --merger control-plane` creates an ed25519 deploy key, registers it read-write on OWNER/REPO and sets the [merger](delivery-redesign.md#the-merger-setting); no App, no branch protection. **Verify:** `github-app`, `reviewer-app` and `branch-protection` print `PASS ... not required (merger: control-plane)`; `merger` passes (github: FAIL; this migrates it).
+`up` creates an ed25519 deploy key and registers it read-write on OWNER/REPO for the [merge writer](delivery-redesign.md#the-merger), which pushes through an SSH origin; no App, no branch protection. The loop re-registers a missing key each setup run. **Verify:** `github-app` and `reviewer-app` print `PASS ... not required (merger: control-plane)`.
 
 ## 4. Register the GitHub App
 
-Legacy merger only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`. Branch protection: `--apply` protects the base; rerun once `Graphyard / merge` requires it; **Verify:** `branch-protection`.
+Only `install --apply` without `--no-github-app`; never `up`. It serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
 
 ## 6. Onboard the checkout
 

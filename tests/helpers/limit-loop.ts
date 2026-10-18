@@ -102,7 +102,7 @@ export function limitLoop(plane: LimitPlane, host: Awaited<ReturnType<typeof lim
         return { epoch, path, base: execFileSync('git', ['-C', path, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() };
       },
       async (_root, _key, claimedEpoch) => { await plane.api(principalOf(profile), 'POST', `work/${work.id}/release`, { epoch: claimedEpoch }); },
-      5_000, snapshot.now, { start: world.bounds(), agents: () => world.herdr.list(), supervisor: () => false, stopSupervisor: () => true, readMergeWriter: world.readMergeWriter, credential: world.mint, probe: { quota: false, cacheMs: 0 } })
+      5_000, snapshot.now, { start: world.bounds(), agents: () => world.herdr.list(), supervisor: () => false, stopSupervisor: () => true, credential: world.mint, probe: { quota: false, cacheMs: 0 } })
       .catch((error: unknown) => { refused.push({ key: work.key, error: error instanceof Error ? error.message : String(error) }); throw error; });
     // The attempt's supervisor records its containment scope, as `graphyard watch` does once it runs.
     await plane.api(principalOf(profile), 'POST', `work/${work.id}/quarantine`, { epoch, settlementHash: createHash('sha256').update(settlementToken).digest('hex'), scope: { unit: `graphyard-watch-4242-${randomUUID()}.scope`, pid: 4242 } });

@@ -17,7 +17,6 @@ import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shel
 import { autonomyContract } from '../src/autonomy.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-01-01 and 2026-09-2x stamps are ledger and decision fixtures assembleEscalationContext copies verbatim; new Date() only stamps observations nothing compares with them.
 
 // GY-90: the control plane assembles an escalation's context from the project — the repository's
@@ -94,7 +93,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 27;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('escalation-context'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('context_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/context_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/context_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials, github);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

@@ -17,7 +17,6 @@ import { samePin } from '../src/server/decision-ledger.js';
 import { workFaults } from '../src/model/fault-classes.js';
 import { exemption } from '../src/intervention-exemptions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2000-01-01 lease expiry forces a lapse that stays lapsed, and the 2030-01-01 escalation `at` is compared by samePin only between two pins; Date.now() serves live items.
 
 // GY-75: a decision whose approval is refused on a revision race must never stay 'requested'
@@ -89,7 +88,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 42;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-lifecycle'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('decision_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/decision_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/decision_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

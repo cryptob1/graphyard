@@ -13,7 +13,6 @@ import { masterHarnessDrift } from './fleet.js';
 import { readSecretFromStdin } from '../context.js';
 import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.js';
 import { shadowGateSummary } from '../../daemon/cycle-shadow.js';
-import { shadowGateAttention } from '../../merge-writer/shadow.js';
 import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../../child-runner.js';
 import { installDirectory } from '../../install/secrets.js';
@@ -35,7 +34,7 @@ export const mainWatchUsage = 'Use master main-watch acknowledge SHA --reason TE
 export const recoverUsage = 'Use master recover [--to SHA] [--reason TEXT] --admin-token-stdin (the admin credential on stdin; the pin returns to the previous known-good SHA without --to)';
 
 /** What `graphyard master merge` answers: Graphyard runs no merge of its own. */
-export const githubMergesAnswer = 'GitHub merges: a pull request whose build, review and required checks pass on its head is merged by GitHub on its branch protection, and Graphyard records the delivery from the merged observation. There is no Graphyard merge to run.';
+export const mergeAnswer = 'The control plane merges: the loop\'s merge writer trial-merges each submitted head whose gates pass, runs its proofs and pushes it to the base branch. There is no merge to run by hand.';
 
 /** What `master recover` does outside this process; a test hands in its own so no real unit is touched. */
 export interface RecoverEffects { run: ChildRun; host: LoopSupervisorHost; restart: (unit: string) => Promise<unknown> }
@@ -67,8 +66,6 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
     const harness = await masterHarnessDrift(root, master);
     // GY-1519: each commit on the base branch the main watch cannot explain is one attention line, report-only.
-    // GY-1522 / GY-1560: each unexplained shadow-only-fail or shadow-missed is one attention line until explained;
-    // the ledger's standing list covers pairs the cursor may have dropped, and a later head of the same item does not.
     type Standing = { key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed'; mergeSha: string | null; build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; conflict?: string[]; at: string; explained: boolean; cause?: string | null };
     const shadowStatus = await masterApi('shadow-disagreements').then(
       (body: { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }) => body ?? {},
@@ -76,16 +73,10 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     );
     const explanations = shadowStatus.explanations ?? [];
     const standing = shadowStatus.disagreements ?? [];
-    const standingVerdicts = standing.map(entry => ({
-      key: entry.key, id: entry.key, head: entry.head, baseTip: entry.baseTip, mergeSha: entry.mergeSha, risk: 'normal' as const,
-      build: entry.build, tests: entry.tests, conflict: entry.conflict ?? [], durationMs: 0, at: entry.at, outcome: entry.outcome,
-      ...(entry.cause ? { cause: entry.cause } : {}),
-    }));
-    const shadowAttention = shadowGateAttention([...(state?.shadow ?? []), ...standingVerdicts], explanations, coordinator?.mergeWriter?.merger === 'control-plane' ? 'control-plane' : 'github');
     // GY-1603: a loop holding the lock outside this install's unit, which the unit's own run is refused on.
     const refusal = await readLockRefusal(root);
     const holder = refusal && state?.lock ? unsupervisedHolderAttention({ refusal, lock: state.lock, hostId: master.hostId, unit: await supervisingUnit(root, master, { host: effects.host }).catch(() => null) }) : null;
-    const added = [...(harness ? [harness] : []), ...(holder ? [holder] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch), ...shadowAttention];
+    const added = [...(harness ? [harness] : []), ...(holder ? [holder] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch)];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
     // `shadowGate`: outcome counts and trial times from the cursor; unexplained/explained counts from the ledger so eviction cannot hide a standing pair.
     // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
@@ -141,7 +132,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { claimBy }));
   }
   // GitHub merges (docs/delivery.md): there is no Graphyard merge to run, by hand or by the loop.
-  if (id === 'merge') return print({ merged: false, result: githubMergesAnswer });
+  if (id === 'merge') return print({ merged: false, result: mergeAnswer });
   // GY-1519: an admin acknowledges a commit the main watch cannot explain, lifting the promotion freeze on it.
   // The control plane records it with an admin credential only, so the command reads one from stdin
   // (`--admin-token-stdin`, as `master promote` does) and never offers the master's coordinator credential.

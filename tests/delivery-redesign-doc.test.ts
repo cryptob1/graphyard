@@ -7,7 +7,7 @@ import { budgetedPage, docsWordBudgetOf, parseRepositoryConfig } from '../src/mo
 
 /**
  * GY-1518: docs/delivery-redesign.md states the decided control-plane merge model — the one rule,
- * the four flow steps, what is removed and kept, the `merger` setting, the rollout and the weekly
+ * the four flow steps, what is removed and kept, the single merger, the rollout and the weekly
  * measures — inside 1,000 words; docs/README.md lists it under Operate Graphyard; and the budgeted
  * set stays at or under 15,950 words after docs/delivery.md and docs/github.md hand their
  * superseded github-mode prose to links, with every command and route they named still named.
@@ -41,14 +41,13 @@ const STATEMENTS: [string, RegExp][] = [
   ['step 4: one independent reviewer per item, blocking only for sensitive diffs', /^4\. .*One independent reviewer per item.*Sensitive diffs.*blocking review before step 2; the rest a non-blocking review after merge/m],
   ['the removed list', /^Removed: GitHub Apps, branch protection, required checks/m],
   ['the kept list', /^Kept: leases and epochs, the transactional ledger/m],
-  ['the merger setting and its two values', /`merger` selects the mode per install, `github` \(legacy, .*\) or `control-plane` \(default\)/],
-  ['the setting is an admin-only ledger event never read from graphyard.json', /admin-only ledger event, never read from graphyard\.json/],
-  ['the shadow-mode switch criterion', /Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained/],
+  ['the single merger', /The control plane is every install's only merge writer: nothing sets another, and old `policy\.merger\.set` events are never read/],
+  ['the switch is done', /\*\*Switch\*\* `control-plane`: done, for every install/],
   ['the three weekly measures', /Weekly: defects reaching production \(escapes\), merge-queue wait, human touches/],
   ['the deferred controls', /Deferred until one demands it: pre-merge review for medium risk, batched merge validation, a per-test flake ledger/],
 ];
 
-test('unit:delivery-redesign-doc-statements — docs/delivery-redesign.md opens with its page line, stays within 1,000 words, and states the one rule, the four flow steps, the removed and kept lists, the merger setting, the four rollout stages with the shadow switch criterion, and the weekly measures', () => {
+test('unit:delivery-redesign-doc-statements — docs/delivery-redesign.md opens with its page line, stays within 1,000 words, and states the one rule, the four flow steps, the removed and kept lists, the single merger, the four rollout stages, and the weekly measures', () => {
   const page = redesign();
   assert.ok(page.startsWith('<!-- page: Operate Graphyard | 6 | merge writer, rollout. -->\n'), 'the page opens with its index declaration');
   assert.ok(words(page) <= 1_000, `the page is within 1,000 words (${words(page)})`);
@@ -58,10 +57,10 @@ test('unit:delivery-redesign-doc-statements — docs/delivery-redesign.md opens 
   const rollout = section(page, 'Rollout').split('\n').filter(line => /^\d+\. /.test(line));
   assert.equal(rollout.length, 4, 'the rollout is exactly four numbered stages');
   assert.match(rollout[0], /Shadow mode/); assert.match(rollout[1], /`control-plane`/); assert.match(rollout[2], /Snake pilot/); assert.match(rollout[3], /delete the github-mode gate code/);
-  for (const heading of ['One rule', 'Flow', 'Merge writer', 'Removed and kept', 'The merger setting', 'Rollout', 'Measures']) section(page, heading);
+  for (const heading of ['One rule', 'Flow', 'Merge writer', 'Removed and kept', 'The merger', 'Rollout', 'Measures']) section(page, heading);
 });
 
-test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under Operate Graphyard, scripts/check-docs.mjs accepts the set, and tests/docs-budget.test.ts requires the setting\'s two values and the one rule of the page', () => {
+test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under Operate Graphyard, scripts/check-docs.mjs accepts the set, and tests/docs-budget.test.ts requires the single merger and the one rule of the page', () => {
   const page = redesign();
   const index = read('docs/README.md');
   const operate = section(index, 'Operate Graphyard');
@@ -73,7 +72,7 @@ test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under
   const entries = [...required.matchAll(/\['docs\/delivery-redesign\.md', \/(.+?)\/\]/g)].map(match => match[1]);
   assert.equal(entries.length, 2, `REQUIRED_STATEMENTS holds two entries for the page: ${entries.join(' | ')}`);
   for (const source of entries) assert.match(page, new RegExp(source), `the page states the required statement ${source}`);
-  assert.ok(entries.some(source => /github.*control-plane/.test(source)), 'one entry pins the setting\'s two values');
+  assert.ok(entries.some(source => /only merge writer/.test(source)), 'one entry pins the single merger');
   assert.ok(entries.some(source => /Only Graphyard writes to main/.test(source)), 'one entry pins the one rule');
 });
 
@@ -81,7 +80,7 @@ test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under
 const NAMED_BEFORE_TRIM = [
   '`release cut', '`release uat', '`release validate', '`release promote', '`release verify', '`release follow-up', '`release soak', '`release status', '`release GY-N EPOCH`',
   'graphyard master config promoteEveryMinutes', '`init --scan`', '`install --plan`', '`graphyard delivery sweep`', '`graphyard delivery`', '`graphyard doctor`', '`graphyard release`',
-  '`master tip-cleanup --apply`', '`graphyard app import', '`graphyard app list`', '`sync GY-N --push-via-control-plane', '`master protection --apply`', '`master browser protection`',
+  '`master tip-cleanup --apply`', '`graphyard app import', '`graphyard app list`', '`sync GY-N --push-via-control-plane',
   '`master browser app-permissions`', '`master browser installation-accept`', '`master reviewer setup`', '`github-setup --update-permissions', 'github-setup URL --reviewer claude', '`graphyard reviewpolicy',
   '`POST /api/delivery/lease`', '`POST /api/delivery/build`', '`POST /api/delivery/release`', '`POST /api/delivery/approve`', '`POST /api/delivery/observe`', '`POST /api/delivery/notify`',
   '`POST /api/validation/result`', '`GET /api/analytics/attribution`', '`POST /api/work/:id/sync-push`',

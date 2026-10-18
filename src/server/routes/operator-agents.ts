@@ -1,12 +1,11 @@
 import { demand } from '../../model.js';
 import { DirectMerges } from '../../direct-merge.js';
-import { MergerSettings } from '../../merger-mode.js';
+import { mergeWriterStatus } from '../../merger-mode.js';
 import { CoordinatorRecovery } from '../../coordinator-recovery.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
 import { humanSignIn } from '../auth.js';
 
 const directMerges = (services: Services) => new DirectMerges(services.engine.store, () => services.engine.directMergeEnvironment);
-const mergerSettings = (services: Services) => new MergerSettings(services.engine.store);
 
 /** Scoped operator automation identities: listing, setup, and credential lifecycle; and the admin-only direct-merge mode. */
 export const operatorAgentRoutes = defineRoutes('operator-agents', [
@@ -36,9 +35,8 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
   // Direct-merge mode (direct-merge.ts): read by the master and dashboard, set and cleared with an admin credential only.
   { method: 'GET', path: '/api/direct-merges', handle: ({ actor, services }) => directMerges(services).status(actor) },
   { method: 'POST', path: /^\/api\/direct-merges\/(on|off)$/, handle: async (context, [action]) => directMerges(context.services).change(context.actor, action as 'on' | 'off', await parseJson(context), context.idempotencyKey()) },
-  // The merger setting (merger-mode.ts): read like direct-merge mode, set with an admin credential only.
-  { method: 'GET', path: '/api/merger', handle: ({ actor, services }) => mergerSettings(services).status(actor) },
-  { method: 'POST', path: '/api/merger', handle: async context => mergerSettings(context.services).change(context.actor, await parseJson(context), context.idempotencyKey()) },
+  // The merger (merger-mode.ts): always the control plane; read-only, so nothing can set another.
+  { method: 'GET', path: '/api/merger', handle: async () => ({ ...mergeWriterStatus, mode: mergeWriterStatus.merger }) },
   // GY-1529: the known-good coordinator's recovery, recorded with an admin credential only.
   { method: 'POST', path: '/api/coordinator/recovered', handle: async context => new CoordinatorRecovery(context.services.engine.store).record(context.actor, await parseJson(context), context.idempotencyKey()) },
   // The operator's own sign-in link (GY-738): only their configured admin credential asks for one.

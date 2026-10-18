@@ -14,7 +14,6 @@ import { evaluateLandability, landabilityRefusals } from '../src/model/landabili
 import { reviewNeed } from '../src/model/dispatch.js';
 import { producerGroupDecisions } from '../src/model/mechanical-proofs.js';
 import type { Observation, Work } from '../src/model/work.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-883: risk lanes. The ceremony an item runs is decided by the risk of what it changes: low
 // lands with its required CI checks green and one approving review — the producer-run proofs and
@@ -214,7 +213,7 @@ async function startLanes() {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 883;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('risk-lanes'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('lanes_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/lanes_test`); await store.init(); await recordLegacyMerger(store);
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/lanes_test`); await store.init();
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };

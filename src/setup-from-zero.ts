@@ -2,11 +2,10 @@ import { access, lstat, readFile, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
-import { protectionPlan, protectionRun, readProtection, type ProtectionRun } from './protection.js';
 import { checkAgentEnvironment, discoverAgentEnvironments } from './master/environments.js';
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
-import { controlPlaneMergerLine, legacyMergerReason, mergerMigrationCommand, mergerNotRequired, statusControlPlaneMerger, statusSupervised } from './model/setup-checklist.js';
+import { mergerNotRequired } from './model/setup-checklist.js';
 import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
 import type { LoopCodeReading } from './repository-setup.js';
 
@@ -19,11 +18,9 @@ export const setupSteps = {
   install: 'docs/setup-from-zero.md step 3 (install the control plane)',
   app: 'docs/setup-from-zero.md step 4 (register the GitHub App)',
   reviewer: 'docs/setup-from-zero.md step 4 (reviewer and revert-approver Apps)',
-  protection: 'docs/setup-from-zero.md step 4 (branch protection)',
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
   releaseFiling: 'docs/delivery.md#release-filing-credential',
-  merger: `run ${mergerMigrationCommand} (docs/setup-from-zero.md step 4)`,
   loopCode: 'rerun graphyard up --agent from this checkout (docs/setup-from-zero.md step 10, start the master)',
 } as const;
 
@@ -42,8 +39,6 @@ export interface SetupFromZeroInput {
   masterCredential?: string | null;
   /** Where the agent environments live (`~/.coding_agents` unless GRAPHYARD_AGENT_ENVIRONMENTS). */
   environments: string;
-  /** `gh` for the branch-protection read; tests pass a fixture. */
-  github?: ProtectionRun;
   /** Probes that the worker confinement can write PATHS; null when it can, else the reason. */
   sandbox?: (paths: string[]) => string | null;
   /** GY-1614: the `/api/status` answer to GRAPHYARD_RELEASE_TOKEN, or the failure it met; read from the plane when unset here. */
@@ -154,34 +149,6 @@ async function sandboxCheck(root: string, probe: (paths: string[]) => string | n
 }
 
 /**
- * The reviewer App is bound either on the server (GRAPHYARD_REVIEWER_APPS, for agent review
- * policies) or to the master (`master reviewer setup`/`bind`, recorded in .graphyard/master.json
- * with its 0600 credential outside the repository); either is a separate identity that can review.
- */
-async function reviewerCheck(root: string, status: any): Promise<SetupCheck> {
-  const check = (pass: boolean, detail: string): SetupCheck => ({ id: 'reviewer-app', status: pass ? 'pass' : 'fail', detail, step: setupSteps.reviewer });
-  const served = Array.isArray(status?.reviewerApps) ? status.reviewerApps : [];
-  if (served.length) return check(true, `GRAPHYARD_REVIEWER_APPS names ${served.map((app: any) => `${app.id} (App ${app.appId})`).join(', ')}`);
-  const bound = (await readJson(resolve(root, '.graphyard/master.json')))?.reviewer;
-  if (!bound?.credentialFile) return check(false, 'no reviewer App: GRAPHYARD_REVIEWER_APPS is empty and .graphyard/master.json binds no reviewer');
-  const info = await lstat(bound.credentialFile).catch(() => null);
-  if (!info?.isFile()) return check(false, `the bound reviewer App ${bound.slug ?? bound.appId}'s credential ${bound.credentialFile} is missing`);
-  if (info.mode & 0o077) return check(false, `the bound reviewer App's credential ${bound.credentialFile} has mode 0${(info.mode & 0o777).toString(8)}; it must be 0600`);
-  return check(true, `reviewer App ${bound.slug ?? ''} (App ${bound.appId}) is bound to the master`);
-}
-
-function protectionCheck(status: any, github: ProtectionRun): SetupCheck {
-  const check = (pass: boolean, detail: string): SetupCheck => ({ id: 'branch-protection', status: pass ? 'pass' : 'fail', detail, step: setupSteps.protection });
-  const repository = status?.githubRepository?.fullName ?? status?.githubRepository, baseBranch = status?.baseBranch ?? 'main', githubAppId = status?.githubAppId;
-  if (!repository || !githubAppId) return check(false, 'depends on the GitHub App: the server reports no bound App');
-  let current;
-  try { current = readProtection({ repository, baseBranch }, github); } catch (error: any) { return check(false, `${repository} ${baseBranch} protection is unreadable (none, or gh is not a repository admin): ${String(error.message).split('\n')[0]}`); }
-  const plan = protectionPlan(current, { repository, baseBranch, githubAppId }, [], undefined, []);
-  const gaps = [...plan.blockers, ...(plan.landableCheck ? [] : ['graphyard/landable is not a required check'])];
-  return check(!gaps.length, gaps.length ? gaps.join('; ') : `${baseBranch} requires Graphyard / merge and graphyard/landable from App ${githubAppId}`);
-}
-
-/**
  * GY-1614: whether the control plane would admit the follow-up a failed release candidate files
  * with GRAPHYARD_RELEASE_TOKEN, judged from the principal that token authenticates as, and whether
  * that principal holds more than the filing identity's `intent:create`.
@@ -234,28 +201,14 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push({ id: 'control-plane', status: status ? 'pass' : 'fail', step: setupSteps.install,
     detail: status ? `answered as role ${status.actor?.role ?? 'unknown'}` : `${input.reachable ? `reachable, credential ${credential}` : 'not reachable'}: ${input.failure ?? 'no answer'}` });
   lines.push(await credentialsCheck(input.root, env, input.masterCredential));
-  if (statusControlPlaneMerger(status)) {
-    // GY-1553: under the control-plane merger no App, reviewer App or branch protection is needed, so
-    // the three lines pass as not required, in the same words the Setup checklist uses.
-    for (const [id, step] of [['github-app', setupSteps.app], ['reviewer-app', setupSteps.reviewer], ['branch-protection', setupSteps.protection]] as const) lines.push({ id, status: 'pass', detail: mergerNotRequired, step });
-  } else {
-    const missing = status?.appPermissions?.missing ?? [];
-    const appBound = !!status?.github, verified = !!status?.appPermissions?.verifiedAt;
-    lines.push({ id: 'github-app', status: appBound && verified && !missing.length ? 'pass' : 'fail', step: setupSteps.app,
-      detail: !status ? 'depends on the control plane' : !appBound ? 'the server reports no bound GitHub App' : !verified ? 'the App-permission preflight has not run' : missing.length ? `missing permissions: ${missing.map((entry: any) => `${entry.permission} ${entry.required}`).join(', ')}` : `App ${status.githubAppId} is bound with every permission the plan needs` });
-    lines.push(await reviewerCheck(input.root, status));
-    lines.push(status ? protectionCheck(status, input.github ?? protectionRun) : { id: 'branch-protection', status: 'fail', detail: 'depends on the control plane', step: setupSteps.protection });
-  }
+  // GY-1553: the control plane is the merge writer, so no App or reviewer App is needed: both lines
+  // pass as not required, in the same words the Setup checklist uses.
+  for (const [id, step] of [['github-app', setupSteps.app], ['reviewer-app', setupSteps.reviewer]] as const) lines.push({ id, status: 'pass', detail: mergerNotRequired, step });
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
   const loopCode = await loopCodeCheck(input.root, input.loopCode);
   if (loopCode) lines.push(loopCode);
   const releaseFiling = input.releaseFiling ?? await readReleaseFiling(input.root, env);
   if (releaseFiling) lines.push(releaseFilingCheck(releaseFiling, status?.repository ?? null));
-  // GY-1833: github merging is the legacy mode; its FAIL names the one command that migrates it.
-  // Supervised installs merge on GitHub by design, and a plane that reports no merger is not judged.
-  if (status?.mergeWriter && !statusSupervised(status)) lines.push(statusControlPlaneMerger(status)
-    ? { id: 'merger', status: 'pass', detail: controlPlaneMergerLine, step: setupSteps.merger }
-    : { id: 'merger', status: 'fail', detail: legacyMergerReason, step: setupSteps.merger });
   return lines;
 }

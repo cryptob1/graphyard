@@ -288,17 +288,17 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
 export function masterPrompt(config: MasterConfig): string {
   // GY-1501: a supervised install has no approver by design; that is its mode, not an onboarding fault.
   const supervised = config.supervision === 'supervised';
-  const supervisedInstruction = `This install is supervised: the operator reviews and merges each pull request on GitHub, and no two-party decision can be approved yet, because supervised mode provisions no operator-agent or approver identity; that is the mode the operator chose, not an onboarding fault, so do not report the missing identities. Record what needs the operator in master status and leave it there; promotion to autonomy (${promotionCommand}) is the operator's choice.`;
+  const supervisedInstruction = `This install is supervised: an agent reviewer reviews each head and the control plane merges it, but no two-party decision can be approved yet, because supervised mode provisions no operator-agent or approver identity; that is the mode the operator chose, not an onboarding fault, so do not report the missing identities. Record what needs the operator in master status and leave it there; promotion to autonomy (${promotionCommand}) is the operator's choice.`;
   const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and leave dispatch, review, proof production and routine merge of system-driven items (every item not created with "systemDriven": false) to node ${config.cliPath} master run, whose loop performs each; the master CLI refuses those hand actions on them. The loop drives an item created with "systemDriven": false the same way; opting out only also allows those hand actions, so take one only where master status shows the loop has not, and merge by hand only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${supervised ? supervisedInstruction : `Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`}`;
   const reviewInstruction = supervised
-    ? `The operator reviews and merges: when a candidate passes the build gate, the operator's own GitHub approval of its exact head passes the review gate and GitHub auto-merge merges it. node ${config.cliPath} master run launches no reviewer, approver or escalation session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
+    ? `Independent review starts on its own: when a candidate passes the build gate, node ${config.cliPath} master run launches a reviewer session for its exact head and the control plane merges it once every gate passes. It launches no approver or escalation session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
     : config.reviewer
     ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery of a review request the loop has stopped relaunching: its session settled without answering it, its automatic sessions are exhausted, or its launch reached the dispatch failure limit with no request-review row still queued; on a system-driven item it is refused before then.`
     : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review; once it is registered, master run launches reviews and producers for every submitted head on its own. Never approve a candidate yourself.`;
   const administrationInstruction = config.browser
-    ? `GitHub administration of ${config.repository} is yours: reconcile protection with node ${config.cliPath} master protection --apply, and when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions, installation-accept, or protection, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
-    : `No browser profile is configured, so App permission updates, installation acceptance, and page-only protection changes are not yet yours: master status records that as a setup attention item owned by the operator, naming node ${config.cliPath} master init --token-stdin --browser-profile PROFILE as what makes them yours. Never ask the operator for it in chat; leave that item to master status and keep routing the rest of the work.`;
-  const mergeInstruction = `GitHub merges: a pull request whose build, review and required checks pass on its head is merged by GitHub on its branch protection, and the loop's merge step only records what GitHub merged. There is no Graphyard merge to run; a merge of a head whose gates had not passed is held as a violation until a two-party merge decision reconciles it.`;
+    ? `GitHub administration of ${config.repository} is yours: when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions or installation-accept, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
+    : `No browser profile is configured, so App permission updates and installation acceptance are not yet yours: master status records that as a setup attention item owned by the operator, naming node ${config.cliPath} master init --token-stdin --browser-profile PROFILE as what makes them yours. Never ask the operator for it in chat; leave that item to master status and keep routing the rest of the work.`;
+  const mergeInstruction = `The control plane merges: a submitted head whose gates pass is trial-merged, proven and pushed to the base branch by the loop's merge writer with its deploy key. GitHub merges nothing and no pull request is opened.`;
   return `${prompt} ${reviewInstruction} ${administrationInstruction} ${mergeInstruction}`;
 }
 
@@ -473,7 +473,7 @@ export function masterHarness(root: string, config: MasterConfig, harness: strin
  * verify reports a run whose own proof cases all passed but which failed around them as left to
  * CI; a failure of a criterion's own test cases always blocks.
  */
-export const submissionPolicyRule = 'The full test suite is CI\'s gate, not yours: run the build and the tests for your own criteria (graphyard verify GY-N runs exactly those), and when they pass, submit with complete, naming in the pull request any full-suite failures that come only from your sandbox and lie outside your planned files, instead of recording a blocker. graphyard verify reports a run whose own proof cases all passed but which failed around them as left to CI; a failure of your own criteria\'s tests always blocks. ';
+export const submissionPolicyRule = 'The full test suite is CI\'s gate, not yours: run the build and the tests for your own criteria (graphyard verify GY-N runs exactly those), and when they pass, submit with complete, naming in the commit message any full-suite failures that come only from your sandbox and lie outside your planned files, instead of recording a blocker. graphyard verify reports a run whose own proof cases all passed but which failed around them as left to CI; a failure of your own criteria\'s tests always blocks. ';
 /** Every character an empty-source refspec's name can start with as typed: a ref name's first character, a quote, or an expansion. */
 export const emptySourceStarts = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...'_.-/@\'"$`{~'];
 /**
@@ -501,15 +501,8 @@ export const scopeGuardHook = (cliPath: string, key: string, epoch: number): Har
   why: 'Deny an edit outside plannedFiles when it happens, naming scope-request, instead of at complete; complete stays the authority.' });
 export function workerHarnessPlan(input: { cliPath: string; branch: string; baseBranch: string; credentialHome: string; key?: string; epoch?: number; mergeWriter?: MergerMode }): HarnessPlan {
   const cli = `node ${input.cliPath}`;
-  // GY-1835: under the control-plane merger the session opens no pull request — it pushes its
-  // branch and submits the head with `complete GY-N EPOCH --head` — so its harness allows no `gh
-  // pr` command: nothing polls GitHub for a pull request the item does not have. With GitHub as
-  // the merge writer the rules stand as before.
-  const pullRequest = input.mergeWriter === 'control-plane' ? [] : [
-    { rule: 'Bash(gh pr create:*)', why: 'Open the pull request the worker submits with complete.' },
-    { rule: 'Bash(gh pr view:*)', why: 'Read the pull request number and state before submitting.' },
-    { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for the worker\'s own candidate.' },
-  ];
+  // GY-1835: the session opens no pull request — it submits the head with `complete GY-N EPOCH
+  // --head` — so its harness allows no `gh pr` command.
   const allow: HarnessRule[] = [
     ...['status', 'sync', 'restore-branch', 'complete', 'blocked', 'heartbeat', 'events', 'diagnose'].map(command => ({ rule: `Bash(${cli} ${command}:*)`, why: `The worker's own ${command} command on its claimed item; the server checks the lease epoch.` })),
     { rule: `Bash(git push origin ${input.branch})`, why: 'Push the assigned branch; Graphyard observes it as the candidate head.' },
@@ -517,7 +510,6 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: `Bash(git push origin HEAD:${input.branch})`, why: 'Push the current head to the assigned branch.' },
     { rule: 'Bash(git fetch origin)', why: 'Read the remote tips restore-branch and sync compare against.' },
     { rule: 'Bash(git reset --hard *)', why: 'Move the assigned branch back to the reviewed head before sync; it changes only this worktree.' },
-    ...pullRequest,
     { rule: `Bash(git merge origin/${input.baseBranch})`, why: 'sync merges the base branch; the worker never rebases.' },
   ];
   // Every rewrite, in each spelling a rule can name: `--force`, `--force-with-lease` (bare or
@@ -566,9 +558,8 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
     { rule: `Read(//${input.credentialHome}/**)`, why: 'Credentials are used through the CLI, never read into a transcript.' },
     { rule: 'Read(**/*.token)', why: 'Token files are never read into a session transcript.' },
   ];
-  // GY-1528: under the control-plane merger nothing is refused on plannedFiles, so no scope guard is installed.
-  const hooks = input.key && input.epoch && input.mergeWriter !== 'control-plane' ? [scopeGuardHook(input.cliPath, input.key, input.epoch)] : [];
-  return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, ...(hooks.length ? { hooks } : {}), note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
+  // GY-1528: nothing is refused on plannedFiles, so no scope guard is installed.
+  return { harness: 'claude', file: '.claude/settings.local.json', allow, deny, manual: null, note: 'Worker rules for one assigned worktree: its own commands and its own branch. A harness rule is a prompt policy; branch protection, leases and the merge gate remain the enforcement.' };
 }
 /**
  * How a worker restores its assigned branch after it was contaminated, as the exact
@@ -627,7 +618,7 @@ export function unrunnableRemedies(work: Work[], input: { cliPath: string; baseB
   });
 }
 /** Install the worker rules in a freshly prepared worktree, only where Git already ignores them. */
-export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker, mergeWriter: MergerMode = 'github') {
+export async function installWorkerHarness(config: MasterConfig, profile: WorkerProfile, key: string, prepared: PreparedWorker, mergeWriter: MergerMode = 'control-plane') {
   // GY-857: a profile whose own settings would turn its runtime's write confinement off is
   // refused here, at the launch, whatever its kind — the worker never starts able to write
   // outside its assigned worktree.

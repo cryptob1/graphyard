@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { MergerSettings, recordedMergerMode } from '../src/merger-mode.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { CHECK_NAME, GitHub, processJob } from '../src/github.js';
 import type { Observation } from '../src/model.js';
@@ -128,11 +127,6 @@ const due = async (...ids: string[]) => {
 const workOf = async (id: string) => (await store.workDocument(id))!;
 const revisionOf = async (id: string) => (await workOf(id))!.revision;
 const jobs = async () => (await store.pool.query('SELECT work_id::text, error, deferred_reason, available_at > now() AS later FROM jobs ORDER BY work_id')).rows as { work_id: string; error: string | null; deferred_reason: string | null; later: boolean }[];
-const setMerger = (merger: 'github' | 'control-plane', reason: string) => new MergerSettings(store).change(operator, { merger, reason }, randomUUID());
-/** Control-plane is the shipped default (GY-1833): a set to the recorded mode is refused, so set it only when it differs. */
-const setMergerUnlessRecorded = async (merger: 'github' | 'control-plane', reason: string) => {
-  if ((await recordedMergerMode(store.pool)).merger !== merger) await setMerger(merger, reason);
-};
 /** One observation cycle: the worker claims due jobs until none is due, and no job is claimed twice. */
 async function cycle(github: ReturnType<Api['client']>, bound = 12) {
   await due();
@@ -157,7 +151,6 @@ before(async () => {
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   // The person-opened pull request merges straight to main: the window owns that merge.
   engine.directMergeEnvironment = { since: new Date(Date.now() - 86_400_000).toISOString(), until: null, reason: 'test repository merges straight into main', setBy: 'environment', enabledAt: new Date(Date.now() - 86_400_000).toISOString(), source: 'environment', event: null };
-  await setMergerUnlessRecorded('control-plane', 'the soak runs the control plane as the merge writer');
   api = new Api();
 });
 after(async () => { if (store) await store.close(); if (postgres) await postgres.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
@@ -200,7 +193,6 @@ test('soak:control-plane-observation-job — processJob run across cycles over c
   await commit(checkout, 'src/base.ts', 'export const base = 2;\n', 'base moves');
   git(checkout, 'push', '-q', 'origin', 'main');
   const tip1 = tip(); api.main = tip1;
-  await setMerger('github', 'the person opens their pull request while GitHub merges');
   const person = await claimed(3);
   api.open(88, person.head, 'graphyard/gy-3-1');
   engine.submissionObserver = async () => ({
@@ -213,7 +205,6 @@ test('soak:control-plane-observation-job — processJob run across cycles over c
   } as Observation);
   try { await engine.execute(worker, 'submit', person.w.id, { epoch: 1, pr: 88 }, randomUUID()); }
   finally { engine.submissionObserver = null; }
-  await setMerger('control-plane', 'the control plane is the merge writer again');
   const number1 = (await workOf(first.w.id)).candidate!.pr, number2 = (await workOf(second.w.id)).candidate!.pr;
   const movedFrom = await Promise.all(ids.map(revisionOf));
   assert.equal(await cycle(github), 3, 'the moved tip observes both candidates and the person-opened pull request once');

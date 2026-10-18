@@ -932,7 +932,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         return { epoch, path, base: github.tip };
       },
       async (_root, _key, claimedEpoch) => { await engine.execute(principal, 'release', work.id, { epoch: claimedEpoch }, id()); },
-      5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list(), supervisor: () => false, stopSupervisor: () => true, readMergeWriter: world.readMergeWriter, credential: world.mint, ...failover.probe ? { probe: failover.probe } : {} })
+      5_000, snapshot.now, { start: world.bounds(), agents: () => herdr.list(), supervisor: () => false, stopSupervisor: () => true, credential: world.mint, ...failover.probe ? { probe: failover.probe } : {} })
       .catch((error: unknown) => { failover.refused?.push({ key: work.key, at: clock.now() - dayStart, error: error instanceof Error ? error.message : String(error) }); throw error; });
     failover.dispatches.push(result);
     failover.samples.push({ key: work.key, failures: await readAccountStartFailures(failover.master), attention: await workerLaunchStatus(failover.root, failover.master) });

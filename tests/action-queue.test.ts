@@ -28,7 +28,6 @@ import { agentRequestAttention, agentRequestReport, actionReport, sessionReport 
 import { pipelineBackfillState, resetPipelineBackfillState } from '../src/pipeline-backfill.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import WorkDetails from '../web/pages/work-details.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-01 boundAt is reviewer config and the 2026-09-20 `at`/clock is the fixed now handed to reconcileActions and evaluate; Date.now() serves only the live engine tests.
 
 /**
@@ -65,7 +64,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_ACTION_QUEUE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 71);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('action-queue'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator, worker, otherWorker, executorA, executorB, producer];
   http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, { ...executorA, token: 'x'.repeat(32) }]);

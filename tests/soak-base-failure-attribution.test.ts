@@ -8,7 +8,6 @@ import { processJob, type GitHub } from '../src/github.js';
 import { checkRerunLimit } from '../src/merge-queue.js';
 import { failedTestsMarker } from '../src/master/base-break-refresh.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { baseFailureReason } from '../src/merge-writer/executor.js';
@@ -104,7 +103,7 @@ test('unit:soak-base-failure-attribution — over a day of hourly heads whose re
   const port = Number(process.env.GRAPHYARD_SOAK_ATTRIBUTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1837);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-base-failure-attribution'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  const db = store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await db.init(); await recordLegacyMerger(db);
+  const db = store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await db.init();
   const engine = new Engine(db, [15368], 120, 'owner/project'); engine.controlPlaneAppId = 1234;
   const operator: Principal = { id: 'operator', role: 'admin' }, worker: Principal = { id: 'agent-a', role: 'worker' };
   const proof = 'unit:item-works', proofFailure = [`tests/item-works.test.ts › ${proof} — works`], shared = ['tests/locked-read.test.ts › unit:reconcile-lock-hold-bounded — bounded'];

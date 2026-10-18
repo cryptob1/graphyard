@@ -11,7 +11,7 @@ import { workerBeforePushSection, workerFastGates, workerFastGatesCommand, worke
 // glossary gates, the wall-clock bomb scan, the CI shard map and the docs page checker — each run
 // locally in seconds, and each is a check CI fails a whole rework round on when a worker ships
 // past it. The worker request now states its before-push discipline in order: the sync
-// instruction (run `sync GY-N` before every push), then the gates as one command line, then the
+// instruction (run `sync GY-N` before submitting), then the gates as one command line, then the
 // request's standing complete instruction, so a budget or page-invariant failure is fixed in the
 // session, not in a CI round. The gates exist only in this repository's tree, so the launcher
 // names them only when the checkout it runs from carries every one of them, handing that fact to
@@ -37,21 +37,21 @@ test('unit:worker-request-names-fast-gates — the request names the fast mechan
   // command line: the whole list in a single code span, the test files in one harness run chained
   // with `&&` to each script.
   assert.ok(request.includes(sync), 'the request carries the sync instruction');
-  assert.match(sync, /^Run node \/bin\/graphyard\.mjs sync GY-1 before every push: /, 'the sync instruction names the CLI and the item');
+  assert.match(sync, /^Run node \/bin\/graphyard\.mjs sync GY-1 before submitting: /, 'the sync instruction names the CLI and the item');
   assert.ok(request.includes(workerFastGatesSentence), 'the request carries the fast-gates sentence');
   assert.deepEqual(workerFastGatesSentence.match(/`[^`]*`/g), [`\`${workerFastGatesCommand}\``], 'the sentence names exactly one command line, in one code span');
   assert.ok(request.includes(workerFastGatesCommand), 'the request carries the one command line');
   assert.deepEqual(gatesIn(request), gates, 'the request names every gate in the constant');
   // Order, in the request itself: the sync instruction, then the gates sentence, then the complete
-  // instruction ("submit it with complete as your last action"), so the gates run in the session
+  // instruction ("submit the commit with complete --head as your last action"), so the gates run in the session
   // after the sync and before the push and the submission.
-  const syncAt = request.indexOf(sync), gatesAt = request.indexOf(workerFastGatesSentence), completeAt = request.indexOf('submit it with complete as your last action');
+  const syncAt = request.indexOf(sync), gatesAt = request.indexOf(workerFastGatesSentence), completeAt = request.indexOf('--head as your last action');
   assert.ok(syncAt >= 0 && syncAt < gatesAt, 'the gates sentence sits after the sync instruction');
   assert.ok(gatesAt >= 0 && gatesAt < completeAt, 'the gates sentence sits before the complete instruction');
   assert.equal(syncAt + sync.length, gatesAt, 'the gates sentence follows the sync instruction directly');
   assert.equal(request.indexOf('sync GY-1'), syncAt + 'Run node /bin/graphyard.mjs '.length, 'the sync instruction is the first mention of sync');
   // The standing sync rule the request's instruction restates, in this repository's own instructions.
-  assert.match(readFileSync(`${root}AGENTS.md`, 'utf8'), /Run `sync GY-N` before every push\./, 'the standing sync instruction the request now states');
+  assert.match(readFileSync(`${root}AGENTS.md`, 'utf8'), /Run `sync GY-N` before submitting\./, 'the standing sync instruction the request now states');
   // Nothing else in the request changed: the section is the one addition, sitting between the
   // pre-edit status instruction and the worktree instruction that follows it.
   assert.ok(request.includes(`Run node ${cli} status GY-1 before editing. ${section}Work only in the current assigned worktree`), 'the section is the one addition after the pre-edit instruction');

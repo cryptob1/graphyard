@@ -20,7 +20,6 @@ import { attributePersistFailure, bounded, capacityReasonLimit, cursorTextLimit,
 import { exhaustionReportSchema } from '../src/model/capacity.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-19 `at`/clock stamps fixture items and dispatch cursors judged at that clock; Date.now()/new Date() stamp live observations and measure launch latency only.
 
 // Each test is named for the proof it produces, so acceptance evidence maps to one executed
@@ -173,7 +172,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_AUTO_DISPATCH_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 18);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('auto-dispatch'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, implementer, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

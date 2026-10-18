@@ -23,7 +23,6 @@ import { assertDispatchable, assessContainment, buildMasterStatus, snapshotWithC
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
 import { exercise } from '../scripts/acceptance-contract.mjs';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'agent-a', role: 'worker', displayName: 'Atlas', runtime: 'Codex' };
@@ -42,7 +41,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('test'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store); engine = new Engine(store, [15368], 120, 'owner/project');
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); engine = new Engine(store, [15368], 120, 'owner/project');
   engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = GRAPHYARD_APP;
   http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, { ...coordinator, token: 'm'.repeat(32) }, ...probeWorkers]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

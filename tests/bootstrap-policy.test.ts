@@ -10,7 +10,6 @@ import { Engine } from '../src/engine.js';
 import { bootstrapObligations, criterionSchema, deliveredProof, evaluate, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-18 declaredAt is a past fixture field of an operator declaration that evaluate and diagnose carry through unchanged; new Date()/Date.now() are the explicit now they are handed.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -26,7 +25,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_BOOTSTRAP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2);
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('bootstrap'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('bootstrap_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/bootstrap_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/bootstrap_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.operatorAuthorizer = async (_db, _now, actor) => actor;
 });

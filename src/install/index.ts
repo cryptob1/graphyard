@@ -105,7 +105,7 @@ export interface FreshCursorChoice { freshCursor?: boolean }
  * GY-1550: `--no-github-app` installs the control plane with no GitHub App at all. Nothing is
  * registered, reused or confirmed in a browser, and GITHUB_APP_ID, GITHUB_INSTALLATION_ID,
  * GITHUB_PRIVATE_KEY, GITHUB_WEBHOOK_SECRET and GITHUB_CI_APP_IDS stay unset, so the server
- * serves with `/api/status.github` false. `graphyard up --merger control-plane` installs this
+ * serves with `/api/status.github` false. `graphyard up` installs this
  * way (GY-1527): the repository and its deploy key come from the operator's gh login instead.
  */
 export interface GitHubAppChoice { noGithubApp?: boolean }

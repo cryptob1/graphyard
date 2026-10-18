@@ -21,7 +21,6 @@ import { boardFromStatus } from '../src/model/board.js';
 import WorkDetails from '../web/pages/work-details.js';
 import WorkCard from '../web/components/work-card.js';
 import { groupOf, timedGroups } from '../web/groups.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-108: every work card carries how long it has held its current status, always, and says so
 // in red past the one configured threshold. The renders here read the views the way a person
@@ -198,7 +197,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_CARD_TIMING_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 52);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('card-timing'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   // A generous claim lease: this case reads the same recorded item at synthetic observation
   // times, and a lease that lapses between them would change the status under the reading.
   engine = new Engine(store, [15368], 3600, 'owner/project');

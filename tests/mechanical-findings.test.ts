@@ -216,7 +216,7 @@ test('unit:mechanical-findings-auto-fixed — review findings are classified, an
     assert.equal(neededDecision({ ...item(H, 1, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]), reworkRequested: true }, { autoMerge: true }, undefined, [], round.requests), null, 'asked once');
     assert.equal(neededDecision(item(H, 2, [{ reviewer, sha: H, state: 'APPROVED', id: 901 }]), { autoMerge: true }, undefined, [], round.requests), null, 'not again once the round has run');
     // 3. The worker launcher gives that round exactly the mechanical findings, bounded to their files, as one commit on the head.
-    for (const fragment of ['mechanical-fix round', '"recieve" is a typo', 'frobCnt', `whose only parent is ${H}`, `change only ${paths.join(', ')}`, 'change no behaviour', 'complete GY-7 2 7']) assert.ok(round.worker.includes(fragment), `worker prompt: ${fragment}`);
+    for (const fragment of ['mechanical-fix round', '"recieve" is a typo', 'frobCnt', `whose only parent is ${H}`, `change only ${paths.join(', ')}`, 'change no behaviour', 'complete GY-7 2 --head']) assert.ok(round.worker.includes(fragment), `worker prompt: ${fragment}`);
     assert.ok(!round.worker.includes('retry loop is unbounded'), 'the bot is never handed a substantive finding');
     assert.equal(round.reviewId, 901);
     assert.ok(!workerPrompt({ cliPath: '/g', repository: 'owner/project' }, item(H, 1), { principal: botWorker }, 1, null, { requests: round.requests, reviewId: 901 }).includes('mechanical-fix round'), 'the attempt that was approved is not a bot round');

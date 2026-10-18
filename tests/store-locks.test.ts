@@ -16,7 +16,6 @@ import { actionSettleMs } from '../src/model/action-progress.js';
 import { coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit, coordinationSnapshot as trimInProcess, coordinationViewHeader, coordinationWork, deliverySettled, type CoordinationOmissions } from '../src/server/work-view.js';
 import { coordinationRecords, coordinationSessions, coordinationTail } from '../src/store/coordination-sql.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-203: migrations and backups take their own advisory locks, and the coordination snapshot is
@@ -254,7 +253,7 @@ const head = 'a'.repeat(40), base = 'b'.repeat(40);
 test('integration:index-matches-documents — the index equals the documents after every mutation, and the coordination snapshot of a 200-item board reads only live documents and is under 1 MB', async () => {
   // The SQL and the TypeScript form of the view keep the same amounts.
   assert.deepEqual([coordinationTail, coordinationRecords, coordinationSessions], [coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit]);
-  const store = await open('lifecycle'); await recordLegacyMerger(store);
+  const store = await open('lifecycle');
   const engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator, worker, executor, coordinator, ci];
   const reload = async (item: Work) => (await store.list()).find(entry => entry.id === item.id)!;

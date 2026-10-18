@@ -21,7 +21,6 @@ import { fileURLToPath } from 'node:url';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
 import { graphyardTools } from '../integrations/pi/index.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): NOW (2026-10-03) is the explicit clock of the unit half; the Postgres half's 2026-01-01 direct-merge window and 2026-02-01 mergedAt are past instants that new Date() only moves further behind.
 
 // GY-1126: a broad item is split into small, independently mergeable child items before its
@@ -219,7 +218,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1126;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('item-split'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('item_split_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/item_split_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/item_split_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

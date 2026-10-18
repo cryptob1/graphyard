@@ -11,7 +11,6 @@ import { controlPlaneHandlers } from '../src/executor.js';
 import type { MasterConfig } from '../src/master.js';
 import { stalledActionAttention } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-607: an executor claiming an item's `resync` row saved the item, so the GitHub observation
@@ -47,7 +46,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 137;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('claim-observation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.principals = [operator, worker, executor];
 });

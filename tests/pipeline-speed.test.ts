@@ -28,7 +28,6 @@ import { readMasterGuide } from './helpers/master-guide.js';
 // A namespace import, so a proof run against code without the stage breakdown fails in its test case, not at load.
 import * as flowAnalytics from '../src/flow-analytics.js';
 import type { DeliveryStage, DeliveryStageMove } from '../src/flow-analytics.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-20/21 instants are past claim/merge fixtures judged against an explicit `now` of the same day; Date.now()/new Date() only stamp and judge the DB-backed items the engine creates.
 
 // GY-54: pipeline speed. Each test is named for the proof it produces — integration:speed-regression-guard
@@ -56,7 +55,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_PIPELINE_SPEED_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 20);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('pipeline-speed'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
   engine.submissionObserver = null;
   process.env.GITHUB_WEBHOOK_SECRET = 'pipeline-speed-webhook-secret';
@@ -179,7 +178,7 @@ async function syncFixture(plannedFiles: string[]) {
   return { root, main, branch, git, shipped, sync, close: () => new Promise<void>(resolve => http.close(() => resolve())) };
 }
 
-test('integration:speed-regression-guard — sync performs the canonical main integration (fetch, merge, never rebase) and the self-check against the fetched tip: a re-resolved file outside plannedFiles is refused with the restore command, and the push is cleared once it matches main again', async () => {
+test('integration:speed-regression-guard — sync performs the canonical main integration (merge of the shared tip the loop fetched, never rebase) and the self-check against that tip: a re-resolved file outside plannedFiles is refused with the restore command, and the push is cleared once it matches main again', async () => {
   const fixture = await syncFixture(['speed.ts']);
   const { main, branch, git, shipped, sync } = fixture;
   try {
@@ -187,20 +186,22 @@ test('integration:speed-regression-guard — sync performs the canonical main in
     // Meanwhile GY-66 ships a change to conflicts.ts on main.
     await writeFile(join(main, 'conflicts.ts'), 'export const probe = 2; // shipped by GY-66\n'); git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'GY-66'); git(main, 'push', '-q', 'origin', 'main');
     (shipped as any).delivery.mergeSha = git(main, 'rev-parse', 'HEAD');
+    // The loop fetches the shared object store; sync itself fetches nothing.
+    git(branch, 'fetch', '-q', '--no-tags', 'origin');
     const merged = await sync();
     assert.equal(merged.code, 0, JSON.stringify(merged.output));
     assert.equal(merged.output.merged, true); assert.equal(merged.output.ok, true); assert.equal(merged.output.base, 'origin/main');
     assert.equal(merged.output.baseTip, git(main, 'rev-parse', 'HEAD'));
     assert.equal(git(branch, 'rev-list', '--merges', '--count', 'HEAD'), '1', 'the integration is a merge commit, never a rebase');
     assert.deepEqual(merged.output.files.map((entry: any) => [entry.path, entry.kind]), [['speed.ts', 'in-scope']]);
-    assert.match(merged.output.next, /Push, then complete GY-1 EPOCH PR/);
+    assert.match(merged.output.next, /complete GY-1 EPOCH --head/);
     // The worker "resolves" the shipped module back to its own version and commits: the self-check refuses before any push.
     await writeFile(join(branch, 'conflicts.ts'), 'export const probe = 1;\n'); git(branch, 'add', '.'); git(branch, 'commit', '-q', '-m', 'bad resolution');
     const refused = await sync();
     assert.equal(refused.code, 1); assert.equal(refused.output.ok, false);
     assert.deepEqual(refused.output.refused.map((line: string) => line.split(':')[0]), ['conflicts.ts']);
     assert.match(refused.output.refused[0], /^conflicts\.ts: differs from the base branch tip \(\+1 −1\)$/);
-    assert.match(refused.output.next, new RegExp(`git checkout ${refused.output.baseTip.slice(0, 12)} -- PATH`)); assert.match(refused.output.next, /Do not push until it reports ok/);
+    assert.match(refused.output.next, new RegExp(`git checkout ${refused.output.baseTip.slice(0, 12)} -- PATH`)); assert.match(refused.output.next, /Do not complete until it reports ok/);
     git(branch, 'checkout', refused.output.baseTip, '--', 'conflicts.ts'); git(branch, 'commit', '-q', '-m', 'restore');
     const restored = await sync();
     assert.equal(restored.code, 0); assert.equal(restored.output.ok, true); assert.deepEqual(restored.output.refused, []);
@@ -208,11 +209,11 @@ test('integration:speed-regression-guard — sync performs the canonical main in
   } finally { await fixture.close(); await rm(fixture.root, { recursive: true, force: true }); }
 });
 
-test('integration:speed-regression-guard — the generated worker instructions require sync before every push, forbid re-resolving files outside plannedFiles, and make complete the last action', async () => {
+test('integration:speed-regression-guard — the generated worker instructions require sync before submitting, never rebase, and make complete --head the last action', async () => {
   const instructions = managedInstructions('# Repo\n', 'https://graphyard.example');
-  for (const fragment of ['Run `sync GY-N` before every push', 'never rebase', 'Files outside plannedFiles must match\norigin/BASE byte-for-byte', 'never re-resolve a merge in favour of your\nbranch', 'Only an operator can widen plannedFiles', 'Submit the PR with `complete GY-N EPOCH PR_NUMBER`', 'refused, naming the files and the shipped work they belong to', 'Make `complete` your last action'])
+  for (const fragment of ['Run `sync GY-N` before submitting', 'never rebase', '`complete GY-N EPOCH --head SHA`', 'Make\n`complete` your last action'])
     assert.ok(instructions.includes(fragment), `the generated worker instructions must say: ${fragment}`);
-  assert.ok((await read('AGENTS.md')).includes('Run `sync GY-N` before every push'), 'this repository carries the generated block');
+  assert.ok((await read('AGENTS.md')).includes('Run `sync GY-N` before submitting'), 'this repository carries the generated block');
   const coordination = await read('docs/coordination.md');
   assert.ok(coordination.includes('## Refuse candidates that revert shipped code outside their scope'));
   assert.ok(coordination.includes('graphyard sync'));
@@ -328,7 +329,7 @@ test('integration:speed-reconcile-latency — a GitHub webhook delivery wakes th
   const main = await read('src/server/main.ts');
   const interval = Number(main.match(/\}, (\d+)\);\s*\n\s*http\.listen/)?.[1]);
   assert.ok(interval > 0 && interval <= 60_000, `the reconciliation tick is ${interval} ms`);
-  assert.match(main, /startObservationWorkers\(engine, github, capacity\.concurrency\)/);
+  assert.match(main, /startObservationWorkers\(engine, capacity\.concurrency\)/);
   assert.match(main, /GRAPHYARD_OBSERVATION_CONCURRENCY/);
   assert.match(main, /Promise\.all\(Array\.from\(\{ length: Math\.max\(1, Math\.floor\(concurrency\)\) \}, worker\)\)/);
   assert.match(await read('docs/protocol/github-webhook.md'), /wakes durable jobs/);

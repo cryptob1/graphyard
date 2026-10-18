@@ -55,8 +55,6 @@ interface World {
   onboardingPullRequest: string | null; onboardingMerged: boolean;
   /** The Hetzner server's monthly price is shown but not yet confirmed. */
   priceUnconfirmed: boolean;
-  /** GY-1833: the merger the plane records, and the credential each `master merger` ran with; unrecorded when undefined. */
-  merger?: string; mergerTokens?: (string | null)[];
   /** The plan's Apps still to create in a browser (GY-1442); absent from the plan when undefined. */
   browserApps?: string[];
   /** Turns an install waits on its App page before it pauses (exit 1, resumable); 10,000 when undefined. */
@@ -76,7 +74,6 @@ const status = (w: World) => w.installed ? {
   reviewerApps: w.reviewer ? [{ id: 'claude', appId: 9 }] : [],
   fleet: w.accounts ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] } : { roles: [], accounts: [] },
   setup: { protection: w.app ? 'checks' : 'off', loop: w.loop },
-  ...(w.merger ? { mergeWriter: { merger: w.merger } } : {}),
 } : null;
 
 function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<UpDependencies> = {}): UpDependencies {
@@ -102,7 +99,6 @@ function dependencies(w: World, root: string, events: UpEvent[], extra: Partial<
       const joined = args.join(' ');
       if (args[0] === 'goal') w.creates.push(options.env?.GRAPHYARD_REQUEST_ID ?? null);
       for (const prefix of w.failOnce) if (joined.startsWith(prefix)) { w.failOnce.delete(prefix); return { code: 1, stdout: '{"error":"interrupted"}' }; }
-      if (args[0] === 'master' && args[1] === 'merger') { (w.mergerTokens ??= []).push(options.env?.GRAPHYARD_TOKEN ?? null); w.merger = args[2]; }
       if (args[0] === 'install' && args.includes('--plan')) {
         return { code: 0, stdout: JSON.stringify({ installId: 'acme-shop', installDirectory: '/install/acme-shop', ...(w.browserApps ? { browserApps: w.browserApps } : {}), ...(w.host ? { host: { units: [] } } : {}), principals: [{ id: 'acme-shop-operator', role: 'admin', sessionKind: 'human' }, { id: 'acme-shop-master', role: 'coordinator', sessionKind: 'ai' }],
           preflight: [{ name: 'GitHub CLI', ok: true }, ...(w.priceUnconfirmed && !args.includes('--confirm-price') ? [{ name: 'Monthly price', ok: false, detail: 'cx33 (8 GB) at fsn1: 6.49 EUR/month; not confirmed, so nothing will be created' }] : []), ...(w.herdrElsewhere && !args.includes('--no-herdr') && !args.includes('--herdr-instance') ? [{ name: 'Herdr plugin', ok: false, detail: 'bound to https://other.example' }] : [])] }) };
@@ -136,11 +132,11 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   const result = await runUp(request(), dependencies(fresh, root, events));
   assert.equal(result.exitCode, 0, result.next);
   assert.deepEqual(result.completed, ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop']);
-  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master merger', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
+  assert.deepEqual(fresh.calls.map(args => args.slice(0, 2).join(' ')), ['install --provider', 'install --provider', 'master init', 'master autonomy', 'init --scan', 'init --scan', 'publish-onboarding', 'master registry', 'master harness', 'master restart', 'onboarding-merged?', 'onboarding-merged?'], 'preflight, control plane, host supervisor, master identities, onboarding (applied, then published), accounts, harness, master loop, in order; then the onboarding pull request merges');
   // Onboarding is done only once its files are published: init --scan --apply writes them to this checkout alone.
   assert.ok(events.some(event => event.kind === 'step' && event.step === 'onboarding' && event.state === 'done' && /published in https:\/\/github\.com\/acme\/shop\/pull\/1/.test(event.detail ?? '')));
   assert.ok(events.some(event => event.kind === 'note' && /onboarding pull request .* to merge/.test(event.text)), 'it says what it waits on');
-  assert.ok(result.checklist.every(item => item.done || item.id === 'merger'), 'the checklist is green but for the legacy merger line (GY-1833)');
+  assert.ok(result.checklist.every(item => item.done), 'the checklist is green');
   const waits = events.filter(event => event.kind === 'waiting');
   assert.equal(waits.length, 1, 'the Setup address is printed once for the whole run');
   assert.equal(result.prompts, 1);
@@ -199,9 +195,6 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.ok(!JSON.stringify(hosted).includes(HOST_SECRET) && !hostEvents.some(event => JSON.stringify(event).includes(HOST_SECRET)), 'and no token value appears in the summary or any printed line');
   // GY-1479: the host install provisioned the master's identities on the host, where the admin credential stays; up runs no local autonomy.
   assert.ok(!host.calls.some(args => args[1] === 'autonomy'), 'no local master autonomy for a host install');
-  // GY-1833: the legacy github merger is recorded with that same in-memory credential, so the plane never reads control-plane.
-  assert.equal(host.merger, 'github');
-  assert.deepEqual(host.mergerTokens, [HOST_SECRET]);
   const identities = hostEvents.find(event => event.kind === 'step' && event.step === 'master-autonomy' && event.state === 'done') as { detail?: string } | undefined;
   assert.match(identities?.detail ?? '', /provisioned on graphyard-acme-shop, where its loop runs/);
   assert.deepEqual(requestedView(`#claim=${CODE}&setup`), { view: 'setup', hash: `#claim=${CODE}` });
@@ -233,7 +226,8 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   assert.match(unconfirmed.next, /operator's consent to its price: cx33 .*6\.49 EUR\/month.*--confirm-price PRICE \(or --max-monthly N\); nothing has been created/);
   assert.equal(installApplies(priced), 0);
   const unconfirmedCalls = priced.calls.length;
-  const consented = upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner', '--merger', 'github', '--confirm-price', '6.49', '--ssh-key', 'laptop']);
+  // The GitHub App path this world serves: the parsed request with no merger.
+  const consented = { ...upRequestFromArgs(['--repo', 'acme/shop', '--provider', 'hetzner', '--confirm-price', '6.49', '--ssh-key', 'laptop']), merger: undefined };
   assert.equal((await runUp(consented, dependencies(priced, priceRoot, []))).exitCode, 0);
   for (const args of priced.calls.slice(unconfirmedCalls).filter(args => args[0] === 'install')) {
     assert.deepEqual(args.slice(args.indexOf('--confirm-price'), args.indexOf('--confirm-price') + 2), ['--confirm-price', '6.49']);
@@ -296,7 +290,7 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
     driveApp: async () => { quiet.app = true; quiet.reviewer = true; return { state: 'done' }; },
   }));
   assert.equal(result.exitCode, 0, result.next);
-  assert.ok(result.checklist.every(item => item.done || item.id === 'merger'), 'green checklist but for the legacy merger line (GY-1833)');
+  assert.ok(result.checklist.every(item => item.done), 'green checklist');
   assert.equal(result.prompts, 0, 'agent mode never prints the Setup address and waits');
   assert.deepEqual(result.handoffs, [], 'nothing is handed to a person');
   assert.ok(quiet.calls.some(args => args.join(' ') === 'master registry propose --apply'), 'accounts come from login homes on the host');
@@ -448,16 +442,12 @@ test('unit:setup-wizard-states — the Setup page shows each checklist state wit
   const { setupChecklist } = await checklistModule();
   const green = { github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] }, reviewerApps: [{ id: 'claude', appId: 9 }],
     fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
-    setup: { protection: 'complete', loop: true } };
+    setup: { loop: true } };
   const states: { name: string; status: any; item: string; action: RegExp | null }[] = [
-    { name: 'nothing installed yet', status: null, item: 'github-app', action: /<a [^>]*data-setup-action="github-app"[^>]*href="http:\/\/127\.0\.0\.1:4311"[^>]*>Create the GitHub App<\/a>/ },
-    { name: 'App missing permissions', status: { ...green, appPermissions: { missing: [{ permission: 'checks', required: 'write' }], installationUrl: 'https://github.com/settings/installations/7' } }, item: 'github-app', action: /data-setup-action="github-app"[^>]*href="https:\/\/github\.com\/settings\/installations\/7"[^>]*>Accept the new permissions</ },
-    { name: 'no reviewer App', status: { ...green, reviewerApps: [] }, item: 'reviewer-app', action: />Create the reviewer App</ },
     { name: 'no account for writing code', status: { ...green, fleet: { roles: [], accounts: [] } }, item: 'account:worker', action: /<button[^>]*data-setup-action="account:worker"[^>]*>Connect an account<\/button>/ },
     { name: 'a signed-out account', status: { ...green, fleet: { ...green.fleet, accounts: [{ name: 'claude-a', enabled: true, loggedIn: false }] } }, item: 'account:reviewer', action: />Connect an account</ },
     { name: 'an account no session may use (quota spent, no model configured)', status: { ...green, fleet: { ...green.fleet, accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, eligible: false }] } }, item: 'account:worker', action: />Connect an account</ },
-    { name: 'branch unprotected', status: { ...green, setup: { protection: 'off', loop: true } }, item: 'branch-protection', action: /href="https:\/\/github\.com\/acme\/shop\/settings\/branches"[^>]*>Open branch settings</ },
-    { name: 'loop not running', status: { ...green, setup: { protection: 'checks', loop: false } }, item: 'master-loop', action: /data-setup-action="master-loop"[^>]*>Check again</ },
+    { name: 'loop not running', status: { ...green, setup: { loop: false } }, item: 'master-loop', action: /data-setup-action="master-loop"[^>]*>Check again</ },
     { name: 'every item green', status: green, item: '', action: null },
   ];
   for (const state of states) {
@@ -484,8 +474,6 @@ test('unit:setup-wizard-states — the Setup page shows each checklist state wit
   const fleetPage = (onOpenSetup?: () => void) => renderToStaticMarkup(createElement(FleetPage, { api: async () => ({}), status: null, observedAt: 0, onOpenSetup }));
   assert.match(fleetPage(() => {}), /<button data-open-setup="true">Open the first-run Setup checklist<\/button>/);
   assert.doesNotMatch(fleetPage(), /data-open-setup/, 'only for the admin');
-  // Partially protected (the repository's checks only) is enough to start; the line says what follows.
-  assert.equal(setupChecklist({ ...green, setup: { protection: 'checks', loop: true } }).find(item => item.id === 'branch-protection')!.done, true);
 });
 
 test('unit:up-goal-uses-pipeline — `up --goal FILE` and the Setup page submit a goal record through the goals API, as `graphyard goal` does, and create no plain work item', async () => {
@@ -564,15 +552,14 @@ test('unit:up-resume-from-state — a resumed up takes --repo and --provider fro
   assert.throws(() => upRequestFromArgs(['--agent'], recordedUp(root)), /--repo OWNER\/NAME/, 'a first run still needs --repo');
   await mkdir(join(root, '.graphyard'), { recursive: true });
   await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'hetzner', completed: ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'], noHerdr: false, goal: null }));
-  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'hetzner', merger: 'github' }, 'a run recorded before the merger field took the github path');
+  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'hetzner' });
 
   // Resumed without --repo or --provider: both come from the recorded run, which then skips every done step.
-  const resumed = upRequestFromArgs(['--agent'], recordedUp(root));
+  const resumed = { ...upRequestFromArgs(['--agent'], recordedUp(root)), merger: undefined };
   assert.equal(resumed.repository, 'acme/shop');
   assert.equal(resumed.provider, 'hetzner');
   assert.equal(upRequestFromArgs(['--repo', 'acme/shop', '--agent'], recordedUp(root)).provider, 'hetzner', 'the same --repo, with --provider omitted');
-  // Its plane held history before GY-1833, so the migration pinned it to github: nothing to record, no admin credential needed.
-  const w = world({ app: true, reviewer: true, accounts: true, installed: true, loop: true, onboardingMerged: true, merger: 'github' });
+  const w = world({ app: true, reviewer: true, accounts: true, installed: true, loop: true, onboardingMerged: true });
   const result = await runUp(resumed, dependencies(w, root, [], { driveApp: async () => ({ state: 'done' }) }));
   assert.equal(result.exitCode, 0, result.next);
   assert.equal(w.calls.filter(args => args[0] === 'install').length, 0, 'the recorded run resumes: nothing is installed again');
@@ -592,12 +579,13 @@ test('unit:up-local-flag — up --local is --provider local, recorded in .graphy
 
   const root = await temporaryDirectory('graphyard-up-local');
   const w = world({ app: true, reviewer: true, accounts: true, onboardingMerged: true });
-  const result = await runUp(upRequestFromArgs(['--repo', 'acme/shop', '--local']), dependencies(w, root, []));
+  // --local takes the control plane too (GY-1978): the repository is read and the deploy key registered with gh.
+  const result = await runUp(upRequestFromArgs(['--repo', 'acme/shop', '--local']), dependencies(w, root, [], { gh: async () => ({ code: 0, stdout: '{}' }), ensureDeployKey: async () => 'registered' }));
   assert.equal(result.exitCode, 0, result.next);
   const installs = w.calls.filter(args => args[0] === 'install');
-  assert.ok(installs.length >= 2 && installs.every(args => args[args.indexOf('--provider') + 1] === 'local'), 'install --plan and --apply both run with --provider local');
+  assert.ok(installs.length >= 1 && installs.every(args => args[args.indexOf('--provider') + 1] === 'local'), 'every install child runs with --provider local');
   assert.equal(JSON.parse(await readFile(upStateFile(root), 'utf8')).provider, 'local', 'recorded in .graphyard/up.json');
-  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'local', merger: 'github' });
+  assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'local' });
   // A resumed run keeps it; --local again agrees with it, and another provider is refused against it.
   assert.equal(upRequestFromArgs(['--local'], recordedUp(root)).provider, 'local');
   assert.equal(upRequestFromArgs([], recordedUp(root)).provider, 'local');
@@ -606,6 +594,8 @@ test('unit:up-local-flag — up --local is --provider local, recorded in .graphy
 
 test('unit:up-signal-forwarding — SIGINT or SIGTERM to up reaches its install child; both exit and the App page port is freed', async () => {
   const root = await temporaryDirectory('graphyard-up-signals');
+  // A stub gh: the repository exists, so the control-plane preflight reaches the install child (GY-1978).
+  await mkdir(join(root, 'bin')); await writeFile(join(root, 'bin', 'gh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   // The stub stands in for `graphyard install`: its plan passes preflight; --apply serves an App page and waits forever.
   const stub = join(root, 'stub-cli.mjs');
   await writeFile(stub, `import { createServer } from 'node:http';
@@ -623,8 +613,8 @@ const server = createServer((_, response) => response.end('App page')).listen(0,
   const launcher = resolve(import.meta.dirname, '../bin/graphyard.mjs');
   await Promise.all((['SIGINT', 'SIGTERM'] as const).map(async signal => {
     const serving = join(root, `${signal}.json`);
-    const upProcess = spawn(process.execPath, [launcher, 'up', '--repo', 'acme/shop', '--merger', 'github'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, GRAPHYARD_CLI: stub, GRAPHYARD_REPOSITORY_ROOT: root, STUB_SERVING: serving } });
+    const upProcess = spawn(process.execPath, [launcher, 'up', '--repo', 'acme/shop', '--local'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, GRAPHYARD_CLI: stub, GRAPHYARD_REPOSITORY_ROOT: root, STUB_SERVING: serving } });
     let output = '';
     upProcess.stdout.on('data', chunk => { output += chunk; }); upProcess.stderr.on('data', chunk => { output += chunk; });
     const exited = new Promise<number | null>(accept => upProcess.once('exit', code => accept(code)));
@@ -797,11 +787,11 @@ test('unit:up-provisions-master-autonomy — up gives the master its operator-ag
     if (path === 'work' && agents.some(agent => agent.token === bearer && /-operator$/.test(agent.id))) { created.push({ credential: bearer, body }); return answer({ key: 'GY-1', revision: 1 }); }
     return answer({ error: 'forbidden' }, 403);
   };
-  const runInstall = async (label: string, admin: string | null, merger?: string) => {
+  const runInstall = async (label: string, admin: string | null) => {
     const root = await temporaryDirectory(label), credentials = await temporaryDirectory(`${label}-credentials`);
     execFileSync('git', ['init', '-q', root]);
     execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/acme/shop.git'], { cwd: root });
-    const w = world({ app: true, reviewer: true, accounts: true, merger });
+    const w = world({ app: true, reviewer: true, accounts: true });
     const base = dependencies(w, root, [], { operatorToken: async file => file === OPERATOR_TOKEN ? admin : null });
     // `master init` and `master autonomy` are the real commands, against the simulated control plane.
     const cli: UpDependencies['cli'] = async (args, options = {}) => {
@@ -841,8 +831,7 @@ test('unit:up-provisions-master-autonomy — up gives the master its operator-ag
 
   // With no admin credential on this machine, up stops (exit 2) at that step naming the one command, and master create is refused as before.
   agents.length = 0; created.length = 0;
-  // (Its github merger was recorded by an admin elsewhere: GY-1833 stops an unrecorded one first.)
-  const missing = await runInstall('graphyard-up-autonomy-missing', null, 'github');
+  const missing = await runInstall('graphyard-up-autonomy-missing', null);
   assert.equal(missing.result.exitCode, 2, missing.result.next);
   assert.match(missing.result.next, /^master-autonomy: the operator's admin credential is not on this machine .*graphyard master autonomy --admin-token-stdin --apply/);
   assert.deepEqual(missing.result.completed, ['preflight', 'control-plane', 'host-supervisor']);
@@ -1002,7 +991,7 @@ test('unit:onboarding-pr-visible — while the onboarding pull request is open, 
   assert.match(open, /<a [^>]*data-setup-action="onboarding"[^>]*href="https:\/\/github\.com\/acme\/shop\/pull\/1"[^>]*>Open the change<\/a>/);
   const text = visible(open);
   assert.ok(text.includes(wait.line), 'the checklist line names what it waits for and the time waited');
-  assert.match(text, /1 of 7 steps left/);
+  assert.match(text, /1 of 6 steps left/);
   assert.doesNotMatch(open, /Describe what you want built/, 'the goal waits for the merge, as up does');
   for (const [what, pattern] of JARGON) assert.doesNotMatch(visible(withoutHerdr(open)), pattern, `the onboarding step shows no ${what}`);
   // Merged, on merge evidence: the step is done and the goal box is offered.
@@ -1471,7 +1460,7 @@ test('unit:up-help — graphyard up --help and -h print up\'s usage, every optio
   }
 });
 
-test('unit:setup-docs-one-command — the one-command line in docs/setup-from-zero.md is the agent command that runs on a host whose other install recorded a browser profile, and it names approving a GitHub Mobile prompt as the only human step', async () => {
+test('unit:setup-docs-one-command — the one-command line in docs/setup-from-zero.md is the agent command that runs on a host whose other install recorded a browser profile, and it names no human step', async () => {
   const { upBrowserProfile, upRequestFromArgs } = await up();
   const page = await readFile(resolve('docs/setup-from-zero.md'), 'utf8');
   const section = page.slice(page.indexOf('## One command'), page.indexOf('## The Setup page'));
@@ -1496,7 +1485,7 @@ test('unit:setup-docs-one-command — the one-command line in docs/setup-from-ze
   await recordProfileLogin(unobserved, 'Default', { browser: null, cli: 'operator' });
   assert.equal(upBrowserProfile(await temporaryDirectory('graphyard-up-docs-fresh'), { ...parsed, repository: 'OWNER/REPO' }, [unobserved], () => 'operator', () => 'operator')?.profile, 'Default');
   // GY-1833: the default control-plane path has none; the legacy App path keeps the Mobile prompt.
-  assert.match(section, /only legacy `--merger github` needs a human \(GitHub Mobile\)/i);
+  assert.match(section, /No step needs a human\./, 'no App is created, so not even --local asks for a GitHub Mobile approval (GY-1978)');
   // Net growth of the page is at most 20 words over its 999 words before GY-1510.
   assert.ok(page.split(/\s+/).filter(Boolean).length <= 999 + 20, 'docs/setup-from-zero.md grew by at most 20 words');
 });
@@ -1522,11 +1511,11 @@ test('unit:up-app-page-rejection-fails — GitHub rejecting the App manifest, or
   assert.ok(!result.completed.includes('control-plane'));
 });
 
-/** GY-1641: the control-plane merger's world: no Apps, the plane becomes the merge writer once `master merger control-plane` runs. */
+/** GY-1641: the control-plane merger's world: no Apps. */
 const controlPlaneRequest = (extra: Partial<UpRequest> = {}) => request({ agent: true, merger: 'control-plane', goalFile: 'goal.txt', ...extra });
-const controlPlaneSteps = ['host-supervisor', 'deploy-key', 'merger-setting', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'];
+const controlPlaneSteps = ['host-supervisor', 'deploy-key', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'];
 
-test('unit:up-child-url-propagation — up --merger control-plane on a server recorded at a non-default port points every child after the install at that URL (master init by --url too), and a failing child ends its step with a step-failed event naming the step, argv and first stderr line, exit 1', async () => {
+test('unit:up-child-url-propagation — up on a server recorded at a non-default port points every child after the install at that URL (master init by --url too), and a failing child ends its step with a step-failed event naming the step, argv and first stderr line, exit 1', async () => {
   const { runUp, upRequestFromArgs, upCommandFlags } = await up();
   const chosen = 'http://127.0.0.1:4317';
   const root = await temporaryDirectory('graphyard-up-child-url');
@@ -1544,14 +1533,13 @@ test('unit:up-child-url-propagation — up --merger control-plane on a server re
   for (const call of seen.filter(call => call.args[0] === 'install')) assert.equal(call.env.GRAPHYARD_URL, undefined, 'the install chooses its own port');
   const init = children.find(call => call.args[0] === 'master' && call.args[1] === 'init')!;
   assert.deepEqual(init.args.slice(init.args.indexOf('--url'), init.args.indexOf('--url') + 2), ['--url', chosen], 'master init is given the recorded server');
-  assert.ok(seen.some(call => call.args.join(' ').startsWith('master merger control-plane') && call.env.GRAPHYARD_TOKEN === ADMIN), 'the merger setting keeps its admin credential beside the URL');
   assert.ok(!JSON.stringify(seen).includes('127.0.0.1:4310'), 'no child is pointed at the default port');
   // Every step-start has its outcome.
   const started = events.filter(event => event.kind === 'step' && event.state === 'start').map(event => (event as any).step);
   for (const step of started) assert.ok(events.some(event => (event.kind === 'step' && event.step === step && event.state === 'done') || (event.kind === 'step-failed' && event.step === step)), `${step} has an outcome`);
 
   // --url names the server outright, and a printed rerun keeps it.
-  const parsed = upRequestFromArgs(['--repo', 'acme/shop', '--merger', 'control-plane', '--agent', '--url', `${chosen}/`]);
+  const parsed = upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--url', `${chosen}/`]);
   assert.equal(parsed.url, chosen);
   assert.match(upCommandFlags(parsed), new RegExp(` --url ${chosen.replace(/[.:/]/g, '\\$&')}$`));
   assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--url', 'ftp://example']), /--url/);
@@ -1609,7 +1597,7 @@ test('unit:up-child-url-propagation — up --merger control-plane on a server re
   assert.ok(!unwritableEvents.some(event => event.kind === 'step' && event.step === 'harness' && event.state === 'done'), 'an unrecorded step is not reported done');
 });
 
-test('integration:up-control-plane-nondefault-port — real child processes: up --merger control-plane against a control plane serving on an ephemeral port (not 4310) completes host-supervisor through goal with every child reaching that server, and a failing child ends in a step-failed event and exit 1', async () => {
+test('integration:up-control-plane-nondefault-port — real child processes: up against a control plane serving on an ephemeral port (not 4310) completes host-supervisor through goal with every child reaching that server, and a failing child ends in a step-failed event and exit 1', async () => {
   const { createServer } = await import('node:http');
   const { upDependencies, runUp, upStateFile } = await up();
   const plane = randomUUID();
@@ -1617,7 +1605,7 @@ test('integration:up-control-plane-nondefault-port — real child processes: up 
   // The control plane: /api/status for up itself, /api/cli for the stub CLI, answering as the real commands change it.
   const make = (fail: (argv: string[]) => { code: number; stderr: string } | null) => {
     const calls: { argv: string[]; env: string | null }[] = [];
-    const state = { merger: 'github', accounts: false, loop: false };
+    const state = { accounts: false, loop: false };
     const server = createServer((req, res) => {
       let body = '';
       req.on('data', chunk => { body += chunk; });
@@ -1625,7 +1613,7 @@ test('integration:up-control-plane-nondefault-port — real child processes: up 
         res.setHeader('x-plane', plane); res.setHeader('content-type', 'application/json');
         if (req.url === '/api/status') {
           if (req.headers.authorization !== `Bearer ${masterToken}`) { res.statusCode = 401; return res.end('{}'); }
-          return res.end(JSON.stringify({ actor: { role: 'coordinator' }, repository: 'acme/shop', mergeWriter: { merger: state.merger },
+          return res.end(JSON.stringify({ actor: { role: 'coordinator' }, repository: 'acme/shop', mergeWriter: { merger: 'control-plane' },
             fleet: state.accounts ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] } : { roles: [], accounts: [] },
             setup: { loop: state.loop } }));
         }
@@ -1634,7 +1622,6 @@ test('integration:up-control-plane-nondefault-port — real child processes: up 
         const failure = fail(argv);
         if (failure) return res.end(JSON.stringify({ code: failure.code, stdout: '', stderr: failure.stderr }));
         const joined = argv.join(' ');
-        if (joined.startsWith('master merger control-plane')) state.merger = 'control-plane';
         if (joined === 'master registry propose --apply') state.accounts = true;
         if (joined === 'master restart') state.loop = true;
         res.end(JSON.stringify({ code: 0, stdout: argv[0] === 'goal' ? JSON.stringify({ key: 'GOAL-1' }) : '{}' }));
@@ -1675,7 +1662,7 @@ process.exit(answer.code);
       // What install --apply leaves behind on this port: master.json at its URL, and the install and preflight steps done.
       await mkdir(join(root, '.graphyard'), { recursive: true });
       await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ url, credentialFile }), { mode: 0o600 });
-      await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'compose', merger: 'control-plane', completed: ['preflight', 'control-plane'], noHerdr: true, goal: null, operatorTokenFile }), { mode: 0o600 });
+      await writeFile(upStateFile(root), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'compose', completed: ['preflight', 'control-plane'], noHerdr: true, goal: null, operatorTokenFile }), { mode: 0o600 });
       await writeFile(join(root, 'goal.txt'), 'A sign-up page');
       const events: UpEvent[] = [];
       const req = controlPlaneRequest();
@@ -1691,10 +1678,9 @@ process.exit(answer.code);
     const green = await runOn('graphyard-up-nondefault-port', () => null);
     assert.equal(green.result.exitCode, 0, green.result.next);
     for (const step of controlPlaneSteps) assert.ok(green.result.completed.includes(step as any), `${step} completed without hand intervention: ${green.result.completed.join(', ')}`);
-    assert.equal(green.state.merger, 'control-plane');
     assert.equal(green.result.goal, 'GOAL-1');
     const commands = green.calls.map(call => call.argv.slice(0, 2).join(' '));
-    for (const expected of ['master init', 'master merger', 'master autonomy', 'init --scan', 'master registry', 'master harness', 'master restart']) assert.ok(commands.includes(expected), `${expected} reached the plane: ${commands.join('; ')}`);
+    for (const expected of ['master init', 'master autonomy', 'init --scan', 'master registry', 'master harness', 'master restart']) assert.ok(commands.includes(expected), `${expected} reached the plane: ${commands.join('; ')}`);
     assert.ok(green.calls.some(call => call.argv[0] === 'goal'), 'the goal child reached the plane');
     for (const call of green.calls) assert.equal(call.env, green.url, `graphyard ${call.argv.join(' ')} was given the recorded server`);
     const init = green.calls.find(call => call.argv[0] === 'master' && call.argv[1] === 'init')!;
@@ -1722,7 +1708,7 @@ process.exit(answer.code);
     await assert.rejects(masterInit('http://127.0.0.1:4310'), /belongs to another server/);
     assert.equal(await upUrlRefusal(repo, initUrl), null, 'the recorded server is accepted');
     assert.equal(await upUrlRefusal(join(scratch, 'unconfigured'), 'http://127.0.0.1:4310'), null, 'before master init records a server, any --url is accepted');
-    await assert.rejects(upCommand(repo, async () => { throw new Error('no child may run'); }, ['--repo', 'acme/shop', '--merger', 'control-plane', '--agent', '--url', 'http://127.0.0.1:4310']),
+    await assert.rejects(upCommand(repo, async () => { throw new Error('no child may run'); }, ['--repo', 'acme/shop', '--agent', '--url', 'http://127.0.0.1:4310']),
       (error: Error) => error.message.includes(`(${initUrl} in .graphyard/master.json), and master init accepts no other`));
     await assert.rejects(readFile(upStateFile(repo), 'utf8'), /ENOENT/, 'no step ran');
 
