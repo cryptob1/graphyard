@@ -181,24 +181,50 @@ export function reconcileRoster(planned: RosterPrincipal[], recorded: RosterPrin
 }
 
 export const principalIdPattern = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/;
+/** Proof patterns `principal add --proof` accepts: the same lanes the installer seeds with `--producer-proof`. */
+const proofPattern = /^(unit|integration|e2e|manual):[A-Za-z0-9._*:/-]+$/;
 /**
  * One `graphyard principal add` entry, judged as `plannedPrincipals` judges the planner's: a
- * producer is created only with an explicit grant, since an ungranted producer would be a
- * standing credential with no lane; a grant names a producer lane, so no other role holds one.
+ * producer is created only with an explicit lane grant (`--grant`) or proof seed (`--proof`), since
+ * an ungranted producer would be a standing credential with no lane; a grant names a producer lane
+ * and a proof seed names bootstrap proof authority, so no other role holds either.
  */
-export function rosterEntry(input: { id: string; role?: string; sessionKind?: string; grants?: string[] }): RosterPrincipal {
+export function rosterEntry(input: { id: string; role?: string; sessionKind?: string; grants?: string[]; proofs?: string[] }): RosterPrincipal {
   if (!principalIdPattern.test(input.id)) throw new Error('A principal id is 1 to 100 letters, digits, dots, underscores and dashes, starting with a letter or digit');
   const role = input.role as Role;
   if (!roles.includes(role)) throw new Error(`--role takes ${roles.join(', ')}`);
   const sessionKind = (input.sessionKind ?? 'ai') as DeclaredSessionKind;
   if (sessionKind !== 'ai' && sessionKind !== 'human') throw new Error('--session-kind takes ai or human');
   const grants = [...new Set(input.grants ?? [])].sort() as PrincipalGrant[];
+  const proofs = [...new Set(input.proofs ?? [])].sort();
   const unknown = grants.filter(grant => !principalGrants.includes(grant));
   if (unknown.length) throw new Error(`Unknown grant ${unknown.join(', ')}; --grant takes ${principalGrants.join(', ')}`);
-  if (role === 'producer' && !grants.length) throw new Error(`A producer is created only with an explicit grant (--grant ${principalGrants.join('|')}): an ungranted producer would be a standing credential with no lane, and widening it later is never automatic`);
+  const badProofs = proofs.filter(proof => !proofPattern.test(proof));
+  if (badProofs.length) throw new Error(`Unknown proof ${badProofs.join(', ')}; --proof takes unit:*, integration:*, e2e:* or manual:* patterns`);
+  if (role === 'producer' && !grants.length && !proofs.length) throw new Error(`A producer is created only with an explicit grant (--grant ${principalGrants.join('|')}) or proof seed (--proof unit:*|integration:*|e2e:*|manual:*): an ungranted producer would be a standing credential with no lane, and widening it later is never automatic`);
   if (role !== 'producer' && grants.length) throw new Error(`A grant names a producer lane; ${role} ${input.id} holds none. Use --role producer`);
-  if (grants.includes(observeShaGrant) && grants.length > 1) throw new Error(`${observeShaGrant} is held by a dedicated observer principal, beside no other grant; add a separate principal for it`);
-  return { id: input.id, role, sessionKind, ...(grants.length ? { grants } : {}), source: 'principal' };
+  if (role !== 'producer' && proofs.length) throw new Error(`A proof seed names producer proof authority; ${role} ${input.id} holds none. Use --role producer`);
+  if (grants.includes(observeShaGrant) && (grants.length > 1 || proofs.length)) throw new Error(`${observeShaGrant} is held by a dedicated observer principal, beside no other grant or proof; add a separate principal for it`);
+  return { id: input.id, role, sessionKind, ...(proofs.length ? { proofs } : {}), ...(grants.length ? { grants } : {}), source: 'principal' };
+}
+/**
+ * Place an existing credential at the install token path `ensureTokens` reads, so `principal add`
+ * restores a former identity instead of minting a new secret the dispatcher's credential file would
+ * not match (GY-1998). Refuses to overwrite a different standing token for the same id.
+ */
+export async function importPrincipalToken(directory: string, principal: string, source: string) {
+  const text = (await readFile(source, 'utf8')).trim();
+  if (text.length < 32) throw new Error(`${source} does not contain a usable credential`);
+  if (/[\r\n\0]/.test(text)) throw new Error(`${source} must be a single-line credential`);
+  const dest = tokenFile(directory, principal);
+  try {
+    const standing = (await readFile(dest, 'utf8')).trim();
+    if (standing === text) return dest;
+    if (standing) throw new Error(`${dest} already holds a different credential for ${principal}; remove it with graphyard principal remove ${principal} before importing ${source}`);
+  } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
+  await mkdir(resolve(directory, 'tokens'), { recursive: true, mode: 0o700 });
+  await atomicPrivate(dest, `${text}\n`);
+  return dest;
 }
 const installersOwn = (roster: RosterPrincipal[], id: string) => {
   const existing = roster.find(principal => principal.id === id);

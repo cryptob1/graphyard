@@ -2230,8 +2230,8 @@ export async function applyRosterChange(session: InstallSession, record: Install
     if (Array.isArray(served) && (change.entry ? listed && servedAs(listed, change.entry) : !listed)) readback = { url: target, principal: listed ? { id: listed.id, role: listed.role, sessionKind: listed.sessionKind ?? null, grants: listed.grants ?? [] } : null, principals: served.length };
     else await deps.wait(3000);
   }
-  if (!readback) throw new Error(`${target} still ${change.entry ? `does not list ${change.id} as ${change.entry.role} with grants ${(change.entry.grants ?? []).join(', ') || 'none'}` : `lists ${change.id}`} after two minutes; the redeploy may still be in progress. Rerun the same command: it changes nothing and reads the roster back again`);
-  return vault.scrub({ action: change.entry ? 'add' as const : 'remove' as const, repository: record.repository, installDirectory: session.directory, principal: change.entry ? { id: change.entry.id, role: change.entry.role, sessionKind: change.entry.sessionKind ?? null, grants: change.entry.grants ?? [] } : { id: change.id }, changed: change.changed, deployment, readback,
+  if (!readback) throw new Error(`${target} still ${change.entry ? `does not list ${change.id} as ${change.entry.role} with grants ${(change.entry.grants ?? []).join(', ') || 'none'}${change.entry.proofs?.length ? ` and proofs ${change.entry.proofs.join(', ')}` : ''}` : `lists ${change.id}`} after two minutes; the redeploy may still be in progress. Rerun the same command: it changes nothing and reads the roster back again`);
+  return vault.scrub({ action: change.entry ? 'add' as const : 'remove' as const, repository: record.repository, installDirectory: session.directory, principal: change.entry ? { id: change.entry.id, role: change.entry.role, sessionKind: change.entry.sessionKind ?? null, grants: change.entry.grants ?? [], ...(change.entry.proofs?.length ? { proofs: change.entry.proofs } : {}) } : { id: change.id }, changed: change.changed, deployment, readback,
     ...(change.entry && !context.host ? { tokenFile: tokenFile(session.directory, change.entry.id) } : {}) });
 }
 

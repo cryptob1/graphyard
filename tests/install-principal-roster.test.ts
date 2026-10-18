@@ -11,7 +11,7 @@ import type { Principal } from '../src/model.js';
 import { authorizedForProof, effectiveAuthority } from '../src/proof-grants.js';
 import { principalCommand } from '../src/cli/install.js';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
-import { fingerprint, plannedPrincipals, reconcileRoster, rosterEntry, tokenFile } from '../src/install/secrets.js';
+import { fingerprint, importPrincipalToken, plannedPrincipals, reconcileRoster, rosterEntry, tokenFile } from '../src/install/secrets.js';
 import { externalRunsImportGrant } from '../src/server/principals.js';
 import { freePort } from '../src/cli/test-isolation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -20,7 +20,8 @@ import { deployedRoster, harness, REPOSITORY, type Harness } from './install-har
 // GY-1879: an installation keeps its principal roster in install.json as a durable record and every
 // apply reconciles with it instead of rewriting it. `graphyard principal add|remove` edits one entry,
 // writes GRAPHYARD_PRINCIPALS alone and reads the served roster back; a producer is created only with
-// an explicit grant, and the external-results lane's grant, external-runs:import, authorizes nothing else.
+// an explicit lane grant or proof seed, and the external-results lane's grant, external-runs:import,
+// authorizes nothing else. GY-1998: `--token-file` restores a former credential.
 
 const GRANT = externalRunsImportGrant;
 const SERVICE = 'graphyard-owner-project';
@@ -120,6 +121,32 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add write
     await assert.rejects(principal(fixture, ['add', 'bad id', '--role', 'reader']), /principal id is/);
     await assert.rejects(principal(fixture, ['remove', 'huck-engineer', '--role', 'reader']), /takes only ID/);
     assert.equal(variableWrites(fixture).length, writesBefore + 2, 'a refused command writes nothing');
+  } finally { await fixture.cleanup(); }
+});
+
+test('unit:principal-upsert-remove-single-entry-readback — principal add --token-file restores a former worker credential instead of minting one, and --proof registers a proof producer without a lane grant (GY-1998)', async () => {
+  const fixture = await harness({ provider: 'railway' });
+  try {
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    await applyInstall(session, await buildPlan(session));
+    const directory = session.directory;
+    const former = join(fixture.root, 'former-worker.token');
+    const formerToken = `${'a'.repeat(43)}`;
+    await writeFile(former, `${formerToken}\n`, { mode: 0o600 });
+    const added = await principal(fixture, ['add', 'graphyard-claude-1', '--role', 'worker', '--token-file', former]);
+    assert.equal(added.changed, true);
+    assert.deepEqual(added.principal, { id: 'graphyard-claude-1', role: 'worker', sessionKind: 'ai', grants: [] });
+    const deployed = deployedRoster(fixture.transport).find(entry => entry.id === 'graphyard-claude-1')!;
+    assert.equal(deployed.token, formerToken, 'the deployment serves the imported credential');
+    assert.equal((await readFile(tokenFile(directory, 'graphyard-claude-1'), 'utf8')).trim(), formerToken);
+    assert.equal(await importPrincipalToken(directory, 'graphyard-claude-1', former), tokenFile(directory, 'graphyard-claude-1'), 're-import of the same credential is a no-op');
+    await writeFile(join(fixture.root, 'other.token'), `${'b'.repeat(43)}\n`, { mode: 0o600 });
+    await assert.rejects(importPrincipalToken(directory, 'graphyard-claude-1', join(fixture.root, 'other.token')), /already holds a different credential/);
+    const proof = await principal(fixture, ['add', 'restored-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']);
+    assert.equal(proof.changed, true);
+    assert.deepEqual(proof.principal, { id: 'restored-producer', role: 'producer', sessionKind: 'ai', grants: [], proofs: ['integration:*', 'unit:*'] });
+    assert.deepEqual(withoutToken(deployedRoster(fixture.transport).find(entry => entry.id === 'restored-producer')!), { id: 'restored-producer', role: 'producer', sessionKind: 'ai', proofs: ['integration:*', 'unit:*'] });
+    assert.deepEqual(proof.readback.principal, { id: 'restored-producer', role: 'producer', sessionKind: 'ai', grants: [] }, 'the served roster lists lane grants only; proof seeds ride in GRAPHYARD_PRINCIPALS');
   } finally { await fixture.cleanup(); }
 });
 
@@ -260,11 +287,13 @@ test('unit:external-import-requires-grant — a producer holding external-runs:i
   principalSchema.parse([{ ...granted, token: tokens.get(granted.id) }]);
   assert.throws(() => principalSchema.parse([{ ...granted, grants: ['proof:*'], token: tokens.get(granted.id) }]));
 
-  // No producer is created without a grant: not by the planner, and not by principal add.
+  // No producer is created without a grant or proof seed: not by the planner, and not by principal add.
   assert.ok(!plannedPrincipals('owner-project', { producerProofs: [] }).some(entry => entry.role === 'producer'));
-  assert.throws(() => rosterEntry({ id: 'huck-engineer', role: 'producer' }), /A producer is created only with an explicit grant \(--grant external-runs:import\|delivery:observe-sha\)/);
+  assert.throws(() => rosterEntry({ id: 'huck-engineer', role: 'producer' }), /A producer is created only with an explicit grant \(--grant external-runs:import\|delivery:observe-sha\) or proof seed/);
   assert.throws(() => rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [] }), /explicit grant/);
   assert.deepEqual(rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [GRANT, GRANT] }), { ...huck, source: 'principal' });
+  assert.deepEqual(rosterEntry({ id: 'restored-producer', role: 'producer', proofs: ['unit:*', 'integration:*'] }), { id: 'restored-producer', role: 'producer', sessionKind: 'ai', proofs: ['integration:*', 'unit:*'], source: 'principal' });
+  assert.throws(() => rosterEntry({ id: 'worker-a', role: 'worker', proofs: ['unit:*'] }), /proof seed names producer proof authority/);
 });
 
 test('unit:principal-upsert-remove-single-entry-readback — on a bundle provider (Compose) principal add rewrites the bundle with every deployed value as it stands, the installed GitHub App, its mounted key and an unrelated setting kept, and changes only GRAPHYARD_PRINCIPALS', async () => {
