@@ -295,7 +295,7 @@ export function markersFromEnvFile(content: string) {
 function composeActions(ctx: AdapterContext, observation: AdapterObservation, label: string): PlanAction[] {
   return [
     { id: 'provider.provision.database', target: 'provider', title: `Start Postgres 17 with a durable volume on ${label}`, state: observation.database ? 'satisfied' : 'create', command: `docker compose --project-directory ${ctx.workdir} up -d db` },
-    { id: 'provider.provision.app', target: 'provider', title: `Start the Graphyard application container (${ctx.image}) on ${label}`, state: observation.app ? 'satisfied' : 'create', command: `docker compose --project-directory ${ctx.workdir} up -d server` },
+    { id: 'provider.provision.app', target: 'provider', title: `Start the Graphyard application container (${ctx.image}) on ${label}${ctx.repoCheckout ? `, with ${ctx.repoCheckout} mounted at /repo` : ''}`, state: observation.app ? 'satisfied' : 'create', command: `docker compose --project-directory ${ctx.workdir} up -d server` },
   ];
 }
 
