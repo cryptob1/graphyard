@@ -24,7 +24,7 @@ export const scopeRequestPlanLine = 'plannedFiles is a plan, not a lock: edit th
 /** The worker half of live scope negotiation, retired (GY-1991): the command posts nothing and returns at once, `--wait` included. */
 export const scopeRequestCommand: CliCommand = {
   name: 'scope-request',
-  scope: 'work',
+  readsConnection: () => false,
   help: [
     '  scope-request GY-N EPOCH [PATH... -- REASON]',
     '                                plannedFiles is a plan, not a lock: edit the file you need and',

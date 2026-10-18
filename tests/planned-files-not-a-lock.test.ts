@@ -6,6 +6,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { syncWork } from '../src/cli/workspace.js';
 import { scopeRequestCommand, scopeRequestPlanLine } from '../src/cli/session-commands.js';
+import { main } from '../src/cli/index.js';
 import { workerPrompt } from '../src/master/dispatch.js';
 import { workerBeforePushSection } from '../src/master/worker-fast-gates.js';
 import { reworkBriefSection } from '../src/master/rework-brief.js';
@@ -105,6 +106,17 @@ test('unit:scope-request-is-a-no-op — scope-request prints that plannedFiles i
     assert.deepEqual(calls, [], `${args.join(' ')} posts nothing to the control plane`);
     assert.deepEqual(printed, [scopeRequestPlanLine], `${args.join(' ')} prints the one line`);
   }
+  // The real CLI dispatch looks nothing up either: no request reaches the control plane.
+  const fetched: unknown[] = [], logged: unknown[] = [];
+  const { fetch, log } = { fetch: globalThis.fetch, log: console.log };
+  globalThis.fetch = (async (input: unknown) => { fetched.push(input); throw new Error('no control plane'); }) as typeof fetch;
+  console.log = (value: unknown) => { logged.push(value); };
+  try {
+    for (const args of [['GY-9', '4', 'src/b.ts', '--', 'the reason'], ['GY-9', '4', 'src/b.ts', '--wait', '--', 'the reason']]) await main(['scope-request', ...args]);
+  } finally { globalThis.fetch = fetch; console.log = log; }
+  assert.deepEqual(fetched, [], 'the CLI makes no request to the control plane');
+  assert.equal(logged.length, 2);
+  for (const line of logged) assert.match(String(line), /plannedFiles is a plan, not a lock/);
   assert.equal(scopeRequestPlanLine, 'plannedFiles is a plan, not a lock: edit the file you need and submit; nothing needs requesting.');
 });
 
