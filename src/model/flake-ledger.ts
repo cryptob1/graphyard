@@ -1,15 +1,12 @@
-// Concern: the flake ledger (GY-1498) — the pure half. A required check that failed and passed on
-// its one rerun on the same sha is a flake: a PR rerun that ended `passed` (GY-516), a main
-// guard flake (GY-1497) or a merge trial whose failing test files passed on their rerun of the
-// same merge commit (GY-1834). Each such failed job is read once for the tests it failed, every
-// test is an entry, and a test gets one fix item: on its first flake when it is no criterion proof
-// of the item it flaked on (GY-1834), after it flakes repeatedly when it is. The ledger only
-// remembers: the PR gate's single rerun and the main guard's revert decision read none of it, and
-// a flaky test is never skipped, quarantined or exempted from a required check. The loop's step is
-// daemon/cycle-flakes.ts and the file is flake-ledger.ts.
+// Concern: the flake ledger (GY-1498) — the pure half. A merge trial whose failing test files
+// passed on their rerun of the same merge commit is a flake (GY-1834). Each is read once for the
+// tests it failed, every test is an entry, and a test gets one fix item: on its first flake when it
+// is no criterion proof of the item it flaked on, after it flakes repeatedly when it is. The ledger
+// only remembers: no gate reads it, and a flaky test is never skipped, quarantined or exempted from
+// a required check. Entries a pull-request-era release recorded (`pr-rerun`, `main-rerun`) still
+// load and count. The loop's step is daemon/cycle-flakes.ts and the file is flake-ledger.ts.
 import { z } from 'zod';
 import type { Work } from './work.js';
-import type {} from '../merge-queue.js';
 import type {} from './merge-ledger.js';
 import { proofTestFile } from './scope-companions.js';
 
@@ -48,12 +45,6 @@ export const flakeLedgerSchema = z.object({
 export type FlakeLedger = z.infer<typeof flakeLedgerSchema>;
 export const emptyFlakeLedger = (): FlakeLedger => flakeLedgerSchema.parse({});
 
-/** A failed job that passed on its rerun on the same sha, before its log is read. */
-export interface FlakeSource {
-  check: string; sha: string; pr: number | null; source: FlakeEntry['source']; failedRunId: number; at: string;
-  /** The criterion proofs of the item it flaked on (GY-1834); absent or null when its criteria were not read. */
-  proofs?: readonly string[] | null;
-}
 /** The criterion proofs of an item, or null when it was read without its criteria. */
 const itemProofs = (item: Work) => Array.isArray(item.criteria) ? item.criteria.flatMap(criterion => criterion.proofs) : null;
 /** Whether `test` is one of `proofs` by the proof id its name leads with; null when the proofs are unknown. */
@@ -62,39 +53,6 @@ export const isOwnProof = (test: string | null, proofs: readonly string[] | null
   const proof = test === null ? null : leadingProof(test);
   return !!proof && proofs.includes(proof);
 };
-
-/**
- * Every flake the items record: a PR check rerun in state `passed` and every main guard flake.
- * A failure whose rerun failed too, is still owed or running, or was refused is not a flake and
- * is never a source; a main flake GitHub gave no failed run for has no job to read.
- */
-export function flakeSources(work: readonly Work[]): FlakeSource[] {
-  const sources: FlakeSource[] = [];
-  for (const item of work) {
-    const pr = item.submission?.pr ?? null, proofs = itemProofs(item);
-    for (const rerun of item.checkReruns ?? []) if (rerun.state === 'passed')
-      sources.push({ check: rerun.check, sha: rerun.sha, pr, source: 'pr-rerun', failedRunId: rerun.failedRunId, at: rerun.resolvedAt ?? rerun.at, proofs });
-  }
-  return sources;
-}
-
-/** The sources not read yet and still inside the retention, oldest first. */
-export function unreadSources(ledger: FlakeLedger, sources: readonly FlakeSource[], now: number): FlakeSource[] {
-  const seen = new Set<number>();
-  return sources.filter(source => {
-    if (seen.has(source.failedRunId) || ledger.read[source.failedRunId] !== undefined) return false;
-    seen.add(source.failedRunId);
-    return now - Date.parse(source.at) < flakeRetentionMs;
-  }).sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
-}
-
-/** Records one read failed job: one entry per test it failed, or one under its check when it names none. Mutates `ledger`. */
-export function recordFlake(ledger: FlakeLedger, source: FlakeSource, tests: readonly string[] | null, now: number) {
-  ledger.read[source.failedRunId] = source.at;
-  const names = tests?.length ? [...new Set(tests)] : [null];
-  ledger.entries.push(...names.map(test => ({ test, check: source.check, sha: source.sha, pr: source.pr, source: source.source, failedRunId: source.failedRunId, at: source.at, ownProof: isOwnProof(test, source.proofs) })));
-  pruneFlakeLedger(ledger, now);
-}
 
 /**
  * GY-1834: a merge trial's flake — the test files of `key`'s trial on `mergeSha` that failed and

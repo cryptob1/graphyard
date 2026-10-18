@@ -454,5 +454,5 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
-  }, Object.getOwnPropertyDescriptors(baseFailureEffects(run, current, asOperatorAgent)));
+  }, Object.getOwnPropertyDescriptors(baseFailureEffects(current, asOperatorAgent)));
 }

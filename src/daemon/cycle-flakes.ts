@@ -1,26 +1,19 @@
-// Concern: the flake ledger (GY-1498) — the loop's step, beside the base-failure step. Each new
-// pass-on-rerun (a PR check rerun that ended passed, a main guard flake) has its failed job's log
-// read once through the failedTests effect, and each merge trial flake the writer recorded on an item's merge ledger (GY-1834)
-// is taken with its tests named; its tests are kept in the bounded ledger file, and a test gets one
+// Concern: the flake ledger (GY-1498) — the loop's step, beside the base-failure step. Each merge
+// trial flake the writer recorded on an item's merge ledger (GY-1834) is taken once with its tests
+// named; its tests are kept in the bounded ledger file, and a test gets one
 // fix item — on its first flake when it is no criterion proof of its item, else once it flakes repeatedly — filed as the operator-agent through
 // fileFaultClass as the docs trim item is. It only reads the items: no rerun count, revert or gate
 // reads the ledger. The pure half is model/flake-ledger.ts, the file flake-ledger.ts.
 import { createHash } from 'node:crypto';
-import { flakeSources, flakyItem, flakyItemTitle, flakyTests, mayFile, noteClosedFlakyItems, openFlakyItem, recordFlake, recordTrialFlake, trialFlakes, unreadSources, type FlakeLedger } from '../model/flake-ledger.js';
+import { flakyItem, flakyItemTitle, flakyTests, mayFile, noteClosedFlakyItems, openFlakyItem, recordTrialFlake, trialFlakes, type FlakeLedger } from '../model/flake-ledger.js';
 import type { FlakeLedgerStore } from '../flake-ledger.js';
 import { readyToRetry } from './sessions.js';
 import { message } from './state.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 
-/** At most this many failed job logs are read in one cycle; the rest are read by the next. */
-export const flakeReadsPerCycle = 20;
-/** A log that cannot be read this many times is recorded under its check, naming no test, so it is never read again. */
-export const flakeReadAttempts = 3;
-
-// The ledger a store last read or wrote, and the failed reads of each job, kept across this loop's cycles.
+// The ledger a store last read or wrote, kept across this loop's cycles.
 const ledgers = new WeakMap<FlakeLedgerStore, FlakeLedger>();
-const failedReads = new WeakMap<FlakeLedgerStore, Map<number, number>>();
 const digest = (text: string) => createHash('sha256').update(text).digest('hex').slice(0, 16);
 /** The loop's action key for the fix item of one test. */
 export const flakyActionKey = (test: string) => `fault:flaky-test:${digest(test)}`;
@@ -34,23 +27,7 @@ export async function flakeStep(cycle: Cycle) {
   if (!ledger) ledgers.set(store, ledger = await store.read());
   let changed = false;
 
-  // 1. Each failed job that passed on its rerun is read once, keyed by its check run id.
-  const unread = effects.failedTests ? unreadSources(ledger, flakeSources(snapshot.work), clock).slice(0, flakeReadsPerCycle) : [];
-  const failures = failedReads.get(store) ?? new Map<number, number>();
-  failedReads.set(store, failures);
-  for (const source of unread) {
-    let tests: string[] | null;
-    try { tests = await effects.failedTests!(source.failedRunId); }
-    catch {
-      const attempts = (failures.get(source.failedRunId) ?? 0) + 1;
-      if (attempts < flakeReadAttempts) { failures.set(source.failedRunId, attempts); continue; }
-      tests = null;
-    }
-    failures.delete(source.failedRunId);
-    recordFlake(ledger, source, tests, clock);
-    changed = true;
-  }
-  // The merge writer's trial flakes (GY-1834), kept on each item's merge ledger, name their tests already: each merge commit is recorded once.
+  // 1. The merge writer's trial flakes (GY-1834), kept on each item's merge ledger, name their tests already: each merge commit is recorded once.
   for (const flake of trialFlakes(snapshot.work)) if (recordTrialFlake(ledger, flake, clock)) changed = true;
 
   // 2. A filed item the snapshot shows closed starts its quiet period; an open one the ledger lost is adopted.
