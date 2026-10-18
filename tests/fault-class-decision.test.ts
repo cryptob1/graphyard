@@ -1469,7 +1469,7 @@ function observedFaults(works: Work[], at: string, writer: MergeWriterSummary | 
 const queued2053 = (requestedAt: string) => ['GY-2004', 'GY-2012'].map(subject => trialRefused(subject, requestedAt, gy2053Heads));
 const front2053 = (requestedAt: string) => pushRefused('GY-2011', requestedAt, gy2053Heads);
 
-test('manual:fault-class-decision — owed-decision|GY-2004, GY-2012 and GY-2011 at 09:32:04.594Z are no fault inside the writer\'s 37-minute flight', () => {
+test('unit:writer-flight-hold-past-thirty-minutes — owed-decision|GY-2004, GY-2012 and GY-2011 at 09:32:04.594Z are no fault inside the writer\'s 37-minute flight', () => {
   const now = Date.parse(gy2053Pass), writer = writer2053(gy2053Pass), bound = owed.mergeWriterMotionBound(writer);
   assert.ok(now - Date.parse(gy2053Flight) > mergeWriterMotionBoundMs && now - Date.parse(gy2053Flight) < bound,
     'the flight had outlived the flat 30-minute bound the pass counted it against and stands inside the writer\'s own worst case');
@@ -1493,35 +1493,39 @@ test('manual:fault-class-decision — owed-decision|GY-2004, GY-2012 and GY-2011
     ['owed-decision|GY-2004', 'owed-decision|GY-2011', 'owed-decision|GY-2012'], 'the three instances, replayed as the base counted them');
 });
 
-test('manual:fault-class-decision — the hold expires only when no flight is in progress and no movement stands inside the writer\'s own bound', () => {
-  const now = Date.parse(gy2053Pass), works = queued2053(new Date(now - 38 * 60_000).toISOString());
-  // The flight settled (its refusal recorded 36m52s after it started) and the next head's flight is
-  // seconds in: the newest movement is fresh, so every still-held line stands and the class is quiet.
-  const next = writer2053(gy2053Settled, { queue: writer2053(gy2053Settled).queue.slice(1),
-    inFlight: { key: 'GY-2004', id: 'work-GY-2004', head: gy2053Heads['GY-2004']!.toLowerCase(), startedAt: gy2053Settled },
-    refusals: [{ key: 'GY-2011', head: gy2053Heads['GY-2011']!.toLowerCase(), reason: 'trial failed: tests tests/item-page-structure.test.ts', at: gy2053Settled }] });
+/** The settled flight: its refusal recorded 36m52s after it started, the next head's flight seconds in. */
+const next2053 = () => writer2053(gy2053Settled, { queue: writer2053(gy2053Settled).queue.slice(1),
+  inFlight: { key: 'GY-2004', id: 'work-GY-2004', head: gy2053Heads['GY-2004']!.toLowerCase(), startedAt: gy2053Settled },
+  refusals: [{ key: 'GY-2011', head: gy2053Heads['GY-2011']!.toLowerCase(), reason: 'trial failed: tests tests/item-page-structure.test.ts', at: gy2053Settled }] });
+
+test('unit:writer-hold-expires-without-flight — the hold expires only when no flight is in progress and no movement stands inside the writer\'s own bound', () => {
+  const now = Date.parse(gy2053Pass), works = queued2053(new Date(now - 38 * 60_000).toISOString()), next = next2053();
+  // The next head's flight is seconds in: the newest movement is fresh, so every still-held line stands and the class is quiet.
   assert.deepEqual(observedFaults(works, gy2053Settled, next).counted.map(fault => fault.kind), [], 'the next flight is movement in the bound\'s own terms');
-  // Past the bound with no flight and no movement, the same hold expires: the queue's one stall
-  // stands for the held heads, and the class counts the stall once, not a decision per head.
+  // Past the bound with no flight and no movement, the same hold expires.
   const stalledAt = Date.parse(gy2053Settled) + owed.mergeWriterMotionBound(next) + 60_000, stalled = { ...next, inFlight: null };
   for (const work of works) assert.equal(owed.mergeWriterHolds(work, stalled, stalledAt), 'stalled', `${work.key}: no flight and the movement is past the bound`);
+  // The hold does not expire while a flight is alive, whatever the movement's age: the flight itself is the writer moving,
+  // and the fault reader sees the same — a timed-out attempt's retry records nothing until it returns, yet no owed decision opens.
+  const alive = { ...stalled, inFlight: next.inFlight };
+  for (const work of works) assert.equal(owed.mergeWriterHolds(work, alive, stalledAt), 'moving', `${work.key}: the flight outlives any bound`);
+  const aliveRead = observedFaults([...works, front2053(new Date(now - 38 * 60_000).toISOString())], new Date(stalledAt).toISOString(), { ...alive, queue: [...alive.queue, writer2053(gy2053Pass).queue[0]!] });
+  assert.ok(aliveRead.reported.length === 3 && aliveRead.reported.every(line => Date.parse(line.inMotionUntil!) > stalledAt), 'every held line stays in motion past this reading');
+  assert.deepEqual(aliveRead.counted.map(fault => fault.kind), [], 'no owed-decision instance opens while the flight is alive, trial or push');
+});
+
+test('unit:stalled-writer-single-line — the single stalled-step line stands only when no attempt is alive, and never beside per-head owed lines', () => {
+  const now = Date.parse(gy2053Pass), works = queued2053(new Date(now - 38 * 60_000).toISOString()), next = next2053();
+  const stalledAt = Date.parse(gy2053Settled) + owed.mergeWriterMotionBound(next) + 60_000, stalled = { ...next, inFlight: null };
   assert.deepEqual(humanNeededAttention({ work: works, now: new Date(stalledAt).toISOString() }, stalled).map(line => line.subject), [], 'the stall stands for the held heads, not beside them');
   const stall = mergeWriterStallAttention(stalled, stalledAt)!;
   assert.match(stall.text, /queue holds 2 head\(s\) it cannot move/);
   assert.deepEqual(cycleFaults(emptyDaemonState(config()), works, stalledAt, { config: config(), reported: [stall] }).map(fault => `${fault.kind}|${fault.subject}`),
     ['stalled-step|merge-writer'], 'one line for the queue the writer cannot move');
-  // The hold does not expire while a flight is alive, whatever the movement's age: the flight itself is the writer moving.
-  const alive = { ...stalled, inFlight: next.inFlight };
-  for (const work of works) assert.equal(owed.mergeWriterHolds(work, alive, stalledAt), 'moving', `${work.key}: the flight outlives any bound`);
-  assert.equal(mergeWriterStallAttention(alive, stalledAt), null, 'no stall line stands beside a live flight');
-  // The fault reader sees the same: a live flight whose newest movement aged past the bound (a timed-out
-  // attempt's retry, which records nothing until it returns) still opens no owed decision, trial or push.
-  const aliveRead = observedFaults([...works, front2053(new Date(now - 38 * 60_000).toISOString())], new Date(stalledAt).toISOString(), { ...alive, queue: [...alive.queue, writer2053(gy2053Pass).queue[0]!] });
-  assert.ok(aliveRead.reported.length === 3 && aliveRead.reported.every(line => Date.parse(line.inMotionUntil!) > stalledAt), 'every held line stays in motion past this reading');
-  assert.deepEqual(aliveRead.counted.map(fault => fault.kind), [], 'no owed-decision instance opens while the flight is alive');
+  assert.equal(mergeWriterStallAttention({ ...stalled, inFlight: next.inFlight }, stalledAt), null, 'no stall line stands beside a live flight');
 });
 
-test('manual:fault-class-decision — a merge-gate push refusal is held exactly like a trial refusal, and every push refusal the writer does not own still counts', () => {
+test('unit:push-refusal-held-while-writer-works — a merge-gate push refusal of a head the writer holds is held exactly like a trial refusal', () => {
   const now = Date.parse(gy2053Pass), writer = writer2053(gy2053Pass);
   // GY-2011 as the pass counted it: merge gate refused `merge writer has not pushed 66f37f2604f1` —
   // the writer's own next step, its queue held the head at the front and its flight was working it.
@@ -1530,6 +1534,10 @@ test('manual:fault-class-decision — a merge-gate push refusal is held exactly 
   assert.equal(owed.mergeWriterHolds(pushRefused('GY-2004', new Date(now - 31 * 60_000).toISOString(), gy2053Heads), writer, now), 'moving', 'a queued head\'s push refusal waits for the writer too');
   assert.deepEqual(observedFaults([front], gy2053Pass, writer).counted.map(fault => fault.kind), [], 'the held push refusal opens nothing');
   assert.ok(Date.parse(observedFaults([front], gy2053Pass, writer).reported[0]!.inMotionUntil!) > now, 'the push refusal is bounded like the trial refusal beside it');
+});
+
+test('unit:unheld-push-refusal-still-counts — a push refusal whose head the writer does not hold, or that is not the writer\'s own, still counts as an owed decision', () => {
+  const now = Date.parse(gy2053Pass), writer = writer2053(gy2053Pass), front = front2053(new Date(now - 38 * 60_000).toISOString());
   // A push refusal whose head is in neither the queue nor the flight is a genuine unanswered decision.
   const unheld = { ...writer, queue: writer.queue.slice(1), inFlight: null };
   assert.equal(owed.mergeWriterHolds(front, unheld, now), null, 'a head the queue does not hold is nobody\'s motion');
@@ -1549,7 +1557,7 @@ test('manual:fault-class-decision — a merge-gate push refusal is held exactly 
   assert.deepEqual(observedFaults([front], gy2053Pass, null).counted.map(fault => fault.kind), ['owed-decision']);
 });
 
-test('manual:fault-class-decision — every ledger write a flight makes is attempt progress, and the movement it reports keeps the queue quiet', () => {
+test('unit:writer-attempt-progress-moves — every ledger write a flight makes is attempt progress, and the movement it reports keeps the queue quiet', () => {
   const item = { key: 'GY-2011' }, head = gy2053Heads['GY-2011']!;
   // The steps one flight records, in the order the executor writes them: the intent, the trial's
   // no-verdict record (a timeout), the retrial's intent on the new tip, the push, the reconcile.
