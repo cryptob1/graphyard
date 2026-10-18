@@ -248,7 +248,13 @@ export async function setupRepository(root: string, input: Connection, options: 
   const herdrRelink = herdrBoundElsewhere(herdrBound, connection.url) ? herdrBound!.bound : null;
   if (herdrRelink && !options.herdrRebind) throw new Error(herdrRebindRefusal(herdrRelink, connection.url));
   const directory = await localDirectory(connectionRoots(root)[0]);
-  await atomicWrite(resolve(directory, 'connection.json'), JSON.stringify(connection, null, 2), 0o600);
+  // GY-1960: setup rewrites connection.json whole from the fields this version declares, so an
+  // older or held CLI rerunning it keeps what a newer CLI wrote: the existing file parses
+  // forward-tolerantly and rides under these updates. A file that cannot be read or parsed is
+  // overwritten as before — setup is also the repair path for a corrupt one.
+  let kept: Partial<Connection> = {};
+  try { kept = connectionSchema.parse(JSON.parse(await readFile(resolve(directory, 'connection.json'), 'utf8'))); } catch { /* nothing kept */ }
+  await atomicWrite(resolve(directory, 'connection.json'), JSON.stringify({ ...kept, ...connection }, null, 2), 0o600);
   let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }
   await atomicWrite(instructionsFile, instructions, instructionsMode);
   const discovery = await saveDiscovery(root);

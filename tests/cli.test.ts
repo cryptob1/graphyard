@@ -869,7 +869,8 @@ test('the runner holds authority while the host attestor executes and signs the 
     const attempted = JSON.parse((await exec(process.execPath, [launcher, 'runner', 'attempt', plan], { cwd, env: attestorEnv, maxBuffer: 8 << 20 })).stdout);
 
     // Acknowledgement sits between the attestor's preflight and its first container.
-    assert.deepEqual(posts, ['dispatch', 'ack']);
+    // GY-1960: the invocation first reads the release /healthz serves; the stub names none, so it proceeds.
+    assert.deepEqual(posts, ['/healthz', 'dispatch', 'ack']);
     // And the attestor checked the control plane itself, twice: once before provisioning
     // anything, and once after the runner claimed to have acknowledged. The second read is
     // what actually releases the containers, so `proceed` on the pipe decides nothing.
@@ -1003,7 +1004,7 @@ test('the runner retries a lost acknowledgement response idempotently and starts
     assert.deepEqual(JSON.parse(acks[0].body), { requestId, attemptId, epoch: 1 });
     // The replayed, already-acknowledged answer is success: the attempt went on to the
     // attestor, which read `running` for itself and produced a signed record.
-    assert.deepEqual(events, ['dispatch', 'authority:dispatched', 'ack:response-lost', 'ack:replayed', 'authority:running'],
+    assert.deepEqual(events, ['/healthz', 'dispatch', 'authority:dispatched', 'ack:response-lost', 'ack:replayed', 'authority:running'],
       'no heartbeat and no execution precede the confirmed acknowledgement');
     assert.equal(attempted.dispatched, true);
     assert.equal(attempted.attestation.payload.attemptId, attemptId);

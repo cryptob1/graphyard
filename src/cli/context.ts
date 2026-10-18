@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadConnection, hostIdSchema } from '../repository-setup.js';
 import { readCredentialFile } from '../master.js';
 import { isConfirmedCoordinationRefusal } from '../quarantine.js';
-import { packageVersion } from '../release.js';
+import { cliRelease } from '../release.js';
 import { cliCommit } from '../protocol-version.js';
 
 /** How long one CLI request waits (2026-09-27: the full work snapshot reached 19 MB and ~31 s, so a 30 s bound failed every read of it, including workers' sync and complete; GY-864 bounds those reads). */
@@ -25,8 +25,8 @@ export interface ReleaseIdentity { version: string; released: boolean; commit: s
 /**
  * Why this CLI refuses its server, or null. A server that names no release says nothing about
  * skew, so the invocation proceeds as before — that is what keeps a stub, an old plane, or a
- * probe that timed out from refusing anything. A released CLI (a stamped GRAPHYARD_VERSION)
- * compares versions: equal versions behave as today. An unreleased build compares the commit it
+ * probe that timed out from refusing anything. A released CLI (a stamped build, or a checkout on
+ * a dated tag) compares versions: equal versions behave as today. An unreleased build compares the commit it
  * runs against the server's, falling back to versions when either commit is unknown; the loop's
  * own exchange keeps its separate MERGE_PROTOCOL check (src/protocol-version.ts).
  */
@@ -42,12 +42,11 @@ export function releaseSkew(cli: ReleaseIdentity, server: { version?: unknown; c
   return cli.version === serverVersion ? null : versionSkewMessage(cli.version, serverVersion);
 }
 
-/** This CLI's own release: the stamped version when the build carries one, else the commit of the checkout this file runs from. */
-const thisRelease = (): ReleaseIdentity => ({
-  version: process.env.GRAPHYARD_VERSION || packageVersion,
-  released: !!process.env.GRAPHYARD_VERSION,
-  commit: cliCommit(fileURLToPath(new URL('../../', import.meta.url))),
-});
+/** This CLI's own release: the same release `graphyard version` reports and /healthz serves (src/release.ts cliRelease), so both sides compare like with like. Its commit is the checkout this file runs from, what an unreleased build compares. */
+const thisRelease = (): ReleaseIdentity => {
+  const release = cliRelease();
+  return { version: release.version, released: release.released, commit: cliCommit(fileURLToPath(new URL('../../', import.meta.url))) };
+};
 
 /** The release /healthz serves — no credential needed — or null when it cannot be read or names none. */
 const readServerRelease = async (base: string): Promise<{ version?: unknown; commit?: unknown } | null> => {

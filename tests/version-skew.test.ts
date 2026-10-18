@@ -11,13 +11,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer, type Server } from 'node:http';
 import { createContext, releaseSkew, versionSkewMessage } from '../src/cli/context.js';
 import { loadStoredMasterConfig, masterConfigSchema } from '../src/master.js';
-import { loadConnection } from '../src/repository-setup.js';
+import { loadConnection, setupRepository } from '../src/repository-setup.js';
 import { daemonStatePath, emptyDaemonState, readDaemonState, writeDaemonState } from '../src/daemon/state.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -119,6 +119,40 @@ test('unit:version-skew — an unreleased build compares commits: another commit
   } finally { await close(server); }
 });
 
+test('unit:version-skew — an unstamped CLI on a dated checkout takes its release from the same source /healthz does, so the checkout\'s own tag with no commit proceeds and another release still refuses', async () => {
+  // The dated checkout is staged with a git that answers `rev-parse HEAD` and `tag --points-at HEAD` in the
+  // install root: no GRAPHYARD_VERSION is set, so the CLI's identity comes from checkoutRelease — the same
+  // source /healthz serves — and a server reporting that tag with `commit: null` (no build identity) must
+  // not refuse, which the package version the CLI once fell back to could not know.
+  const fakeBin = await temporaryDirectory('version-skew-dated-git');
+  const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const scriptedHead = 'b'.repeat(40);
+  await writeFile(join(fakeBin, 'git'), `#!/bin/sh\nif [ "$1 $2" = "rev-parse HEAD" ] && [ -z "$3" ]; then echo ${scriptedHead}; elif [ "$1" = tag ]; then echo 2026.10.17; else exec '${realGit}' "$@"; fi\n`, { mode: 0o755 });
+  const cwd = await gitRepository('version-skew-dated');
+  const requests: string[] = [];
+  let servingVersion = '2026.10.17';
+  const server = createServer((request, response) => {
+    requests.push(request.url!);
+    response.setHeader('Content-Type', 'application/json');
+    if (request.url === '/healthz') return response.end(JSON.stringify({ ok: true, version: servingVersion, commit: null }));
+    response.statusCode = 404;
+    response.end(JSON.stringify({ error: 'Not found' }));
+  });
+  await listen(server);
+  const env = { ...process.env, PATH: `${fakeBin}:${process.env.PATH}`, GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: origin(server) } as Record<string, string | undefined>;
+  delete env.GRAPHYARD_VERSION; // unstamped: the checkout's own release is what both sides report
+  try {
+    const current = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env }).then(() => null, (error: any) => error);
+    assert.match(current?.stderr, /Unknown work item GY-1/, 'the checkout\'s own dated tag is the served release: the invocation proceeds with no commit named anywhere');
+    assert.deepEqual(requests, ['/healthz', '/api/work/GY-1']);
+    requests.length = 0;
+    servingVersion = '2026.10.18';
+    const behind = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env }).then(() => null, (error: any) => error);
+    assert.match(behind?.stderr, /CLI 2026\.10\.17 and server 2026\.10\.18 differ: run graphyard upgrade/);
+    assert.deepEqual(requests, ['/healthz'], 'the skewed invocation is refused before its first API request');
+  } finally { await close(server); }
+});
+
 test('unit:version-skew — an Invalid input answer from a server at a different version is reported as the skew message, and a same-version one is not', async () => {
   const savedUrl = process.env.GRAPHYARD_URL, savedToken = process.env.GRAPHYARD_TOKEN, savedVersion = process.env.GRAPHYARD_VERSION;
   let healthzReads = 0;
@@ -193,6 +227,23 @@ test('unit:state-files-forward-tolerant — connection.json reads and writes an 
   // A malformed declared field still refuses the read.
   await writeFile(file, JSON.stringify({ url: 'http://127.0.0.1:4310', cliPath: launcher, hostId: '' }), { mode: 0o600 });
   await assert.rejects(loadConnection(root));
+});
+
+test('unit:state-files-forward-tolerant — setupRepository keeps what a newer CLI wrote when an older CLI\'s declared-only setup rewrites the file', async () => {
+  const root = await gitRepository('skew-connection-writer');
+  const fetcher = async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' } }));
+  const input = { url: 'http://127.0.0.1:4310', cliPath: launcher, hostId: 'host-a', token: 'worker-token-'.padEnd(40, 'x') };
+  try {
+    // The newer CLI's setup declares a field this version does not know; the forward-tolerant schema keeps it and the writer writes it.
+    await setupRepository(root, { ...input, futureConnection: { addedBy: 'a newer CLI' } } as any, { fetcher, executors: false });
+    assert.deepEqual((await loadConnection(root) as any)!.futureConnection, { addedBy: 'a newer CLI' });
+    // The older CLI's rerun builds its input fresh from the fields it declares — the exact drop the item forbids.
+    await setupRepository(root, { ...input }, { fetcher, executors: false });
+    const reread = await loadConnection(root) as any;
+    assert.deepEqual(reread!.futureConnection, { addedBy: 'a newer CLI' }, 'the rerun kept the newer field the file already held');
+    assert.equal(reread!.hostId, 'host-a');
+    assert.equal(reread!.principal, 'worker-a', 'the rerun still writes the fields it verifies');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('unit:state-files-forward-tolerant — the daemon cursor reads and writes unknown top-level and nested fields back unchanged', async () => {

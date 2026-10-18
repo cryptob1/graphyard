@@ -12,7 +12,7 @@ Graphyard is a control plane that runs a team of AI coding agents on a repositor
 graphyard up --agent --goal GOAL.md
 ```
 
-[Install](docs/install.md) · [How it works](docs/how-graphyard-works.md) · [Onboarding](docs/onboarding.md) · [Documentation](docs/README.md)
+[Install](docs/install.md) · [How Graphyard works](docs/how-graphyard-works.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
 
 **[docs/install.md](docs/install.md) is the primary install path** (`install --provider railway|hetzner|compose`). Contribute: [AGENTS.md](AGENTS.md), [development](docs/development.md). Licence: [Apache 2.0](LICENSE).
 
@@ -35,7 +35,7 @@ flowchart LR
   E --> F[Merge to main] -->|normal: after| G[Review]
   E -.->|sensitive: before| G -.-> F
   F --> H[Release candidate] --> I[UAT + E2E] --> J[Production verified]
-  I -.->|failure| C
+  I -.->|failure: new work item| C
 ```
 
 Text equivalent: steps 1-8.

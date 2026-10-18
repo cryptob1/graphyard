@@ -19,8 +19,8 @@ export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of
  * Built on first use, never at module scope: state.ts and this module import each other, so the
  * schema it wraps does not exist while this file's body runs.
  */
-let forwardDaemonState: typeof daemonStateSchema | null = null;
-const toleratedStateSchema = () => forwardDaemonState ??= forwardTolerant(daemonStateSchema);
+let tolerated: typeof daemonStateSchema | undefined;
+const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSchema);
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
 /** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
