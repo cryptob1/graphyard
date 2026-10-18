@@ -183,7 +183,7 @@ test('unit:docs-no-duplication — no two pages share a heading, a paragraph of 
 
 test('unit:docs-budget — docs/master-agent-reference.md states how the shadow trial obtains the submitted head under the control-plane merger (GY-2043), and the budgeted pages stay within their per-page and total budgets', () => {
   const shadow = read('docs/master-agent-reference.md').split('## Shadow merge gate')[1]!.split('\n## ')[0]!;
-  assert.match(shadow, /control-plane: base-only fetch, head from shared object store, never unpushed worker branch \(absent: recorded skip\)/);
+  assert.match(shadow, /control-plane: base-only fetch, head from shared object store \(absent: skipped\)/);
   for (const page of pages) assert.ok(words(read(page)) <= PAGE_BUDGET, `${page} is within its ${PAGE_BUDGET}-word budget`);
   assert.ok(pages.reduce((sum, page) => sum + words(read(page)), 0) <= TOTAL_BUDGET, `the set is within its ${TOTAL_BUDGET}-word budget`);
 });
