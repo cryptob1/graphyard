@@ -253,7 +253,7 @@ test('apply registers only the worker principals the reviewed proposal declares'
  * must scan as the root project alone (against the base traversal it refuses). No runtime worktree
  * is removed or modified: the scan is read-only and the fixture is a temporary directory.
  */
-test('scan-excludes-runtime-worktrees: a checkout whose Claude runtime holds more entries than the scan bound still scans as the root project alone', async () => {
+test('unit:scan-excludes-runtime-worktrees — a checkout whose Claude runtime holds more entries than the scan bound still scans as the root project alone', async () => {
   const root = await fixtureRepo({
     'package.json': JSON.stringify({ name: 'orders-api', scripts: { test: 'vitest run', typecheck: 'tsc --noEmit' }, devDependencies: { vitest: '1.0.0' } }),
     'tests/api.test.ts': 'import { test } from "vitest";\ntest.todo("orders");\n',
@@ -289,7 +289,7 @@ test('scan-excludes-runtime-worktrees: a checkout whose Claude runtime holds mor
  * the file bound still refuses; the depth, byte-size and symlink bounds hold for ordinary content;
  * and a nested runtime manifest cannot change the discovered delivery policy.
  */
-test('scan-bounds-preserved: over-limit ordinary projects still refuse, the depth, byte-size and symlink bounds hold, and nested runtime manifests cannot change the delivery policy', async () => {
+test('unit:scan-bounds-preserved — over-limit ordinary projects still refuse, the depth, byte-size and symlink bounds hold, and nested runtime manifests cannot change the delivery policy', async () => {
   // A genuine over-limit project of ordinary content refuses, as before.
   const over = await fixtureRepo({ 'package.json': JSON.stringify({ name: 'bulk', scripts: { test: 'vitest run' } }) });
   try {
