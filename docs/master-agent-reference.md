@@ -15,7 +15,14 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-Flows (`master browser app-permissions` raises App permissions, `master browser installation-accept` accepts installation requests) drive the `master init --browser-profile` profile, reading `GET /api/github/installation` and recording `.graphyard/master-actions/`; a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human, following each offered method's control. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting, mutating `gh api`; missing rules: `harness` drift, reapplied each cycle.
+Flows (`master browser app-permissions`, `master browser installation-accept`) drive the `master init --browser-profile` profile:
+
+| Flow | Effect
+| --- | ---
+| `app-permissions` | Permissions raised
+| `installation-accept` | Requests accepted
+
+Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup (`master browser fixtures`)); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human, following each offered method's control as a button or a link; a refused capture's record names the controls it saw. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing/retired rules: `harness` drift, reapplied each cycle.
 
 ## Typed actions and executors
 
@@ -25,7 +32,7 @@ Declared slot not `active`: `resources` fault naming `journalctl --user -u graph
 
 ## Recovery
 
-Dead supervisor fences item; `containment` lists survivors' pid, cmdline and cwd: `settleable: true` → loop settles; past grace+10min `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss`; admins settle explained: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler: `master decide GY-N resolve … --context FINGERPRINT REASON`.
+Dead supervisor fences item; `containment` lists survivors' pid/cmdline/cwd: `settleable: true` → loop settles; past grace+10min `master settle-containment GY-N REASON`, else stop recorded scope unit (`containment.scope`), request `rework`. Unexplained lapses raise `lease-loss`; admins settle explained: `resolve GY-N lease-loss --attestation blocked|stopped-worker "reason"` ([settling](delegation.md#who-may-settle-what)). `master escalation GY-N` spawns handler: `master decide GY-N resolve … --context FINGERPRINT REASON`.
 
 ### Producer-runtime faults
 
@@ -33,7 +40,7 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Resolver
 
-Every `run.doctor.intervalMinutes` (10min) the loop launches one resolver session on the doctor role (`doctorPrompt`, `src/daemon/doctor.ts`): a short act-don't-ask charter over open items, standing faults, failed actions and attention lines. It acts on whatever stalled 20+ minutes: re-dispatching dead attempts, unblocking cleared blockers, reworking a head naming why, closing obsolete or duplicate work, deciding in-intent scope and requirements; else one line on why waiting is fine. Never a person. An item only for a code change judged needed; its allowlist refuses merge, dispatch, evidence and lease commands.
+Every `run.doctor.intervalMinutes` (10min) the loop launches one resolver (`doctorPrompt`, `src/daemon/doctor.ts`), act-don't-ask over items/faults/failed actions/attention lines stalled 20min (re-dispatch, unblock, rework naming why, close obsolete work, decide in-intent scope), else says why waiting is fine. Never a person; items only for needed code changes; merge/dispatch/evidence/lease commands refused.
 
 ## Fault classes
 
@@ -41,10 +48,10 @@ Every `run.doctor.intervalMinutes` (10min) the loop launches one resolver sessio
 
 ## Shadow merge gate
 
-`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free, pushing nothing; `shadow.verdict` joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
+`run.shadowGate` (`enabled` true, `timeoutMinutes` 20): each cycle trial-merges/builds/affected-tests oldest untried head credential-free in sticky tmp-reclaimed `TMPDIR` (`gy-t*`), pushing nothing; `shadow.verdict` joins GitHub's outcome in `shadowGate` (`shadow-only-fail`/`shadow-missed`); errors/timeouts record nothing; third timeout one line. `GET /api/shadow-disagreements`, `/api/shadow-explanations?pair=KEY:HEAD:BASETIP`.
 
 ## Pipeline speed
 
 Target: submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`/`waitMs`/`reworkRounds`/`interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`.
 
-Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread.
+Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Master/merge-mode/record/triage-phase calls too.
