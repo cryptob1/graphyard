@@ -49,4 +49,4 @@ A passing producer records `"exercise"`: rerun without the criterion's behaviour
 
 ## The control plane merges
 
-The [merge writer](delivery-redesign.md#merge-writer) merges gate-passing heads; GitHub merges nothing; failing heads need two-party `master decide GY-N merge`; skew: `… deploy main first`; a check the base fails too is a [base failure](development.md#base-failures). Unresolved review threads are the reviewer's inputs, not merge blockers (`reviewThreads`); approvals list each under `Resolved threads:`, `Follow-up threads:` or `Overridden threads:` ([rules](coordination.md#review-gate-verdicts-not-threads)).
+The [merge writer](delivery-redesign.md#merge-writer) merges gate-passing heads; GitHub merges nothing; failing heads need two-party `master decide GY-N merge`; skew: `… deploy main first`; a check the base fails too is a [base failure](development.md#base-failures). GitHub review threads are never read or resolved ([rules](coordination.md#review-gate-verdicts-not-threads)).

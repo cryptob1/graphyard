@@ -20,6 +20,7 @@ import { completionBody } from '../src/cli/complete.js';
 import { createWorktree } from '../src/cli/workspace-worktree.js';
 import type { CliContext } from '../src/cli/context.js';
 import { masterConfigSchema } from '../src/master.js';
+import { reconcileReviews, saveReviewLedger } from '../src/reviewer.js';
 import { daemonEffects } from '../src/daemon/effects-production.js';
 import { routineDecision } from '../src/daemon/decisions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -67,8 +68,20 @@ test('unit:github-client-removed — the GitHub API client modules are gone, no 
     assert.doesNotMatch(text, /mintPushToken|installationToken\s*\(/, `${file} must not mint an App installation token`);
     // Delegating the request to a subprocess (`gh api repos/R/pulls…`) still calls api.github.com:
     // no pull request listing or detail, check run or commit status is read by any route.
-    assert.doesNotMatch(text, /repos\/[^'"`\n]*\/(?:check-runs|status\b|pulls(?:\?|\/\$\{[^}]+\}['"`]))/, `${file} must not read pull requests, check runs or commit statuses through GitHub's API`);
+    assert.doesNotMatch(text, /repos\/[^'"`\n]*\/(?:check-runs|status\b|pulls(?:\?|\/\$\{[^}]+\}(?:['"`]|\/reviews)))/, `${file} must not read pull requests, their reviews, check runs or commit statuses through GitHub's API`);
+    assert.doesNotMatch(text, /['"]api['"],\s*['"]graphql['"]/, `${file} must not call GitHub's GraphQL API (review threads, thread resolution)`);
   }
+  // A pending pull-request reviewer session from before the control-plane merger settles cancelled
+  // on the loop's reconcile pass with no GitHub read, so its request is asked again through the control plane.
+  const reviewRoot = await temporaryDirectory('github-client-removed-reviews'), calls: string[] = [];
+  const legacy = { id: randomUUID(), key: 'GY-1', pr: 7, sha: sha('a1'), baseSha: sha('b1'), policyRevision: 1, profile: 'claude-reviewer', agentName: 'review-claude-1', pane: 'pane-review',
+    sessionDirectory: join(reviewRoot, 'session'), requestedAt: at, tokenExpiresAt: new Date(clock + 3_600_000).toISOString(), state: 'pending' as const };
+  await saveReviewLedger(reviewRoot, { version: 1, reviews: [legacy] });
+  const run: ChildRun = async (command, args) => { calls.push([command, ...args].join(' ')); return '{}'; };
+  const settled = await reconcileReviews(reviewRoot, config(), { run, now: () => now, work: [], agents: [] });
+  assert.deepEqual(settled.reviews.map(record => record.state), ['cancelled']);
+  assert.match(settled.reviews[0].resolution!, /GitHub pull-request reviews are no longer read/);
+  assert.deepEqual(calls.filter(call => call.startsWith('gh ')), [], 'the reconcile pass ran no gh command');
   // The pull-request inventory that read them is no command any more.
   const { commands } = await import('../src/cli/index.js');
   assert.equal(commands.some(command => command.name === 'onboard'), false, 'graphyard onboard is not registered');

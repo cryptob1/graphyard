@@ -395,7 +395,7 @@ export interface DispatchEffects {
   agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   /** `released` names the panes, with their names, of settled sessions the pass closed (GY-1072): those names are free for this tick's launches. */
-  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; threads?: string[]; released?: { pane: string; agentName: string }[] }>;
+  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
   /**
    * The name half of the resource reclaim (GY-1196): closes finished panes on profile names on the
@@ -769,8 +769,6 @@ export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused:
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
   /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
   sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
-  /** Review threads this tick resolved on an approval's word, and the ones it named but could not resolve. */
-  threads?: string[];
   /** Items whose observation this tick woke because a reviewer had answered their request (GY-1429). */
   woken?: string[];
   /** Where the tick's time went: every step it ran and its slowest external calls (GY-377). */
@@ -842,8 +840,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const herdr = await timings.step('herdr', () => effects.agents());
   // GY-1490: the loop sleeping beside this tick is woken for what its next cycle acts on, within one tick of it appearing.
   try { effects.observeLoopSubjects?.(snapshot.work, herdr, clock); } catch { /* a wake that cannot be judged leaves the loop to its interval */ }
-  const { reviews, threads, released } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
-  if (threads?.length) tick.threads = threads;
+  const { reviews, released } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
   const { producers } = await timings.step('reconcile producers', () => effects.reconcileProducers(snapshot.work, herdr));
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
@@ -1410,7 +1407,6 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       if (tick.timings && tick.timings.totalMs > interval) log(`[graphyard-dispatch] tick took ${tick.timings.totalMs}ms against its ${interval}ms interval; ${describeTimings(tick.timings)}`);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}${launch.reason ? `; ${launch.reason}` : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
-      for (const event of tick.threads ?? []) log(`[graphyard-dispatch] ${event}`);
       for (const closure of tick.closed) log(`[graphyard-dispatch] closed ${closure.role} session ${closure.id} on ${closure.key}: ${closure.outcome}`);
       // A closure that cannot be written back is retried every tick, so it is logged when it
       // starts and when it changes rather than once per tick for as long as it lasts; `master

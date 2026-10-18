@@ -20,8 +20,8 @@ import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
-import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
+import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
+import { type ReviewFinding, type SuccessionRead, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
@@ -304,10 +304,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await currentBaseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
-    // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
-    // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
-    reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
-      trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
     baseText: path => baseText(root, current().baseBranch, path, run),
     baseMentions: identifier => baseMentions(root, current().baseBranch, identifier, run),
@@ -318,10 +314,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get replan() {
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
-    },
-    get withdrawReview() {
-      const reviewer = current().reviewer;
-      return reviewer ? (work: Work, reviewId: number, message: string) => dismissApproval(root, reviewer, current().repository, work.candidate!.pr, reviewId, message) : undefined;
     },
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
