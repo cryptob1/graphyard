@@ -526,7 +526,9 @@ export async function mergeWriterStep(cycle: Cycle) {
   // GY-1852: a write whose reply was lost is replayed first; the snapshot predates it, so nothing new starts in the cycle that settled one.
   const replayed = !flights.has(state) && await replayUnconfirmed(cycle, reads.record);
   if (replayed) changed = true;
-  if (!flights.has(state) && !replayed) {
+  // A merge that landed this cycle starts nothing new: the loop upgrades onto it between cycles, and a
+  // trial started now would die in that restart and run again (12 of 17 merges on 2026-10-18 lost one so).
+  if (!flights.has(state) && !replayed && !delivered) {
     if ((await reads.merger()) !== 'control-plane') {
       if (writer.queue.length) { writer.queue = []; changed = true; }
     } else {
