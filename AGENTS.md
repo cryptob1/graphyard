@@ -1,5 +1,7 @@
 # Working on Graphyard
 
+Keep it simple. Build the simplest thing that meets the criteria and gives users a good experience. Do not over-engineer: no defensive layers, extra gates, permission checks or tests for hypothetical cases. Prefer deleting code to adding it. Agents are capable: do not build process around corner cases.
+
 Keep the control plane independent of agent runtimes. Herdr is the first integration, not the source of ownership truth.
 
 The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work. Once Graphyard's own repository is connected and its gates are active, claim subsequent implementation work in Graphyard and use its assigned worktree.

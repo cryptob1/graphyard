@@ -718,6 +718,7 @@
     "tests/review-provider.test.ts": 419,
     "tests/review-request.test.ts": 1479,
     "tests/review-rounds.test.ts": 2114,
+    "tests/review-self.test.ts": 2000,
     "tests/review-thread-resolution.test.ts": 5942,
     "tests/review-verdict.test.ts": 4000,
     "tests/reviewer-observe-failure.test.ts": 2277,

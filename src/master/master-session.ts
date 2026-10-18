@@ -17,6 +17,7 @@ import type { MasterConfig } from './profiles.js';
 import type { Work } from '../model.js';
 import { deliveryState } from '../model.js';
 import { parkedOnHuman } from '../model/human-request.js';
+import { simplicityParagraph } from '../reviewer.js';
 
 /** How long one master session may run before the loop rotates it, and the heartbeat fallback's cadence. */
 export const defaultMasterSessionMinutes = 240, defaultMasterHeartbeatMinutes = 30;
@@ -63,8 +64,8 @@ export function masterHandover(input: HandoverInput) {
     `Continue the operating loop from node ${input.cliPath} master status until both stopping conditions hold; the launcher wakes this session as these change.`,
   ].join('\n');
 }
-/** The session's first request: the shared master prompt, then the handover. */
-export const masterRequest = (config: MasterConfig, handover: string) => `${masterPrompt(config)} ${handover}`;
+/** The session's first request: the shared master prompt, the simplicity paragraph, then the handover. */
+export const masterRequest = (config: MasterConfig, handover: string) => `${masterPrompt(config)} ${simplicityParagraph}${handover}`;
 
 export interface MasterLaunch { agentName: string; pane: string; runtime: string; account: string | null; session: string | null; delivery: RequestDelivery }
 /**
