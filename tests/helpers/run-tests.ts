@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
-import { resolve } from 'node:path';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statfsSync } from 'node:fs';
+import { availableParallelism, homedir, tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, readDurations, shardFiles } from '../../scripts/ci-tests.mjs';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
@@ -62,6 +62,22 @@ export async function sweepLeftoverTempDirectories(when: string, tmpRoot?: strin
     } catch { /* a sweep that cannot run must never stop the suite */ }
   }
   return removed;
+}
+
+/** statfs's type for a memory-backed filesystem (TMPFS_MAGIC). */
+const tmpfsType = 0x01021994;
+/**
+ * The tmpdir the suite runs under when the caller's is a tmpfs (GY-2001), else null. Graphyard
+ * refuses a managed checkout on a tmpfs, so every test that makes one under the tmpdir failed on a
+ * host whose /tmp is memory-backed, the merge writer's trials included; CI's /tmp is on disk. The
+ * replacement is short (socket paths built under it have a length bound), on disk, outside any
+ * checkout, so no fixture finds a repository or an install above it, and sticky and shared (1777)
+ * as /tmp is, which tests/runner-executor.test.ts requires of the fixture root.
+ */
+export function durableTestTmpdir(current = tmpdir(), home = homedir(), statfs: (path: string) => { type: number } = statfsSync): string | null {
+  try { if (statfs(current).type !== tmpfsType) return null; } catch { return null; }
+  const directory = join(home, '.gy', 'tmp');
+  try { mkdirSync(directory, { recursive: true }); chmodSync(directory, 0o1777); return directory; } catch { return null; }
 }
 
 /** The browser suite's historical port, tried first. */
@@ -160,7 +176,8 @@ export function nestedFirst(environment: NodeJS.ProcessEnv = process.env): { fir
 }
 
 export async function runTests(options: RunOptions = {}): Promise<RunResult> {
-  await sweepLeftoverTempDirectories('before the suite');
+  const tmpRoot = durableTestTmpdir() ?? undefined;
+  await sweepLeftoverTempDirectories('before the suite', tmpRoot);
   const cwd = resolve(options.cwd ?? process.cwd()), args = options.args ?? [];
   const selection = options.browser ? null : nodeTestArgs(cwd, args);
   // An empty selection (a shard with nothing assigned, a change that affects no test) runs nothing:
@@ -179,7 +196,7 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     // the behaviour of tests that stub none.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
-    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome };
+    const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
@@ -198,7 +215,7 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     process.off('SIGINT', forward); process.off('SIGTERM', forward);
     // Whatever this run's children leaked — a failure before an after hook, a killed file — its
     // processes are gone now, so the sweep takes their directories back at once.
-    await sweepLeftoverTempDirectories('after the suite');
+    await sweepLeftoverTempDirectories('after the suite', tmpRoot);
     return { code, base: reservation.base, environment, stdout, stderr };
   } finally { reservation.release(); }
 }
