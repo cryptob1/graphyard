@@ -9,16 +9,18 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { actionId, claimAction, openActions, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
+import { actionId, claimAction, openActions, reconcileActions, settleAction, type ActionRecord, type ActionRow } from '../src/model/actions.js';
 import { actionIdleMs, actionRetryDelay, actionRetryMaxMs, actionRetryMinMs, actionStall, actionStallDelay, actionStallLatencyMs, actionStallMaxMs, actionStallRecheckMs, actionStallThreshold, claimable, queueSnapshot, stalledActions } from '../src/model/action-progress.js';
 import { sweepDirectMerges, type DirectMergeWindow } from '../src/direct-merge.js';
 import { assertDispatchable } from '../src/master.js';
 import { actionReport, stalledActionAttention } from '../src/cli/master-status.js';
 import { plainStatus, stalledStep } from '../src/model/plain-status.js';
+import { classifyAttention } from '../src/model/fault-classes.js';
+import { credential401Remedy, recordStallRemedy } from '../src/stall-remedies.js';
 import WorkCard from '../web/components/work-card.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merge are past inside an open-ended window; new Date() judges live DB rows.
+// Time-bomb allowance (GY-1694): the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merge are past inside an open-ended window; the 2026-10-18 GY-2014 fixtures pass their own fixed ISO clocks into stalledActionAttention and recordStallRemedy; Date.now()/new Date() only stamp live DB rows in the integration cases.
 
 /**
  * GY-110: an action that keeps failing for the same reason is a stall, not a retry.
@@ -571,4 +573,68 @@ test('integration:idle-claim-lock-free — a claim poll with nothing claimable t
   assert.ok(claiming.some(entry => /pg_advisory_xact_lock/.test(entry.text)), 'under the coordination lock');
   const loaded = claiming.filter(entry => /SELECT document FROM work_items/.test(entry.text)).flatMap(entry => entry.rows);
   assert.deepEqual(loaded.map(row => row.document.id), [item.id], 'loading only the item that holds it');
+});
+
+// ---- GY-2014: permanent reasons raise installation-level setup attention -------------------------
+
+/** A stalled row of `kind` on `reason` at a fixed clock — no DB. */
+function fixtureStall(key: string, kind: ActionRow['kind'], reason: string, at = '2026-10-18T03:00:00.000Z') {
+  const id = randomUUID(), shift = (iso: string, ms: number) => new Date(Date.parse(iso) + ms).toISOString();
+  const failures = actionStallThreshold, first = shift(at, -failures * 60_000);
+  const history: ActionRecord[] = [{ at: shift(first, -60_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: `${key} needs ${kind}` }];
+  for (let n = 0; n < failures; n++) {
+    const failed = shift(first, (n + 1) * 60_000);
+    history.push({ at: shift(failed, -10_000), event: 'claimed', requester: 'graphyard', executor: 'x', result: null, reason: `attempt ${n + 1}` },
+      { at: failed, event: 'failed', requester: 'graphyard', executor: 'x', result: 'failed', reason });
+  }
+  const row: ActionRow = { id: actionId(kind, id, `${kind}:1`), kind, work: id, key, inputs: { kind } as ActionRow['inputs'], gate: 'build', refusal: null, reason: `${key} needs ${kind}`, binding: `${kind}:1`,
+    requestedBy: 'graphyard', requestedAt: history[0].at, state: 'pending', claim: null, attempts: failures, retryAt: shift(at, 60_000), resolvedAt: at, result: 'failed', resolution: reason, history };
+  row.stall = actionStall(row)!;
+  const work = { id, key, stage: 'build', actionQueue: { actions: [row], history: [] } } as unknown as Work;
+  return { work, row, at };
+}
+
+test('unit:stalled-actions-endpoint-setup-attention — a verify-deployment row on Deployment endpoint answered 4xx raises the installation-level setup line, not a stalled-action instance', () => {
+  const { work, at } = fixtureStall('GY-1963', 'verify-deployment', 'Deployment endpoint answered 404');
+  const raised = stalledActionAttention({ work: [work], now: at });
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].kind, 'setup');
+  assert.equal(raised[0].subject, 'setup');
+  assert.match(raised[0].text, /installation's configured deployment endpoint answers 4xx/);
+  assert.match(raised[0].next, /deploymentUrl/);
+  assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
+  const classified = classifyAttention(raised);
+  assert.equal(classified[0].faultClass, 'configuration');
+  assert.equal(classified[0].kind, 'setup');
+  assert.notEqual(classified[0].faultClass, 'stalled-gate');
+});
+
+test('unit:stalled-actions-claim-credential-attention — a dispatch row on the refused claim credential names the credential-401 remedy, not the generic instruction', () => {
+  const reason = 'Command failed: node bin/graphyard.mjs claim GY-1994\n{"error":"A valid Graphyard bearer token is required"}';
+  const { work, row, at } = fixtureStall('GY-1994', 'dispatch', reason);
+  const raised = stalledActionAttention({ work: [work], now: at });
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].kind, 'setup');
+  assert.equal(raised[0].subject, 'setup');
+  assert.match(raised[0].next, /credential-401/);
+  assert.match(raised[0].next, new RegExp(credential401Remedy.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 40)));
+  assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
+  recordStallRemedy(work, row.id, { remedy: 'credential-401', reason, outcome: 'applied', detail: 'the fresh credential authenticates', flows: [] }, 'graphyard-master', new Date(at));
+  const after = stalledActionAttention({ work: [work], now: at })[0];
+  assert.match(after.next, /the loop applied the credential-401 remedy/);
+  assert.equal(classifyAttention([after])[0].faultClass, 'configuration');
+});
+
+test('unit:stalled-actions-reviewer-launch-attention — a request-review row on the refused reviewer launch raises the reviewer-identity setup line, not a stalled-action instance', () => {
+  const reason = 'The control plane refused the reviewer launch of GY-1998 (400): Invalid input';
+  const { work, at } = fixtureStall('GY-1998', 'request-review', reason);
+  const raised = stalledActionAttention({ work: [work], now: at });
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].kind, 'setup');
+  assert.equal(raised[0].subject, 'setup');
+  assert.match(raised[0].text, /reviewer identity is refused at launch/);
+  assert.match(raised[0].next, /GY-2008|reviewer setup|reviewer bind/);
+  assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
+  assert.equal(classifyAttention(raised)[0].faultClass, 'configuration');
+  assert.notEqual(classifyAttention(raised)[0].faultClass, 'stalled-gate');
 });
