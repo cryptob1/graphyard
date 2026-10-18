@@ -268,10 +268,10 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     mkdirSync(join(poisoned, 'a', 'b'), { recursive: true });
     assert.equal(lookupPoisoned(join(poisoned, 'a', 'b')), true, `a ${entry} above the directory poisons it`);
   }
-  assert.equal(await trialTemporaryRoot('/session', [join(clean, 'missing'), shared]), '/session', 'no clean root: the session directory');
+  assert.equal(trialTemporaryRoot('/session', [join(clean, 'missing'), shared]), '/session', 'no clean root: the session directory');
   // The clean candidate is clean unless the host's own tmp above it is poisoned, as vishrog's is: then the session directory.
   const usable = !lookupPoisoned(clean);
-  assert.equal(await trialTemporaryRoot('/session', [shared, clean]), usable ? clean : '/session');
+  assert.equal(trialTemporaryRoot('/session', [shared, clean]), usable ? clean : '/session');
   // The checkout goes only where the managed worktree root\'s guard would let it: never a tmpfs, never a volume short of room,
   // and never a root a stray node_modules, .git or package.json sits in or above, durable or not.
   const near = await temporaryDirectory('trial-near-tmp', tmpdir());
@@ -354,31 +354,6 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   const report = await reclaimTmpDirectories({ tmpRoots: [clean], held: new Set() });
   assert.deepEqual(report.removed.map(entry => entry.path).sort(), [crashedCheckout, crashed].sort(), JSON.stringify(report));
   assert.deepEqual(readdirSync(clean).sort(), [`${trialTemporaryPrefix}running`, `${trialTemporaryPrefix}running.owner`], 'the running trial\'s directory stays');
-});
-
-/**
- * GY-2007 rework: the trial points the suite's TMPDIR at its own temporary directory, and a suite
- * that allocates a managed worktree under its data home (tests/approver-launch-record.test.ts,
- * tests/graphyard-up.test.ts, tests/registry-drives-launch.test.ts) has that root refused by
- * `verifyWorktreeRoot`'s tmpfs guard when the trial's directory is memory-backed. CI's /tmp is
- * durable, so the same tests pass the check the trial mirrors: the temporary directory prefers a
- * clean root on durable storage over a clean memory-backed one, whichever comes first in the list,
- * and falls back to the first clean root, then the session directory, as before the preference.
- */
-test('unit:trial-tmp-on-durable-storage — the trial temporary directory is made in the first clean root on durable storage even when a volatile clean root stands first, mirroring CI\'s durable /tmp; a poisoned root is never chosen though it is durable, a host with no clean durable root keeps the first clean root, and with no clean root the session directory', async () => {
-  const volatileFirst = await temporaryDirectory('trial-volatile-tmp', tmpdir());
-  const durableSecond = await temporaryDirectory('trial-durable-tmp', tmpdir());
-  const session = '/session';
-  const memory: FilesystemProbe = async path => ({ probed: path, volatile: path === volatileFirst ? 'tmpfs' : null, freeBytes: null });
-  const allVolatile: FilesystemProbe = async path => ({ probed: path, volatile: 'tmpfs', freeBytes: null });
-  const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: null });
-  assert.equal(await trialTemporaryRoot(session, [volatileFirst, durableSecond], memory), durableSecond, 'durable beats list order');
-  assert.equal(await trialTemporaryRoot(session, [durableSecond, volatileFirst], memory), durableSecond, 'the first durable clean root wins');
-  assert.equal(await trialTemporaryRoot(session, [volatileFirst, durableSecond], allVolatile), volatileFirst, 'no clean durable root: the first clean root, as before the preference');
-  mkdirSync(join(durableSecond, '.git'));
-  assert.equal(await trialTemporaryRoot(session, [volatileFirst, durableSecond], durable), volatileFirst, 'a poisoned root is never chosen though it is durable');
-  rmSync(join(durableSecond, '.git'), { recursive: true });
-  assert.equal(await trialTemporaryRoot(session, [join(volatileFirst, 'missing'), join(durableSecond, 'missing')], durable), session, 'no clean root at all: the session directory');
 });
 
 test('integration:shadow-trial-stable-green — three consecutive trials of one head, on a host whose shared tmp holds a stray node_modules, pass every time: a test whose upward lookup from its tmpdir would resolve that node_modules (as tests/worktree-reclaim.test.ts did on vishrog) runs under the trial\'s own tmpdir and never sees it, while the shared tmp stays dirty (GY-1565)', async () => {
