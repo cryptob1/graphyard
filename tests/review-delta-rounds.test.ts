@@ -96,7 +96,10 @@ test('unit:review-round-carries-earlier-findings — a re-review takes the earli
 
 const TOKEN = 'f'.repeat(64);
 const diff = ['diff --git a/src/b.ts b/src/b.ts', 'index 1111111..2222222 100644', '--- a/src/b.ts', '+++ b/src/b.ts', '@@ -10,3 +12,5 @@ unchanged context', ' unchanged', ' unchanged', '+added one', '+added two',
-  'diff --git a/src/new.ts b/src/new.ts', 'new file mode 100644', '--- /dev/null', '+++ b/src/new.ts', '@@ -0,0 +1,2 @@', '+brand new'].join('\n');
+  'diff --git a/src/new.ts b/src/new.ts', 'new file mode 100644', '--- /dev/null', '+++ b/src/new.ts', '@@ -0,0 +1,2 @@', '+brand new',
+  'diff --git a/src/guard.ts b/src/guard.ts', 'index 3333333..4444444 100644', '--- a/src/guard.ts', '+++ b/src/guard.ts', '@@ -40,3 +39,0 @@', '-const guard = makeGuard();', '-check(guard);', '-export guard;',
+  'diff --git a/src/gone.ts b/src/gone.ts', 'deleted file mode 100644', '--- a/src/gone.ts', '+++ /dev/null', '@@ -1,2 +0,0 @@', '-gone one', '-gone two',
+  'diff --git a/src/with space.ts b/src/with space.ts', 'index 5555555..6666666 100644', '--- a/src/with space.ts', '+++ b/src/with space.ts', '@@ -3 +3 @@', '-old line', '+new line'].join('\n');
 const threads = 'Resolved threads: none\nFollow-up threads: none\nOverridden threads: none';
 const deltaBinding = (fields: Partial<ReviewPostBinding> = {}): ReviewPostBinding => ({ repository: 'owner/project', key: 'GY-1988', pr: 7, sha: H2, baseSha: B, policyRevision: 1, criteriaOnly: true, threadsListed: [],
   mode: 'control-plane', head: H2, baseTip: B, verdictToken: TOKEN, ...fields });
@@ -106,6 +109,9 @@ test('unit:review-post-refuses-blocking-on-unchanged-code — a control-plane re
   assert.deepEqual([...hunks.get('src/b.ts')!], [[12, 16]], 'the hunk reader reads the new side');
   assert.deepEqual([...hunks.get('src/new.ts')!], [[1, 2]]);
   assert.equal(hunks.get('src/unchanged.ts'), undefined);
+  assert.deepEqual([...hunks.get('src/guard.ts')!], [[39, 40]], 'a hunk that only deletes lines counts as the lines around its new-side position');
+  assert.deepEqual([...hunks.get('src/gone.ts')!], [[1, 2]], 'a wholly deleted file changes the lines it lost, named from its diff --git line');
+  assert.deepEqual([...hunks.get('src/with space.ts')!], [[3, 3]], 'a path with spaces is read from its +++ header');
   const unchanged = 'src/unchanged.ts:50 — the retry swallows aborts';
   const directory = await temporaryDirectory('delta-rounds-post');
   try {
@@ -126,8 +132,11 @@ test('unit:review-post-refuses-blocking-on-unchanged-code — a control-plane re
     assert.ok(refused!.message.includes('move it to a "Nit: PATH:LINE — FINDING" line') && refused!.message.includes('AC-N'));
     assert.deepEqual(gits, [['diff', '-U0', H1, H2]], 'the hunk check reads the diff from the previous head');
     assert.deepEqual(calls, [], 'a refused verdict posts nothing');
-    // Inside a changed hunk: stands.
+    // Inside a changed hunk: stands. Deleted code is exactly what changed: a finding on a deletion-only hunk's lines stands too.
     assert.deepEqual([ (await attempt('BLOCKING: src/b.ts:13 — the added retry swallows aborts')).posted!.reviewId, (await attempt('BLOCKING: src/new.ts:1 — the new branch leaks')).gits.length ], [41, 1]);
+    assert.ok((await attempt('BLOCKING: src/guard.ts:39 — this head removed the auth/abort guard')).posted, 'a finding on deleted code stands');
+    assert.ok((await attempt('BLOCKING: src/gone.ts:1 — this head deleted the whole module')).posted, 'a finding on a wholly deleted file stands');
+    assert.ok((await attempt('BLOCKING: src/guard.ts:44 — untouched code breaks')).refused instanceof ReviewPostRefusal, 'a line outside the deletion hunk\u2019s range is still refused');
     // An earlier finding's path re-raised, and an unmet acceptance criterion named: stand.
     assert.ok((await attempt('BLOCKING: src/a.ts:99 — the flag is still unread')).posted, 'an earlier finding\u2019s path stands');
     assert.ok((await attempt('BLOCKING: src/unchanged.ts:50 — AC-1 is unmet: the widget misses frobs')).posted, 'a criterion naming finding stands');

@@ -91,6 +91,9 @@ export function threadLineRefusals(event: ReviewEvent, body: string, binding: Pi
   return refusals;
 }
 
+/** The path a `+++` header names, C-unquoted when git quoted it for special characters. */
+const unquoted = (path: string): string => /^".*"$/.test(path) ? (() => { try { return JSON.parse(path) as string; } catch { return path; } })() : path;
+
 /** The hunks the new head changes, by file, read from `git diff -U0 PREVIOUS HEAD`: each file's new-side [first line, last line] ranges. */
 export function changedHunks(diff: string): Map<string, Array<[number, number]>> {
   const hunks = new Map<string, Array<[number, number]>>();
@@ -98,10 +101,18 @@ export function changedHunks(diff: string): Map<string, Array<[number, number]>>
   for (const line of diff.split('\n')) {
     const file = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line);
     if (file) { path = file[2]!; continue; }
-    const hunk = path ? /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line) : null;
+    // The `+++` header names the file unambiguously (spaces, quotes, renames), where the `diff --git` line's bare words do not.
+    const plus = /^\+\+\+ b\/(.+)$/.exec(line);
+    if (plus) { path = unquoted(plus[1]!); continue; }
+    const hunk = path ? /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line) : null;
     if (!hunk) continue;
-    const start = Number(hunk[1]), count = hunk[2] === undefined ? 1 : Number(hunk[2]);
-    if (count > 0) hunks.set(path!, [...(hunks.get(path!) ?? []), [start, start + count - 1]]);
+    const start = Number(hunk[3]!), count = hunk[4] === undefined ? 1 : Number(hunk[4]);
+    // A hunk that only deletes lines (`@@ -40,3 +39,0 @@`) changes the code around its position: a finding
+    // on the deleted lines names one of them, so it counts as [max(1, start), start + 1]; when nothing
+    // remains on the new side (+0,0, a wholly deleted file), the lines it lost are its old-side ones.
+    const deleted = count === 0 ? (start > 0 ? [Math.max(1, start), start + 1] : [Number(hunk[1]!), Number(hunk[1]!) + (hunk[2] === undefined ? 1 : Number(hunk[2]!)) - 1]) : null;
+    const range: [number, number] = deleted ?? [start, start + count - 1];
+    hunks.set(path!, [...(hunks.get(path!) ?? []), range]);
   }
   return hunks;
 }
