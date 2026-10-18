@@ -406,7 +406,7 @@
     "tests/fault-class-decision.test.ts": 621,
     "tests/fault-class-deployment.test.ts": 338,
     "tests/fault-class-human-decision.test.ts": 3500,
-    "tests/fault-class-resources.test.ts": 450,
+    "tests/fault-class-resources.test.ts": 3500,
     "tests/fault-class-review-convergence.test.ts": 1047,
     "tests/fault-class-scope.test.ts": 760,
     "tests/fault-class-session-liveness.test.ts": 12616,
@@ -938,6 +938,7 @@
     "tests/upgrade-dirty-snapshot.test.ts": 4000,
     "tests/upgrade-slot-restart.test.ts": 1800,
     "tests/upgrade-external-install.test.ts": 2000,
+    "tests/upgrade-from-stable.test.ts": 500,
     "tests/user-manager-faults.test.ts": 9309,
     "tests/validation.test.ts": 34631,
     "tests/vanished-reviewer-slot.test.ts": 1500,
@@ -978,6 +979,7 @@
     "tests/goal-exact-candidates.test.ts": 3000,
     "tests/goal-exact-verification.test.ts": 4000,
     "tests/soak-exact-candidates.test.ts": 32000,
-    "tests/goal-candidate-promotion.test.ts": 5000
+    "tests/goal-candidate-promotion.test.ts": 5000,
+    "tests/release-uat-after-read.test.ts": 400
   }
 }
