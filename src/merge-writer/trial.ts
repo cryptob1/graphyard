@@ -5,7 +5,7 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFil
 import { availableParallelism, constants, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
+import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, probeFilesystem, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { failingSummary, trialCutLine } from './shadow.js';
@@ -96,9 +96,20 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
  * shared nothing. The directory stays short, as CI's is: a socket path or a typed launch line the
  * suite builds under it has a length bound. A root clean when chosen is checked again once the
  * trial ends (`TrialEnvironmentError`): no point-in-time check keeps a shared folder clean.
+ *
+ * A clean root on durable storage is preferred over a clean memory-backed one, whichever order the
+ * roots list them in (GY-2007): CI's /tmp is durable, and a host whose /tmp is a tmpfs made every
+ * trial point the suite's TMPDIR at memory-backed storage the rest of Graphyard refuses for
+ * checkouts — `verifyWorktreeRoot` declines a managed worktree root on a tmpfs — so tests that
+ * allocate one under their data home failed every trial on that host while passing the CI check the
+ * trial mirrors. The same durability rule the checkout root applies below, applied here; a host
+ * with no clean durable root keeps the first clean root, as before this preference.
  */
-export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots()) =>
-  roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
+export async function trialTemporaryRoot(sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots(), probe: FilesystemProbe = probeFilesystem): Promise<string> {
+  const clean = roots.filter(root => existsSync(root) && !lookupPoisoned(root));
+  for (const root of clean) if (!(await probe(root)).volatile) return root;
+  return clean[0] ?? sessionDirectory;
+}
 /**
  * The folder a trial's short checkout is made in (GY-1565): the first of `roots` that passes the
  * managed worktree root's own guard (`verifyWorktreeRoot`: durable storage, not a tmpfs, with
@@ -461,7 +472,8 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
  * One attempt of a trial. Check the merge commit out detached as a `trial` checkout (in a short directory beside the trial's
  * temporary one when a clean root is found), run `npm run build`, then the affected
  * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, all under one
- * deadline and `trialEnvironment` with the trial's own empty temporary directory. The runner
+ * deadline and `trialEnvironment` with the trial's own empty temporary directory, made in a clean
+ * root on durable storage when one is offered (GY-2007), and its short checkout beside one. The runner
  * always gets a selected file list, so a full selection runs every pre-merge file and never the
  * release-candidate suites, and the verdict counts the files that ran. The selection runs in
  * parallel shards sized to the host (GY-1832, `shardTestFiles`: `trialShardLanes(cores)` at once,
@@ -481,9 +493,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   /** Closes the running phase's time and opens `next`'s; with no `next`, answers every phase's time so far. */
   const enter = (next: TrialPhase = phase) => { const at = now(); phases[phase] += Math.max(0, at - phaseAt); phase = next; phaseAt = at; return { ...phases }; };
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
-  // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
-  // with room (else the session directory's checkout), each removed with the session and marked as this process's so a
-  // crash before the cleanup leaves it to the tmp reclaim.
+  // A fresh, empty temporary directory made for this trial alone — in a clean root on durable storage when
+  // one is offered, else the first clean root (GY-2007) — and a short one its checkout goes in on a durable
+  // root with room (else the session directory's checkout), each removed with the session and marked as this
+  // process's so a crash before the cleanup leaves it to the tmp reclaim.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
   const clear = async (directory: string) => {
@@ -491,7 +504,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
   };
   try {
-    const root = trialTemporaryRoot(checkout.directory, roots);
+    const root = await trialTemporaryRoot(checkout.directory, roots, input.probe);
     if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
     const near = await trialCheckoutRoot(roots, input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe);
