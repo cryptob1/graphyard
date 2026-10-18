@@ -16,7 +16,8 @@ import { containmentGraceMs } from '../src/model/containment.js';
 import { maxApproverLaunches } from '../src/daemon/decisions.js';
 // GY-1346's bound is read through the namespace too, so the base exercise loads this file and its replays fail on their assertions.
 import * as decisions from '../src/daemon/decisions.js';
-import { humanNeededAttention } from '../src/cli/owed-report.js';
+import { humanNeededAttention, mergeWriterMotionBoundMs, mergeWriterMovement, mergeWriterStallAttention, owedAttention } from '../src/cli/owed-report.js';
+import { trialRefusal } from '../src/model/gates.js';
 import { readDecisions } from '../src/server/decision-ledger.js';
 import { humanNeeded, type NextAction } from '../src/model/next-action.js';
 import { approverSessionName } from '../src/master.js';
@@ -1254,4 +1255,139 @@ test('manual:fault-class-decision — owed-decision|GY-1834|2026-10-16T22:35:33.
   assert.match(standingLine[0]?.text ?? '', /a new head for GY-1834 has been owed for 52m/, JSON.stringify(standingLine));
   const counted = cycleFaults(emptyDaemonState(loopConfig()), [unlanded], late, { config: loopConfig(), reported: standingLine }).filter(fault => fault.faultClass === 'decision');
   assert.deepEqual(counted.map(fault => fault.kind), ['owed-decision'], 'the instance, reproduced as the base held it');
+});
+
+// GY-2015 names this file for its proof: manual:fault-class-decision. The master loop filed 3
+// decision faults in 24 hours on 18 October 2026, 04:20–04:29Z. Each was an `owed-decision` line
+// for an item refused at the test gate with `merge writer has not trialled …` (trialRefusal,
+// model/gates.ts) — the control-plane test gate's refusal until the merge ledger holds a passing
+// trial of exactly that head on exactly that base tip. All three stood on the same base tip
+// 9bc46db8f4e8, refused within a 14-minute window, owed 30–36 minutes: the serial merge writer
+// (mergeQueue: oldest first, one merge in flight, an open intent blocks the queue) trialled one
+// head at a time (merge + build + the fast tests, GY-1832 re-queues on no verdict), and every
+// later head counted an unanswered decision at the 30-minute bound while its only answerer — the
+// writer reaching it — was exactly what the loop was watching do its work. The named resolution
+// (graphyard diagnose, concerns.ts humanNeeded) is run by nothing and could not hurry a trial.
+//
+// The shared cause: the owed-decision fault had no suppression keyed to the writer's own motion
+// (faults.ts keyed rework, escalation and containment turns, never the writer's). The candidate
+// keys it to demonstrated movement — a trial in flight, a delivery, a refusal recorded, a trial
+// failure — reading the writer summary the loop itself keeps (state.mergeWriter, the GY-1966
+// pattern), inside the bound (GY-1315's inMotionUntil); and when the writer itself cannot move
+// past the bound, one writer-level stall on subject `merge-writer` stands for the queue instead
+// of an owed decision per head. Each instance is replayed as the item and the writer stood when
+// the loop recorded it, with the line master status reported. Against the base each subtest
+// fails: the instance reproduces.
+
+const gy2015Base = '9bc46db8f4e8'.padEnd(40, '0');
+const gy2015Heads: Record<string, string> = { 'GY-1999': '19b8c5d6eaa2'.padEnd(40, '0'), 'GY-2007': 'bc6e928cd5b4'.padEnd(40, '0'), 'GY-2001': '9d824e1ed743'.padEnd(40, '0') };
+const gy2015Instances = [
+  { subject: 'GY-1999', at: '2026-10-18T04:20:07.533Z', owed: '36m', owedMs: 36 * 60_000 },
+  { subject: 'GY-2007', at: '2026-10-18T04:24:07.832Z', owed: '35m', owedMs: 35 * 60_000 },
+  { subject: 'GY-2001', at: '2026-10-18T04:28:58.411Z', owed: '30m', owedMs: 30 * 60_000 },
+];
+
+/** The item as the instance stood: a candidate the test gate refuses because the merge writer has not trialled its head on the base tip yet. */
+function trialRefused(subject: string, requestedAt: string): Work {
+  const sha = gy2015Heads[subject]!;
+  const work = standing({ subject, detail: '', owedMs: 0, owed: '' }, requestedAt);
+  const refusal = trialRefusal(sha, gy2015Base);
+  const action: NextAction = { kind: 'escalate', work: work.id, key: subject, gate: 'test', refusal,
+    reason: `${subject} is refused at the test gate and no executor step answers it: ${refusal}`,
+    inputs: { kind: 'escalate', trigger: 'test', detail: refusal } as NextAction['inputs'], llmRole: null,
+    binding: `test:1:${sha.slice(0, 12)}:${gy2015Base.slice(0, 12)}:${refusal}` };
+  Object.assign(work, { stage: 'test', candidate: { sha, baseSha: gy2015Base, pr: 2015, branch: `graphyard/${subject.toLowerCase()}-1`, author: 'implementer' },
+    nextAction: { ...action, needsHuman: humanNeeded(action)! } });
+  Object.assign(work.actionQueue!.actions[0], { kind: 'escalate', gate: 'test', binding: action.binding, refusal, reason: action.reason });
+  return work;
+}
+
+/** The writer state the loop held while the instance stood: the serial queue with all three heads, one trial in flight, the last delivery recorded. */
+function gy2015Writer(observedAt: string, inFlight = true) {
+  const now = Date.parse(observedAt);
+  const queue = Object.entries(gy2015Heads).map(([subject, sha], index) => ({ key: subject, id: `work-${subject}`, head: sha.toLowerCase(),
+    submittedAt: new Date(now - (72 - index * 6) * 60_000).toISOString(), waitingMs: (72 - index * 6) * 60_000 }));
+  return {
+    lastMergeAt: new Date(now - 9 * 60_000).toISOString(), queue,
+    inFlight: inFlight ? { key: queue[0]!.key, id: queue[0]!.id, head: queue[0]!.head, startedAt: new Date(now - 2 * 60_000).toISOString() } : null,
+    refusals: [{ key: 'GY-1978', head: 'a'.repeat(40), reason: 'base moved 3 times', at: new Date(now - 14 * 60_000).toISOString() }],
+    reworks: [],
+  };
+}
+
+for (const entry of gy2015Instances) test(`manual:fault-class-decision — owed-decision|${entry.subject}|${entry.at} is no fault while the merge writer moves toward its head`, () => {
+  const now = Date.parse(entry.at);
+  const work = trialRefused(entry.subject, new Date(now - entry.owedMs).toISOString());
+  const writer = gy2015Writer(entry.at);
+  const reported = humanNeededAttention({ work: [work], now: entry.at }, writer);
+  // The line master status reported is the instance's own text, so the replay is the instance;
+  // the writer's newest movement bounds it (GY-1315), the flight started two minutes before.
+  assert.deepEqual(reported.map(line => line.text),
+    [`${entry.subject} is refused at the test gate and no executor step answers it: merge writer has not trialled ${gy2015Heads[entry.subject]!.slice(0, 12)} on ${gy2015Base.slice(0, 12)} — no executor may run it; resolving ${entry.subject}'s test refusal has been owed for ${entry.owed}`]);
+  assert.equal(reported[0]!.inMotionUntil, new Date(now - 2 * 60_000 + mergeWriterMotionBoundMs).toISOString());
+  const counted = cycleFaults(emptyDaemonState(config()), [work], now, { config: config(), reported }).filter(fault => fault.faultClass === 'decision');
+  assert.deepEqual(counted.map(fault => fault.kind), [], `${entry.subject}'s head was queued behind the writer's serial trials when the loop recorded it`);
+  // The queue's one stall line does not stand beside moving heads: the writer is at work.
+  assert.equal(mergeWriterStallAttention(writer, now), null);
+});
+
+test('manual:fault-class-decision — the queue\'s one writer-level stall stands for held heads once the writer itself cannot move', () => {
+  // The bound past: no trial in flight and no movement for 40 minutes — the writer cannot serve
+  // the queue it still holds. The per-item lines are gone (the stall stands for them), and the
+  // cycle counts one stalled step on the writer, no owed decision per head.
+  const at = '2026-10-18T05:20:00.000Z', now = Date.parse(at);
+  const writer = { ...gy2015Writer(at, false), lastMergeAt: new Date(now - 40 * 60_000).toISOString(), refusals: [], reworks: [], inFlight: null };
+  const works = gy2015Instances.map(entry => trialRefused(entry.subject, new Date(now - entry.owedMs - 60 * 60_000).toISOString()));
+  const reported = humanNeededAttention({ work: works, now: at }, writer);
+  assert.deepEqual(reported.map(line => line.text), [], 'the stall stands for the held heads, not beside them');
+  const stall = mergeWriterStallAttention(writer, now)!;
+  assert.match(stall.text, /queue holds 3 head\(s\) it cannot move: no trial is in flight and its newest movement is the last merge was delivered/);
+  assert.match(stall.text, /GY-1999's head 19b8c5d6eaa2 has waited \d+ minutes at the front/);
+  assert.equal(stall.kind, 'stalled-step');
+  assert.match(stall.next!, /merge-writer step/);
+  const counted = cycleFaults(emptyDaemonState(config()), works, now, { config: config(), reported: [...reported, stall] });
+  assert.deepEqual(counted.map(fault => `${fault.kind}|${fault.subject}`), ['stalled-step|merge-writer'], 'one writer-level stall for the queue');
+  // The writer's newest movement is the reading the stall text carries; the movement bound is what it is past.
+  assert.equal(mergeWriterMovement(writer)!.at, Date.parse(writer.lastMergeAt));
+  assert.ok(now - mergeWriterMovement(writer)!.at > mergeWriterMotionBoundMs);
+});
+
+test('manual:fault-class-decision — a trial refusal whose head the writer does not hold, and every other test-gate refusal, still count', () => {
+  // The genuine gap the writer cannot answer: its queue holds nothing for the item (the writer
+  // will never reach that head on its own), so the owed decision stands as it did.
+  const entry = gy2015Instances[0]!;
+  const now = Date.parse(entry.at);
+  const work = trialRefused(entry.subject, new Date(now - entry.owedMs).toISOString());
+  const writer = { ...gy2015Writer(entry.at), queue: gy2015Writer(entry.at).queue.slice(1) }; // GY-1999 absent
+  const counted = cycleFaults(emptyDaemonState(config()), [work], now, { config: config(), reported: humanNeededAttention({ work: [work], now: entry.at }, writer) }).filter(fault => fault.faultClass === 'decision');
+  assert.deepEqual(counted.map(fault => fault.kind), ['owed-decision'], 'a head the queue does not hold is nobody\'s motion');
+  // A test-gate refusal that is not the writer's trial refusal is never held: the rerun-grounded
+  // escalate of a failed required check counts at once, writer moving or not.
+  const rerun = trialRefused(entry.subject, new Date(now - entry.owedMs).toISOString());
+  const refusal = 'rerun: failed again after rerunning its failed jobs';
+  const action: NextAction = { kind: 'escalate', work: rerun.id, key: rerun.key, gate: 'test', refusal,
+    reason: `${rerun.key} is refused at the test gate and no executor step answers it: ${refusal}`,
+    inputs: { kind: 'escalate', trigger: 'test', detail: refusal } as NextAction['inputs'], llmRole: null, binding: 'test:rerun' };
+  Object.assign(rerun, { nextAction: { ...action, needsHuman: humanNeeded(action)! } });
+  Object.assign(rerun.actionQueue!.actions[0], { kind: 'escalate', gate: 'test', binding: action.binding, refusal, reason: action.reason });
+  const rerunCounted = cycleFaults(emptyDaemonState(config()), [rerun], now, { config: config(), reported: humanNeededAttention({ work: [rerun], now: entry.at }, gy2015Writer(entry.at)) }).filter(fault => fault.faultClass === 'decision');
+  assert.deepEqual(rerunCounted.map(fault => fault.kind), ['owed-decision'], 'a non-trial test refusal is a judgment nobody takes');
+  // Without the writer summary — an older caller, or a status read before the writer ran — every line stands as before.
+  const unthreaded = cycleFaults(emptyDaemonState(config()), [work], now, { config: config(), reported: humanNeededAttention({ work: [work], now: entry.at }) }).filter(fault => fault.faultClass === 'decision');
+  assert.deepEqual(unthreaded.map(fault => fault.kind), ['owed-decision'], 'no writer summary, no suppression');
+});
+
+test('manual:fault-class-decision — owedAttention carries the writer stall and drops only the held heads it replaces', () => {
+  const at = '2026-10-18T05:20:00.000Z', now = Date.parse(at);
+  const writer = { ...gy2015Writer(at, false), lastMergeAt: new Date(now - 40 * 60_000).toISOString(), refusals: [], reworks: [], inFlight: null };
+  const works = gy2015Instances.map(entry => trialRefused(entry.subject, new Date(now - entry.owedMs - 60 * 60_000).toISOString()));
+  const owed = owedAttention({ work: works, now: at }, works.map(item => ({ key: item.key, attention: null })), [] as never[], writer);
+  assert.deepEqual(owed.items.map(item => `${item.subject}`), ['merge-writer'], 'the stall is the queue\'s one line');
+  // A queue with a trial in flight keeps the held heads as items, each bounded by the writer's movement (the
+  // fault count skips them); a queue at all without a writer summary keeps them unbounded, as before.
+  const moving = owedAttention({ work: works, now: at }, works.map(item => ({ key: item.key, attention: null })), [] as never[], gy2015Writer(at));
+  assert.deepEqual(moving.items.map(item => item.subject), works.map(item => item.key));
+  assert.deepEqual(moving.items.map(item => !!item.inMotionUntil), works.map(() => true), 'each held line carries the movement bound');
+  assert.deepEqual(owedAttention({ work: works, now: at }, works.map(item => ({ key: item.key, attention: null })), [] as never[]).items.map(item => item.subject), works.map(item => item.key), 'no writer summary, every line stands');
+  assert.deepEqual(owedAttention({ work: works, now: at }, works.map(item => ({ key: item.key, attention: null })), [] as never[]).items.map(item => !!item.inMotionUntil), works.map(() => false));
 });

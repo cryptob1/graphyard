@@ -420,10 +420,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // the faults it counts are read with the coordinator's visibility, with or without that identity,
     // so an installation that has not provisioned it yet still counts every recurrence.
     controlPlane: coordinatorStatus,
-    reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => {
+    reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string; mergeWriter?: ReturnType<typeof daemonSummary>['mergeWriter'] | null }) => {
       // Imported when first read: the status report imports this module, so a static import would be a cycle.
       const reported = await (await import('../cli/master-status.js')).reportedAttention(root, withRoleDefaults(current()), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
         runtime: { available: observed.available ?? true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true,
+        // GY-2015: the loop's own writer summary rides the same observed, so its fault step counts a held trial refusal as the writer's motion.
+        mergeWriter: observed.mergeWriter ?? null,
         // The intervention report takes the server close to a minute (GY-377): the cycle uses the
         // cached copy and refreshes it detached from itself, which is also the copy master status reads.
         reports: 'background', reportBoundMs: deps.reportReadBoundMs });
