@@ -49,7 +49,7 @@ Role | Held by | May | Never
 
 Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, ungrounded [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, triage closures, and merges with automatic merging off; gates decide the rest; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits).
 
-An approved-but-unapplied decision never blocks the next request: on a passed head it settles `superseded`; else it resumes after 60s via `POST /api/work/:id/decide` `{"action":"resume","decision":ID}`. `master status` shows `approved but unapplied since <approvedAt>` (`loop-silence`).
+An approved-but-unapplied decision never blocks the next request: on a passed head it settles `superseded`; else it resumes after 60s via `POST /api/work/:id/decide` `{"action":"resume","decision":ID}`. `master status` shows `approved but unapplied since <approvedAt>`.
 
 A revision-bound decision (release, unblock, close, unpinned resolve) settles `stale` on other item changes; three stale closes in a row stop re-requests (`Decision GY-N/ACTION (ACTION) is stale`).
 

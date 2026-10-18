@@ -2,26 +2,25 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { masterConfigSchema, workerProfileSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { fleetHold, fleetHoldWording, silenceBudgetMs } from '../src/daemon/metrics.js';
-import { loopAttention } from '../src/daemon/liveness.js';
+import { actionableSubjects } from '../src/daemon/metrics.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { Launcher } from '../src/daemon/cycle.js';
 import { systemInvariants } from '../src/model/invariants.js';
 
 /**
- * GY-1890: a saturated worker fleet over simulated days of the real loop. The silence measure's
- * reclassing of a claimable item between the loop's `dispatch` subject and the fleet's `capacity`
- * subject repeats per cycle and per item, so it lives in a soak suite: `runCycle` with one
- * `Launcher` carried across its cycles, as `runDaemon` does, over a world whose two worker profiles
- * take queued items, work them for varying stretches and finish, so the fleet's occupancy changes
- * all day. Twice a day every launch credential is spent for a while: the fleet cannot launch at
- * all, the queue's waits are the loop's (dispatch subjects, escalated for a working credential),
- * and when the credentials return to a fleet that fills at once the same waits become capacity
- * subjects; credentials spent over a busy fleet reclass them back as attempts finish. Across every
- * transition each queued item's wait runs from the first cycle that saw it claimable, the held
- * fleet is recorded a bounded number of times, a silence breach files `concurrency-starved` while
- * the fleet is held and `loop-silence` only while it cannot launch, and every system invariant
- * (docs/master-agent.md#system-invariants) holds after every cycle.
+ * GY-1890: a saturated worker fleet over simulated days of the real loop. The classification of a
+ * claimable item between the loop's `dispatch` subject and the fleet's `capacity` subject repeats
+ * per cycle and per item, so it lives in a soak suite: `runCycle` with one `Launcher` carried
+ * across its cycles, as `runDaemon` does, over a world whose two worker profiles take queued items,
+ * work them for varying stretches and finish, so the fleet's occupancy changes all day. Twice a day
+ * every launch credential is spent for a while: the fleet cannot launch at all, the queue's waits
+ * are the loop's (dispatch subjects, escalated for a working credential), and when the credentials
+ * return to a fleet that fills at once the same waits become capacity subjects; credentials spent
+ * over a busy fleet reclass them back as attempts finish. Across every transition the held fleet is
+ * recorded a bounded number of times, the master session's wake reads the subject kind the step's
+ * own stop decided, and every system invariant (docs/master-agent.md#system-invariants) holds after
+ * every cycle. (GY-1980 removed the silence measure these subjects used to feed; the kinds now feed
+ * the master wake, and stillness is the progress watchdog's judgement.)
  */
 
 const minute = 60_000, hour = 60 * minute, day = 24 * hour;
@@ -91,48 +90,38 @@ function world(days: number) {
   return { effects, advance, now: () => clock, items, attempts };
 }
 
-test('unit:soak-invariants-hold — GY-1890: two simulated days over a fleet that saturates, drains and loses its credentials keep each queued item’s wait age across every dispatch/capacity reclass, record the held fleet a bounded number of times, file concurrency-starved while the fleet is held and loop-silence only while it cannot launch, and every system invariant holds', { timeout: 600_000 }, async () => {
+test('unit:soak-invariants-hold — GY-1890: two simulated days over a fleet that saturates, drains and loses its credentials keep every subject the class its step’s own stop decided, record the held fleet a bounded number of times, and every system invariant holds', { timeout: 600_000 }, async () => {
   const days = 2, master = config(), state: DaemonState = emptyDaemonState(master);
   state.lock = { pid: process.pid, host: 'machine-a', startedAt: iso(dayStart), heartbeatAt: iso(dayStart) } as DaemonState['lock'];
   const sim = world(days), launcher = new Launcher();
-  const firstClaimable = new Map<string, string>();
   const violations: string[] = [], reclassed = new Set<string>(), kinds = new Map<string, string>();
-  const filed = { starved: 0, loop: 0, starvedSubjects: new Set<string>() };
   for (let at = dayStart; at < dayStart + days * day; at += minute) {
     sim.advance(at);
-    // What the cycle's snapshot shows claimable: the queue whose wait ages the measure must keep.
-    for (const entry of sim.items) if (entry.stage !== 'done' && !entry.lease && !firstClaimable.has(entry.key)) firstClaimable.set(entry.key, iso(at));
     const busy = sim.attempts.size, spent = spentAt(at);
-    const result = await runCycle(master, state, sim.effects, sim.now, launcher);
+    await runCycle(master, state, sim.effects, sim.now, launcher);
     await launcher.idle();
     const into = `+${Math.round((at - dayStart) / minute)} min`;
     // Every system invariant, after every cycle.
     if (state.invariants.report.length !== systemInvariants.length) violations.push(`${into}: ${state.invariants.report.length} invariants judged`);
     for (const check of state.invariants.report.filter(entry => !entry.holds)) violations.push(`${into}: ${check.line}`);
-    for (const subject of result.silence.subjects.filter(entry => entry.kind === 'dispatch' || entry.kind === 'capacity')) {
+    // The subjects the wake reads, under the step's own stop: a fleet whose profiles all run
+    // attempts holds the queue as capacity (the step's saturated-fleet stop); one that cannot
+    // launch at all is not a held fleet, and the queue stays the loop's dispatch subjects.
+    const fleetHeld = busy === profiles.length && !spent;
+    for (const subject of actionableSubjects(master, sim.items.filter(entry => entry.stage !== 'done'), at, { fleetHeld })) {
       const work = subject.work!;
-      // The wait runs from the first cycle that saw the item claimable, whatever class it holds now.
-      if (subject.since !== firstClaimable.get(work)) violations.push(`${into}: ${work}'s ${subject.kind} wait runs from ${subject.since}, not ${firstClaimable.get(work)}`);
+      if (subject.kind !== 'dispatch' && subject.kind !== 'capacity') continue;
       if (kinds.has(work) && kinds.get(work) !== subject.kind) reclassed.add(`${work} ${kinds.get(work)}→${subject.kind}`);
       kinds.set(work, subject.kind);
-      // A fleet whose profiles all run attempts holds the queue as capacity; one that cannot launch leaves it the loop's.
       if (busy === profiles.length && !spent && subject.kind !== 'capacity') violations.push(`${into}: ${work} is a ${subject.kind} subject while every profile runs an attempt`);
       if (busy === 0 && spent && subject.kind !== 'dispatch') violations.push(`${into}: ${work} is a ${subject.kind} subject while no profile can launch`);
-      if (subject.kind === 'capacity' && !fleetHold(subject)) violations.push(`${into}: ${work}'s capacity subject lacks the fleet-hold wording`);
+      if (subject.kind === 'capacity' && !subject.detail.includes('no worker profile is free')) violations.push(`${into}: ${work}'s capacity subject lacks the fleet-hold wording`);
     }
-    for (const line of loopAttention({ liveness: { state: 'running', detail: '', lagMs: 1, stalledAfterMs: 600_000, cycle: 1, lock: state.lock, restart: '', cost: null }, silence: result.silence })) {
-      if (line.kind === 'concurrency-starved') { filed.starved++; filed.starvedSubjects.add(line.subject); }
-      if (line.kind === 'loop-silence') { filed.loop++; if (busy === profiles.length && !spent) violations.push(`${into}: loop-silence filed on ${line.subject} while every profile runs an attempt: ${line.text}`); }
-    }
-    if (result.silence.subjects.length >= 20) violations.push(`${into}: the queue outgrew the measure's 20-subject report`);
   }
-  assert.deepEqual(violations, [], 'every invariant, wait age and fault class holds across two simulated days');
-  // The day really exercised what it claims: both reclass directions, held queues past the bound, and outage breaches.
+  assert.deepEqual(violations, [], 'every invariant, subject kind and wording holds across two simulated days');
+  // The day really exercised what it claims: both reclass directions happened.
   assert.ok([...reclassed].some(entry => entry.endsWith('dispatch→capacity')), `a queued wait was reclassed from dispatch to capacity: ${[...reclassed].join(', ')}`);
   assert.ok([...reclassed].some(entry => entry.endsWith('capacity→dispatch')), `and from capacity back to dispatch: ${[...reclassed].join(', ')}`);
-  assert.ok(filed.starved > 0, 'a held queue breached past the bound as concurrency-starved');
-  assert.ok(filed.loop > 0, 'a fleet that could not launch for longer than the bound filed the loop’s silence');
-  assert.equal(silenceBudgetMs, 20 * minute, 'the bound is unchanged');
   // Bounded capacity records: one per held item at most, each written once (its detail names no moving signal).
   const held = Object.entries(state.actions).filter(([key]) => key.startsWith('capacity:work-'));
   assert.ok(held.length > 0, 'the step recorded the held fleet');
@@ -143,5 +132,4 @@ test('unit:soak-invariants-hold — GY-1890: two simulated days over a fleet tha
     assert.ok(action.detail.includes('worker-one, worker-two'), `${key} names the held profiles`);
   }
   assert.ok(sim.items.filter(entry => entry.stage === 'done').length >= sim.items.length - 12, 'the fleet kept delivering through the days');
-  assert.ok(fleetHoldWording.held.length > 0);
 });

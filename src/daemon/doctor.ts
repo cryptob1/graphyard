@@ -45,7 +45,7 @@ export { settleSubmittedContainment, coveredScopePaths, clearCoveredBlockers, un
 // hand and repeatedly applied the same sanctioned actions; here the loop does it, and the session
 // is a resolver, not a checklist reader. Every `run.doctor.intervalMinutes` (5 by default) — and
 // at once when the loop's progress watchdog fires (GY-2005: cycle.ts marks a run due when the
-// silence bound breaches) — it
+// watchdog's lines begin standing) — it
 // launches one: a headless session on the registry's doctor role, else Pi, with the master's read
 // access and the operator-agent identity's sanctioned commands only — scope, requirements,
 // unblock, decide + approver, settle-containment, close, create, release and checkout-restore

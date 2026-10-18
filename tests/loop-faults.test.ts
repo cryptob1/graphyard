@@ -13,7 +13,7 @@ import { dispatchFailureBlockAfter, noteDispatchFailure } from '../src/daemon/di
 import { dispatchFailureAttention } from '../src/auto-dispatch.js';
 import { providerLimit } from '../src/model/capacity.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { actionableSubjects, cycleCost, daemonEffects, emptyDaemonState, storeAction, loopAttention, loopLiveness, runCycle, trackSilence, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { actionableSubjects, cycleCost, daemonEffects, emptyDaemonState, storeAction, loopAttention, loopLiveness, runCycle, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { reworkWokenObservationMaxAgeMs } from '../src/daemon/decisions.js';
 import { clearDiagnoses, diagnosesSettled, diagnosisLimitHoldMs, diagnosisReport, diagnosisStep, diagnosticianGate, diagnosticianHeldUntil, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -273,26 +273,15 @@ function gy727(unexercised: boolean): Work {
       proofs: ['unit:reconcile-reads-open-items-once', 'unit:reconcile-tick-bounded'], reason: 'no trusted evidence binds bc00115a30ef', requestedAt: '2026-09-27T05:12:55.795Z', policyRevision: 2 }] } as unknown as Work['autoDispatch'],
   });
 }
-/** 437 minutes of cycles every thirty seconds, the loop requesting GY-727's rework decision every quarter hour as it did; the silence attention at the end. */
-function replay(work: Work[]) {
-  const master = config(), span = 437 * minute, start = silentAt - span;
-  const state: DaemonState = { ...emptyDaemonState(master), silence: { subjects: {}, lastActionAt: null, breached: false } };
-  state.lock = { pid: process.pid, host: 'machine-a', startedAt: iso(start), heartbeatAt: iso(start) } as DaemonState['lock'];
-  let silence = trackSilence(state, actionableSubjects(master, work, start), [], start);
-  for (let at = start; at <= silentAt; at += 30_000) {
-    const performed = (at - start) % (15 * minute) === 0 ? [{ kind: 'decision', work: 'GY-727', state: 'done' } as DaemonAction] : [];
-    silence = trackSilence(state, actionableSubjects(master, work, at), performed, at);
-    state.lastCycleAt = iso(at);
-  }
-  const liveness = loopLiveness(state, silentAt, master.run.intervalSeconds * 1000);
-  return { silence, attention: loopAttention({ liveness, silence }).filter(entry => entry.kind === 'loop-silence') };
-}
-
 test(`manual:fault-class-loop — ${silenceInstance.id}: a proof recorded as not exercising its criterion is the rework decision's wait, not the loop's silence`, () => {
-  const subjects = actionableSubjects(config(), [gy727(true)], silentAt).map(subject => subject.key);
+  const master = config();
+  const subjects = actionableSubjects(master, [gy727(true)], silentAt).map(subject => subject.key);
   assert.ok(!subjects.includes('proof:GY-727'), subjects.join(', '));
-  const { attention } = replay([gy727(true)]);
-  assert.deepEqual(attention, [], attention.map(entry => entry.text).join('\n'));
+  // The wait stays named: the decision subject is on the inventory the loop keeps, for the master
+  // session's wake, while no proof subject is invented for it. (GY-1980 removed the silence bound
+  // the instance was filed under; whether the whole pipeline has gone still is the progress
+  // watchdog's judgement, not a per-subject wait.)
+  assert.ok(subjects.includes('decision:GY-727'), subjects.join(', '));
 });
 
 test('manual:fault-class-loop — a waiting diagnosis is settled so inFlight counts no provider hold as active work, and diagnosticianGate keys on explicit refusal time', () => {
@@ -416,12 +405,11 @@ test(`manual:fault-class-loop — ${gy1266Instances[2].id}: a merge burst's rewo
   assert.deepEqual([...new Set(requested)].sort(), heads.slice(0, 5 * wave).map(head => head.key).sort(), 'every head woken before the last cycle has its rework requested');
 });
 
-test(`manual:fault-class-loop — ${gy1266Instances[0].id}: no head waits past the silence bound for a rework the loop never requests`, async () => {
-  const { results } = await replayBurst(6);
-  const silence = results.at(-1)!.silence;
-  const unrequested = silence.subjects.filter(subject => /needs a rework decision requested and approved/.test(subject.detail) && subject.idleMs > intervalMs);
-  assert.deepEqual(unrequested.map(subject => subject.key), [], 'a rework head is requested on the cycle after its wake');
-  assert.equal(silence.breached, false, JSON.stringify(silence.longest));
+test(`manual:fault-class-loop — ${gy1266Instances[0].id}: no head waits for a rework the loop never requests`, async () => {
+  const { requested, heads } = await replayBurst(6);
+  // A rework head is requested on the cycle after its wake: none of the burst's heads is left
+  // without a request, so none can sit unowned the way the filed instance's head did.
+  assert.deepEqual([...new Set(requested)].sort(), heads.slice(0, 5 * wave).map(head => head.key).sort(), 'every burst head has its rework requested');
 });
 
 test(`manual:fault-class-loop — ${gy1266Instances[0].id}: GitHub delivery being the only delivery, a missing proof is nobody's to produce, so it is no subject of the loop's silence and no workflow is requested for it`, async () => {

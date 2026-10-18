@@ -179,7 +179,7 @@ test('unit:soak-item-preview — a simulated day of item previews on the real lo
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(), decide: async () => ({ id: 'none' }) } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), decide: async () => ({ id: 'none' }) } as unknown as DaemonEffects;
   let state = emptyDaemonState(config);
   const checkouts = async () => (await readdir(base)).filter(name => name.startsWith(previewCheckoutPrefix) && !name.endsWith('.owner'));
   for (let cycle = 0; cycle < cycles; cycle++) {
