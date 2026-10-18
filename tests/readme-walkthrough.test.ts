@@ -102,7 +102,7 @@ function parseGif(bytes: Buffer) {
 test('unit:readme-walkthrough-gif-plays — the committed GIF opens on a full opaque 800x509 first frame, runs 12,010 centiseconds and loops forever, read from its bytes, so browsers play it where the ffmpeg GIF froze', () => {
   const { width, height, frames, loop } = parseGif(read('docs/diagrams/how-graphyard-works.gif'));
   assert.equal(width, 800, 'the logical screen is the 800-wide embed');
-  assert.equal(height, 509, 'the logical screen is the 510-high walkthrough stage');
+  assert.equal(height, 509, 'the logical screen is the 509-high walkthrough stage');
   const first = frames[0];
   assert.ok(first, 'the GIF has a first frame');
   assert.deepEqual([first.left, first.top, first.width, first.height], [0, 0, width, height], 'the first frame paints the whole logical screen, not a later scene');
