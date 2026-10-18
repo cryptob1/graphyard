@@ -30,8 +30,10 @@ export const assertionNames = ['health-reports-candidate', 'item-unchanged', 'hi
 export const fixtureRepository = 'upgrade-gate/fixture';
 const installId = 'upgrade-gate-fixture';
 const pinPattern = /github:cryptob1\/graphyard#([0-9a-f]{40})/g;
-const itemFields = ['id', 'key', 'title', 'type', 'criteria', 'plannedFiles', 'createdAt'];
-const decisionFields = ['id', 'action', 'input', 'reason', 'requestedBy', 'requestedAt', 'createdAt', 'precedent', 'context'];
+// Lifecycle and decision state are compared too: an upgrade that drops the lease or settles the
+// decision corrupts the work as surely as one that rewrites its title.
+const itemFields = ['id', 'key', 'title', 'type', 'criteria', 'plannedFiles', 'createdAt', 'lease', 'epoch', 'ready', 'stage'];
+const decisionFields = ['id', 'action', 'input', 'reason', 'requestedBy', 'requestedAt', 'createdAt', 'precedent', 'context', 'state', 'approvedBy', 'approvedAt', 'approvalReason', 'outcome', 'refusal'];
 
 const pick = (value, fields) => Object.fromEntries(fields.filter(field => value?.[field] !== undefined).map(field => [field, value[field]]));
 const canonical = value => JSON.stringify(value, (_, inner) => inner && typeof inner === 'object' && !Array.isArray(inner) ? Object.fromEntries(Object.entries(inner).sort(([a], [b]) => a.localeCompare(b))) : inner);
@@ -195,10 +197,10 @@ export async function seedThroughCli({ cli, plane, repoRoot }) {
   if (!key) throw new Error(`create returned no key: ${JSON.stringify(created)}`);
   const requested = await cli(['master', 'decide', key, 'release', '{}', 'Upgrade gate: this decision survives the upgrade']);
   const id = requested?.id ?? requested?.decision?.id;
-  const decision = listOf(await cli(['master', 'decisions', key]), 'decisions').find(entry => entry?.id === id);
-  if (!decision) throw new Error(`master decide recorded no decision on ${key} that master decisions lists: ${JSON.stringify(requested)}`);
   await cli(['master', 'release', key, 'Upgrade gate: the fixture is released so the worker can claim it']);
   await cli(['claim', key], plane.worker);
+  const decision = listOf(await cli(['master', 'decisions', key]), 'decisions').find(entry => entry?.id === id);
+  if (!decision) throw new Error(`master decide recorded no decision on ${key} that master decisions lists: ${JSON.stringify(requested)}`);
   return { key, item: await cli(['status', key]), history: await cli(['events', key, '--all', '--payload', 'full', '--order', 'asc']), decision };
 }
 
@@ -214,16 +216,20 @@ export function loopVerdict(result) {
   return { ok: true };
 }
 
-/** What the candidate serves after the upgrade, read back through its own CLI. */
+/**
+ * What the candidate serves after the upgrade, read back through its own CLI. The work is read
+ * before the loop runs, since a cycle may legitimately lapse the lease or act on the decision.
+ */
 export async function observeThroughCli({ cli, plane, repoRoot, fetch: get }, seeded) {
   const health = await (await get(`${plane.url}/healthz`)).json();
+  const item = await cli(['status', seeded.key]), history = await cli(['events', seeded.key, '--all', '--payload', 'full', '--order', 'asc']), decisions = await cli(['master', 'decisions', seeded.key]);
   let loop;
   try { loop = loopVerdict(await cli(['master', 'run', '--once'])); } catch (error) { loop = { ok: false, detail: String(error?.message ?? error) }; }
   const directory = join(repoRoot, '.github/workflows');
   const workflows = [];
   for (const name of (await readdir(directory).catch(() => [])).filter(name => /\.ya?ml$/.test(name)).sort())
     for (const match of (await readFile(join(directory, name), 'utf8')).matchAll(pinPattern)) workflows.push({ file: name, commit: match[1] });
-  return { health, item: await cli(['status', seeded.key]), history: await cli(['events', seeded.key, '--all', '--payload', 'full', '--order', 'asc']), decisions: await cli(['master', 'decisions', seeded.key]), loop, workflows };
+  return { health, item, history, decisions, loop, workflows };
 }
 
 export function parseArguments(argv) {

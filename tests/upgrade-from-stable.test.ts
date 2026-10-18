@@ -30,7 +30,7 @@ function fakePlane() {
     }
     if (command === 'create') {
       const body = JSON.parse(await readFile(rest[0], 'utf8'));
-      state.item = { id: 'w-1', key: 'GY-1', type: 'feature', ...body, createdAt: 'recorded-at-create', revision: 1, ready: false };
+      state.item = { id: 'w-1', key: 'GY-1', type: 'feature', ...body, createdAt: 'recorded-at-create', revision: 1, ready: false, stage: 'backlog', epoch: 0, lease: null };
       event('work.created', body); return structuredClone(state.item);
     }
     if (command === 'master' && rest[0] === 'release') {
@@ -40,6 +40,7 @@ function fakePlane() {
     if (command === 'claim') {
       assert.equal(token, 'worker-token', 'the lease is claimed by the install\'s worker');
       if (!state.item.ready) throw new Error('Task is not ready or has a blocker');
+      Object.assign(state.item, { stage: 'build', epoch: 1, lease: { owner: 'fixture-worker-1', epoch: 1, expiresAt: 'two-minutes-on' } });
       event('lease.claimed', { epoch: 1, owner: 'fixture-worker-1' }); return { epoch: 1 };
     }
     if (command === 'status') return structuredClone(state.item);
@@ -52,7 +53,8 @@ function fakePlane() {
     if (command === 'master' && rest[0] === 'decisions') return { decisions: state.decisions.map(entry => structuredClone(entry)) };
     if (command === 'master' && rest[0] === 'run') {
       if (state.loopBroken) return { cycles: 0, failedCycles: 1, stopped: 'completed', last: null, lastFailure: { error: 'cycle failed' } };
-      state.cycles++; event('loop.cycle', {}); return { cycles: 1, failedCycles: 0, stopped: 'completed', last: { cycle: 1 }, lastFailure: null };
+      // A cycle may lapse the unrenewed lease: the read-back is taken before it, so this is no violation.
+      state.cycles++; state.item.lease = null; event('loop.cycle', {}); return { cycles: 1, failedCycles: 0, stopped: 'completed', last: { cycle: 1 }, lastFailure: null };
     }
     throw new Error(`unexpected command ${args.join(' ')}`);
   };
@@ -126,6 +128,11 @@ test('unit:upgrade-from-stable — scripts/upgrade-from-stable.mjs installs, see
   // A lost history row and a decision that no longer reads back fail as surely as a rewritten one.
   assert.equal((await stubbedRun(plane => { plane.events.splice(0, 1); })).verdict.failed, 'history-unchanged');
   assert.equal((await stubbedRun(plane => { plane.decisions.length = 0; })).verdict.failed, 'decision-unchanged');
+  // So do lifecycle and decision state: a dropped lease, a moved stage or epoch, an unreleased item, a settled decision.
+  for (const violate of [(plane: any) => { plane.item.lease = null; }, (plane: any) => { plane.item.stage = 'backlog'; }, (plane: any) => { plane.item.epoch = 2; }, (plane: any) => { plane.item.ready = false; }])
+    assert.equal((await stubbedRun(violate)).verdict.failed, 'item-unchanged');
+  for (const violate of [(plane: any) => { plane.decisions[0].state = 'applied'; }, (plane: any) => { plane.decisions[0].approvedBy = 'someone'; }])
+    assert.equal((await stubbedRun(violate)).verdict.failed, 'decision-unchanged');
   assert.equal((await stubbedRun(async (_, repoRoot) => { await writeFile(join(repoRoot, '.github/workflows/graphyard-release-candidate.yml'), 'jobs: {}\n'); await writeFile(join(repoRoot, '.github/workflows/graphyard-promotion.yml'), 'jobs: {}\n'); })).verdict.failed, 'workflows-pin-candidate', 'no pin at all is no pin of the candidate');
 
   // The seed provisions the operator-agent identity before deciding and releases before claiming;
