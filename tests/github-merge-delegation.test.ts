@@ -4,7 +4,6 @@ import { readdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CHECK_NAME, LANDABLE_CHECK, GitHub, gateMerge } from '../src/github.js';
-import { mergeQueueRuleset, mergeQueueRulesetName, protectionPlan, applyProtection } from '../src/protection.js';
 import { type MergeEnqueueRequest } from '../src/merge-queue.js';
 import type { Observation, Work } from '../src/model.js';
 
@@ -168,45 +167,4 @@ test('unit:no-graphyard-merge-call — GitHub performs the merge: no code path c
     });
     }
     assert.deepEqual(offenders, [], 'no source line calls the GitHub merge endpoint unbound to the head');
-});
-
-test('unit:protection-configures-merge-queue — master protection plans and applies the base branch merge queue with Graphyard / merge required from the App', async () => {
-  const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
-  const protection = { required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true },
-    required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: 1234 }, { context: LANDABLE_CHECK, app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } };
-  const open = [work({ policy: { checks: ['test'], review: true } })];
-
-  const ruleset = mergeQueueRuleset(config);
-  assert.equal(ruleset.name, mergeQueueRulesetName);
-  assert.deepEqual(ruleset.conditions.ref_name.include, ['refs/heads/main']);
-  assert.ok(ruleset.rules.some(rule => rule.type === 'merge_queue'), 'the plan carries a merge queue');
-  assert.deepEqual(ruleset.rules.find(rule => rule.type === 'required_status_checks')?.parameters, { strict_required_status_checks_policy: false, required_status_checks: [{ context: CHECK_NAME, integration_id: 1234 }, { context: LANDABLE_CHECK, integration_id: 1234 }] });
-
-  const missing = protectionPlan(protection, config, open, []);
-  assert.equal(missing.consistent, false);
-  assert.ok(missing.changes.some(change => /merge queue on main/.test(change)), missing.changes.join('; '));
-  assert.ok(missing.changes.some(change => /merge queue required check Graphyard \/ merge/.test(change)));
-  assert.deepEqual(missing.mergeQueue?.ruleset, ruleset, 'the protection plan includes the merge-queue configuration');
-
-  const configured = protectionPlan(protection, config, open, [{ type: 'merge_queue', parameters: {} }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: CHECK_NAME, integration_id: 1234 }, { context: LANDABLE_CHECK, integration_id: 1234 }] } }]);
-  assert.equal(configured.consistent, true, configured.changes.join('; '));
-  // A same-named check from another App does not satisfy the queue.
-  assert.equal(protectionPlan(protection, config, open, [{ type: 'merge_queue' }, { type: 'required_status_checks', parameters: { required_status_checks: [{ context: CHECK_NAME, integration_id: 999 }] } }]).consistent, false);
-
-  // Apply: the rules are read from the branch, the ruleset is written, then read back.
-  let rules: unknown[] = [];
-  const writes: { args: string[]; input?: string }[] = [];
-  const run = (_command: string, args: string[], input?: string) => {
-    if (args.includes('--method')) { writes.push({ args, input }); if (args.some(arg => arg.endsWith('/rulesets'))) rules = JSON.parse(input!).rules; return '{}'; }
-    if (args[1].endsWith('/protection')) return JSON.stringify(protection);
-    if (args[1].includes('/rules/branches/')) return JSON.stringify(rules);
-    if (args[1].includes('/rulesets')) return '[]';
-    throw new Error(`Unexpected gh ${args.join(' ')}`);
-  };
-  const applied = await applyProtection(config, open, run);
-  assert.equal(applied.applied, true);
-  assert.equal(applied.consistent, true);
-  assert.deepEqual(writes.map(write => write.args.slice(0, 4)), [['api', '--method', 'POST', 'repos/owner/project/rulesets']], 'only the merge queue ruleset is written');
-  assert.deepEqual(JSON.parse(writes[0].input!), ruleset);
-  assert.match(applied.result, /merge queue requiring Graphyard \/ merge/);
 });

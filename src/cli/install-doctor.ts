@@ -7,7 +7,7 @@ import type { CliContext } from './context.js';
 import { doctorDocumentation } from '../model/documentation.js'; import { doctorRepositoryPolicy } from '../model/repository-policy.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { mergerDoctorLine } from './merger.js'; import { coordinatorDoctor } from '../master/known-good.js';
+import { coordinatorDoctor } from '../master/known-good.js';
 
 /** `graphyard doctor [--profile PROFILE]`: local discovery, live integration readiness and the readiness checklist for a completion profile. */
 export async function runDoctor(context: CliContext) {
@@ -51,7 +51,6 @@ export async function runDoctor(context: CliContext) {
     : documentation.drift ? documentation.drift
     : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
     : readiness.next;
-  console.error(mergerDoctorLine(live?.mergeWriter));
   await coordinatorDoctor(root, discovered.repository, production);
   return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
     setup,

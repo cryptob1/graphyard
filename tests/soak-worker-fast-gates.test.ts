@@ -71,7 +71,7 @@ test('unit:soak-invariants-hold — over a day on a checkout that carries the ga
     for (const [attempt, { text }] of theirs.entries()) {
       const label = `${item.key} attempt ${attempt + 1}`;
       // The request names the sync instruction, then the gates as one command line, then complete.
-      const syncAt = text.indexOf(sync), gatesAt = text.indexOf(workerFastGatesSentence), completeAt = text.indexOf('submit it with complete as your last action');
+      const syncAt = text.indexOf(sync), gatesAt = text.indexOf(workerFastGatesSentence), completeAt = text.indexOf('--head as your last action');
       assert.ok(syncAt >= 0, `${label}: the request carries the sync instruction for this item and CLI`);
       assert.equal(syncAt + sync.length, gatesAt, `${label}: the gates sentence follows the sync instruction directly`);
       assert.ok(gatesAt < completeAt, `${label}: the gates sentence sits before the complete instruction`);

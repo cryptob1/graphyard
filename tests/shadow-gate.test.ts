@@ -23,7 +23,6 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1522: the shadow merge gate trial-merges one submitted head per cycle beside GitHub's gate,
 // records the verdict, compares it with what GitHub then did, and writes nothing.
@@ -335,7 +334,7 @@ test('unit:shadow-status — master status lists the gate report and, for each i
   // master status: one attention line per disagreeing item, from the item's newest verdict, however many verdicts it has.
   const lines = shadowGateAttention([...entries, verdict('GY-2', { outcome: 'agree-pass', at: iso(start + minute) }), verdict('GY-3', { outcome: 'shadow-missed', at: iso(start - minute) })]);
   assert.deepEqual(lines.map(line => [line.subject, line.role, line.human, line.text.startsWith('Shadow merge gate: GY-3')]), [['shadow-gate', 'master', false, true]], 'GY-2 is agreed at its newest verdict; GY-3 keeps its one line');
-  assert.match(lines[0]!.next, /before the switch to control-plane merging/);
+  assert.match(lines[0]!.next, /nothing is changed/);
   assert.deepEqual(shadowGateAttention([]), []);
   // The loop's own effects carry the reads: the verdict is posted as the coordinator under one idempotency key per (head, tip), with the route's body.
   const posted: { path: string; data: unknown; key?: string }[] = [];
@@ -438,7 +437,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1522;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('shadow-gate-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('shadow_gate_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/shadow_gate_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/shadow_gate_test`); await store.init();
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

@@ -36,9 +36,9 @@ Refused workflow syncs: `sync GY-N --push-via-control-plane COMMIT` (`POST /api/
 
 ## Require the check
 
-Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force-push/deletion (`master protection --apply`, `master browser protection`); merges mergeable non-draft approved heads ([one delivery path](delivery.md#one-delivery-path)) whose `Graphyard / merge`, App-bound required runs pass, else held (one `merge.enqueue.refused`, ≤3 runs/head); `master init --no-auto-merge` holds each until approved `master decide GY-N merge`; merged runs frozen, re-read in rotation for 24h; drift: `required-checks-disagree`, `public-verdict-contradicts-delivery`.
+Require `Graphyard / merge`, `graphyard/landable` ([landability](coordination.md)) from control-plane App: `strict` **off**, admin-enforced, no force-push/deletion (`install --apply`); merges mergeable non-draft approved heads ([one delivery path](delivery.md#one-delivery-path)) whose `Graphyard / merge`, App-bound required runs pass, else held (one `merge.enqueue.refused`, ≤3 runs/head); `master init --no-auto-merge` holds each until approved `master decide GY-N merge`; merged runs frozen, re-read in rotation for 24h; drift: `required-checks-disagree`, `public-verdict-contradicts-delivery`.
 
-Operator rulesets (inherited too; classic 404 = none, unwritten): `--apply`/install add both checks, once PR-published, to the sole checks ruleset; snapshotted (`.graphyard/protection-snapshots/`), diff-verified, rolled back. `--retire CONTEXT@INTEGRATION --proof PR`; `--restore SNAPSHOT`.
+Operator rulesets (inherited too; classic 404 = none, unwritten): install adds both checks, once PR-published, to the sole checks ruleset; snapshotted (`.graphyard/protection-snapshots/`), diff-verified, rolled back.
 
 ## Failed checks
 

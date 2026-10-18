@@ -219,7 +219,7 @@ test('unit:onboarding-nogithubapp-applies — a --no-github-app install supplies
   await mkdir(join(root, '.graphyard'), { recursive: true });
   await writeFile(join(root, '.graphyard/github-app.json'), JSON.stringify({ repository: 'other/repo', appId: 9, slug: 'stale' }));
   let appPage = false;
-  const result = await applyProposal(root, proposal, { url: 'http://127.0.0.1:4310', installed: installed!, merger: 'control-plane',
+  const result = await applyProposal(root, proposal, { url: 'http://127.0.0.1:4310', installed: installed!,
     githubSetup: async () => { appPage = true; return { appId: 1, slug: 'unwanted' }; } });
   assert.equal(appPage, false, 'no App page is opened for an install that chose none');
   assert.equal(result.githubApp, null);
@@ -262,8 +262,8 @@ test('integration:onboarding-apply-without-app — init --scan --apply --url onb
   assert.equal(applied.githubPending, false, 'the CLI reports no pending App step for an install that chose none');
   assert.equal(applied.principalsFile, null);
   for (const file of onboardingFiles) assert.ok((await stat(join(root, file))).isFile(), `${file} is written for publishing`);
-  assert.ok(applied.delivery?.workflows.length, 'a delivery workflow is written for the onboarding change');
-  for (const workflow of applied.delivery.workflows) assert.ok((await stat(join(root, workflow))).isFile(), workflow);
+  // The control plane merges, so the proposed delivery is local: no GitHub Actions workflow is written.
+  assert.deepEqual(applied.delivery?.workflows ?? [], [], 'no delivery workflow is written');
   assert.ok((await stat(join(root, '.graphyard/repository-setup.json'))).isFile());
   await assert.rejects(stat(join(root, '.graphyard/principals.json')), { code: 'ENOENT' });
   // The onboarding files publish: git sees them as additions and ignores .graphyard/.

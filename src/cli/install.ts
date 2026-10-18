@@ -5,7 +5,6 @@ import { availableRuntimes, describeMergeGate, discover, installedOnboarding } f
 import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
-import { protectionRun } from '../protection.js';
 import { acquireApplyLock, appCommand, applyInstall, applyRosterChange, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
 import { installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
 import { runManifestFlow } from '../install/manifest.js';
@@ -13,7 +12,7 @@ import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
-import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { mergerFromStatus } from './install-merger.js'; import { runDoctor } from './install-doctor.js';
+import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { runDoctor } from './install-doctor.js';
 
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
@@ -87,7 +86,7 @@ export const installCommands = defineCommands([
   {
     name: 'up',
     help: [
-      '  up --repo OWNER/NAME [--provider compose|railway|hetzner|local] [--local] [--reviewer NAME]',
+      '  up --repo OWNER/NAME [--provider compose|railway|hetzner|local] [--local]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
       '     [--reuse-app SLUG]... [--github-mobile] [--wait MINUTES] [--no-wait] [--share-tailnet]',
@@ -198,9 +197,8 @@ export const installCommands = defineCommands([
         // Applying rescans with the choices the operator reviewed, so a confirmed opt-out or cadence
         // is compared with the checkout rather than read back as a difference.
         const reviewed = stored?.proposal.delivery ? { mode: stored.proposal.delivery.mode, candidateSchedule: stored.proposal.delivery.candidateSchedule } : undefined;
-        // GY-1901: the recorded merger chooses the default model; an explicit github merger keeps the GitHub pipeline.
-        const recordedMerger = await mergerFromStatus(() => context.api('status'));
-        const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: { ...(values.apply ? { ...reviewed, ...choices } : choices), merger: recordedMerger } });
+        // GY-1901: the control plane is the merge writer, which chooses the default model.
+        const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: { ...(values.apply ? { ...reviewed, ...choices } : choices), merger: 'control-plane' } });
         if (values.apply) {
           if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
           // An install that owns this repository supplies the identities and the App (GY-1413);
@@ -212,9 +210,8 @@ export const installCommands = defineCommands([
           if (differences.length) throw new Error(`${differences.join('; ')}. Rerun init --scan, review the refreshed proposal, then apply it again. The stored proposal was left unchanged.`);
           const url = selected ?? installed?.url;
           if (!url) throw new Error('Applying requires the Graphyard server URL; pass --url');
-          const merger = recordedMerger;
           if (installed) {
-            const result = await applyProposal(root, stored.proposal, { url, installed, github: protectionRun, merger });
+            const result = await applyProposal(root, stored.proposal, { url, installed });
             return print({ proposal: stored.file, ...result, installed: installed.directory });
           }
           // Apply rewrites the registry from the reviewed proposal; the CI producer's token is read
@@ -222,7 +219,7 @@ export const installCommands = defineCommands([
           const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
           // The App page init would open needs port 4311; a busy one refuses here, before any write.
           if (!(await loadAppliedSetup(root))?.artifacts.githubApp && !await readFile(resolve(root, '.graphyard/github-app.json')).then(() => true, () => false) && !await appPagePortFree()) throw appPageBusy(4311);
-          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), github: protectionRun, writeCredentials: true, merger });
+          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), writeCredentials: true });
           if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
           const ciProofs = await registerCiProducer(result.principalsFile, roster);
           return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },

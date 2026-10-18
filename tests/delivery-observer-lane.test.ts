@@ -20,7 +20,6 @@ import { fingerprint, reconcileRoster, rosterEntry, tokenFile } from '../src/ins
 import { externalRunsImportGrant } from '../src/server/principals.js';
 import { freePort } from '../src/cli/test-isolation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { deployedRoster, harness, REPOSITORY, type Harness } from './install-harness.js';
 
 // GY-1912: a dedicated producer holding only delivery:observe-sha records which commit production
@@ -61,7 +60,7 @@ before(async () => {
   scratch = await temporaryDirectory('delivery-observer-lane');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('observer_lane_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/observer_lane_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/observer_lane_test`); await store.init();
   engine = new Engine(store, [15368], 120, REPOSITORY); validation = new Validation(engine, principals, REPOSITORY);
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), github as any);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

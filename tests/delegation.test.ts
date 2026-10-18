@@ -16,7 +16,6 @@ import { server } from '../src/server.js';
 import { currentEvidence, sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GitHub merges (GY-1235): what GitHub may merge is every gate passing on the item as it stands,
 // in the merge order the delegation computes. These stand in for the guarded broker's selection.
@@ -86,7 +85,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 10;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delegation'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('delegation_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delegation_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delegation_test`); await store.init();
   engine = new Engine(store); engine.principals = roster;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

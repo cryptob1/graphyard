@@ -14,7 +14,6 @@ import * as decisionsModule from '../src/server/decisions.js';
 import type { DecisionRecord } from '../src/server/decision-ledger.js';
 import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 lease and quarantine stamps are two snapshots decisionGroundsChange compares with each other, never with a clock; the one new Date() stamps a session's observedAt.
 
 // GY-1463: a requested decision binds the item revision it was requested at, and a worker's lease
@@ -40,7 +39,7 @@ async function start() {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1463;
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-moved-revision'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('moved_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/moved_test`); await store.init(); await recordLegacyMerger(store);
+  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/moved_test`); await store.init();
   const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };

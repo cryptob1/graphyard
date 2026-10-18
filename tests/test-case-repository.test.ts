@@ -10,7 +10,6 @@ import { Validation } from '../src/validation.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { caseResult, flakiness, scenarioOf, type ScenarioRun } from '../src/model/test-cases.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): artifact createdAt 2026-09-01 is provenance fixture nothing dates against the clock; new Date()/Date.now() stamp live observations and set request deadlines relative to the wall clock.
 
 // GY-162: the test-case repository. A case is a versioned scenario; each trusted run of it is
@@ -35,7 +34,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 162;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('test-cases'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('test_cases_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/test_cases_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/test_cases_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository);
   validation = new Validation(engine, principals, repository);
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);

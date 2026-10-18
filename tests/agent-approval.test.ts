@@ -9,7 +9,6 @@ import { standingEscalations, type Observation, type Principal, type Work } from
 import { approvalConflict, foldDecisions, requiredDecisionCapabilities } from '../src/model/approval.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-70: decisions the guides reserved for a human operator are completed by one agent identity
 // holding the capability plus an approval from a second, independent agent identity. Each test
@@ -66,7 +65,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 40;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('agent-approval'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('approval_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/approval_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/approval_test`); await store.init();
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

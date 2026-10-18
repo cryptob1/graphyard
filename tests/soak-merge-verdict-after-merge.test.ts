@@ -12,7 +12,6 @@ import { LANDABLE_CHECK, type Observation, type Principal, type Work } from '../
 import { checkInvariants, emptyInvariantRecord, systemInvariants } from '../src/model/invariants.js';
 import { mergeStallAttention } from '../src/cli/status-attention.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { clock, clockSql, hour, minute, sha } from './helpers/soak-world.js';
 
 /**
@@ -157,7 +156,7 @@ before(async () => {
   await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
   await setup.query('ALTER DATABASE soak_merge_verdict_after_merge SET search_path = public, pg_catalog');
   await setup.end();
-  store = new Store(connection); await store.init(); await recordLegacyMerger(store);
+  store = new Store(connection); await store.init();
   engine = new Engine(store, [CI], 120, 'owner/project'); engine.submissionObserver = null; engine.controlPlaneAppId = APP;
 });
 after(async () => { clock.uninstall(); if (store) await store.close(); if (database) await database.stop(); });

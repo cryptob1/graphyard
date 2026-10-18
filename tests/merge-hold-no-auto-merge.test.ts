@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import * as githubModule from '../src/github.js';
@@ -34,7 +33,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-hold'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   url = `postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`;
-  store = new Store(url); await store.init(); await recordLegacyMerger(store);
+  store = new Store(url); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [admin, coordinator];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

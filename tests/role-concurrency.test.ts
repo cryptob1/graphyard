@@ -15,7 +15,6 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveRev
 import { launchProducer, reconcileProducers, summarizeProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-21 `clock` is handed explicitly to roleConcurrency and to the requested() fixtures of that test; the other tests stamp items, verdicts and mint expiry from the real clock alone.
 
 // GY-107: one review and one proof run at a time fleet-wide, because each role had a single fixed
@@ -171,7 +170,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_ROLE_CONCURRENCY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 29);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('role-concurrency'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init(); await recordLegacyMerger(store);
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, runner, runnerB];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

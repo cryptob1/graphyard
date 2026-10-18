@@ -1,23 +1,18 @@
-// Concern: the observation job of a control-plane install with no GitHub App (GY-1675), kept out of src/server/main.ts's budget.
+// Concern: the observation job (GY-1675), kept out of src/server/main.ts's budget.
 import { observationClaim } from '../observation-priority.js';
-import { recordedMergerMode } from '../merger-mode.js';
 import type { Engine } from '../engine.js';
 
 /**
- * The observation job of a control-plane install with no GitHub App (GY-1675): take one due job and
- * observe its candidate from the local checkout, as `processJob` does from GitHub; false when no job
- * was due or the observation failed.
- *
- * The path is gated on the recorded merger: while the ledger says `github`, a server with no App
- * claims nothing, so a checkout that is not the configured merger never writes a control-plane
- * observation over a GitHub one. The claimed item is read again after the claim, never judged from
+ * The observation job (GY-1675): take one due job and observe its candidate from the local checkout;
+ * false when no job was due or the observation failed. A candidate GitHub observed before the control
+ * plane became the only merge writer (a pull request head) is observed the same way, from the shared
+ * object store, which turns it into a submitted head the merge writer queues. The claimed item is read again after the claim, never judged from
  * the pre-claim snapshot: a submission between `fleet()` and `takeJob` creates the candidate and
  * wakes the very job claimed, and a stale snapshot would discard it. A job for an item with nothing
  * submitted yet is deferred a minute (`deferJob` keeps a wake that lands meanwhile); one for a
  * finished or missing item is dropped.
  */
 export async function processControlPlaneJob(engine: Engine): Promise<boolean> {
-  if ((await recordedMergerMode(engine.store.pool)).merger !== 'control-plane') return false;
   const all = await engine.store.fleet();
   const plan = observationClaim(all, Date.now(), false);
   const job = await engine.store.takeJob(plan.order, plan.headCount);

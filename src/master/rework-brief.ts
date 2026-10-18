@@ -67,7 +67,7 @@ export function reworkBriefSection(work: BriefWork, rework: AppliedRework | null
   if (!rework || !work.submission) return '';
   const reason = rework.reason.length > reworkBriefMax ? `${rework.reason.slice(0, reworkBriefMax)}… (truncated; read the whole reason on the decision${rework.id ? ` ${rework.id}` : ''})` : rework.reason;
   const head = work.candidate?.sha ? ` at head ${work.candidate.sha.slice(0, 12)}` : '';
-  return `This attempt is a rework round of PR #${work.submission.pr}${head}. The rework decision applied at ${rework.approvedAt} sent it back for this reason, which is this round's brief: ${reason} `
-    + 'Answer every point it names with a new commit pushed to the pull request\'s branch, and read the unresolved review threads on the pull request; resubmitting the same head answers nothing, because what sent it back still stands on it. '
+  return `This attempt is a rework round of change #${work.submission.pr}${head}. The rework decision applied at ${rework.approvedAt} sent it back for this reason, which is this round's brief: ${reason} `
+    + 'Answer every point it names with a new commit on the assigned branch, submitted with complete --head; resubmitting the same head answers nothing, because what sent it back still stands on it. '
     + 'If answering a point needs a file outside plannedFiles, ask for it with scope-request, naming the point. ';
 }

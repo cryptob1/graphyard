@@ -9,9 +9,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { gitBranchName } from '../src/model/pr-adoption.js';
 import { saveDocument, Store } from '../src/store.js';
-import { MergerSettings, mergerEventKind } from '../src/merger-mode.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { recordLegacyMerger } from './helpers/legacy-merger.js';
 import { FakeGitHub } from './helpers/fake-github.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -39,7 +37,6 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('pr-adoption-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('pr_adoption');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/pr_adoption`); await store.init();
-  await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 300, repository);
   engine.submissionObserver = null;
   github = new FakeGitHub(repository, { autoApprove: true });
@@ -155,7 +152,7 @@ test('unit:pr-adoption-binds-once — adopting a pull request at its live head b
   await refused(adopt(item, thirdPull.number, thirdHead), `${item.key} already adopted pull request #${pull.number}; one binding stands per item`);
 });
 
-test('unit:pr-adoption-refuses-unadoptable — a draft, a control-plane merge writer and an item with work in flight are each refused at adoption; a re-adopt at a new live head rebinds once the attempt is over', async () => {
+test('unit:pr-adoption-refuses-unadoptable — a draft and an item with work in flight are each refused at adoption; a re-adopt at a new live head rebinds once the attempt is over', async () => {
   const { head, pull } = externalPull('feature/huck-draft');
   const item = await released();
   // A draft: the binding waits for the pull request to be marked ready for review.
@@ -164,14 +161,6 @@ test('unit:pr-adoption-refuses-unadoptable — a draft, a control-plane merge wr
     await refused(adopt(item, pull.number, head), `Pull request #${pull.number} is a draft`);
   } finally {
     engine.adoptionObserver = async pr => livePull(pr);
-  }
-  // The control plane as merge writer: no GitHub pull request could ever complete, so none is adopted.
-  const setMerger = (merger: string, reason: string) => store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['test-fixture', mergerEventKind, JSON.stringify({ merger, reason, previous: merger === 'github' ? 'control-plane' : 'github' })]);
-  await setMerger('control-plane', 'this case exercises the control-plane writer');
-  try {
-    await refused(adopt(item, pull.number, head), /merge writer is the control plane.*graphyard master merger/);
-  } finally {
-    await setMerger('github', 'this test exercises the legacy github merger');
   }
   // An attempt holding a live lease: adoption waits for the attempt to end, then binds.
   const claim = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
@@ -276,29 +265,22 @@ test('unit:pr-adoption-exact-head-complete — complete on an adopted item is re
   }
 });
 
-test('unit:pr-adoption-merger-switch-keeps-pr — an adoption made under the github writer still completes only as its pull request after a real switch to the control-plane writer: a head is refused, and nothing is recorded until the writer is github again', async () => {
+test('unit:pr-adoption-merger-switch-keeps-pr — an adopted item completes only as its pull request: a head is refused naming it, and nothing is recorded', async () => {
   const { head, pull } = externalPull('feature/huck-switch');
   const item = await adopt(await released(), pull.number, head);
   const attempt = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   await engine.execute(worker, 'workspace', item.id, { epoch: attempt.epoch, host: 'machine-d', path: `/tmp/adopted-4/${item.id}`, branch: 'feature/huck-switch' }, randomUUID());
-  const settings = new MergerSettings(store);
-  await settings.change(operator, { merger: 'control-plane', reason: 'this test switches the writer after an adoption' }, randomUUID());
-  try {
-    // The adopted head itself, submitted as a head, would be a newly allocated change: refused naming the adopted pull request.
-    await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, head }, randomUUID()),
-      new RegExp(`adopted pull request #${pull.number} and completes only as that pull request, never as a head`));
-    await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID()), 'A pull request is submitted only while GitHub is the merge writer');
-    const held = await reload(item);
-    assert.equal(held.submission ?? null, null, 'no submission was recorded under the control-plane writer');
-    assert.equal(held.candidate ?? null, null, 'no synthetic change was bound');
-    assert.equal(held.prAdoption!.pr, pull.number, 'the adoption still binds its pull request');
-  } finally {
-    await settings.change(operator, { merger: 'github', reason: 'this test exercises the legacy github merger' }, randomUUID());
-  }
+  // The adopted head itself, submitted as a head, would be a newly allocated change: refused naming the adopted pull request.
+  await refused(engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, head }, randomUUID()),
+    new RegExp(`adopted pull request #${pull.number} and completes only as that pull request, never as a head`));
+  const held = await reload(item);
+  assert.equal(held.submission ?? null, null, 'no submission was recorded');
+  assert.equal(held.candidate ?? null, null, 'no synthetic change was bound');
+  assert.equal(held.prAdoption!.pr, pull.number, 'the adoption still binds its pull request');
   engine.submissionObserver = observeFromFake;
   try {
     const completed = await engine.execute(worker, 'submit', item.id, { epoch: attempt.epoch, pr: pull.number }, randomUUID());
-    assert.deepEqual(completed.submission, { epoch: attempt.epoch, pr: pull.number }, 'it completes as the adopted pull request once github writes again');
+    assert.deepEqual(completed.submission, { epoch: attempt.epoch, pr: pull.number }, 'it completes as the adopted pull request');
   } finally {
     engine.submissionObserver = null;
   }
