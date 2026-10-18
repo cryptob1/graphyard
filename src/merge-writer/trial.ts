@@ -2,12 +2,12 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
-import { availableParallelism, constants, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
+import { dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
-import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
+import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { failingSummary, trialCutLine } from './shadow.js';
 import type { HostMemoryReading } from '../master-resources.js';
 
@@ -100,19 +100,49 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
 export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots()) =>
   roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
 /**
- * The folder a trial's short checkout is made in (GY-1565): the first of `roots` that passes the
- * managed worktree root's own guard (`verifyWorktreeRoot`: durable storage, not a tmpfs, with
- * `minFreeBytes` free), so a checkout and its `npm ci` tree never fill a memory-backed /tmp, and
- * that no stray node_modules, .git or package.json sits in or above (`lookupPoisoned`), so a module
- * the checkout's own install lacks never resolves upward into a durable host /tmp's stray tree; null
- * when none does, and the checkout stays in the managed session directory.
+ * Where a trial's short checkout may go (GY-2020): a short folder on disk in the coordinator's home,
+ * made on demand. Never /tmp, /var/tmp or the tmpdir: the suite treats a checkout under any of them
+ * as a test fixture (seven self-upgrade tests failed every trial on a host whose /tmp is a tmpfs and
+ * whose loop unit's TMPDIR is /var/tmp), and no service override is needed to keep it out.
  */
-export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe): Promise<string | null> {
+export const trialCheckoutRoots = (home = homedir()): string[] => [join(home, '.gy', 'trials')];
+/** The folders a trial's checkout never goes under (GY-2020): /tmp, /var/tmp and the process tmpdir. */
+export const trialExcludedRoots = (own = tmpdir()): string[] => [...new Set(['/tmp', '/var/tmp', own])];
+const within = (path: string, root: string) => { const to = relative(root, path); return to === '' || !to.startsWith('..') && !isAbsolute(to); };
+/**
+ * The folder a trial's short checkout is made in (GY-1565, GY-2020): the first of `roots` under none
+ * of `excluded` that passes the managed worktree root's own guard (`verifyWorktreeRoot`: durable
+ * storage, not a tmpfs, with `minFreeBytes` free), so a checkout and its `npm ci` tree never fill a
+ * memory-backed volume, is made if missing, and that no stray node_modules, .git or package.json sits
+ * in or above (`lookupPoisoned`), so a module the checkout's own install lacks never resolves upward
+ * into a stray tree; null when none does, and the checkout stays in the managed session directory.
+ */
+export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe, excluded: readonly string[] = trialExcludedRoots()): Promise<string | null> {
   for (const root of roots) {
-    if (!existsSync(root) || lookupPoisoned(root)) continue;
-    try { await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) }); return root; } catch { /* the next root */ }
+    if (excluded.some(temporary => within(root, temporary))) continue;
+    try {
+      await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) });
+      await mkdir(root, { recursive: true });
+      if (!lookupPoisoned(root)) return root;
+    } catch { /* the next root */ }
   }
   return null;
+}
+/**
+ * Takes back the short checkouts a crashed trial left in `root` (GY-2020): the tmp reclaim scans only
+ * the temporary roots, so a `gy-c` directory here whose owner marker names a process that is gone is
+ * removed, with its marker, before the next trial makes its own. Best effort: nothing here fails a trial.
+ */
+export async function reclaimTrialCheckouts(root: string): Promise<string[]> {
+  const removed: string[] = [];
+  const names = await readdir(root).catch(() => [] as string[]);
+  for (const name of names) {
+    if (!name.startsWith(trialCheckoutPrefix) || name.endsWith('.owner')) continue;
+    const directory = join(root, name), owner = await readTempOwner(directory).catch(() => null);
+    if (!owner || !tempOwnerGone(owner)) continue;
+    try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); } catch { /* the next */ }
+  }
+  return removed;
 }
 /**
  * The name prefix of a trial's temporary directory. It stays this short, as CI's /tmp is
@@ -357,8 +387,10 @@ export interface RunTrialInput {
   retries?: number;
   /** Called as each attempt starts, before it runs anything (GY-1832): a caller keeping attempt-scoped evidence starts it afresh. */
   onAttempt?: (attempt: number) => void;
-  /** Where the trial's temporary directory and short checkout may go; `trialTemporaryRoots()` unless a test names others. */
+  /** Where the trial's temporary directory may go; `trialTemporaryRoots()` unless a test names others. */
   temporaryRoots?: readonly string[];
+  /** Where the trial's short checkout may go; `trialCheckoutRoots()`, kept out of `trialExcludedRoots()`, unless a test names others, taken as named. */
+  checkoutRoots?: readonly string[];
   /** The free space a short checkout's root must have, and how it is measured: the managed worktree root's default and probe unless given. */
   minFreeBytes?: number;
   probe?: FilesystemProbe;
@@ -482,7 +514,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const enter = (next: TrialPhase = phase) => { const at = now(); phases[phase] += Math.max(0, at - phaseAt); phase = next; phaseAt = at; return { ...phases }; };
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
   // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
-  // with room (else the session directory's checkout), each removed with the session and marked as this process's so a
+  // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's so a
   // crash before the cleanup leaves it to the tmp reclaim.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
@@ -494,8 +526,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const root = trialTemporaryRoot(checkout.directory, roots);
     if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
-    const near = await trialCheckoutRoot(roots, input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe);
-    if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
+    const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
+    if (near) { await reclaimTrialCheckouts(near); place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
   }
   catch (error) {
     for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
