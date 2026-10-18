@@ -21,7 +21,7 @@ import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
 import type { MergerMode } from '../merger-mode.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
-import { readReviewerProfileRefusal, reviewerProfileRefusalAttention } from '../reviewer.js';
+import { readReviewerProfileRefusal, reviewerProfileRefusalAttention, simplicityParagraph } from '../reviewer.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { agentOwner, type AttentionItem } from './attention.js';
@@ -594,6 +594,7 @@ export function workerPrompt(
     + submissionPolicyRule
     + destructivePromptGuidance
     + branchRewriteGuidance
+    + simplicityParagraph
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
     + (mechanical ? '' : reworkBriefSection(work, rework))
@@ -601,6 +602,8 @@ export function workerPrompt(
     // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
     + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED --ask ASK --recommend TEXT --why SENTENCE -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide: every human step the item still needs, in this one request; ASK is one plain sentence naming the human's action; TEXT is the choice you recommend, or the safest way to obtain a value, such as a fine-grained token scoped to one repository with a short expiry and only the permissions needed, and SENTENCE is one plain sentence of why; a scope widening is never a park, ask for it with scope-request), which ends your lease and parks the item for the human, then stop. `
+    // GY-1987: the worker judges its own diff by the reviewer's standard (graphyard review self) before it submits, so a blocking finding costs a push, not a review round.
+    + `Before complete, run node ${config.cliPath} review self ${work.key}, judge your diff by what it prints and fix each BLOCKING finding first. `
     + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
 }
 

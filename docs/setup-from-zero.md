@@ -37,7 +37,7 @@ Once green, **Describe what you want built** records a goal.
 
 ## Troubleshooting: manual steps
 
-`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite, naming its step; **HUMAN** marks agent-impossible steps.
+`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite; **HUMAN** marks agent-impossible steps.
 
 ## 1. Machine prerequisites
 
@@ -69,7 +69,7 @@ Not required for the control-plane merger: install and `up` register no App and 
 
 ## 6. Onboard the checkout
 
-`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json` to the base (never `.graphyard/` or `.github/workflows` — setup writes none). **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json` to the base (never `.graphyard/` or `.github/workflows` — setup writes none). Scans skip `.claude`. **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 8. Agent environments
 
