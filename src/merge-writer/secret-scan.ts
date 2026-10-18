@@ -16,8 +16,18 @@ export const gitleaksIgnorePath = '.github/gitleaksignore.txt';
 /** Where the pinned binary is kept across trials: under the managed worktree root, keyed by version and archive digest. */
 export const secretScanCacheDirectory = (managedRoot: string) => resolve(managedRoot, '.secret-scan', `gitleaks-${gitleaksVersion}-${gitleaksSha256.slice(0, 12)}`);
 
-/** The scan's answer: a pass, the merge's failure (`detail` holds gitleaks' report), or no verdict when the binary could not be had. */
-export type SecretScanResult = { ok: true } | { ok: false; detail: string; unavailable?: true };
+/** How a gitleaks run that reported no findings ended: its status or signal, the runner's own reason, and whether the deadline killed it. */
+export interface SecretScanExecution { status: number | null; signal: string | null; cause?: unknown; timedOut?: boolean }
+
+/** gitleaks' exit status when it found leaks (its default `--exit-code`). Any other ending is no verdict. */
+export const gitleaksFindingsStatus = 1;
+
+/**
+ * The scan's answer: a pass, the merge's failure (`detail` holds gitleaks' report), or no verdict —
+ * `unavailable` when the binary could not be had, `execution` when gitleaks ran but did not end with
+ * its findings status (a deadline kill, a signal, a spawn or capture failure, an error exit).
+ */
+export type SecretScanResult = { ok: true } | { ok: false; detail: string; unavailable?: true; execution?: SecretScanExecution };
 
 export interface SecretScanInput {
   /** The trial checkout whose HEAD history is scanned. */
@@ -69,8 +79,9 @@ async function pinnedBinary(input: SecretScanInput, timeoutMs: number): Promise<
 
 /**
  * Obtain (once, cached) the pinned gitleaks binary and scan `worktree` at HEAD with the repository's
- * ignore file. Findings fail the scan; a binary that cannot be had (download, digest or platform) is
- * `unavailable`, which the trial treats as no verdict rather than the merge's failure.
+ * ignore file. Only gitleaks' findings status fails the scan; a binary that cannot be had (download,
+ * digest or platform) is `unavailable`, and a run that ended any other way carries its `execution`:
+ * the trial treats both as no verdict (a timeout or runner failure) rather than the merge's failure.
  */
 export async function runSecretScan(input: SecretScanInput): Promise<SecretScanResult> {
   const timeoutMs = input.timeoutMs ?? 120_000;
@@ -82,8 +93,11 @@ export async function runSecretScan(input: SecretScanInput): Promise<SecretScanR
     await input.run(command!, args, { cwd: input.worktree, timeoutMs });
     return { ok: true };
   } catch (error) {
-    const failed = error as { status?: number | null; stdout?: unknown; stderr?: unknown; message?: string };
+    const failed = error as { status?: number | null; signal?: string | null; cause?: unknown; timedOut?: boolean; stdout?: unknown; stderr?: unknown; message?: string };
     const out = `${typeof failed.stdout === 'string' ? failed.stdout : ''}${typeof failed.stderr === 'string' ? failed.stderr : ''}` || String(failed.message ?? error);
-    return { ok: false, detail: out.slice(0, 4000) };
+    const detail = out.slice(0, 4000);
+    const status = typeof failed.status === 'number' ? failed.status : null, signal = failed.signal ?? null;
+    if (status === gitleaksFindingsStatus && signal === null && failed.cause === undefined && !failed.timedOut) return { ok: false, detail };
+    return { ok: false, detail, execution: { status, signal, ...(failed.cause !== undefined ? { cause: failed.cause } : {}), ...(failed.timedOut ? { timedOut: true } : {}) } };
   }
 }

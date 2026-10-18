@@ -21,7 +21,7 @@ const execFile = promisify(execFileCallback);
 
 /**
  * GY-1550 / GY-1552 (children of GY-1527, `up`):
- * - GY-1550: `graphyard install --no-github-app` installs a control plane with no GitHub App; the
+ * - GY-1550 (every install since GY-2009): `graphyard install` installs a control plane with no GitHub App; the
  *   proof runs the installer against a live server started without GitHub and checks no App flow
  *   runs, no GITHUB_APP_* variable is written, and `/api/status.github` is false.
  * - GY-1552: `up` step order (proofs unit:up-control-plane-steps and
@@ -94,19 +94,19 @@ function dependenciesFor(adapter: ProviderAdapter, transport = fakeTransport({ r
   return {
     transport: transport as Transport, configHome, sourceRoot: root, adapter,
     cliPath: join(root, 'package.json'), hostId: 'no-app-host', wait: async () => {}, log: () => {},
-    githubApp: async () => { throw new Error('the App manifest flow must never run with --no-github-app'); },
+    githubApp: async () => { throw new Error('the App manifest flow must never run: an install binds no App'); },
     detectRuntimes: async () => [{ kind: 'claude', program: 'claude', path: '/usr/bin/claude', authenticated: true, reason: 'signed in' }],
     detectHerdr: async () => ({ available: false, version: null, reason: 'not installed' }),
   };
 }
 
-test('integration:install-without-github-app — install --no-github-app registers no App, writes no GITHUB_APP_* variable, and the server serves with /api/status.github false', async () => {
+test('integration:install-without-github-app — install (no App flag: GY-2009) registers no App, writes no GITHUB_APP_* variable, and the server serves with /api/status.github false', async () => {
   const environments: EnvValue[][] = [];
   let appFlows = 0;
   const transport = fakeTransport({ responses: [{ match: 'gh auth status', result: 'Logged in to github.com account installer' }] });
   const dependencies: InstallDependencies = {
     ...dependenciesFor(recordingAdapter(environments), transport),
-    githubApp: async () => { appFlows += 1; throw new Error('the App manifest flow must never run with --no-github-app'); },
+    githubApp: async () => { appFlows += 1; throw new Error('the App manifest flow must never run: an install binds no App'); },
   };
   const { request } = installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--workers', '1', '--apply']);
   assert.equal(request.noGithubApp, true);
@@ -115,11 +115,9 @@ test('integration:install-without-github-app — install --no-github-app registe
 
   // The plan: no App step, no App variables, no webhook, no protection, no browser click and no App to create.
   assert.ok(plan.preflight.every(item => item.ok), JSON.stringify(plan.preflight));
-  assert.ok(plan.preflight.some(item => item.name === 'GitHub App' && /--no-github-app/.test(item.detail)));
+  assert.ok(plan.preflight.some(item => item.name === 'GitHub App' && /no App is registered or reused; .* the merge writer deploy key is the only GitHub access/.test(item.detail)), JSON.stringify(plan.preflight));
   const ids = plan.actions.map(action => action.id);
-  for (const absent of ['github.env', 'github.webhook', 'github.ci-app-ids', 'github.protection', 'github.reviewer']) assert.ok(!ids.includes(absent), `${absent} must not be planned: ${ids.join(', ')}`);
-  const appAction = plan.actions.find(action => action.id === 'github.app')!;
-  assert.equal(appAction.state, 'satisfied'); assert.match(appAction.title, /--no-github-app/);
+  for (const absent of ['github.app', 'github.env', 'github.webhook', 'github.ci-app-ids', 'github.protection', 'github.reviewer']) assert.ok(!ids.includes(absent), `${absent} must not be planned: ${ids.join(', ')}`);
   assert.equal(plan.actions.find(action => action.id === 'verify.webhook')!.state, 'satisfied');
   assert.deepEqual(plan.browserApps, []);
   assert.ok(!plan.humanSteps.some(step => /GitHub App/.test(step)), plan.humanSteps.join('\n'));
@@ -130,7 +128,10 @@ test('integration:install-without-github-app — install --no-github-app registe
 
   // The apply: the App flow never ran, no gh command was needed, and the deployed environment holds no App variable.
   assert.equal(appFlows, 0);
-  assert.deepEqual(transport.commands.filter(command => command.program === 'gh'), [], 'an install without an App makes no GitHub CLI call');
+  // GY-2009: the only GitHub access is the merge writer deploy key: gh checks its login and lists and adds that key, nothing else.
+  const gh = transport.commands.filter(command => command.program === 'gh').map(command => command.args.join(' '));
+  assert.ok(gh.every(call => call === 'auth status' || /^repo deploy-key (list|add) /.test(call)), gh.join('\n'));
+  assert.ok(gh.some(call => /^repo deploy-key add .* -R owner\/project --allow-write /.test(call)), gh.join('\n'));
   assert.ok(environments.length >= 1, 'the core variables were deployed');
   for (const values of environments) for (const name of APP_VARIABLES) assert.ok(!values.some(value => value.name === name), `${name} was written to the deployment`);
   assert.ok(environments.at(-1)!.some(value => value.name === 'GITHUB_REPOSITORY' && value.value === 'owner/project'), 'the repository is still named without an App');
@@ -141,9 +142,10 @@ test('integration:install-without-github-app — install --no-github-app registe
   assert.equal(summary.status.githubAppId, null);
   assert.equal(summary.status.role, 'admin');
   assert.equal(summary.status.repository, 'owner/project');
-  assert.equal(summary.webhook.skipped, true); assert.match(summary.webhook.detail, /--no-github-app/);
-  assert.match(summary.protection, /^not required: no GitHub App is bound/);
-  assert.ok(summary.nextSteps.some(step => /--no-github-app/.test(step)), summary.nextSteps.join('\n'));
+  assert.equal(summary.webhook.skipped, true); assert.match(summary.webhook.detail, /no GitHub App is registered/);
+  assert.match(summary.protection, /^merge writer deploy key registered at .* \(read-write\); no GitHub App and no branch protection or ruleset$/);
+  assert.ok(summary.nextSteps.some(step => /No GitHub App is bound and none is needed: the merge writer's trial gates every merge/.test(step)), summary.nextSteps.join('\n'));
+  assert.ok(!summary.nextSteps.some(step => /--no-github-app|rerun without/i.test(step)), 'GY-2009: no step names the removed flag or a rerun that would bind an App');
   assert.ok(!summary.nextSteps.some(step => /reviewer App|publishes/.test(step)), summary.nextSteps.join('\n'));
   assert.equal(summary.profiles.master.configured, true, summary.profiles.master.detail);
   const record = JSON.parse(await readFile(join(session.directory, 'install.json'), 'utf8'));
@@ -157,9 +159,9 @@ test('integration:install-without-github-app — install --no-github-app registe
   assert.equal(status.githubAppId, null);
   assert.equal(status.repository, 'owner/project');
 
-  // A rerun is the same request: the resume command carries the flag and parses back to it.
+  // A rerun is the same request: the resume command carries no App flag and parses back to no App.
   const command = resumeCommand(session);
-  assert.ok(command.includes('--no-github-app'), command);
+  assert.doesNotMatch(command, /--no-github-app|--github-app|--reuse-app/, command);
   const { stdout } = await execFile('sh', ['-c', `printf '%s\\0' ${command}`]);
   const words = stdout.split('\0').slice(0, -1);
   assert.equal(installRequestFromArgs(words.slice(2)).request.noGithubApp, true);
@@ -172,8 +174,8 @@ test('integration:install-without-github-app — install --no-github-app registe
   })}\n`, { mode: 0o600 });
   const repair = await prepareInstall(root, { repository: 'owner/project', provider: 'compose', workers: 1 }, dependencies);
   assert.equal(repair.record?.noGithubApp, true);
-  assert.equal(repair.inputs.noGithubApp, undefined);
-  assert.ok(repair.savedApp.app, 'a leftover registration is still readable on the host');
+  assert.equal(repair.inputs.noGithubApp, true, 'GY-2009: every install request binds no App');
+  assert.equal(repair.savedApp.app, null, 'GY-2009: a leftover registration on the host is never adopted');
   const derived = await derivedVariables(repair);
   for (const name of APP_VARIABLES) assert.ok(!derived.some(value => value.name === name), `${name} must not be derived for a no-App install record`);
 });
@@ -244,17 +246,19 @@ test('integration:install-without-github-app refuses a live App binding and merg
   assert.equal(JSON.parse(await readFile(join(rewrite.directory, 'install.json'), 'utf8')).noGithubApp, true);
 });
 
-test('integration:install-without-github-app refuses the flags that need an App: --github-app, --reuse-app, --reviewer and a self-contained --target', () => {
+test('integration:install-without-github-app — GY-2009: every install binds no App; the App and protection flags are unknown options, --reviewer and a self-contained --target are accepted', () => {
   const base = ['--provider', 'compose', '--repo', 'owner/project'];
-  assert.throws(() => installRequestFromArgs([...base, '--github-app', 'app.json']), /--no-github-app registers no GitHub App, so it cannot be combined with --github-app/);
-  assert.throws(() => installRequestFromArgs([...base, '--reuse-app', 'graphyard-owner-project']), /cannot be combined with --reuse-app/);
-  assert.throws(() => installRequestFromArgs([...base, '--reviewer', 'claude-reviewer']), /cannot be combined with --reviewer/);
-  assert.throws(() => installRequestFromArgs(['--target', 'host', '--repo', 'owner/project']), /cannot be combined with --target/);
-  assert.equal(installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project']).request.noGithubApp, undefined, 'without the flag the App flow stays the default');
+  for (const flag of [['--github-app', 'app.json'], ['--reuse-app', 'graphyard-owner-project'], ['--restore-protection'], ['--no-github-app']])
+    assert.throws(() => installRequestFromArgs([...base, ...flag]), new RegExp(`Unknown option '${flag[0]}'`));
+  const reviewer = installRequestFromArgs([...base, '--reviewer', 'claude-reviewer']).request;
+  assert.equal(reviewer.reviewer, 'claude-reviewer');
+  assert.equal(reviewer.noGithubApp, true);
+  assert.equal(installRequestFromArgs(['--target', 'host', '--repo', 'owner/project']).request.noGithubApp, true, 'a self-contained host installs with no App bound');
+  assert.equal(installRequestFromArgs(base).request.noGithubApp, true, 'no App is the default and only install');
 });
 
 /**
- * GY-1552 (child of GY-1527): every unsupervised `up` — step order, install --no-github-app, no
+ * GY-1552 (child of GY-1527): every unsupervised `up` — step order, install with no App flag, no
  * browser profile, gh repo create when missing, the deploy key, and no GitHub protection. Proofs:
  * unit:up-control-plane-steps, unit:up-github-steps-unchanged.
  */
@@ -337,7 +341,7 @@ function controlPlaneUpWorld(options: { settled?: boolean; operatorToken?: strin
   return { calls, ghCalls, deployKeys, goals, setRepoExists: (value: boolean) => { repoExists = value; }, deps };
 }
 
-test('unit:up-control-plane-steps — up runs preflight, control-plane (install --no-github-app), host-supervisor, deploy-key, master-autonomy, onboarding, accounts, harness, master-loop, goal; needs no browser profile; creates the repository with gh repo create when missing', async () => {
+test('unit:up-control-plane-steps — up runs preflight, control-plane (install, binding no App), host-supervisor, deploy-key, master-autonomy, onboarding, accounts, harness, master-loop, goal; needs no browser profile; creates the repository with gh repo create when missing', async () => {
   const { runUp, upRequestFromArgs, upControlPlaneSteps, upStepsFor, upMergerControlPlane } = await upModule();
   const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--goal', 'goal.md']);
   assert.equal(request.merger, 'control-plane');
@@ -359,8 +363,9 @@ test('unit:up-control-plane-steps — up runs preflight, control-plane (install 
 
   const plans = world.calls.filter(args => args[0] === 'install' && args.includes('--plan'));
   const applies = world.calls.filter(args => args[0] === 'install' && args.includes('--apply'));
-  assert.ok(plans.length && plans.every(args => args.includes('--no-github-app')), 'preflight plans with --no-github-app');
-  assert.ok(applies.length && applies.every(args => args.includes('--no-github-app')), 'control-plane install applies with --no-github-app');
+  const appFlag = (args: string[]) => args.some(arg => /^--(no-github-app|github-app|reuse-app|restore-protection)$/.test(arg));
+  assert.ok(plans.length && !plans.some(appFlag), 'preflight plans with no App flag (GY-2009: the install binds none)');
+  assert.ok(applies.length && !applies.some(appFlag), 'control-plane install applies with no App flag');
   assert.ok(!world.calls.flat().includes('--reviewer'), 'no reviewer App flag');
   assert.ok(!world.calls.flat().some(arg => arg === '--reuse-app'), 'no App reuse');
   assert.deepEqual(world.ghCalls[0], ['repo', 'view', 'owner/project', '--json', 'name']);

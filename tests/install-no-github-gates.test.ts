@@ -12,8 +12,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall } from '../src/install/index.js';
 import { applyProposal } from '../src/repository-setup.js';
-import { gitleaksIgnorePath, gitleaksSha256, runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput } from '../src/merge-writer/secret-scan.js';
-import { runTrialAttempt, TrialRunnerError } from '../src/merge-writer/trial.js';
+import { gitleaksIgnorePath, gitleaksSha256, runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from '../src/merge-writer/secret-scan.js';
+import { runTrialAttempt, TrialRunnerError, TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { refuseUpAppReuse, upUsageWithoutAppReuse } from '../src/cli/install.js';
 import { harness } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -104,7 +104,7 @@ async function scanRepository() {
 test('unit:github-gates-removed — the merge writer\'s trial runs the secret scan on its checkout: findings fail the trial as secret-scan, an unobtainable binary is no verdict', async () => {
   const repo = await scanRepository();
   const calls: (SecretScanInput & { head: string })[] = [];
-  const trial = (secretScan: (input: SecretScanInput) => Promise<{ ok: true } | { ok: false; detail: string; unavailable?: true }>) =>
+  const trial = (secretScan: (input: SecretScanInput) => Promise<SecretScanResult>) =>
     runTrialAttempt({ root: repo.root, base: repo.base, mergeSha: repo.sha, changedFiles: ['README.md'], timeoutMs: 60_000, key: 'GY-2009', environment: { PATH: process.env.PATH! },
       secretScan: async input => { calls.push({ ...input, head: execFileSync('git', ['-C', input.worktree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim() }); return secretScan(input); } });
 
@@ -123,6 +123,35 @@ test('unit:github-gates-removed — the merge writer\'s trial runs the secret sc
 
   await assert.rejects(trial(async () => ({ ok: false, unavailable: true, detail: 'secret scan unavailable: gitleaks download failed (503)' })),
     (error: unknown) => error instanceof TrialRunnerError && error.phase === 'install' && /gitleaks download failed \(503\)/.test(error.outputTail));
+
+  // A scan the deadline killed is the trial's timeout, never a failed merge.
+  await assert.rejects(trial(async () => ({ ok: false, detail: 'killed', execution: { status: null, signal: 'SIGTERM', timedOut: true } })),
+    (error: unknown) => error instanceof TrialTimeoutError && error.phase === 'install');
+  // A scan a signal ended, the runner could not start, or that exited with gitleaks' error status is a runner failure: no verdict.
+  await assert.rejects(trial(async () => ({ ok: false, detail: 'killed', execution: { status: null, signal: 'SIGKILL' } })),
+    (error: unknown) => error instanceof TrialRunnerError && error.phase === 'install' && error.signal === 'SIGKILL');
+  await assert.rejects(trial(async () => ({ ok: false, detail: 'spawn EACCES', execution: { status: null, signal: null, cause: new Error('spawn EACCES') } })),
+    (error: unknown) => error instanceof TrialRunnerError && error.phase === 'install' && /spawn EACCES/.test(error.outputTail));
+  await assert.rejects(trial(async () => ({ ok: false, detail: 'fatal: not a git repository', execution: { status: 126, signal: null } })),
+    (error: unknown) => error instanceof TrialRunnerError && error.phase === 'install' && /not its findings status/.test(error.outputTail));
+});
+
+test('unit:github-gates-removed — runSecretScan fails only on gitleaks\' findings status; a timeout, signal, spawn failure or error exit carries its execution as no verdict', async () => {
+  const worktree = await temporaryDirectory('scan-ended', tmpdir());
+  const cacheDirectory = await temporaryDirectory('scan-ended-cache', tmpdir());
+  await writeFile(join(cacheDirectory, 'gitleaks'), '#!/bin/sh\n');
+  const scan = (error: object) => runSecretScan({ worktree, cacheDirectory, run: (async () => { throw Object.assign(new Error('gitleaks ended'), error); }) as unknown as SecretScanInput['run'] });
+  assert.deepEqual(await scan({ status: 1, signal: null, stdout: 'leaks found: 1' }), { ok: false, detail: 'leaks found: 1' });
+  const timedOut = await scan({ status: null, signal: 'SIGTERM', timedOut: true });
+  assert.ok(!timedOut.ok && timedOut.execution?.timedOut === true && timedOut.execution.signal === 'SIGTERM', JSON.stringify(timedOut));
+  const killed = await scan({ status: null, signal: 'SIGKILL' });
+  assert.ok(!killed.ok && killed.execution?.signal === 'SIGKILL' && !killed.unavailable, JSON.stringify(killed));
+  const spawn = await scan({ status: null, signal: null, cause: new Error('spawn EACCES') });
+  assert.ok(!spawn.ok && spawn.execution?.cause instanceof Error, JSON.stringify(spawn));
+  const capture = await scan({ status: 1, signal: null, cause: 'output exceeded the capture limit' });
+  assert.ok(!capture.ok && capture.execution?.cause === 'output exceeded the capture limit', 'a capture failure is no verdict even with status 1');
+  const errorExit = await scan({ status: 2, signal: null });
+  assert.ok(!errorExit.ok && errorExit.execution?.status === 2, JSON.stringify(errorExit));
 });
 
 test('unit:github-gates-removed — the pinned gitleaks binary is downloaded once and reused by later scans; a failed download or another platform is unavailable, never thrown', async () => {

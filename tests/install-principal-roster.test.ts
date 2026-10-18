@@ -267,7 +267,7 @@ test('unit:external-import-requires-grant — a producer holding external-runs:i
   assert.deepEqual(rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [GRANT, GRANT] }), { ...huck, source: 'principal' });
 });
 
-test('unit:principal-upsert-remove-single-entry-readback — on a bundle provider (Compose) principal add rewrites the bundle with every deployed value as it stands, the installed GitHub App, its mounted key and an unrelated setting kept, and changes only GRAPHYARD_PRINCIPALS', async () => {
+test('unit:principal-upsert-remove-single-entry-readback — on a bundle provider (Compose) principal add rewrites the bundle with every deployed value as it stands, App variables bound outside install and an unrelated setting kept, and changes only GRAPHYARD_PRINCIPALS', async () => {
   let fixture: Harness | undefined;
   // `cat` reads back what the installer wrote, as a real machine would.
   const cat = { match: 'cat /', result: (line: string) => fixture!.transport.files.get(line.slice(4))?.content ?? { stdout: '', stderr: 'No such file', code: 1 } };
@@ -276,12 +276,10 @@ test('unit:principal-upsert-remove-single-entry-readback — on a bundle provide
     const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await applyInstall(session, await buildPlan(session));
     const { workdir } = session.context;
-    // The installation runs with its GitHub App (its id, installation, webhook secret and a key mounted from the bundle); an operator added a setting outside the core variables.
-    const env = `${workdir}/server.env`, key = `${workdir}/github-private-key.pem`;
-    const extra = ['GITHUB_APP_ID=200001', 'GITHUB_INSTALLATION_ID=500', 'GITHUB_PRIVATE_KEY_FILE=/run/graphyard/github-private-key.pem', 'OPERATOR_SETTING=keep-me'];
-    fixture.transport.files.set(env, { ...fixture.transport.files.get(env)!, content: `${fixture.transport.files.get(env)!.content.trimEnd()}\nOPERATOR_SETTING=keep-me\n` });
-    const pem = fixture.transport.files.get(key)!.content;
-    assert.match(pem, /PRIVATE KEY/);
+    // Install binds no App (GY-2009); an operator bound App variables and added a setting outside the core variables by hand.
+    const env = `${workdir}/server.env`;
+    const extra = ['GITHUB_APP_ID=200001', 'GITHUB_INSTALLATION_ID=500', 'OPERATOR_SETTING=keep-me'];
+    fixture.transport.files.set(env, { ...fixture.transport.files.get(env)!, content: `${fixture.transport.files.get(env)!.content.trimEnd()}\n${extra.join('\n')}\n` });
     const lines = (text: string) => text.trimEnd().split('\n');
     const before = lines(fixture.transport.files.get(env)!.content);
 
@@ -293,8 +291,6 @@ test('unit:principal-upsert-remove-single-entry-readback — on a bundle provide
     const principalsLine = (all: string[]) => all.find(line => line.startsWith('GRAPHYARD_PRINCIPALS='));
     assert.deepEqual(after.filter(line => line !== principalsLine(after)).sort(), before.filter(line => line !== principalsLine(before)).sort(), 'every other variable stands as deployed');
     for (const line of extra) assert.ok(after.includes(line), `${line} is kept`);
-    assert.equal(fixture.transport.files.get(key)!.content, pem, 'the mounted App key is written back unchanged');
-    assert.match(fixture.transport.files.get(`${workdir}/compose.yaml`)!.content, /github-private-key\.pem:\/run\/graphyard\/github-private-key\.pem:ro/, 'the key stays mounted');
     assert.deepEqual(deployedRoster(fixture.transport).map(entry => entry.id).at(-1), 'huck-engineer');
   } finally { await fixture.cleanup(); }
 });

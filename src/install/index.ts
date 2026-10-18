@@ -984,7 +984,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   else if (observeOnly && record?.github) preflight.push(kept
     ? { name: 'GitHub App', ok: true, detail: `--observe-only keeps GitHub App ${record.github.slug} (app ${record.github.appId}) that graphyard app bind bound, and binds no App itself` }
     : { name: 'GitHub App', ok: false, detail: `this installation binds GitHub App ${record.github.slug} (app ${record.github.appId}), and no registration of it is imported on this host to keep its variables with`, fix: `graphyard app import --repo ${session.inputs.repository} --app-id ${record.github.appId} --key-file PEM, then rerun` });
-  else if (noApp && record?.github) preflight.push({ name: 'GitHub App', ok: false, detail: `this installation already binds GitHub App ${record.github.slug} (app ${record.github.appId}); --no-github-app does not strip a live App`, fix: `Rerun without --no-github-app to keep that App, or remove its binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment before installing without one` });
+  else if (noApp && record?.github) preflight.push({ name: 'GitHub App', ok: false, detail: `this installation already binds GitHub App ${record.github.slug} (app ${record.github.appId}); an install binds no App (GY-2009) and does not strip a live one`, fix: `Remove that App's binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment, then rerun` });
   else if (session.inputs.githubAppFile) preflight.push(session.savedApp.error
     ? { name: 'GitHub App registration', ok: false, detail: session.savedApp.error, fix: 'Name the JSON the manifest flow saved for this repository with --github-app FILE, or omit --github-app to register the App in the browser' }
     : { name: 'GitHub App registration', ok: true, detail: `reusing app ${session.savedApp.app!.facts.appId} from ${session.savedApp.app!.file}` });
@@ -1007,14 +1007,14 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     // (Railway swallows an unparsable `variables --json`) may still hold an App: refuse rather
     // than find out from the server after the deploy.
     const unread = merges && observation.app && observation.variablesObserved !== true;
-    if (heldVariables.length && merges) preflight.push({ name: 'GitHub App', ok: false, detail: `the ${context.provider} deployment still holds ${heldVariables.join(', ')}; that adapter keeps variables absent from a write, so --no-github-app cannot leave them unset`, fix: `Remove ${heldVariables.join(', ')} from the ${context.service} service on ${context.provider}, then rerun` });
+    if (heldVariables.length && merges) preflight.push({ name: 'GitHub App', ok: false, detail: `the ${context.provider} deployment still holds ${heldVariables.join(', ')}; that adapter keeps variables absent from a write, so an install that binds no App cannot leave them unset`, fix: `Remove ${heldVariables.join(', ')} from the ${context.service} service on ${context.provider}, then rerun` });
     // Observation-only never reads values, so it cannot know the names either: the server's own
     // report of a bound App after the deploy (performInstall) is what refuses a leftover one.
     // A service this installation's own observation-only apply created never held an App; any
     // other existing one may keep orphaned App variables through the merged write, so refuse.
     else if (unread && observeOnly && await observeOnlyCreated(session)) preflight.push({ name: 'GitHub App', ok: true, detail: `--observe-only: ${context.service} was created by this installation's own observation-only apply, which never sets ${APP_VARIABLES.join(', ')}; its variables are not read` });
     else if (unread && observeOnly) preflight.push({ name: 'GitHub App', ok: false, detail: `--observe-only reads no variable of the existing ${context.service} service on ${context.provider}, so whether it still holds ${APP_VARIABLES.join(', ')} is unknown; that adapter keeps variables absent from a write, and the deploy would keep the App's access to the repository`, fix: `Rerun with --server-name NAME naming a service that does not exist yet, or without --observe-only so its variables can be read` });
-    else if (unread) preflight.push({ name: 'GitHub App', ok: false, detail: `the variables of the ${context.service} service on ${context.provider} could not be read, so whether it still holds ${APP_VARIABLES.join(', ')} is unknown; that adapter keeps variables absent from a write, so --no-github-app cannot promise to leave them unset`, fix: `Make the ${context.provider} variable listing of ${context.service} readable (remove any ${APP_VARIABLES.join(', ')} it holds), then rerun` });
+    else if (unread) preflight.push({ name: 'GitHub App', ok: false, detail: `the variables of the ${context.service} service on ${context.provider} could not be read, so whether it still holds ${APP_VARIABLES.join(', ')} is unknown; that adapter keeps variables absent from a write, so an install that binds no App cannot promise to leave them unset`, fix: `Make the ${context.provider} variable listing of ${context.service} readable (remove any ${APP_VARIABLES.join(', ')} it holds), then rerun` });
     else preflight.push({ name: 'GitHub App', ok: true, detail: `no App is registered or reused; ${APP_VARIABLES.join(', ')} stay unset; the merge writer deploy key is the only GitHub access` });
   }
 
@@ -2146,7 +2146,7 @@ async function registerProfiles(session: InstallSession, url: string, appPending
   const registration = deps.registerProfiles ? await deps.registerProfiles(request) : await (await import('./profiles.js')).registerLocalProfiles(request);
   // Without an App (GY-1550) the master is configured the way it is while an App step is pending,
   // with no App id to bind; its registration says so instead of promising a confirmation.
-  if (session.inputs.noGithubApp && registration.master.configured) return { ...registration, master: { ...registration.master, detail: 'configured without a GitHub App (--no-github-app): master environments and master harness work now; the control plane serves without GitHub' } };
+  if (session.inputs.noGithubApp && registration.master.configured) return { ...registration, master: { ...registration.master, detail: 'configured without a GitHub App: master environments and master harness work now; the control plane serves without an App' } };
   return registration;
 }
 
@@ -2178,7 +2178,7 @@ function nextSteps(session: InstallSession, url: string, mergeCheckExists: boole
       : `Open ${url} and sign in with the credential in ${tokenFile(session.directory, principalOfRole(session.principals, 'admin').id)}.`,
     'Create the first work item: write it like examples/work.json and run "graphyard master create FILE"; the supervised master loop dispatches, reviews and merges it (docs/setup-from-zero.md step 12).',
   ];
-  if (session.inputs.noGithubApp) steps.push('No GitHub App is bound (--no-github-app): the server serves without GitHub, so nothing on GitHub is observed, reviewed or merged through an App until a rerun without the flag binds one.');
+  if (session.inputs.noGithubApp) steps.push('No GitHub App is bound and none is needed: the merge writer\'s trial gates every merge and pushes main with its deploy key, Graphyard\'s only GitHub access; no branch protection, ruleset or Actions workflow is set up (docs/github.md).');
   else if (!session.reviewers.length && !session.inputs.reviewer) steps.push(`No reviewer App is registered, so no independent review can pass: rerun with --reviewer NAME (docs/setup-from-zero.md step 5).`);
   if (!mergeCheckExists && !session.inputs.noGithubApp) steps.push(`Rerun "graphyard install --provider ${session.context.provider} --repo ${session.inputs.repository} --apply" after Graphyard publishes "${CHECK_NAME}" on the first pull request, so branch protection can require the App-bound check.`);
   if (!webhook.delivered && !webhook.skipped) steps.push(`Webhook delivery is unconfirmed: ${webhook.detail}`);

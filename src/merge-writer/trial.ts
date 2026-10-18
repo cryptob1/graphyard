@@ -600,6 +600,13 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           log.push(`$ ${secretScanArgv(worktree).join(' ')}\n${scanned.detail}`);
           // A binary the host could not obtain says nothing about the merge: no verdict, tried again.
           if (scanned.unavailable) throw runnerFailure('install', { ok: false, out: scanned.detail, status: null, signal: null, cause: scanned.detail });
+          // A scan the deadline killed is the trial's timeout, and one a signal, the runner or an error exit ended is
+          // a runner failure: neither is a finding, so neither fails the merge (only gitleaks' findings status does).
+          if (scanned.execution) {
+            if (scanned.execution.timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
+            const ended = endedOf(scanned.execution, scanned.detail);
+            throw runnerFailure('install', { ...ended, cause: ended.cause ?? (ended.signal ? undefined : `gitleaks exited with status ${ended.status ?? 'unknown'}, not its findings status`) });
+          }
           enter('build');
           return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
         }

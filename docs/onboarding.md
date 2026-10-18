@@ -13,7 +13,7 @@ Per concurrent session: worker identity, host ID (`install --workers`) or:
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, workflows ([candidates](delivery.md#managed-repositories); `graphyard-delivery.yml` on `pull_request`: build, test, `graphyard-gate`, sole required check), never `.graphyard/`; masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`; setup writes no `.github/workflows` file: the merge writer's trial (build, tests, secret scan) is the gate ([GitHub](github.md)); masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
 
 ### Documentation policy
 
@@ -94,9 +94,7 @@ Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work (`maste
 
 ## 4. Prove the first PR
 
-`graphyard doctor --profile through-merge` names gaps; `master run` dispatches small item, merged once protection requires `Graphyard / merge`; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
-
-CI workflows should cancel superseded pull-request runs: group `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled.
+`graphyard doctor --profile through-merge` names gaps; `master run` dispatches small item, merged when the merge writer's trial passes and it pushes main with its deploy key (no branch protection); `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 ## 5. Inventory PRs
 

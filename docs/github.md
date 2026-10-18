@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 2 | deploy key, observation. -->
 # GitHub access
 
-Graphyard install registers **no** GitHub App and writes **no** branch protection or ruleset (GY-2009). The merge writer's deploy key (read-write on OWNER/REPO) is the only GitHub credential install creates; the control-plane trial (merge, build, typecheck, tests, secret scan) is the gate. The scan's pinned gitleaks is downloaded once into the managed root's `.secret-scan/`; a host that cannot obtain it gets no verdict, never a failed merge.
+Graphyard install registers **no** GitHub App and writes **no** branch protection or ruleset (GY-2009). The merge writer's deploy key (read-write on OWNER/REPO) is the only GitHub credential install creates; the control-plane trial (merge, build, typecheck, tests, secret scan) is the gate. The scan's pinned gitleaks is downloaded once into the managed root's `.secret-scan/`; a host that cannot obtain it, or a scan the deadline, a signal or the runner ends, gets no verdict (timeout or runner failure); only gitleaks' findings fail the merge.
 
 ## Deploy key
 
