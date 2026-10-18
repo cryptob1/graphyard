@@ -9,7 +9,7 @@ import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionChe
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { failingSummary, trialCutLine } from './shadow.js';
-import { runSecretScan, type SecretScanInput } from './secret-scan.js';
+import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
 import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master-resources.js';
 
@@ -368,7 +368,7 @@ export interface RunTrialInput {
    * GY-2009: the pinned gitleaks secret scan. Production runs `runSecretScan`; the test runner
    * skips it unless a test injects a scan (or `false` to force a skip outside the suite).
    */
-  secretScan?: ((input: SecretScanInput) => Promise<{ ok: true } | { ok: false; detail: string }>) | false;
+  secretScan?: ((input: SecretScanInput) => Promise<SecretScanResult>) | false;
 }
 const tailLength = 4000;
 /**
@@ -594,9 +594,12 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const scan = input.secretScan === false ? null
         : input.secretScan ?? (underTestRunner() ? null : runSecretScan);
       if (scan) {
-        const scanned = await scan({ worktree, cacheDirectory: temporary ?? checkout.directory, run, timeoutMs: remaining() });
+        // The binary is cached under the managed root, so only the first trial on a host downloads it.
+        const scanned = await scan({ worktree, cacheDirectory: secretScanCacheDirectory(input.base), run, timeoutMs: remaining() });
         if (!scanned.ok) {
-          log.push(`$ gitleaks git --redact --log-opts=HEAD\n${scanned.detail}`);
+          log.push(`$ ${secretScanArgv(worktree).join(' ')}\n${scanned.detail}`);
+          // A binary the host could not obtain says nothing about the merge: no verdict, tried again.
+          if (scanned.unavailable) throw runnerFailure('install', { ok: false, out: scanned.detail, status: null, signal: null, cause: scanned.detail });
           enter('build');
           return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
         }

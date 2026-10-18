@@ -126,14 +126,6 @@ export interface ObserveOnlyChoice {
    */
   bindApp?: string;
 }
-/**
- * GY-1870: `--restore-protection` returns the base branch to the protection install recorded before
- * its first github.protection write (protection-record.json in the install directory): `--plan`
- * lists the writes against what GitHub answers now, `--apply` makes them and verifies by re-reading.
- * It touches nothing else, so every flag but --repo and --base-branch is refused beside it.
- */
-export interface RestoreProtectionChoice { restoreProtection?: boolean }
-export interface ProtectionRestorePlan { version: 1; action: 'restore-protection'; repository: string; branch: string; record: string; recordedAt: string | null; changes: { write: string; field: string; recorded: string; observed: string }[]; operatorRulesets?: { rulesets: { id: number; name: string }[]; restored: false; note: string } }
 export type InstallRequest = InstallInputs & HerdrChoice;
 /** The variables an App binding writes; `--no-github-app` leaves every one of them unset. */
 export const APP_VARIABLES = ['GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS'] as const;
@@ -179,7 +171,7 @@ export function installRequestFromArgs(args: string[]) {
   const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
   // GY-2009: every install registers no GitHub App and writes no branch protection; the merge
   // writer deploy key is the only GitHub access install plans or applies.
-  const request: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice & RestoreProtectionChoice = { repository: values.repo, noGithubApp: true,
+  const request: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice = { repository: values.repo, noGithubApp: true,
     ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : values['herdr-instance'] ? { herdr: 'instance' as const } : {}), provider: provider as InstallRequest['provider'],
     ...(values.target || provider === 'host' ? { selfContained: true } : {}),
     ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
@@ -237,9 +229,7 @@ export const OBSERVE_ONLY_HELD = 'held by observation-only (--observe-only)';
 const held = (action: Omit<PlanAction, 'state' | 'held'>, reason: string): PlanAction => ({ ...action, state: 'held', held: `${OBSERVE_ONLY_HELD}: ${reason}` });
 
 export interface InstallSession {
-  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice & RestoreProtectionChoice;
-  /** Removed with GY-2009: install never restores branch protection. */
-  restore?: never;
+  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice;
   installId: string; directory: string; adapter: ProviderAdapter; context: AdapterContext;
   /** The roster this apply deploys: the plan's principals reconciled with the recorded roster (GY-1879, `reconcileRoster`). */
   principals: RosterPrincipal[]; tokens: Map<string, string>; vault: Vault;
@@ -516,8 +506,7 @@ export function composeCheckoutMounts(root: string): { repoCheckout: string | nu
   return { repoCheckout: root, repoGitDir: resolve(common) };
 }
 
-export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & RestoreProtectionChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
-  if (rawInputs.restoreProtection) throw new Error('install no longer restores branch protection (GY-2009); --restore-protection is not a supported flag');
+export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
   const provider = rawInputs.provider;
   if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose|local, or --target host|hetzner');
   // Observation-only (GY-1846) binds no App and leaves Herdr untouched, whoever builds the request.
@@ -656,14 +645,6 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
  * passed, so a refused `--apply` leaves the machine exactly as it found it. Idempotent — an
  * existing installation keeps every credential it already has.
  */
-/**
- * A restore session (GY-1870): the recorded protection and the gh CLI, nothing else. Refuses, before
- * anything is read from GitHub, without a record (naming the file it looked for) or when the record
- * belongs to another repository or branch.
- */
-const operatorRestoreNote = (rulesets: any[], branch: string) => ({ rulesets: rulesets.map(ruleset => ({ id: ruleset.id as number, name: ruleset.name as string })), restored: false as const,
-  note: `install --restore-protection restores only classic protection, auto-merge and Graphyard's queue ruleset; operator ruleset(s) ${rulesets.map(ruleset => ruleset.id).join(', ')} on ${branch} are restored only through graphyard master protection --restore SNAPSHOT, from a snapshot under .graphyard/protection-snapshots/` });
-
 export async function materializeInstall(session: InstallSession): Promise<InstallSession> {
   if (session.mode !== 'apply') throw new Error('Apply requires a session prepared in apply mode; --plan sessions create nothing');
   if (session.context.host) {
@@ -967,8 +948,6 @@ export function webhookPreflight(provider: Provider): PreflightItem | null {
 type WebhookProof = DeliveryProof & { skipped?: true };
 
 export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
-  // A restore session plans the restore, not an install; the CLI prints either plan as it is.
-  if (session.restore || (session as any).restoreWithoutRecord) throw new Error('install no longer restores branch protection (GY-2009)');
   if (session.inputs.bindApp) return buildBindAppPlan(session);
   const { adapter, context, record } = session;
   const preflight = await adapter.preflight(context);
@@ -1290,7 +1269,6 @@ async function refuseMovedRoster(session: InstallSession) {
  * line and the summary.
  */
 export async function applyInstall(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
-  if ((session as any).restoreWithoutRecord || session.restore) throw new Error('install no longer restores branch protection (GY-2009)');
   try {
     refuseUnready(session, plan);
     await prepareInstallDirectory(session.directory, session.root);

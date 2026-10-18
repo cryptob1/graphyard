@@ -1,8 +1,8 @@
 // Concern: the merge writer's secret scan (GY-2009) — the same pinned gitleaks check the former
 // Actions secrets job ran, now part of the trial that gates every merge.
 import { createHash } from 'node:crypto';
-import { chmod, mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { existsSync } from 'node:fs';
 import type { ChildRun } from '../child-runner.js';
 
@@ -13,45 +13,73 @@ export const gitleaksUrl = `https://github.com/gitleaks/gitleaks/releases/downlo
 export const gitleaksSha256 = '551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb';
 export const gitleaksIgnorePath = '.github/gitleaksignore.txt';
 
+/** Where the pinned binary is kept across trials: under the managed worktree root, keyed by version and archive digest. */
+export const secretScanCacheDirectory = (managedRoot: string) => resolve(managedRoot, '.secret-scan', `gitleaks-${gitleaksVersion}-${gitleaksSha256.slice(0, 12)}`);
+
+/** The scan's answer: a pass, the merge's failure (`detail` holds gitleaks' report), or no verdict when the binary could not be had. */
+export type SecretScanResult = { ok: true } | { ok: false; detail: string; unavailable?: true };
+
 export interface SecretScanInput {
   /** The trial checkout whose HEAD history is scanned. */
   worktree: string;
-  /** Where to cache the pinned binary (a durable directory the trial may write). */
+  /** Where to cache the pinned binary: a durable directory (`secretScanCacheDirectory`) that outlives the trial. */
   cacheDirectory: string;
   run: ChildRun;
   /** Download the archive; tests substitute a fake. */
   download?: (url: string) => Promise<Buffer>;
   timeoutMs?: number;
+  /** The host platform and architecture; `process.platform`/`process.arch` unless a test names others. */
+  platform?: string;
+  arch?: string;
+  /** The archive digest the download must match; `gitleaksSha256` unless a test's fake archive names its own. */
+  sha256?: string;
+}
+
+/** The argv the trial runs the scan with: HEAD's history, redacted, with the repository's ignore file when it has one. */
+export const secretScanArgv = (worktree: string, binary = 'gitleaks', ignore = existsSync(join(worktree, gitleaksIgnorePath))) =>
+  [binary, 'git', '--redact', '--log-opts=HEAD', ...(ignore ? ['--gitleaks-ignore-path', join(worktree, gitleaksIgnorePath)] : []), worktree];
+
+/** Obtain the pinned binary in `cacheDirectory` once: a later trial finds it there and downloads nothing. */
+async function pinnedBinary(input: SecretScanInput, timeoutMs: number): Promise<string> {
+  const binary = join(input.cacheDirectory, 'gitleaks');
+  if (existsSync(binary)) return binary;
+  const platform = input.platform ?? process.platform, arch = input.arch ?? process.arch;
+  if (platform !== 'linux' || arch !== 'x64') throw new Error(`the pinned gitleaks archive ${gitleaksArchive} is linux x64 only; this host is ${platform} ${arch}`);
+  await mkdir(input.cacheDirectory, { recursive: true });
+  const download = input.download ?? (async (url: string) => {
+    const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) throw new Error(`gitleaks download failed (${response.status})`);
+    return Buffer.from(await response.arrayBuffer());
+  });
+  const archive = await download(gitleaksUrl);
+  const digest = createHash('sha256').update(archive).digest('hex');
+  const pinned = input.sha256 ?? gitleaksSha256;
+  if (digest !== pinned) throw new Error(`gitleaks archive sha256 ${digest} does not match ${pinned}`);
+  // Extracted beside the cache and renamed into place, so a concurrent trial never runs a half-written binary.
+  const staging = await mkdtemp(join(input.cacheDirectory, 'staging-'));
+  try {
+    const archivePath = join(staging, gitleaksArchive);
+    await writeFile(archivePath, archive, { mode: 0o600 });
+    await input.run('tar', ['-xzf', archivePath, '-C', staging, 'gitleaks'], { timeoutMs });
+    await chmod(join(staging, 'gitleaks'), 0o700);
+    await rename(join(staging, 'gitleaks'), binary);
+  } finally { await rm(staging, { recursive: true, force: true }); }
+  return binary;
 }
 
 /**
- * Download (or reuse) the pinned gitleaks binary and scan `worktree` at HEAD with the repository's
- * ignore file. Throws when the scan finds secrets or the binary cannot be obtained.
+ * Obtain (once, cached) the pinned gitleaks binary and scan `worktree` at HEAD with the repository's
+ * ignore file. Findings fail the scan; a binary that cannot be had (download, digest or platform) is
+ * `unavailable`, which the trial treats as no verdict rather than the merge's failure.
  */
-export async function runSecretScan(input: SecretScanInput): Promise<{ ok: true } | { ok: false; detail: string }> {
-  const run = input.run;
+export async function runSecretScan(input: SecretScanInput): Promise<SecretScanResult> {
   const timeoutMs = input.timeoutMs ?? 120_000;
-  const binDir = join(input.cacheDirectory, 'gitleaks', gitleaksVersion);
-  const binary = join(binDir, 'gitleaks');
-  if (!existsSync(binary)) {
-    await mkdir(binDir, { recursive: true });
-    const download = input.download ?? (async (url: string) => {
-      const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
-      if (!response.ok) throw new Error(`gitleaks download failed (${response.status})`);
-      return Buffer.from(await response.arrayBuffer());
-    });
-    const archive = await download(gitleaksUrl);
-    const digest = createHash('sha256').update(archive).digest('hex');
-    if (digest !== gitleaksSha256) throw new Error(`gitleaks archive sha256 ${digest} does not match ${gitleaksSha256}`);
-    const archivePath = join(binDir, gitleaksArchive);
-    await writeFile(archivePath, archive, { mode: 0o600 });
-    await run('tar', ['-xzf', archivePath, '-C', binDir, 'gitleaks'], { timeoutMs });
-    await chmod(binary, 0o700);
-  }
-  const ignore = join(input.worktree, gitleaksIgnorePath);
-  const args = ['git', '--redact', '--log-opts=HEAD', ...(existsSync(ignore) ? ['--gitleaks-ignore-path', ignore] : []), input.worktree];
+  let binary: string;
+  try { binary = await pinnedBinary(input, timeoutMs); }
+  catch (error) { return { ok: false, unavailable: true, detail: `secret scan unavailable: ${error instanceof Error ? error.message : String(error)}` }; }
+  const [command, ...args] = secretScanArgv(input.worktree, binary);
   try {
-    await run(binary, args, { cwd: input.worktree, timeoutMs });
+    await input.run(command!, args, { cwd: input.worktree, timeoutMs });
     return { ok: true };
   } catch (error) {
     const failed = error as { status?: number | null; stdout?: unknown; stderr?: unknown; message?: string };
@@ -59,7 +87,3 @@ export async function runSecretScan(input: SecretScanInput): Promise<{ ok: true 
     return { ok: false, detail: out.slice(0, 4000) };
   }
 }
-
-/** The argv a trial records for the secret scan (tests assert these options). */
-export const secretScanArgv = (worktree: string, binary = 'gitleaks') =>
-  [binary, 'git', '--redact', '--log-opts=HEAD', '--gitleaks-ignore-path', join(worktree, gitleaksIgnorePath), worktree];

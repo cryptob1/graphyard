@@ -14,6 +14,14 @@ import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { runDoctor } from './install-doctor.js';
 
+/** GY-2009: install registers no GitHub App, so `up --reuse-app` would reuse nothing; it is refused rather than silently ignored. */
+export const upAppReuseRefusal = 'graphyard up --reuse-app is refused: install registers no GitHub App and the merge writer\'s deploy key is its only GitHub access (GY-2009); rerun without --reuse-app';
+export function refuseUpAppReuse(args: readonly (string | undefined)[]): void {
+  if (args.some(arg => arg === '--reuse-app' || arg?.startsWith('--reuse-app='))) throw new Error(upAppReuseRefusal);
+}
+/** up's usage without the refused --reuse-app line. */
+export const upUsageWithoutAppReuse = upUsage.split('\n').filter(line => !line.trimStart().startsWith('--reuse-app')).join('\n');
+
 const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
   const setup = await startGithubSetup(root, repository, deployment);
   console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in .graphyard/github-app.json; do not share that file. Setup finishes automatically once the App is installed; press Ctrl+C to finish later and rerun init --scan --apply.`);
@@ -89,7 +97,7 @@ export const installCommands = defineCommands([
       '  up --repo OWNER/NAME [--provider compose|railway|hetzner|local] [--local]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
-      '     [--reuse-app SLUG]... [--github-mobile] [--wait MINUTES] [--no-wait] [--share-tailnet]',
+      '     [--github-mobile] [--wait MINUTES] [--no-wait] [--share-tailnet]',
       '  up --sudo-code CODE|email',
       '                                First-run setup in one command: preflight, control plane, host supervisor and',
       '                                Herdr, onboarding, agent accounts, harness and master loop, resumable (.graphyard/up.json;',
@@ -105,14 +113,16 @@ export const installCommands = defineCommands([
       '                                device approvals. Confirm access: GitHub Mobile when offered (its number; 3 prompts; password link',
       '                                after 60 s); else the page\'s methods, re-checked each 10 s: your Chrome (shared profile; a copy:',
       '                                the App page in your browser), --sudo-code an authenticator or email code typed in 2 s (email:',
-      '                                GitHub sends one), or app import both Apps, --reuse-app each (--no-wait exits 3 saying so). A drive',
+      '                                GitHub sends one), or app import both Apps (--no-wait exits 3 saying so). A drive',
       '                                giving up hands off the page; a GitHub rejection exits 1 quoting it. --wait MINUTES bounds a wait',
       '                                (agent: 20); rerun resumes Confirm access; up --help: options, exit codes.',
+      '                                --reuse-app is refused: install registers no GitHub App (GY-2009).',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
     async run(context) {
-      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsage); return; }
+      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsageWithoutAppReuse); return; }
+      refuseUpAppReuse([context.id, ...context.args]);
       const result = await upCommand(context.repositoryRoot(), () => context.activeCliPath(), [context.id, ...context.args].filter((value): value is string => value !== undefined));
       context.print(result);
       if ('exitCode' in result) process.exitCode = result.exitCode;
@@ -129,25 +139,19 @@ export const installCommands = defineCommands([
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
       '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
-      '          [--github-app FILE] [--reuse-app SLUG]... [--herdr-only | --profiles-only]',
+      '          [--herdr-only | --profiles-only]',
       '                                Self-contained host: server, Postgres, loop, executors,',
       '                                Herdr and agent runtimes on one machine (hetzner creates it',
       '                                and needs its monthly price confirmed). --migrate moves an',
       '                                installation there from GRAPHYARD_MIGRATE_DATABASE_URL.',
-      '                                An App already saved for the repository (--github-app,',
-      '                                or .graphyard/github-app.json) is reused: no browser step.',
-      '                                --reuse-app SLUG reuses an App saved on this host and',
-      '                                installed on the account: the repository is added to its',
-      '                                installation with gh after its permissions are checked; a',
-      '                                control-plane App whose webhook serves another install is',
-      '                                refused. The App page offers the same reuse.',
+      '                                Install registers no GitHub App and reads or writes no branch',
+      '                                protection or ruleset: the merge writer\'s deploy key is its',
+      '                                only GitHub access (GY-2009).',
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with --create-environments.',
       '                                A Herdr plugin bound elsewhere is repointed only with --herdr-rebind; --herdr-only sets up Herdr alone;',
       '                                --profiles-only (with --apply) writes the reviewer and worker profiles on the host (master environments --apply there).',
-      '                                An App step nobody confirms within 900 s (under up: its --wait,',
-      '                                plus a minute) exits 1 with a JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.
@@ -264,7 +268,7 @@ export const installCommands = defineCommands([
     '                                install --apply keeps the entry. Repeating either command changes nothing.'], readsConnection: () => false,
     async run(context) { context.print(await principalCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { cwd: process.cwd(), cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line) })); } },
   { name: 'app', help: ['  app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo R]', '  app list [--repo OWNER/NAME]  Import an App made elsewhere (key proven by an App JWT, saved 0600,',
-    '                                never printed) for --reuse-app without sudo; list reusable Apps per role',
+    '                                never printed) without sudo; list imported Apps per role',
     '  app bind SLUG [--plan] [--ssh-host H] [--workspace W]  Bind an imported App to the observe-only install'], readsConnection: () => false,
     async run(context) { context.print(await appCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { root: context.repositoryRoot() })); } },
   {
