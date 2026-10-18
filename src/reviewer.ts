@@ -720,6 +720,12 @@ export type ReviewCriterion = { id: string; text: string; proofs?: readonly stri
  * checks on the serving release after delivery. Empty when no criterion is declared, so every
  * other review request stays byte-identical.
  */
+/**
+ * The shared simplicity paragraph (GY-1999): defined once here and interpolated verbatim into every
+ * role prompt — worker (dispatch.ts), reviewer, planner, acceptance and master — and put at the top
+ * of AGENTS.md, so agents build the simplest thing that meets the criteria instead of machinery.
+ */
+export const simplicityParagraph = 'Keep it simple. Build the simplest thing that meets the criteria and gives users a good experience. Do not over-engineer: no defensive layers, extra gates, permission checks or tests for hypothetical cases. Prefer deleting code to adding it. Agents are capable: do not build process around corner cases. ';
 export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
   const declared = (criteria ?? []).filter(criterion => criterion.proofs && declaredPostDeploy({ proofs: criterion.proofs })).map(criterion => criterion.id);
   if (!declared.length) return '';
@@ -746,6 +752,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + postDeployReviewSection(criteria)
     + findingClassificationSection()
+    + simplicityParagraph
     + (fresh ? freshReadSection(fresh, binding.sha) : '')
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)

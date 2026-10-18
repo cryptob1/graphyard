@@ -20,7 +20,7 @@ import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
 import type { MergerMode } from '../merger-mode.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
-import { readReviewerProfileRefusal, reviewerProfileRefusalAttention } from '../reviewer.js';
+import { readReviewerProfileRefusal, reviewerProfileRefusalAttention, simplicityParagraph } from '../reviewer.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { agentOwner, type AttentionItem } from './attention.js';
@@ -577,6 +577,7 @@ export function workerPrompt(
     + submissionPolicyRule
     + destructivePromptGuidance
     + branchRewriteGuidance
+    + simplicityParagraph
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
     + (mechanical ? '' : reworkBriefSection(work, rework))
