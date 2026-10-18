@@ -52,8 +52,7 @@ export async function main(options: MainOptions = {}) {
   // with a warning; only a principal added beyond the limit refuses, naming the variable.
   const knownPrincipals = (await store.pool.query('SELECT principal_id FROM proof_grants')).rows.map(row => String(row.principal_id));
   const build = buildIdentity();
-  // Railway's API when a Railway token is set, else the GitHub deployments Railway reports (GY-1327),
-  // under the environment the master published to the ledger (Railway's `<project> / production`, GY-1426).
+  // Railway's API when a Railway token is set; GitHub deployments are no longer read (GY-2010).
   const provider = productionProvider(process.env, null, fetch, await resolvedWatchEnvironment(store.pool));
   // Production deploys the release branch when the release pipeline owns it (GY-1207); GRAPHYARD_PRODUCTION_BRANCH names another.
   const production = new ProductionWatch(store, { provider, github: null, build, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', releaseBranch: process.env.GRAPHYARD_PRODUCTION_BRANCH?.trim() || productionBranch });
