@@ -12,11 +12,11 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default), railway or hetzner
 ```
 
-No step needs a human (supervised `--local` only: GitHub Mobile).
+No step needs a human.
 
 Hetzner waits (exit 3) for price approval: `--confirm-price`, `--max-monthly` or `--ssh-key`.
 
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` reviews and merges, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity holding intent:create; neither present: exit 2, never the install's worker credential). The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers rebind (declared slots restart); foreign refused; the loop reports its CLI's checkout, never the managed repository's, self-upgrading only when managing its project (same directory, worktree, origin); else `upgrade:refused`; `up` upgrades. Its `.graphyard/held-cli` pin and snapshots live there: `master status` names, `up` lifts, units read.
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity holding intent:create; neither present: exit 2, never the install's worker credential). The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers rebind (declared slots restart); foreign refused; the loop reports its CLI's checkout, never the managed repository's, self-upgrading only when managing its project (same directory, worktree, origin); else `upgrade:refused`; `up` upgrades. Its `.graphyard/held-cli` pin and snapshots live there: `master status` names, `up` lifts, units read.
 
 ## The Setup page
 
@@ -24,7 +24,7 @@ A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`
 
 | Item | Button
 | --- | ---
-| GitHub App, reviewer App | Done, not required ([merger](delivery-redesign.md#the-merger)); supervised: **Create the GitHub App**
+| GitHub App, reviewer App | Done, not required ([merger](delivery-redesign.md#the-merger))
 | Coding and reviewing accounts | **Connect an account** (API key or subscription sign-in)
 | Coordinator running | none (automatic)
 | Onboarding change: its wait | **Open the change**
@@ -65,7 +65,7 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 4. Register the GitHub App
 
-Supervised (`--local`) only. `--apply` serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
+Only `install --apply` without `--no-github-app`; never `up`. It serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
 
 ## 6. Onboard the checkout
 

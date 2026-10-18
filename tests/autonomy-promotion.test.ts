@@ -4,7 +4,7 @@ import { mkdir, readFile, rmdir, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildMasterStatus, loadMasterConfig, loadStoredMasterConfig, type MasterConfig } from '../src/master.js';
 import { masterCommands } from '../src/cli/master.js';
-import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile, supervisedReview } from '../src/auto-dispatch.js';
+import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
 import { fleet, requested } from './helpers/review-fleet.js';
 // Time-bomb allowance (GY-1694): the 2026-10-08 boundAt is reviewer config and the 2026-10-08 `now` is handed explicitly to promoteToAutonomy for its audit stamp; the one new Date() is the status snapshot's own now.
 
@@ -163,11 +163,17 @@ test('unit:promotion-enables-reviewer — after promotion the loop launches the 
     assert.ok(item.gates.find(gate => gate.name === 'build')!.passed, 'the candidate passed the build gate');
     const status = (config: MasterConfig) => buildMasterStatus({ work: [item], now: new Date().toISOString() }, [], [], {}, {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: config.supervision, operatorLogin: config.operatorLogin }).supervision;
 
-    // Supervised: no reviewer session, and master status names the promotion command.
+    // Supervised: the reviewer App is withheld, so a GitHub-observed head gets no reviewer session, but
+    // a head the control plane observed (every head since GY-1978) is reviewed by the profile; master status names the promotion command.
     let config = await loadMasterConfig(host.root);
-    assert.deepEqual(selectReviewerProfile(config), { profile: null, reason: supervisedReview });
+    assert.equal(selectReviewerProfile(config).profile, null);
     const before = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [item], () => config), Date.now);
     assert.deepEqual(before.launched.filter(entry => entry.kind === 'review'), []);
+    const head = requested(2); head.observation = { ...head.observation!, source: 'control-plane' };
+    const supervised = await runDispatchTick(config, emptyDispatchCursor(config), host.effects(() => [head], () => config), Date.now);
+    // The fixture serves no control plane to register the launch with, so the attempt is refused there: it was made, and nothing waits.
+    assert.deepEqual([...supervised.launched, ...supervised.refused].filter(entry => entry.kind === 'review').map(entry => entry.work), ['GY-502'], 'the supervised install launches a reviewer for its control-plane head');
+    assert.deepEqual(supervised.waiting, []);
     assert.match(status(config)!, /^Supervised: .*graphyard master promote --admin-token-stdin/);
 
     await promoteToAutonomy(host.root, ADMIN, { fetcher: controlPlane().fetcher, operatorLogin: current() });

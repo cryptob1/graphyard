@@ -29,9 +29,6 @@ export interface SetupItem {
   human: boolean;
 }
 
-/** Where the installer serves the GitHub App manifest page while it waits for the App (src/install/manifest.ts). */
-export const defaultAppSetupUrl = 'http://127.0.0.1:4311';
-
 /**
  * The address `graphyard up` prints (GY-1419): the dashboard's Setup page, signed in. A one-time
  * sign-in link (`#sign-in=CODE`, or a host install's `#claim=CODE`) carries `&setup`, so the person
@@ -70,44 +67,38 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
  * The checklist for STATUS (the control plane's `/api/status` answer, or null while it does not
  * answer). Items stay in the order a new installation completes them.
  */
-/**
- * SUPERVISED (GY-1501, `up --local`): the operator reviews and merges on GitHub, so the reviewer App
- * and the reviewing agent account are not part of this installation and are never reported missing.
- * `graphyard up` says so itself; the dashboard reads it from the status (`setup.supervision`, as the
- * live loop names it).
- */
+/** SUPERVISED (GY-1501, `up --local`): as the live loop names it in the status (`setup.supervision`); the checklist is the same either way (GY-1978). */
 export const statusSupervised = (status: any | null) => status?.setup?.supervision === 'supervised';
+/** Where the installer serves the GitHub App manifest page while it waits for the App (src/install/manifest.ts). */
+const defaultAppSetupUrl = 'http://127.0.0.1:4311';
 /**
- * CONTROL-PLANE MERGER (GY-1553): the control plane is the only merge writer, so for an unsupervised
- * install no GitHub App opens pull requests and no reviewer App signs reviews: those items pass as
- * not required. No GitHub branch protection is used. `doctor`'s setup-from-zero checks
- * (src/setup-from-zero.ts) say the same words for the same ids.
+ * CONTROL-PLANE MERGER (GY-1553): the control plane is the only merge writer, so no GitHub App opens
+ * pull requests and no reviewer App signs reviews: those items pass as not required. No GitHub
+ * branch protection is used. `doctor`'s setup-from-zero checks (src/setup-from-zero.ts) say the
+ * same words for the same ids.
  */
 export const mergerNotRequired = 'not required (merger: control-plane)';
-export function setupChecklist(status: any | null, options: { appSetupUrl?: string; supervised?: boolean; githubApps?: boolean } = {}): SetupItem[] {
-  const supervised = options.supervised ?? statusSupervised(status);
-  // Only an install on the GitHub App path (supervised, or `up`'s own App path) judges the App items.
-  const controlPlane = !(options.githubApps ?? supervised);
+export function setupChecklist(status: any | null, options: { githubApps?: boolean } = {}): SetupItem[] {
   const notRequired = (id: SetupItemId, title: string): SetupItem => ({ id, title, done: true, human: false, line: mergerNotRequired, action: null });
-  const appUrl = options.appSetupUrl ?? defaultAppSetupUrl;
+  // Only `up`'s App path (a run recorded before every `up` took the control plane) judges the App items.
+  if (!options.githubApps) return [notRequired('github-app', 'GitHub App'), notRequired('reviewer-app', 'Reviewer App'), ...accountItems(status)];
   const missing: unknown[] = status?.appPermissions?.missing ?? [];
   const appBound = !!status?.github;
   const appDone = appBound && missing.length === 0;
-  const items: SetupItem[] = [];
-  if (controlPlane) items.push(notRequired('github-app', 'GitHub App'));
-  else items.push({ id: 'github-app', title: 'GitHub App', done: appDone, human: true,
+  const reviewerDone = Array.isArray(status?.reviewerApps) && status.reviewerApps.length > 0;
+  return [{ id: 'github-app', title: 'GitHub App', done: appDone, human: true,
     line: appDone ? 'Graphyard can open pull requests and read checks in your repository.'
       : appBound ? 'The App needs a few more permissions before Graphyard can use it.'
       : 'Create the App that lets Graphyard work in your repository, then install it there.',
     action: appDone ? null : appBound && status?.appPermissions?.installationUrl ? { kind: 'link', label: 'Accept the new permissions', href: status.appPermissions.installationUrl }
-      : { kind: 'link', label: 'Create the GitHub App', href: appUrl } });
-  const reviewerDone = Array.isArray(status?.reviewerApps) && status.reviewerApps.length > 0;
-  if (controlPlane) items.push(notRequired('reviewer-app', 'Reviewer App'));
-  else if (!supervised) items.push({ id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
+      : { kind: 'link', label: 'Create the GitHub App', href: defaultAppSetupUrl } },
+  { id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
     line: reviewerDone ? 'A second App signs the independent code reviews.' : 'Create a second App so every change is reviewed by someone other than its author.',
-    action: reviewerDone ? null : appBound ? { kind: 'link', label: 'Create the reviewer App', href: appUrl } : { kind: 'wait', label: 'Waiting for the GitHub App' } });
+    action: reviewerDone ? null : appBound ? { kind: 'link', label: 'Create the reviewer App', href: defaultAppSetupUrl } : { kind: 'wait', label: 'Waiting for the GitHub App' } }, ...accountItems(status)];
+}
+function accountItems(status: any | null): SetupItem[] {
+  const items: SetupItem[] = [];
   for (const role of requiredSetupRoles) {
-    if (supervised && role === 'reviewer') continue;
     const done = roleReady(status?.fleet, role);
     items.push({ id: `account:${role}`, title: roleTitle[role], done, human: true,
       line: done ? 'Connected and signed in.' : role === 'worker' ? 'Connect an AI coding account (an API key or a subscription sign-in) to write the code.' : 'Connect an AI coding account to review the code. It may be the same account.',

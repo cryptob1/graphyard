@@ -1013,6 +1013,11 @@ export class Engine {
    * directory); null means no checkout, and every head submission is refused as unreadable.
    */
   gitRunner: GitRunner | null | undefined = undefined;
+  /**
+   * Reads a retained pull request's live reviews (GY-1978). Left undefined, the deployment's GitHub
+   * App (from the environment) reads them; null means none is read and recorded reviews are kept.
+   */
+  pullReviewReader: ((pr: number) => Promise<Pick<Observation, 'reviews' | 'reviewIds' | 'dismissedReviewIds'>>) | null | undefined = undefined;
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
   /**
@@ -1163,12 +1168,23 @@ export class Engine {
       branch: work.candidate.branch,
       author: work.candidate.author,
     });
-    if (work.observation?.reviews) {
-      observation.reviews = [...work.observation.reviews];
-      observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
-    } else {
-      observation.reviews = [];
-      observation.reviewIds = [];
+    const recorded = work.observation?.reviews ?? [];
+    observation.reviews = [...recorded];
+    observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
+    // A pull request submitted before the cutover (no change number allocated for it) keeps its
+    // GitHub review path: its live reviews replace the recorded GitHub ones, so an approval posted
+    // after submission passes the review gate; control-plane verdicts are kept beside them.
+    const pr = work.submission?.pr;
+    if (pr && !(await this.store.pool.query('SELECT 1 FROM change_numbers WHERE work_id=$1 AND number=$2', [work.id, pr])).rowCount) {
+      if (this.pullReviewReader === undefined) { const github = await githubFromEnv(); this.pullReviewReader = github ? number => github.pullReviews(number) : null; }
+      // An unreadable pull request keeps what was recorded: the head is still observed and handed on.
+      const live = this.pullReviewReader ? await this.pullReviewReader(pr).catch(() => null) : null;
+      if (live) {
+        const kept = recorded.filter(r => r.source === 'control-plane');
+        observation.reviews = [...kept, ...(live.reviews ?? [])];
+        observation.reviewIds = [...kept.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0), ...(live.reviewIds ?? [])];
+        observation.dismissedReviewIds = live.dismissedReviewIds;
+      }
     }
     if (work.candidate.pr) observation.candidate.pr = work.candidate.pr;
     return observation;

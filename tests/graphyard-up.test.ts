@@ -579,10 +579,11 @@ test('unit:up-local-flag — up --local is --provider local, recorded in .graphy
 
   const root = await temporaryDirectory('graphyard-up-local');
   const w = world({ app: true, reviewer: true, accounts: true, onboardingMerged: true });
-  const result = await runUp(upRequestFromArgs(['--repo', 'acme/shop', '--local']), dependencies(w, root, []));
+  // --local takes the control plane too (GY-1978): the repository is read and the deploy key registered with gh.
+  const result = await runUp(upRequestFromArgs(['--repo', 'acme/shop', '--local']), dependencies(w, root, [], { gh: async () => ({ code: 0, stdout: '{}' }), ensureDeployKey: async () => 'registered' }));
   assert.equal(result.exitCode, 0, result.next);
   const installs = w.calls.filter(args => args[0] === 'install');
-  assert.ok(installs.length >= 2 && installs.every(args => args[args.indexOf('--provider') + 1] === 'local'), 'install --plan and --apply both run with --provider local');
+  assert.ok(installs.length >= 1 && installs.every(args => args[args.indexOf('--provider') + 1] === 'local'), 'every install child runs with --provider local');
   assert.equal(JSON.parse(await readFile(upStateFile(root), 'utf8')).provider, 'local', 'recorded in .graphyard/up.json');
   assert.deepEqual(recordedUp(root), { repository: 'acme/shop', provider: 'local' });
   // A resumed run keeps it; --local again agrees with it, and another provider is refused against it.
@@ -593,6 +594,8 @@ test('unit:up-local-flag — up --local is --provider local, recorded in .graphy
 
 test('unit:up-signal-forwarding — SIGINT or SIGTERM to up reaches its install child; both exit and the App page port is freed', async () => {
   const root = await temporaryDirectory('graphyard-up-signals');
+  // A stub gh: the repository exists, so the control-plane preflight reaches the install child (GY-1978).
+  await mkdir(join(root, 'bin')); await writeFile(join(root, 'bin', 'gh'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
   // The stub stands in for `graphyard install`: its plan passes preflight; --apply serves an App page and waits forever.
   const stub = join(root, 'stub-cli.mjs');
   await writeFile(stub, `import { createServer } from 'node:http';
@@ -611,7 +614,7 @@ const server = createServer((_, response) => response.end('App page')).listen(0,
   await Promise.all((['SIGINT', 'SIGTERM'] as const).map(async signal => {
     const serving = join(root, `${signal}.json`);
     const upProcess = spawn(process.execPath, [launcher, 'up', '--repo', 'acme/shop', '--local'], { cwd: root, stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, GRAPHYARD_CLI: stub, GRAPHYARD_REPOSITORY_ROOT: root, STUB_SERVING: serving } });
+      env: { ...process.env, PATH: `${join(root, 'bin')}:${process.env.PATH}`, GRAPHYARD_CLI: stub, GRAPHYARD_REPOSITORY_ROOT: root, STUB_SERVING: serving } });
     let output = '';
     upProcess.stdout.on('data', chunk => { output += chunk; }); upProcess.stderr.on('data', chunk => { output += chunk; });
     const exited = new Promise<number | null>(accept => upProcess.once('exit', code => accept(code)));
@@ -1457,7 +1460,7 @@ test('unit:up-help — graphyard up --help and -h print up\'s usage, every optio
   }
 });
 
-test('unit:setup-docs-one-command — the one-command line in docs/setup-from-zero.md is the agent command that runs on a host whose other install recorded a browser profile, and it names approving a GitHub Mobile prompt as the only human step', async () => {
+test('unit:setup-docs-one-command — the one-command line in docs/setup-from-zero.md is the agent command that runs on a host whose other install recorded a browser profile, and it names no human step', async () => {
   const { upBrowserProfile, upRequestFromArgs } = await up();
   const page = await readFile(resolve('docs/setup-from-zero.md'), 'utf8');
   const section = page.slice(page.indexOf('## One command'), page.indexOf('## The Setup page'));
@@ -1482,7 +1485,7 @@ test('unit:setup-docs-one-command — the one-command line in docs/setup-from-ze
   await recordProfileLogin(unobserved, 'Default', { browser: null, cli: 'operator' });
   assert.equal(upBrowserProfile(await temporaryDirectory('graphyard-up-docs-fresh'), { ...parsed, repository: 'OWNER/REPO' }, [unobserved], () => 'operator', () => 'operator')?.profile, 'Default');
   // GY-1833: the default control-plane path has none; the legacy App path keeps the Mobile prompt.
-  assert.match(section, /No step needs a human \(supervised `--local` only: GitHub Mobile\)/);
+  assert.match(section, /No step needs a human\./, 'no App is created, so not even --local asks for a GitHub Mobile approval (GY-1978)');
   // Net growth of the page is at most 20 words over its 999 words before GY-1510.
   assert.ok(page.split(/\s+/).filter(Boolean).length <= 999 + 20, 'docs/setup-from-zero.md grew by at most 20 words');
 });

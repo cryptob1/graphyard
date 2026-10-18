@@ -50,19 +50,19 @@ import { recordHerdrInstance } from './master/config.js';
  * one sentence plus a link or code; the run resumes on its own once it completes. Agent mode with
  * no browser profile stops before anything runs: App creation is never handed to a person.
  *
- * `up --local` sets up supervised mode (GY-1501): no reviewer App, no master-autonomy identities, and
- * master.json records `supervision: supervised` with the operator's GitHub login, so the operator
- * reviews and merges each pull request on GitHub and nothing claims autonomy.
+ * `up --local` sets up supervised mode (GY-1501): no master-autonomy identities, and master.json
+ * records `supervision: supervised` with the operator's GitHub login, so the operator answers each
+ * decision and nothing claims autonomy; its heads are reviewed and merged as below (GY-1978).
  *
- * Every other `up` (GY-1552): the control plane is the merge writer, with no GitHub Apps and no
+ * Every `up` (GY-1552): the control plane is the merge writer, with no GitHub Apps and no
  * browser profile; `install --no-github-app`, a deploy key from the operator's `gh` login, then the
  * same autonomy, onboarding, accounts, harness, master-loop and goal steps. A run recorded before
  * the control plane became the only merge writer resumes with its deploy-key step still to run.
  */
 
-/** `up --local` installs supervised (GY-1501): the operator reviews and merges on GitHub. */
+/** `up --local` installs supervised (GY-1501): no operator-agent or approver identity; the operator answers each decision. */
 export const upSupervised = (request: Pick<UpRequest, 'provider'>) => request.provider === 'local';
-/** GY-1552: every unsupervised `up` — the control plane is the merge writer, with no GitHub Apps. */
+/** GY-1552: every `up` — the control plane is the merge writer, with no GitHub Apps. */
 export const upMergerControlPlane = (request: Pick<UpRequest, 'merger'>) => request.merger === 'control-plane';
 /** Supervised step list. */
 export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
@@ -84,7 +84,7 @@ export interface UpRequest {
   goalFile: string | null;
   /** The Chrome profile signed in to GitHub that drives the App manifest in agent mode; the master's recorded one when omitted. */
   browserProfile: string | null;
-  /** GY-1552: `control-plane` for every unsupervised up (upRequestFromArgs sets it); absent, the supervised App path. */
+  /** GY-1552: `control-plane` for every up (upRequestFromArgs sets it); absent only on a request recorded before. */
   merger?: MergerMode;
   /**
    * Passed on to `graphyard install` unchanged: the operator's consent to a created server's monthly
@@ -547,7 +547,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   let herdrAttach: string | null = null;
   const supervised = upSupervised(request);
   const controlPlaneMerger = upMergerControlPlane(request);
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null, { supervised, githubApps: !controlPlaneMerger }), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null, { githubApps: !controlPlaneMerger }), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -560,14 +560,13 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   /** GY-1850: what the accounts step's `master environments --apply` wrote, as its own report counts it; null until it has run this pass. */
   let writtenProfiles: { workers: number; reviewers: number } | null = null;
   /** GY-1850: the accounts lines answer for the profiles master.json holds, not only for the fleet's accounts: a fleet whose accounts are all connected still cannot launch a review when the write found no profile to make, so a green line is held back while either count is zero. A report that names no counts (an older CLI, or the write not run yet) leaves the line judging as before. */
-  // Supervised mode launches no reviewer (`up --local`), so only its worker profile is required.
-  const profileMissing = () => !!writtenProfiles && (writtenProfiles.workers === 0 || (!supervised && writtenProfiles.reviewers === 0));
+  const profileMissing = () => !!writtenProfiles && (writtenProfiles.workers === 0 || writtenProfiles.reviewers === 0);
   const withWrittenProfiles = async (items: SetupItem[]) => {
     if (!profileMissing()) return items;
     return items.map(item => (item.id === 'account:worker' || item.id === 'account:reviewer') && item.done ? { ...item, done: false, action: null,
       line: 'The account is connected, but the coordinator has no agent profile for it yet; setup writes one once the account is signed in where the coordinator runs.' } : item);
   };
-  const checklist = async () => (last = await withWrittenProfiles(setupChecklist(await deps.status().catch(() => null), { supervised, githubApps: !controlPlaneMerger })));
+  const checklist = async () => (last = await withWrittenProfiles(setupChecklist(await deps.status().catch(() => null), { githubApps: !controlPlaneMerger })));
   let reached = false;
   /**
    * GY-1477: the dashboard's address from the operator's other devices, worked out once a server is
@@ -927,7 +926,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // Recorded on every run (idempotent), so a resumed run that skipped master init still installs supervised.
     if (supervised && deps.supervise) {
       const { operatorLogin } = await deps.supervise();
-      deps.emit({ kind: 'note', text: `Supervised mode: you review and merge each pull request on GitHub${operatorLogin ? ` (as ${operatorLogin}; a pull request your own login opens needs another person's approval)` : ''}; no agent reviewer or approver runs.` });
+      deps.emit({ kind: 'note', text: `Supervised mode: an agent reviewer reviews each head and the control plane merges it; no operator-agent or approver runs, so you${operatorLogin ? ` (${operatorLogin})` : ''} answer each decision.` });
     }
 
     // GY-1552: the merge writer's deploy key under the install directory. No GitHub protection is set.
@@ -952,7 +951,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // with the admin credential the install saved, so the new master creates, releases and unblocks work
     // with no further command. That credential is never something an agent session may read.
     // Control-plane merger (GY-1552) still provisions them: no reviewer App, but the master decides with its own identities.
-    if (supervised) deps.emit({ kind: 'step', step: 'master-autonomy', state: 'skipped', detail: 'supervised: the operator reviews and merges, so no operator-agent or approver identity is provisioned' });
+    if (supervised) deps.emit({ kind: 'step', step: 'master-autonomy', state: 'skipped', detail: 'supervised: no operator-agent or approver identity is provisioned; the operator answers each decision' });
     else await step('master-autonomy', async () => {
       // A host install provisions them on the host, where its loop runs and the admin credential stays.
       if (state.identitiesHost) return `the master's agent identities were provisioned on ${state.identitiesHost}, where its loop runs`;
@@ -1045,7 +1044,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (!profileMissing()) return;
       }
     };
-    const accountIds: SetupItemId[] = supervised ? ['account:worker'] : ['account:worker', 'account:reviewer'];
+    const accountIds: SetupItemId[] = ['account:worker', 'account:reviewer'];
     // A run resuming over an earlier pass's completed accounts step still writes the profiles it may
     // lack, and waits for them here with the same rewrite, never in a later wait that writes nothing.
     if (state.completed.includes('accounts')) { await writeProfiles(); await awaitAccounts(); }
@@ -1054,8 +1053,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       await run('accounts', ['master', 'registry', 'propose', '--apply']);
       // GY-1850: and the profiles, so master.json holds a reviewer and a worker profile for every
       // logged-in environment before the loop starts; without one, the loop's first review launch is
-      // refused for an unknown reviewer profile. The lines are green only once both exist (one worker
-      // profile under supervised setup, which launches no reviewer).
+      // refused for an unknown reviewer profile. The lines are green only once both exist.
       await writeProfiles();
       await awaitAccounts();
     });
@@ -1198,7 +1196,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const deadline = deps.now() + humanWaitMs;
       let shown = '';
       for (let polls = 0; !(await deps.onboardingMerged(pullRequest)); polls++) {
-        if (polls === 0) deps.emit({ kind: 'note', text: `Waiting for the onboarding pull request ${pullRequest} to merge: it adds Graphyard's delivery workflows to the base branch.${supervised ? ' Your own gh login opened it, so your approval does not count: merge it on GitHub as a repository admin, or have someone else approve it.' : state.onboardingWork ? ` The loop reviews and merges it as ${state.onboardingWork}.` : ''}` });
+        if (polls === 0) deps.emit({ kind: 'note', text: `Waiting for the onboarding pull request ${pullRequest} to merge: it adds Graphyard's delivery workflows to the base branch.${state.onboardingWork ? ` The loop reviews and merges it as ${state.onboardingWork}.` : ''}` });
         // The current setup step (GY-1478 AC-2): the item's URL, what it waits for, how long; shown again whenever what it waits for changes.
         const work = state.onboardingWork ? findOnboardingWork(await deps.work?.().catch(() => null), state.onboardingWork) : null;
         if (work) {
@@ -1409,7 +1407,7 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   // The origin rule master init applies (serverOrigin): HTTPS, or HTTP only on loopback.
   if (values.url !== undefined) { try { url = serverOrigin(values.url); } catch { throw new Error('Use --url with the control plane\'s origin: HTTPS, or HTTP on loopback (such as http://127.0.0.1:4311); no credentials, query or path'); } }
   return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: values.reviewer ?? 'claude', master: values.master ?? 'claude',
-    goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null, ...(local ? {} : { merger: 'control-plane' as const }),
+    goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null, merger: 'control-plane' as const,
     install: { confirmPrice: values['confirm-price'] ?? null, maxMonthly: values['max-monthly'] ?? null, sshKey: values['ssh-key'] ?? null, sshHost: values['ssh-host'] ?? null, sshUser: values['ssh-user'] ?? null },
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
     ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}) };

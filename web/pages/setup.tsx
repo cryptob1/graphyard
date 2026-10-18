@@ -97,8 +97,8 @@ export function GoalForm({ onSubmit, busy, error, submitted }: { onSubmit: (text
  * read failed), so whether the change merged is unknown and the goal box stays closed.
  */
 export function SetupView({ status, work, workUnread, now, onConnect, onSubmitGoal, busy, error, submitted }: { status: any; work?: readonly any[] | null; workUnread?: boolean; now?: number; onConnect: () => void; onSubmitGoal: (text: string) => void; busy?: boolean; error?: string; submitted?: string | null }) {
-  // A supervised install (GY-1501) has no reviewer App or reviewing account to set up: the person reviews each change.
-  const supervised = statusSupervised(status), items = setupChecklist(status, { supervised });
+  // A supervised install (GY-1501) is set up as any other; it only provisions no approver.
+  const supervised = statusSupervised(status), items = setupChecklist(status);
   const item = findOnboardingWork(work);
   const onboarding = item ? onboardingWait(item, now ?? Date.now(), status?.githubRepository?.fullName ?? status?.githubRepository ?? null) : null;
   const open = onboarding && !onboarding.merged ? 1 : 0;
@@ -106,7 +106,7 @@ export function SetupView({ status, work, workUnread, now, onConnect, onSubmitGo
   const total = items.length + (onboarding ? 1 : 0), left = items.filter(entry => !entry.done).length + open;
   return <>
     <PageHeader title="Set up Graphyard">{green ? 'Everything is ready.' : !left ? 'Checking whether the onboarding change has merged. This page updates by itself.' : `${left} of ${total} steps left. This page updates by itself as each one finishes.`}</PageHeader>
-    {supervised && <p className="notice" data-supervised>You review and merge each change on GitHub; no agent reviews or approves on your behalf.</p>}
+    {supervised && <p className="notice" data-supervised>An agent reviews each change and Graphyard merges it; no agent approves decisions on your behalf, so you answer each one.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
     <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
     {green && <PageSection title="Your first goal" label="First goal"><GoalForm onSubmit={onSubmitGoal} busy={busy} error={error} submitted={submitted}/></PageSection>}

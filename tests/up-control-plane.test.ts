@@ -372,18 +372,18 @@ test('unit:up-control-plane-steps — up runs preflight, control-plane (install 
   assert.ok(!events.some(event => event.kind === 'handoff'), 'no browser or device handoff');
 });
 
-test('unit:up-github-steps-unchanged — the GitHub App path (supervised, or a request with no merger) keeps its step list and install still registers Apps (no --no-github-app, no deploy-key)', async () => {
+test('unit:up-github-steps-unchanged — the GitHub App path (a request recorded with no merger) keeps its step list and install still registers Apps (no --no-github-app, no deploy-key); --local takes the control plane too (GY-1978)', async () => {
   const { runUp, upRequestFromArgs, upSteps, upStepsFor, upControlPlaneSteps, upMergerControlPlane } = await upModule();
   assert.deepEqual([...upSteps], ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal']);
   assert.ok(!upSteps.includes('deploy-key' as never), 'the App path has no deploy-key');
   assert.notDeepEqual([...upSteps], [...upControlPlaneSteps], 'control-plane inserts the deploy key');
 
-  // A bare up is control-plane; --local is the supervised App path.
+  // Every up is control-plane, --local (supervised) too: no pull request awaits the operator, so the merge writer needs its deploy key.
   assert.equal(upMergerControlPlane(upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose'])), true);
   const local = upRequestFromArgs(['--repo', 'owner/project', '--local']);
-  assert.equal(local.merger, undefined);
-  assert.equal(upMergerControlPlane(local), false);
-  assert.deepEqual([...upStepsFor(local)], [...upSteps]);
+  assert.equal(local.merger, 'control-plane');
+  assert.deepEqual([...upStepsFor(local)], [...upControlPlaneSteps]);
+  assert.deepEqual([...upStepsFor({ merger: undefined })], [...upSteps], 'only a request recorded with no merger keeps the App path');
 
   const checkout = await temporaryDirectory('up-github-steps-unchanged');
   const calls: string[][] = [];

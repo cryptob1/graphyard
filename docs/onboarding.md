@@ -90,7 +90,7 @@ Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work (`maste
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: your GitHub approval of the exact head passes review, auto-merge lands it; the loop launches no reviewer, approver or escalation. `master status` prints `supervision`, flagging your PRs. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: an agent reviewer reviews each head, the control plane merges it; no approver or escalation runs, so you answer decisions. `master status` prints `supervision`. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
 
 ## 4. Prove the first PR
 

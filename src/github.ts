@@ -1826,6 +1826,19 @@ export class GitHub {
       ...(pr.merged ? { mergeVerdict: mergeVerdictRun(checks, this.config.appId, pr.head.sha) } : {}),
     };
   }
+  /**
+   * GY-1978: the reviews of a pull request submitted before the control plane became the only merge
+   * writer, as `observe` records them (each identity's latest verdict), so the checkout observation
+   * of its head still sees an approval posted after submission.
+   */
+  async pullReviews(pr: number): Promise<Pick<Observation, 'reviews' | 'reviewIds' | 'dismissedReviewIds'>> {
+    const reviews = await this.pages(`/pulls/${pr}/reviews`);
+    const latest = new Map<string, any>();
+    for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
+    return { reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined, dismissedReviewIds: dismissedReviewIds(reviews),
+      reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
+        ...(r.state === 'CHANGES_REQUESTED' && typeof r.body === 'string' && r.body.trim() ? observedReviewBody(r.body) : {}) })) };
+  }
   /** The latest run of one check on one commit, other than this App's own, or null when it has none. */
   private async latestCheckRun(sha: string, name: string): Promise<{ id: number; conclusion: string | null } | null> {
     const runs = (await this.pages(`/commits/${sha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest`, 'check_runs'))

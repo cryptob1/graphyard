@@ -11,8 +11,10 @@ import { simulateDay, supervisedAbsentEffects } from './helpers/soak-simulation.
 
 /**
  * GY-1501. A supervised install under the real loop for simulated hours: master.json records
- * `supervised`, so the loop runs with no reviewer App, operator-agent or approver identity, and the
- * operator's own GitHub login reviews. One concern of the release-candidate soak (GY-404), in its own
+ * `supervised`, so the loop runs with no reviewer App, operator-agent or approver identity. The day's
+ * candidates are pull requests (retained from before the control plane became the only merge writer,
+ * GY-1978), which the operator's own GitHub login reviews; a control-plane head gets the reviewer
+ * profile instead (tests/autonomy-promotion.test.ts). One concern of the release-candidate soak (GY-404), in its own
  * file (GY-1363): the world is tests/helpers/soak-world.ts, the control planes
  * tests/helpers/soak-plane.ts, the day tests/helpers/soak-simulation.ts, and the system invariants
  * are asserted after every cycle.
@@ -79,5 +81,5 @@ test('unit:supervised-review-gate-human — under the real loop a supervised ins
   const status = await api(principals.operator, 'GET', 'status');
   assert.equal(status.setup.supervision, 'supervised', 'the status carries the live loop\'s supervision');
   const ids = setupChecklist(status).map(entry => entry.id);
-  assert.ok(!ids.includes('reviewer-app') && !ids.includes('account:reviewer'), `the Setup checklist asks for no reviewer App or reviewing account: ${ids.join(', ')}`);
+  assert.deepEqual(ids, ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'master-loop'], 'the Setup checklist is an autonomous install\'s: no App, and a reviewing account for the control-plane reviewer');
 });

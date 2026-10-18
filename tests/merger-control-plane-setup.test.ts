@@ -26,7 +26,7 @@ const bare = (supervision = 'autonomous') => ({
   mergeWriter: { merger: 'github' },
 });
 
-test('unit:setup-checklist-control-plane — the Setup checklist passes github-app and reviewer-app as not required for every unsupervised install, judges no branch protection and no merger, and judges the App only on the GitHub App path', () => {
+test('unit:setup-checklist-control-plane — the Setup checklist passes github-app and reviewer-app as not required for every install, supervised or not, judges no branch protection and no merger, and judges the App only on up\'s App path', () => {
   assert.equal(mergerNotRequired, 'not required (merger: control-plane)');
   const control = setupChecklist(bare());
   assert.deepEqual(control.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'master-loop']);
@@ -36,9 +36,8 @@ test('unit:setup-checklist-control-plane — the Setup checklist passes github-a
   }
   assert.equal(control.find(item => item.id === 'account:worker')!.done, true, 'the worker account is still judged');
   assert.equal(control.find(item => item.id === 'account:reviewer')!.done, false, 'the reviewing account is still required');
-  const supervised = setupChecklist(bare('supervised'));
-  assert.deepEqual(supervised.map(item => item.id), ['github-app', 'account:worker', 'master-loop'], 'supervision removes the reviewer items');
-  assert.equal(supervised[0].line, 'Create the App that lets Graphyard work in your repository, then install it there.', 'the supervised GitHub App path judges its App');
+  // GY-1978: a supervised install's heads are reviewed by an agent and merged by the control plane too, so its checklist is the same.
+  assert.deepEqual(setupChecklist(bare('supervised')), control, 'supervision changes no step');
   assert.equal(setupChecklist(bare(), { githubApps: true }).find(item => item.id === 'github-app')!.done, false, 'up\'s own App path judges its App');
 });
 
