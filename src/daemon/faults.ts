@@ -8,7 +8,6 @@ import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type Contain
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
 import { judgeWorktreeDisk, standingDiskLine, worktreePassOf, worktreeVolumeWording } from '../master/worktree-disk.js';
-import { qualifyTimingFailures, type CheckAnnotations } from '../cli/timing-failures.js';
 import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
 export { unboundedAttemptKey };
 import type { UnsubmittedAttempt } from '../model/attempt-bound.js';
@@ -310,33 +309,6 @@ export function baseConflictInMotion(work: Work | undefined, now: number): boole
   if (!baseRefreshConflict(work)) return false;
   const since = work.baseRefresh?.conflictSince ?? work.baseRefresh?.at;
   return !!since && now - Date.parse(since) <= baseConflictWaitBoundMs;
-}
-/**
- * The timing-dependent check failures `master status` names (qualifyTimingFailures), for the loop to
- * track as the timing-failure class (GY-173): the unqualified gate line they replace is never counted,
- * so without them a failure on the clock could never recur to the loop and file its structural item.
- */
-export async function timingFaultAttention(work: Work[], repository: string, annotations: CheckAnnotations): Promise<AttentionItem[]> {
-  const none = { work: [], attentionItems: [], counts: { attention: 0 } } as unknown as Parameters<typeof qualifyTimingFailures>[0];
-  return (await qualifyTimingFailures(none, work, repository, annotations)).attentionItems;
-}
-/**
- * A check run's annotations, read once: a completed run's annotations do not change, and the loop
- * would otherwise read every failed required check of every open candidate again each cycle. A read
- * that fails is not kept, so the next cycle reads it again.
- */
-export function onceAnnotations(read: CheckAnnotations, bound = 200): CheckAnnotations {
-  const kept = new Map<number, ReturnType<CheckAnnotations>>();
-  return checkRunId => {
-    let entry = kept.get(checkRunId);
-    if (!entry) {
-      if (kept.size >= bound) kept.delete(kept.keys().next().value!);
-      entry = read(checkRunId);
-      kept.set(checkRunId, entry);
-      entry.catch(() => { if (kept.get(checkRunId) === entry) kept.delete(checkRunId); });
-    }
-    return entry;
-  };
 }
 /** The kinds read from Herdr's session inventory: an unreadable Herdr lists none, so they go unobserved rather than read as missing sessions. */
 export const herdrFaultKinds: ReadonlySet<FaultKind> = new Set<FaultKind>(['session', 'overlong-session', 'concurrency-starved']);

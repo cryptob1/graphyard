@@ -42,7 +42,6 @@ import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
 import { baseTree } from '../cli/planned-files-intent.js'; import { currentBaseTree } from '../executor.js';
-import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
@@ -130,7 +129,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
-  const annotations = onceAnnotations(async checkRunId => JSON.parse(await run('gh', ['api', '--paginate', `repos/${current().repository}/check-runs/${checkRunId}/annotations`])));
   const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
     const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
     try { return await post(work); }
@@ -415,8 +413,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         // The intervention report takes the server close to a minute (GY-377): the cycle uses the
         // cached copy and refreshes it detached from itself, which is also the copy master status reads.
         reports: 'background', reportBoundMs: deps.reportReadBoundMs });
-      // A required check red on the clock is named as master status names it, after buildMasterStatus.
-      return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
+      // No check-run annotation is read back (GY-2010): stored checks are pull-request-era history.
+      return reported;
     },
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnosticianEffects(config, root, asOperatorAgent, run) : undefined; },
     // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.

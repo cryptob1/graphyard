@@ -671,7 +671,6 @@
     "tests/soak-approver-pane-rebind.test.ts": 4000,
     "tests/soak-carried-scope-ask.test.ts": 1823,
     "tests/soak-checkout-restore.test.ts": 41555,
-    "tests/soak-ci-rework-after-refusal.test.ts": 1500,
     "tests/soak-control-plane-observation.test.ts": 9000,
     "tests/soak-control-plane-switches.test.ts": 3000,
     "tests/soak-cursor-forward-fields.test.ts": 15000,

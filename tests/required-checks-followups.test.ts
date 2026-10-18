@@ -32,9 +32,10 @@ test('unit:required-checks-followups — a check bound to no app prefers the con
   const shadowed = item([...passing, { name: 'secrets', result: 'success' }, { name: 'secrets', result: 'failure', appId: 4242 }]);
   assert.equal(requiredCheckRun(secrets, shadowed.observation!.checks, ciAppIds)?.result, 'success');
   assert.equal(routineDecision(shadowed, { autoMerge: true }, now.getTime()), null);
-  // A commit-status context: a failure reworks; success and pending ask for nothing.
+  // A commit-status context: nothing asks for a rework.
   const status = (result: string) => item([...passing, { name: 'ci/legacy', result, appId: 0, source: 'status' }], [{ name: 'ci/legacy', appId: null }]);
-  assert.equal(routineDecision(status('failure'), { autoMerge: true }, now.getTime())?.binding, `${head}:ci:ci/legacy`);
+  // Since GY-2010 no stored check grounds a rework, a failed commit status included.
+  assert.equal(routineDecision(status('failure'), { autoMerge: true }, now.getTime()), null);
   assert.equal(routineDecision(status('success'), { autoMerge: true }, now.getTime()), null);
   assert.equal(routineDecision(status('pending'), { autoMerge: true }, now.getTime()), null);
   // Another app's stray run of the context's name never hides its commit status (finding 19).

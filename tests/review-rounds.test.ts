@@ -224,14 +224,11 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   assert.ok(!cappedRework({ binding: cappedReworkBinding('c'.repeat(40), reviewer) }, standing), 'not the current head');
   assert.ok(!cappedRework({ binding: round.binding }, { ...standing, observation: { ...standing.observation!, reviews: [] } }), 'no change request stands');
   assert.equal(neededDecision({ ...changed(3, 'BLOCKING: AC-1 is not met'), reworkRequested: true }, config), null, 'once the round is applied the item needs a worker, not a second decision');
-  // A failed required check or proof is a mandatory ground ahead of the capped round (GY-1389 review): the
-  // round is keyed on its own binding, so an approver's refusal of it, which the loop then never re-asks,
-  // can hold neither the check's rework on this head nor one for a check that fails after the refusal.
+  // A stored failed check grounds nothing since GY-2010 (the merge writer's trial is the only test):
+  // the capped round is asked on its own binding whatever the pull-request-era checks say.
   const failing = changed(3, 'BLOCKING: AC-1 is not met');
   failing.observation!.checks = [{ name: 'test', result: 'failure', appId: 15368 }] as Observation['checks'];
-  const ciRound = neededDecision(failing, config)!;
-  assert.deepEqual([ciRound.action, ciRound.binding], ['rework', `${H}:ci:test`]);
-  assert.notEqual(ciRound.binding, round.binding, 'a refusal of the capped round names another binding');
+  assert.equal(neededDecision(failing, config)?.binding, round.binding, 'a red stored check neither replaces nor holds the capped round');
   failing.observation!.checks = [{ name: 'test', result: 'success', appId: 15368 }] as Observation['checks'];
   assert.equal(neededDecision(failing, config)?.binding, round.binding, 'with every check green the capped round is asked as before');
   // A loop without the decision effects still escalates it for a master to request.

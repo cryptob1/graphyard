@@ -1141,8 +1141,9 @@ export class Engine {
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     const work = (await lockedWork(this.store.leasePool, [id])).find(w => w.id === id || w.key === id);
     const workspace = work?.workspaces.find(w => w.epoch === data.epoch);
-    // GY-1849: an adopted item never completes as a head (the transaction refuses it), so no git is read for one.
-    if (!work || work.stage === 'done' || !workspace || work.prAdoption) return null;
+    // GY-2010: an item a stored adoption (GY-1849) still names completes as a head like any other:
+    // its replacement commit is read from the shared object store, never from the pull request.
+    if (!work || work.stage === 'done' || !workspace) return null;
     if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
     demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
@@ -2043,9 +2044,8 @@ export class Engine {
         // hands it to the merge writer.
         let observed = observation, number: number;
         if (data.head !== undefined) {
-          // GY-1849: an adoption binds its pull request's own number, and that binding outlives a later
-          // switch of the merge writer: a head would complete it as a newly allocated change instead.
-          demand(!work.prAdoption, `${work.key} adopted pull request #${work.prAdoption?.pr} and completes only as that pull request, never as a head: complete ${work.key} ${data.epoch} ${work.prAdoption?.pr}`, 409);
+          // GY-2010: a stored adoption (GY-1849) binds nothing here. Graphyard observes no pull request,
+          // so an adopted item's replacement head completes as a change of its own, like a rework's.
           demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane; complete ${work.key} ${data.epoch} --head again`, 409);
           // One change number per (item, head), allocated under the item lock this transaction holds:
           // the candidate, the submission and the number commit together, and a retried or repeated
@@ -2061,12 +2061,12 @@ export class Engine {
         }
         // GY-1849: the adopted head is verified against a live observation or not at all, so an
         // unobserved completion of an adopted item is refused rather than recorded unchecked.
-        demand(!work.prAdoption || observed, `${work.key} adopted pull request #${work.prAdoption?.pr}, whose live head could not be observed; complete is refused until it can be verified against the adopted head`, 503);
+        demand(data.head !== undefined || !work.prAdoption || observed, `${work.key} adopted pull request #${work.prAdoption?.pr}, whose live head could not be observed; complete is refused until it can be verified against the adopted head`, 503);
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
           // GY-1849: the binding is exact-head, so the head observed now is compared to the adopted
           // one; a moved head is refused naming both shas, and the master re-adopts at the live head.
-          if (work.prAdoption && observed!.candidate.sha !== work.prAdoption.head)
+          if (data.head === undefined && work.prAdoption && observed!.candidate.sha !== work.prAdoption.head)
             demand(false, `${work.key} adopted pull request #${work.prAdoption.pr} at head ${work.prAdoption.head.slice(0, 12)}, but its live head is ${observed!.candidate.sha.slice(0, 12)}; adopt naming the live head, then complete again`, 409);
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
           // GY-1528: a control-plane observation is refused nothing on plannedFiles (regressionRefusals answers none for it).

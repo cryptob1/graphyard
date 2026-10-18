@@ -14,7 +14,7 @@
   - Late-fault waits: 30min: owed `request-rework` (`owed-decision`), unwatched decision, owed escalation/blocker, stale non-release, `actorless` head behind base; a queue-held trial refusal is the writer's motion ([fault classes](master-agent-reference.md#fault-classes)); 10min: containment past grace; 15min: watched decision post-launch; once: unre-asked refusal (`decision-refused`).
   - Plane-wide failures (502–504, refused, timeout; proxy 502s) retry faultless: outage-refused preserves, coordinates re-sent across restarts (`plane-unavailable`); slow fault/deployment reads defer (`faults:deferred`, `deployment:deferred`); `loop-cost` names the slowest.
   - A failed producer-runnable manual proof returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
-- **Merge refused**: wait or repair, never bypass; `BLOCKED` retries head-bound 10min, `merge-blocked` 30min quotes GitHub. **Merged outside**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **GitHub paused/webhook silent**: [budget](operations-reference.md#observation). **Smoke failed**: [delivered](operations-reference.md#delivered-with-a-failed-smoke-proof).
+- **Merge refused**: wait or repair, never bypass; the gate quotes the merge writer's ledger ([main](delivery.md#main)): not yet trialled or pushed is its motion; a failed trial returns the head to a worker; a failure the base tip shares is held, never reworked; `base moved N times` stays queued for a later trial. **Merged outside**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **Smoke failed**: [delivered](operations-reference.md#delivered-with-a-failed-smoke-proof).
 - **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff in one 30-second lock budget, each attempt waiting ≤3 s per lock so live writes never queue longer.
 - **Diagnosis `waiting`**: [provider quota](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
@@ -39,7 +39,7 @@ Confined masters/approvers/producers (not workers/reviewers) read GitHub through
 
 - Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal can hold `admin`.
 - Proof authority: live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs; operator agents only add requirements.
-- GitHub merges on passing gates: no bypass, no lifecycle-state endpoint.
+- Only the merge writer moves main, pushing its trialled merge commit on passing gates: no bypass, no lifecycle-state endpoint.
 - History is append-only; routine rows past retention get [compacted](operations-reference.md#storage-retention).
 
 ## Deeper references

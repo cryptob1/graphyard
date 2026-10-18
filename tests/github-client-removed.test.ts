@@ -1,8 +1,8 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -17,7 +17,11 @@ import type { MergePorts, MergeTrialRun, runMergeTrial } from '../src/merge-writ
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { completionBody } from '../src/cli/complete.js';
+import { createWorktree } from '../src/cli/workspace-worktree.js';
+import type { CliContext } from '../src/cli/context.js';
 import { masterConfigSchema } from '../src/master.js';
+import { daemonEffects } from '../src/daemon/effects-production.js';
+import { routineDecision } from '../src/daemon/decisions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-05-01 instant is the loop's injected clock and the explicit
 // `now` of evaluate(); new Date() only stamps documents the Postgres half writes and reads back.
@@ -80,7 +84,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 const trap = (what: string) => new Proxy({}, { get: (_, name) => { if (name === 'then') return undefined; throw new Error(`the loop touched ${what} (${String(name)})`); } });
 
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof controlPlane>, url: string;
-let fixture: string, origin: string, checkout: string, managed: string, deployKey: string, baseTip: string, head: string;
+let fixture: string, origin: string, checkout: string, managed: string, deployKey: string, baseTip: string, head: string, workerPushes: string;
 const branch = 'graphyard/gy-1-1';
 
 async function commit(cwd: string, path: string, text: string, message: string) {
@@ -107,6 +111,12 @@ before(async () => {
   await commit(checkout, 'tests/a.test.ts', "import { test } from 'node:test';\ntest('unit:a — a answers', () => {});\n", 'test');
   git(checkout, 'push', '-q', 'origin', 'main');
   baseTip = git(checkout, 'rev-parse', 'refs/remotes/origin/main');
+  // Origin serves and accepts the base branch alone: every other ref is hidden from fetch, and a push
+  // of one is recorded and rejected, so any worker-ref network operation fails the case that ran it.
+  workerPushes = join(fixture, 'worker-ref-pushes');
+  await writeFile(join(origin, 'hooks', 'pre-receive'), `#!/bin/sh\nwhile read -r _old _new ref; do\n  case "$ref" in refs/heads/main) ;; *) printf '%s\\n' "$ref" >> ${JSON.stringify(workerPushes)}; exit 1 ;; esac\ndone\n`);
+  await chmod(join(origin, 'hooks', 'pre-receive'), 0o755);
+  git(origin, 'config', 'uploadpack.hideRefs', 'refs'); git(origin, 'config', '--add', 'uploadpack.hideRefs', '!refs/heads/main');
   const tree = join(checkout, '.graphyard', 'worktrees', 'GY-1-1');
   git(checkout, 'worktree', 'add', '-q', '-b', branch, tree, baseTip);
   git(tree, 'config', 'user.email', 't@example.com'); git(tree, 'config', 'user.name', 'T');
@@ -143,12 +153,12 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   // Submitted as today's workers submit, then rewritten as a release that still observed GitHub left it.
   let work = await engine.execute(operator, 'create', null, { title: 'PR-era history before GY-2010', plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
-  const pulled = await engine.pullAssignment(worker, { work: work.id }, randomUUID());
-  assert.equal(pulled.assigned?.id, work.id, JSON.stringify(pulled.refused));
+  await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'worker-host', path: join(checkout, '.graphyard', 'worktrees', 'GY-1-1'), branch }, randomUUID());
   work = await engine.execute(worker, 'submit', work.id, completionBody(['1', '--head', head], () => head), randomUUID());
   assert.equal(work.candidate?.sha, head);
-  const githubChecks = [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'failure', appId: 15368 }];
+  // Real run ids, as GitHub recorded them: a red required check whose rerun failed too and whose hold expired.
+  const githubChecks = [{ name: 'test', result: 'success', appId: 15368, id: 7000 }, { name: 'typecheck', result: 'failure', appId: 15368, id: 7001, attempt: 1 }, { name: 'typecheck', result: 'failure', appId: 15368, id: 7002, attempt: 2 }];
   await store.transaction(async db => {
     const stored: Work & Record<string, unknown> = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document;
     stored.submission = { ...stored.submission!, pr: 2010 };
@@ -156,7 +166,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
     stored.headObserved = { at, pr: 2010, sha: head };
     stored.observation = { ...stored.observation!, checks: githubChecks, reviews: [{ reviewer: 'alice', sha: head, state: 'CHANGES_REQUESTED' }], prState: 'open', draft: false, mergeable: false, mergeabilityUnknown: false, protected: true } as Work['observation'];
     stored.mainGuardReverts = [{ mergeSha: sha('e1'), pr: 1999, state: 'merged', revertSha: sha('e2'), failing: ['test'] }];
-    stored.checkReruns = [{ sha: head, check: 'typecheck', failedRunId: 7, state: 'failed', at }];
+    stored.checkReruns = [{ sha: head, check: 'typecheck', failedRunId: 7001, state: 'failed', at: new Date(clock - 86_400_000).toISOString() }];
     await save(db, stored, 'github', 'github.observed', now);
   });
 
@@ -195,6 +205,30 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => { const target = String(input instanceof Request ? input.url : input); requested.push(target); return realFetch(input, init); }) as typeof fetch;
   const actions: string[] = [];
   try {
+    // Before the writer runs, the stale checks stand over repeated cycles with the decision effects
+    // enabled and the production attention path (effects-production.ts) reading the live plane: the
+    // loop requests no rework for them and reads no check run back.
+    const credentialFile = join(fixture, 'coordinator.token');
+    await writeFile(credentialFile, token(coordinator), { mode: 0o600 });
+    const production = daemonEffects(checkout, { ...master, credentialFile }, { snapshot: effects.snapshot, run, fetcher: globalThis.fetch,
+      mutate: async () => { throw new Error('nothing to mutate'); }, reportReadBoundMs: 5_000 });
+    const decided: { action: string; input?: Record<string, unknown>; reason: string }[] = [];
+    const deciding = { ...effects, mergeWriter: undefined, controlPlane: production.controlPlane, reportedAttention: production.reportedAttention,
+      decide: async (_: Work, action: string, reason: string, input?: Record<string, unknown>) => { decided.push({ action, reason, input }); return { id: randomUUID() }; },
+      approver: async () => ({ agentName: 'approver', pane: null }) } as unknown as DaemonEffects;
+    for (let cycle = 0; cycle < 3; cycle++) {
+      actions.push(...(await runCycle(master, state, deciding, () => clock + cycle * 3_600_000)).actions.map(action => action.detail));
+      const stale = (await store.workDocument(work.id))!;
+      // Without the stored change request in front of it too: a failed check alone grounds nothing.
+      for (const document of [stale, { ...stale, observation: { ...stale.observation!, reviews: [] } } as Work])
+        assert.doesNotMatch(String(routineDecision(document, master, clock + cycle * 3_600_000)?.binding ?? ''), /:ci:/, 'no stored failed check grounds a rework');
+    }
+    const attention = await production.reportedAttention!([(await store.workDocument(work.id))!], await production.controlPlane!(), { agents: [], approvals: daemonSummary(state, clock, 60_000).approvals, loop: daemonSummary(state, clock, 60_000).liveness, now: at });
+    assert.ok(Array.isArray(attention.items), 'the production attention path answered');
+    assert.ok(!decided.some(entry => /:ci:/.test(String(entry.input?.binding ?? '')) || /required CI check/i.test(entry.reason)), `no rework for a stored failed check: ${JSON.stringify(decided)}`);
+    assert.ok(!JSON.stringify(attention).includes('typecheck failed on'), 'no stored check is reported as a timing failure');
+    assert.deepEqual(children.filter(([command]) => command === 'gh'), [], `no gh child ran over the stale-check cycles: ${JSON.stringify(children.filter(([command]) => command === 'gh'))}`);
+    assert.ok(!children.some(args => args.some(arg => /check-runs|annotations/.test(arg))), 'no check run was read back');
     for (let cycle = 0; cycle < 3 && (await store.workDocument(work.id))!.stage !== 'done'; cycle++) {
       actions.push(...(await runCycle(master, state, effects, () => clock)).actions.map(action => action.detail));
       await mergeWriterIdle(state);
@@ -219,6 +253,73 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
   assert.equal(status.body.mergeWriter.merger, 'control-plane', 'and reports the merge writer');
   for (const path of ['src/master-status.ts', 'src/cli/master-status.ts', 'src/daemon/cycle-delivery.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
+});
+
+/** `worktree GY-N EPOCH` as the launcher runs it from the coordinator checkout, against the live plane as the worker. */
+async function worktree(id: string, epoch: number): Promise<{ path: string; branch: string }> {
+  const subject = await store.workDocument(id), printed: { path: string; branch: string }[] = [];
+  const api = async (path: string, body?: unknown, key?: string) => {
+    // The fixture's origin is a local path, so the plane's repository name is left out of the identity check.
+    if (path === 'status') return { ...(await request(coordinator, 'status')).body, repository: null };
+    const response = await request(worker, path, body, key);
+    if (response.status >= 300) throw new Error(`${path} refused (${response.status}): ${JSON.stringify(response.body)}`);
+    return response.body;
+  };
+  const cli = { args: [String(epoch)], api, print: (value: { path: string; branch: string }) => printed.push(value), repositoryRoot: () => checkout, individualHostId: () => 'worker-host' } as unknown as CliContext;
+  const previous = process.cwd();
+  process.chdir(checkout);
+  try { await createWorktree(cli, subject); } finally { process.chdir(previous); }
+  return printed[0];
+}
+
+test('unit:pr-era-history-loads — an item a stored pull-request adoption names starts from the adopted head, completes --head, and reworks and completes --head again, all from the shared object store with no pull-request read, worker-ref fetch or push', { timeout: 120_000 }, async () => {
+  // The adopted pull request's branch and head, in the shared object store only: origin never held them.
+  const adoptedBranch = 'feature/adopted', adoptTree = join(fixture, 'adopt-tree');
+  git(checkout, 'worktree', 'add', '-q', '-b', adoptedBranch, adoptTree, baseTip);
+  git(adoptTree, 'config', 'user.email', 't@example.com'); git(adoptTree, 'config', 'user.name', 'T');
+  const adopted = await commit(adoptTree, 'src/b.ts', 'export const b = 1;\n', 'the adopted work');
+  git(checkout, 'worktree', 'remove', adoptTree);
+
+  let work = await engine.execute(operator, 'create', null, { title: 'Adopted before GY-2010', plannedFiles: ['src/b.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }, randomUUID());
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  await store.transaction(async db => {
+    const stored: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document;
+    stored.prAdoption = { pr: 1849, head: adopted, branch: adoptedBranch, repository, adoptedBy: coordinator.id, adoptedAt: at };
+    await save(db, stored, coordinator.id, 'work.adopted', now);
+  });
+  const originRefs = () => git(origin, 'for-each-ref', '--format=%(refname)');
+  const before = originRefs();
+
+  // The first attempt starts at the adopted head, and its commit completes as a head.
+  assert.equal((await engine.pullAssignment(worker, { work: work.id }, randomUUID())).assigned?.id, work.id);
+  const first = await worktree(work.id, 1);
+  assert.equal(first.branch, adoptedBranch, 'the attempt works on the adopted branch');
+  assert.equal(git(first.path, 'rev-parse', 'HEAD'), adopted, 'and starts from the adopted head');
+  git(first.path, 'config', 'user.email', 't@example.com'); git(first.path, 'config', 'user.name', 'T');
+  const answered = await commit(first.path, 'src/b.ts', 'export const b = 2;\n', 'answer the adoption');
+  work = await engine.execute(worker, 'submit', work.id, completionBody(['1', '--head', answered], () => answered), randomUUID());
+  assert.equal(work.candidate?.sha, answered, 'the adopted item completes --head');
+  assert.equal(work.observation?.source, 'control-plane', 'observed from the shared object store');
+
+  // A rework round the PR era left on it: the next attempt starts from the registered head and completes --head again.
+  await store.transaction(async db => {
+    const stored: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document;
+    stored.reworkRequested = true; stored.lease = null;
+    await save(db, stored, coordinator.id, 'rework', now);
+  });
+  await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+  const epoch = (await store.workDocument(work.id))!.epoch;
+  const second = await worktree(work.id, epoch);
+  assert.equal(git(second.path, 'rev-parse', 'HEAD'), answered, 'the rework starts from the registered submission head');
+  git(second.path, 'config', 'user.email', 't@example.com'); git(second.path, 'config', 'user.name', 'T');
+  const reworked = await commit(second.path, 'src/b.ts', 'export const b = 3;\n', 'the rework');
+  work = await engine.execute(worker, 'submit', work.id, completionBody([String(epoch), '--head', reworked], () => reworked), randomUUID());
+  assert.equal(work.candidate?.sha, reworked, 'the reworked adopted item completes --head');
+  assert.equal(work.reworkRequested, false);
+
+  assert.equal(originRefs(), before, 'origin’s refs never moved: nothing was pushed');
+  assert.equal(existsSync(workerPushes), false, 'no worker-ref push reached origin');
+  assert.equal(spawnSync('git', ['-C', checkout, 'rev-parse', '--verify', '-q', `refs/remotes/origin/${adoptedBranch}`]).status === 0, false, 'no worker ref was fetched');
 });
 
 test('unit:shadow-gate-removed — the shadow gate is gone: its modules and routes are deleted, the loop runs no shadow trial step and touches no shadow port, and its report leaves the run summary', { timeout: 120_000 }, async () => {
