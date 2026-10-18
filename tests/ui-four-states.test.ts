@@ -144,7 +144,7 @@ test('unit:ui-four-states-board — the board API and the Work page list only To
   // Where nothing has observed production, the line says so rather than claiming either way.
   const unobserved = renderToStaticMarkup(createElement(ReleaseLine, { status: boardStatus() }))!;
   assert.match(unobserved, /data-release-line="unobserved"/);
-  assert.match(unobserved, /Production has not been observed yet/);
+  assert.match(unobserved, /Release: not watched/);
   // The Work page carries the line in its top bar, at the same place the reader starts.
   assert.match(home(work, { status: status as Dashboard['status'] }), /data-release-line="serving"/);
 });

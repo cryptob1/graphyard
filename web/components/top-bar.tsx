@@ -12,9 +12,10 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
  * status (`production`), the same view the board reads (src/model/release.ts). Health is the
  * watch's own: an open deployment incident is an unhealthy release; a pending count is lag, not
  * ill health. Where nothing has observed production (no watch configured, a failed provider read,
- * an unknown serving commit) the line says so rather than claiming either way. It is plain text,
- * not a live region: it refreshes with every poll, and the page's own `role="status"` regions
- * (loading notices) stay unique for readers and tests.
+ * an unknown serving commit) the line says so rather than claiming either way — "Release: not
+ * watched", never a serving sha or health claim without an observation. It is plain text, not a
+ * live region: it refreshes with every poll, and the page's own `role="status"` regions (loading
+ * notices) stay unique for readers and tests.
  */
 export function ReleaseLine({ status }: { status?: Dashboard['status'] }) {
   const watch = status?.production as { observedAt?: unknown; serving?: unknown; error?: unknown; pending?: unknown; incidents?: unknown } | null | undefined;
@@ -24,7 +25,7 @@ export function ReleaseLine({ status }: { status?: Dashboard['status'] }) {
   return <p className="release-line" data-release-line={observed ? 'serving' : 'unobserved'} data-healthy={observed ? incidents === 0 : undefined} data-pending={observed ? pending : undefined}>
     {observed
       ? <>Serving {shortSha(watch!.serving as string)} · <strong>{incidents ? `unhealthy: ${incidents} open deployment ${incidents === 1 ? 'incident' : 'incidents'}` : 'healthy'}</strong> · {pending} merged {pending === 1 ? 'change' : 'changes'} not carried yet</>
-      : <>Production has not been observed yet</>}
+      : <>Release: not watched</>}
   </p>;
 }
 
