@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -524,7 +524,7 @@ test('unit:proof-and-cli-self-sufficient graphyard complete refused during a Git
 test('unit:durable-test-tmpdir — a suite whose tmpdir is a tmpfs runs under a short directory on disk outside any checkout; any other tmpdir stands (GY-2001)', async () => {
   const home = await scratch('home');
   assert.equal(durableTestTmpdir('/tmp', home, () => ({ type: 0x01021994 })), join(home, '.gy', 'tmp'));
-  assert.ok(existsSync(join(home, '.gy', 'tmp')), 'the directory is made');
+  assert.equal(statSync(join(home, '.gy', 'tmp')).mode & 0o7777, 0o1777, 'the directory is made sticky and shared, as /tmp is');
   assert.equal(durableTestTmpdir('/tmp', home, () => ({ type: 0xef53 })), null, 'a disk tmpdir stands');
   assert.equal(durableTestTmpdir('/tmp', home, () => { throw new Error('ENOENT'); }), null, 'an unreadable tmpdir stands');
 });

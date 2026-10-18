@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { mkdirSync, readdirSync, readFileSync, statfsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readdirSync, readFileSync, statfsSync } from 'node:fs';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -70,13 +70,14 @@ const tmpfsType = 0x01021994;
  * The tmpdir the suite runs under when the caller's is a tmpfs (GY-2001), else null. Graphyard
  * refuses a managed checkout on a tmpfs, so every test that makes one under the tmpdir failed on a
  * host whose /tmp is memory-backed, the merge writer's trials included; CI's /tmp is on disk. The
- * replacement is short (socket paths built under it have a length bound), on disk, and outside any
- * checkout, so no fixture finds a repository or an install above it.
+ * replacement is short (socket paths built under it have a length bound), on disk, outside any
+ * checkout, so no fixture finds a repository or an install above it, and sticky and shared (1777)
+ * as /tmp is, which tests/runner-executor.test.ts requires of the fixture root.
  */
 export function durableTestTmpdir(current = tmpdir(), home = homedir(), statfs: (path: string) => { type: number } = statfsSync): string | null {
   try { if (statfs(current).type !== tmpfsType) return null; } catch { return null; }
   const directory = join(home, '.gy', 'tmp');
-  try { mkdirSync(directory, { recursive: true }); return directory; } catch { return null; }
+  try { mkdirSync(directory, { recursive: true }); chmodSync(directory, 0o1777); return directory; } catch { return null; }
 }
 
 /** The browser suite's historical port, tried first. */
