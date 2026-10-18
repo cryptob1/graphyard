@@ -7,7 +7,7 @@
 
 ### Dispatch order
 
-Within a priority: a submitted attempt (returned rework) precedes unsubmitted items, ahead of starvation/cold/scope; `master status`'s schedule follows.
+Within a priority: a submitted attempt (returned rework) precedes unsubmitted items, ahead of starvation/cold/scope; `master status`'s schedule follows. At most 4 items are in flight: ready work starts only while fewer than 4 are being built or waiting to merge (`Hotfix: …` items exempt) and otherwise waits in Todo until a merge frees a slot.
 
 ### Perpetual master loop
 
@@ -23,7 +23,7 @@ Leases expire 120s after last heartbeat (recorded renewal fault, plane stall: 30
 
 ## Submitted implementation needs rework
 
-Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies 100 deliveries' rounds (55% own-change/33% conflicts; raw median 2); `speed.reworkRounds.ownChange` excludes out-of-item causes.
+Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits. `scripts/rework-causes.mjs` classifies rework rounds; `speed.reworkRounds.ownChange` excludes out-of-item causes.
 
 ## Base-sync conflicts
 
@@ -68,7 +68,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### What a pause means for gates
 
-`403`/`429` pauses stop requests; gates read the last observation until it lifts; GitHub merges on branch protection ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
+`403`/`429` pauses stop requests; gates read the last observation until it lifts ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
 
 ### Reading the budget
 

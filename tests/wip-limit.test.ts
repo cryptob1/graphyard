@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isHotfix, maxInFlight, wipHoldWording } from '../src/model/dispatch.js';
 import { inFlight } from '../src/coordination.js';
-import { fleetHold, actionableSubjects } from '../src/daemon/metrics.js';
+import { actionableSubjects } from '../src/daemon/metrics.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { buildMasterStatus, masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -100,7 +100,7 @@ test('unit:wip-limit — with 4 items implementing or waiting to merge the dispa
   } finally { await loop.cleanup(); }
 });
 
-test('unit:wip-limit — the measure counts a cap-held item under capacity, not the loop\u2019s silence, and master status names the cap', () => {
+test('unit:wip-limit — the measure counts a cap-held item under capacity, not as its own dispatch wait, and master status names the cap', () => {
   const { ready, hotfix, all } = queue();
   const config = daemonConfig('/outside/coordinator.token', []);
   // The dispatch step's own decision (saturation.wipHeld) retitles the wait, the way fleetHeld does (GY-1890).
@@ -109,7 +109,7 @@ test('unit:wip-limit — the measure counts a cap-held item under capacity, not 
   assert.ok(held, 'the held item is still a measured subject');
   assert.equal(held.kind, 'capacity');
   assert.equal(held.detail, `GY-201 ${wipHoldWording.held}`);
-  assert.ok(fleetHold({ kind: held.kind, detail: held.detail }), 'the wait is capacity\u2019s, not the loop\u2019s silence');
+  assert.ok(!subjects.some(entry => entry.work === ready.key && entry.kind === 'dispatch'), 'the cap hold is not counted as a dispatch wait');
   // A hotfix starts whatever the count, so its wait stays the loop's dispatch subject.
   const exempt = subjects.find(entry => entry.work === hotfix.key && entry.kind === 'dispatch')!;
   assert.equal(exempt.kind, 'dispatch');
