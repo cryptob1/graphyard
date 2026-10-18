@@ -915,7 +915,7 @@
     "tests/tmp-reclaim-runtime-scratch-cap.test.ts": 1236,
     "tests/tmp-reclaim-tsx-cache.test.ts": 1500,
     "tests/tmp-reclaim-voice-dirs.test.ts": 2311,
-    "tests/trial-merge.test.ts": 20200,
+    "tests/trial-merge.test.ts": 29500,
     "tests/uat-deploy-guard.test.ts": 1296,
     "tests/uat-digests-observed.test.ts": 1207,
     "tests/uat-follow-up-filing.test.ts": 3000,
