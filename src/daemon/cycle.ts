@@ -5,7 +5,7 @@ import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonA
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
 import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
-import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
+import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
@@ -26,7 +26,6 @@ import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
 import { remedyStep } from './cycle-remedies.js';
 import { mainWatchStep } from './main-watch.js';
-import { shadowStep } from './cycle-shadow.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
@@ -267,8 +266,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 6b'. The control-plane merge executor (GY-1524): open intents reconciled, then one head trial-merged,
   //      tested and pushed with the deploy key beside the cycle; active only under the control-plane merger.
   await timings.step('merge writer', () => cycle.isolate('merge', null, 'merge writer', () => mergeWriterStep(cycle)));
-  // 6c. The shadow merge gate (GY-1522): one head trial-merged and fast-tested beside GitHub's gate; it writes nothing.
-  await timings.step('shadow gate', () => cycle.isolate('merge', null, 'shadow gate', () => shadowStep(cycle)));
   spent('merge');
 
   await timings.step('deployment verification', () => deploymentStep(cycle));
@@ -292,7 +289,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   await settleLaunches();
 
   // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have
-  //    acted on and how long the longest of those has waited, and the passage of every item it
+  //    acted on, and the passage of every item it
   //    watches: ready→claim, ready→first push, approval→merge and how long a mergeable candidate
   //    stayed mergeable. All of it from the snapshot this cycle acted on, so no figure can
   //    disagree with the state that produced it.
@@ -303,11 +300,10 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   }
   // GY-1890: the dispatch step's own saturation report answers whether any launch profile was free
   // when it dispatched. With none free a claimable item's wait is the fleet's slot capacity, so its
-  // silence subject is a capacity one; the bound then files the class that owns slot starvation,
-  // never the loop's. The flag is the step's own stop (`saturatedFleet` in the launch step), not a
-  // recomputation beside it, so what reclasses a subject is what the step decided.
+  // subject is a capacity one; the master session's wake reads the kinds, so a held fleet reads as
+  // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
+  // not a recomputation beside it, so what reclasses a subject is what the step decided.
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
-  const silence = trackSilence(state, actionable, performed, clock);
   const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
@@ -317,7 +313,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // GY-1344: time spent on requests the control plane never answered is the plane's outage, not the loop's work.
   const report = timings.report(), planeWaitMs = Math.min(durationMs - childWaitMs, report.planeWaitMs ?? 0);
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs - planeWaitMs, ...(planeWaitMs ? { planeWaitMs } : {}), steps, timings: report, open: open.length, actions: performed.length,
-    actionable: silence.actionable, idleMs: silence.longestIdleMs, stages, lead, production, postDeploy, postDeployFailures,
+    actionable: actionable.length, stages, lead, production, postDeploy, postDeployFailures,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
   state.cycle += 1;
@@ -335,7 +331,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   });
   pruneDaemonState(state);
   await effects.persist(state);
-  return { actions: performed, metrics, deployment: state.deployment, health, silence, budget: latencyBudget(state.latency), scope: budget };
+  return { actions: performed, metrics, deployment: state.deployment, health, actionable, budget: latencyBudget(state.latency), scope: budget };
 }
 
 /**
@@ -379,7 +375,7 @@ export interface Cycle {
   launch: (kind: DaemonActionKind, item: Work | null, key: string, holds: string[], body: (sink: DaemonAction[]) => Promise<void>) => boolean;
   /** Whether launches outlive this cycle (the loop's launcher), or are settled within it (a cycle run on its own). */
   detached: boolean;
-  /** GY-1890: the dispatch step stopped on a saturated fleet this cycle — no launch profile free while work is claimable, by `saturatedFleet`. The measure reads this, the step's own decision, to count a claimable item's wait under capacity instead of the loop's silence. Absent where the step never stopped. */
+  /** GY-1890: the dispatch step stopped on a saturated fleet this cycle — no launch profile free while work is claimable, by `saturatedFleet`. The measure reads this, the step's own decision, to name a claimable item's wait a capacity subject instead of a dispatch one. Absent where the step never stopped. */
   fleetHeld?: boolean;
   /** The decision histories read on earlier cycles of this loop (GY-1142), which the decisions step keeps while their ledger has not moved. */
   heldDecisions: HeldDecisions;

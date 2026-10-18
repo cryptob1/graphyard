@@ -30,7 +30,7 @@ The control plane is every install's only merge writer: nothing sets another, an
 
 ## Rollout
 
-1. **Shadow mode**: trials beside the GitHub gate, nothing written; `shadowGate` counts agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending; p50/p90; newest ten disagreements.
+1. **Shadow mode**: trials beside the GitHub gate, nothing written; done, and deleted (GY-2087).
 2. **Switch** `control-plane`: done, for every install.
 3. **Run the Snake pilot.**
 4. **After a week**, delete the github-mode gate code.

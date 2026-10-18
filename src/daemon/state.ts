@@ -15,7 +15,7 @@ import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 import { mainWatchStateSchema } from './main-watch.js';
-import { shadowKeptVerdicts, shadowStateSchema } from './cycle-shadow.js'; import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // both lazy: they import this module
+import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -96,10 +96,12 @@ export const cycleMetricsSchema = z.object({
   timings: timingsSchema.optional(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
   /**
-   * What the cycle could act on, and the longest any one of those has gone unacted (see
-   * `silenceReport`). Absent — never zero — on a cycle recorded before the loop measured it.
+   * What the cycle could act on, and nothing else about them: stillness is the progress
+   * watchdog's judgement (`progressAttention` in ./liveness.ts). Absent — never zero — on a cycle
+   * recorded before the loop measured it.
    */
   actionable: z.number().int().min(0).optional(),
+  /** How long the longest unacted subject had waited, while the cursor field stood; never written now, kept so older cursors parse. */
   idleMs: z.number().int().min(0).optional(),
   stages: z.record(z.string(), percentileSchema).default({}),
   lead: percentileSchema,
@@ -227,12 +229,6 @@ export const scopeMeasurementSchema = z.object({
 export type ScopeMeasurement = z.infer<typeof scopeMeasurementSchema>;
 
 export { itemClockSchema, latencySampleSchema, type ItemClock, type LatencySample } from './latency-clock.js';
-
-/** Everything the loop could act on but has not, keyed by kind and item; `since` resets on every action. */
-export const silenceSchema = z.object({
-  subjects: z.record(z.string(), z.object({ since: z.string(), work: z.string().max(40).nullable(), kind: z.string().max(40), detail: z.string().max(500) }).strict()).default({}),
-  lastActionAt: z.string().nullable().default(null),
-}).strict();
 
 /**
  * What the loop last saw of an assignment whose Herdr session is gone: enough for a later cycle
@@ -450,8 +446,8 @@ export const masterSessionSchema = z.object({
   /**
    * Per subject key, the digest of its detail when it was last woken about (or first seen). It is
    * never cut to a count: it tracks exactly the current actionable subjects (pruned to them every
-   * cycle, like `silence.subjects`, which already holds each with its detail), and a digest dropped
-   * for a bound would read as a changed subject and wake the session every cycle with no event.
+   * cycle, each carrying its detail), and a digest dropped for a bound would read as a changed
+   * subject and wake the session every cycle with no event.
    */
   subjects: z.record(z.string().max(60), z.string().max(40)).default({}),
   /**
@@ -519,7 +515,6 @@ export const daemonStateSchema = z.object({
   deployment: deploymentObservationSchema.nullable().default(null),
   promotion: promotionStateSchema.nullable().default(null), // the loop's promotion drive (GY-1302)
   mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits and the promotion freeze; lazy as main-watch.ts imports this module
-  shadow: z.lazy(() => shadowStateSchema).default([]), // GY-1522: the shadow merge gate's last 200 verdicts; lazy as cycle-shadow.ts imports this module
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
@@ -531,8 +526,8 @@ export const daemonStateSchema = z.object({
   memory: hostMemoryStateSchema.nullable().default(null),
   clocks: z.record(z.string(), itemClockSchema).default({}), // per-item passage clocks and the samples they produced: the loop's own latency measurement
   latency: z.array(latencySampleSchema).default([]),
-  /** What is actionable and how long it has gone without an action (see `silenceReport`). */
-  silence: silenceSchema.default({ subjects: {}, lastActionAt: null }),
+  /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and src/daemon/doctor.ts still names it until it drops its `silenceReport` argument. */
+  silence: z.unknown().optional(),
   /** One entry per scope request this loop has decided, for the latency budget it must keep. */
   scope: z.array(scopeMeasurementSchema).default([]),
   /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
@@ -602,14 +597,6 @@ export const daemonStateSchema = z.object({
    * and bounds the record (retainedStepStalls).
    */
   stepStalls: z.record(z.string(), stepStallSchema).default(() => ({})),
-  /**
-   * GY-1855: upstream filings of uncleared stalls, by stall subject: each body composed once at its
-   * first ask and kept until the plane files it, then the filed key. src/daemon/stall-upstream.ts owns the rules and bounds.
-   */
-  stallUpstream: z.object({
-    pending: z.record(z.string().max(40), z.object({ signature: z.string().max(800), step: z.string().max(100), at: z.string(), body: z.string().max(30_000) }).strict()).default(() => ({})),
-    filed: z.record(z.string().max(40), z.object({ key: z.string().max(100), at: z.string() }).strict()).default(() => ({})),
-  }).strict().default(() => ({ pending: {}, filed: {} })),
   /** The item keys the decisions step reached past its time budget last cycle, which this cycle reaches first (GY-1286). */
   decisionsDeferred: z.array(z.string().max(200)).max(5000).default(() => []),
   /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */
