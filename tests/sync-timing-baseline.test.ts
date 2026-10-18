@@ -107,7 +107,7 @@ test('unit:sync-resolves-timing-baseline-conflict \u2014 the base and the branch
     assert.equal(result.code, 0, JSON.stringify(result.output));
     assert.equal(result.output.merged, true); assert.equal(result.output.ok, true);
     assert.deepEqual(result.output.regenerated, [regeneratedEntry]);
-    assert.deepEqual(result.output.files.map((entry: any) => [entry.path, entry.kind]), [[timingBaselinePath, 'in-scope'], ['tests/mid-branch.test.ts', 'in-scope']]);
+    assert.equal(result.output.refused, undefined, 'the merge alone is judged; nothing is classified against plannedFiles');
     assert.equal(git(branch, 'status', '--porcelain'), '', 'the merge is committed');
     assert.equal(git(branch, 'rev-list', '--merges', '--count', 'HEAD'), '1');
     // The merged file holds the base tip's file plus exactly the branch's own test-file line, and

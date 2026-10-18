@@ -18,62 +18,30 @@ export { parkArgs, parkCommand } from './park-command.js';
  * command, so they live beside it rather than in it.
  */
 
-/** The worker half of live scope negotiation: ask, or withdraw, without leaving the lease. */
+/** The one line `scope-request` prints (GY-1991): the plan is not a lock, so there is nothing to request. */
+export const scopeRequestPlanLine = 'plannedFiles is a plan, not a lock: edit the file you need and submit; nothing needs requesting.';
+
+/** The worker half of live scope negotiation, retired (GY-1991): the command posts nothing and returns at once, `--wait` included. */
 export const scopeRequestCommand: CliCommand = {
   name: 'scope-request',
   scope: 'work',
   help: [
-    '  scope-request GY-N EPOCH PATH... -- REASON',
-    '                                Ask to widen plannedFiles with PATH... for a reason; the',
-    '                                widening rule, a review finding or the independent approver',
-    '                                decides it and the attempt keeps its lease. `scope-request',
-    '                                GY-N EPOCH --wait` waits up to 15 minutes, as long as the',
-    '                                approver path takes (run it in the background where a',
-    '                                shell bounds commands shorter), and prints the outcome;',
-    '                                `--wait` among the PATHs files the request and',
-    '                                then waits the same way. Any other argument before -- that',
-    '                                begins with - is refused. `scope-request GY-N EPOCH -`',
-    '                                withdraws the request.',
-    '                                A free-text blocker is never needed for scope',
+    '  scope-request GY-N EPOCH [PATH... -- REASON]',
+    '                                plannedFiles is a plan, not a lock: edit the file you need and',
+    '                                submit; nothing needs requesting. The command files nothing with',
+    '                                the control plane and returns at once, `--wait` included.',
   ],
-  async run(context, work) {
-    const { args, print } = context;
-    const epoch = Number(args[0]);
-    if (!Number.isInteger(epoch) || epoch < 1) throw new Error('Use scope-request GY-N EPOCH PATH... -- REASON, scope-request GY-N EPOCH --wait, or scope-request GY-N EPOCH - to withdraw');
-    if (args[1] === '-') return print(await workMutation(context, work)('scope', { epoch, paths: [], reason: 'Withdrawn by the worker' }));
-    if (args[1] === '--wait' && args.length === 2) return print(await awaitScopeOutcome(context, work, epoch));
-    const { paths, reason, wait } = scopeRequestArgs(args.slice(1));
-    const filed = await workMutation(context, work)('scope', { epoch, paths, reason });
-    if (!wait) return print(filed);
-    // `--wait` among the paths files the request first and then waits on it, as the first-position
-    // form waits on one already filed (GY-522); the filed item carries the request the wait reads.
-    return print(await awaitScopeOutcome(context, filed as Work, epoch));
+  async run(context) {
+    context.print(scopeRequestPlanLine);
   },
 };
 
 /**
- * The arguments of a scope request after EPOCH: PATH... before `--`, the REASON after it. `--wait`
- * may stand anywhere before `--` and asks to wait for the outcome once the request is filed; any
- * other argument there that begins with '-' is a flag this command does not have, and is refused
- * by name rather than recorded as a planned path (GY-522).
- */
-export function scopeRequestArgs(args: readonly string[]) {
-  const separator = args.indexOf('--');
-  const before = args.slice(0, separator < 0 ? args.length : separator);
-  const reason = separator < 0 ? '' : args.slice(separator + 1).join(' ').trim();
-  const wait = before.includes('--wait');
-  const paths = before.filter(arg => arg !== '--wait');
-  const flag = paths.find(arg => arg.startsWith('-'));
-  if (flag !== undefined) throw new Error(`scope-request does not accept ${flag}: only --wait may stand before --, and a PATH never begins with '-'`);
-  if (!paths.length || !reason) throw new Error('Name at least one PATH outside plannedFiles and give a REASON after --');
-  return { paths, reason, wait };
-}
-
-/**
- * GY-1484. How long `scope-request --wait` waits by default: the whole bound the loop settles a scope
+ * GY-1484. How long `scope-request --wait` waited by default: the whole bound the loop settles a scope
  * ask in, so a refusal the rule defers to the independent approver — routed, judged within the
  * approver's ten-minute bound and applied — is read in the one wait instead of reported pending
  * while the approval is still on its way, which led workers to give the ask up before it landed.
+ * The command no longer waits (GY-1991); the bound remains the one old requests' outcomes are read under.
  */
 export const scopeRequestWaitMs = scopeBlockedBudgetMs;
 /**
