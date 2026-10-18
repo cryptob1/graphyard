@@ -144,7 +144,7 @@ async function loopCycle(state: ReturnType<typeof emptyDaemonState>, ports: Merg
     snapshot: async () => ({ work: await served(), now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github, merge: github, shadow: null, mergeWriter: { ...ports, merger: async () => 'control-plane' }, decide: async () => ({ id: randomUUID() }) } as unknown as DaemonEffects;
+    github, merge: github, mergeWriter: { ...ports, merger: async () => 'control-plane' }, decide: async () => ({ id: randomUUID() }) } as unknown as DaemonEffects;
   await runCycle(loopConfig, state, effects, () => Date.now());
   await mergeWriterIdle(state);
 }
