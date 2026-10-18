@@ -358,11 +358,14 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
-test('unit:workspace-failure-spares-profile — a rework whose local branch moved or is missing releases the claim as a workspace failure before anything is reserved', async () => {
+test('unit:workspace-failure-spares-profile — a rework whose registered start object is missing or unregistered releases the claim as a workspace failure before anything is reserved', async () => {
   const root = await host();
+  const origin = await temporaryDirectory('branch-lock-origin');
   try {
+    execFileSync('git', ['clone', '-q', '--bare', root, origin]);
+    execFileSync('git', ['remote', 'add', 'origin', origin], { cwd: root });
     const branch = 'graphyard/gy-870-1';
-    execFileSync('git', ['branch', '-q', branch, 'main'], { cwd: root });
+    execFileSync('git', ['--git-dir', origin, 'branch', branch, 'main']);
     const command = workspaceCommands.find(entry => entry.name === 'worktree')!;
     const drive = async (work: Record<string, unknown>) => {
       const calls: Array<[string, unknown]> = [];
@@ -374,18 +377,18 @@ test('unit:workspace-failure-spares-profile — a rework whose local branch move
       const outcome = await command.run(context, { id: 'work-870', key: 'GY-870', submission: { epoch: 1, pr: 7 }, workspaces: [{ epoch: 1, branch }], ...work }).then(() => null, (error: Error) => error);
       return { calls, outcome };
     };
-    // The worker's local branch holds a head the candidate is not (GY-2035: origin is never asked).
-    const moved = await drive({ candidate: { sha: 'f'.repeat(40) } });
-    assert.match(moved.outcome?.message ?? '', /Submitted PR branch changed.*released as a workspace failure/);
-    assert.deepEqual(moved.calls.map(([path]) => path), ['status', 'work/work-870/release'], 'the claim is released, and nothing is reserved');
-    assert.match((moved.calls[1][1] as { failure: { message: string } }).failure.message, /Submitted PR branch changed/);
-    assert.equal((moved.calls[1][1] as { epoch: number }).epoch, 2);
-    // A branch that is gone holds no candidate either.
-    const missing = await drive({ workspaces: [{ epoch: 1, branch: 'graphyard/gy-870-9' }], candidate: { sha: 'f'.repeat(40) } });
-    assert.match(missing.outcome?.message ?? '', /Submitted PR branch changed.*released as a workspace failure/);
-    assert.deepEqual(missing.calls.map(([path]) => path), ['status', 'work/work-870/release']);
-    assert.ok(workspaceDispatchFailure(missing.outcome!.message) && workspaceDispatchFailure(moved.outcome!.message), 'both are workspace failures to the loop');
-  } finally { await rm(root, { recursive: true, force: true }); }
+    // A registered head the shared object store does not hold: nothing the store has answers for it, and the registered branch is gone.
+    const missing = await drive({ candidate: { sha: 'f'.repeat(40) } });
+    assert.match(missing.outcome?.message ?? '', /missing from the shared object store.*released as a workspace failure/);
+    assert.deepEqual(missing.calls.map(([path]) => path), ['status', 'work/work-870/release'], 'the claim is released, and nothing is reserved');
+    assert.match((missing.calls[1][1] as { failure: { message: string } }).failure.message, /missing from the shared object store/);
+    assert.equal((missing.calls[1][1] as { epoch: number }).epoch, 2);
+    // No start object is registered at all: no head is bound, and the store holds no branch by the workspace's name.
+    const unregistered = await drive({ workspaces: [{ epoch: 1, branch: 'graphyard/gy-870-9' }] });
+    assert.match(unregistered.outcome?.message ?? '', /No start object is registered for graphyard\/gy-870-9/);
+    assert.deepEqual(unregistered.calls.map(([path]) => path), ['status', 'work/work-870/release']);
+    assert.ok(workspaceDispatchFailure(unregistered.outcome!.message) && workspaceDispatchFailure(missing.outcome!.message), 'both are workspace failures to the loop');
+  } finally { await rm(root, { recursive: true, force: true }); await rm(origin, { recursive: true, force: true }); }
 });
 
 /** `git rev-parse --git-path` resolved inside the worktree it was asked in. */

@@ -4,7 +4,6 @@ import { cp, lstat, mkdir, open, readFile, rename, unlink } from 'node:fs/promis
 import { basename, dirname, resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
-import { submittedBranchMoved } from '../model/assignment.js';
 import { branchHolders, heldBranchRefusal, holderRefusals } from '../worktree-holders.js';
 import { failureText, worktreesDirectory } from './worktrees.js';
 
@@ -205,17 +204,24 @@ export async function releaseUnderFailure(mutate: (name: string, data: unknown) 
 }
 
 /**
- * GY-860 AC-2, GY-2035: why a rework workspace may not start from the submitted PR branch, or null
- * when it may. The workspace starts from the worker's local branch, so the local head alone
- * decides: one that is missing, or holds anything but the submitted candidate, refuses with the
- * existing message. Origin is never asked — no fetch, no push, whatever it holds for the branch
- * (GY-1753's push of a local-only head is gone): workers' branches never touch origin, the merge
- * writer is the only git network user, and a stale remote-tracking ref is never a start point.
+ * GY-2017: the head a rework workspace starts from, resolved from the shared object store alone.
+ * Workers commit locally and the control plane registers the head they submitted, so the attempt
+ * restarts from that registered head: the candidate's sha when the item still holds one, else the
+ * registered branch's own tip, which a requirements revision that cleared the candidate leaves
+ * holding it. The registered branch is never fetched or pushed — origin may lack it or hold a
+ * stale one from the legacy flow, and only the merge writer pushes — so both refusals this read
+ * can name are local facts: an object nothing registered, and a registration the store does not
+ * hold. An interrupted attempt's commits past the registered head are the partial work the
+ * reservation preserves; the workspace still starts from the registered head, never from them.
  */
-export async function submittedBranchRefusal(root: string, branch: string, candidateSha: string | undefined, run: ChildRun): Promise<string | null> {
-  let sha = '';
-  try { sha = String(await run('git', ['rev-parse', '--verify', `refs/heads/${branch}`], { cwd: root })).trim(); } catch { /* a branch that is gone holds no candidate */ }
-  return !candidateSha || sha !== candidateSha ? submittedBranchMoved : null;
+export async function registeredReworkHead(root: string, branch: string, registered: string | undefined, run: ChildRun): Promise<string> {
+  const verify = async (ref: string) => { try { return String(await run('git', ['rev-parse', '--verify', ref], { cwd: root })).trim(); } catch { return ''; } };
+  const tip = await verify(`refs/heads/${branch}`);
+  const head = registered || tip;
+  if (!head) throw new Error(`No start object is registered for ${branch}: the item holds no submitted head and the shared object store holds no branch by that name`);
+  if (head !== tip && await verify(`${head}^{commit}`) !== head)
+    throw new Error(`The registered start object ${head.slice(0, 12)} is missing from the shared object store (refs/heads/${branch} ${tip ? `holds ${tip.slice(0, 12)}` : 'is gone'}), so no rework workspace can start from it`);
+  return head;
 }
 
 /**
