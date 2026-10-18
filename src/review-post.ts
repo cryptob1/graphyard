@@ -110,9 +110,9 @@ export function changedHunks(diff: string): Map<string, Array<[number, number]>>
     // A hunk that only deletes lines (`@@ -40,3 +39,0 @@`) changes the code around its position: a finding
     // on the deleted lines names one of them, so it counts as [max(1, start), start + 1]; when nothing
     // remains on the new side (+0,0, a wholly deleted file), the lines it lost are its old-side ones.
-    const deleted = count === 0 ? (start > 0 ? [Math.max(1, start), start + 1] : [Number(hunk[1]!), Number(hunk[1]!) + (hunk[2] === undefined ? 1 : Number(hunk[2]!)) - 1]) : null;
-    const range: [number, number] = deleted ?? [start, start + count - 1];
-    hunks.set(path!, [...(hunks.get(path!) ?? []), range]);
+    const first = Number(hunk[1]!), lost = (hunk[2] === undefined ? 1 : Number(hunk[2]!)) - 1;
+    const deleted: [number, number] | null = count === 0 ? (start > 0 ? [Math.max(1, start), start + 1] : [first, first + lost]) : null;
+    hunks.set(path!, [...(hunks.get(path!) ?? []), deleted ?? [start, start + count - 1]]);
   }
   return hunks;
 }
