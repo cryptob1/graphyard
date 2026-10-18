@@ -25,11 +25,11 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
 ```
 
-`GRAPHYARD_CI_PRODUCER_TOKEN`, `GRAPHYARD_URL` in default-branch-only `graphyard-reporting` environment; `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into live roster (`--remove ID`, `--rotate ID`, `--deploy`).
+`GRAPHYARD_CI_PRODUCER_TOKEN`, `GRAPHYARD_URL` in default-branch-only `graphyard-reporting` environment; `scripts/configure-integrations.mjs --apply` merges `.graphyard/credentials.json` into live roster (`--remove`, `--rotate`, `--deploy`).
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy `production` shows `aheadBy`, `rollingOut: true`, no attention. Deployments: Railway's API (`RAILWAY_API_TOKEN`/`RAILWAY_TOKEN`), else GitHub's ([environment name](#production-environment-name)). A fresh `master verify-deployment` (`servingSource: endpoint`) outranks a lagging list, the build's `/healthz` commit (`servingSource: build`) both. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses observations `run.deploymentReuseMinutes` (15; `0` every cycle).
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy `production` shows no attention. Deployments: Railway's API, else GitHub's ([environment name](#production-environment-name)). A fresh `master verify-deployment` outranks a lagging list and the build's `/healthz` commit. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses observations `run.deploymentReuseMinutes` (15; `0` every cycle).
 
 Release lag and `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades await production serving them (`release-lagged`, `upgrade:held`); `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, loops to it; held executors' owed restarts aren't faults.
 
@@ -37,7 +37,7 @@ Observing a release reports post-deploy checks it does not yet see; nothing is f
 
 ### Deployment incident
 
-Railway deploys `release/production` in ~1min. `/healthz` `commit` at tip: `graphyard master verify-deployment GY-N` per pending delivery; else `railway deployment list --service graphyard --environment production` shows failures; redeploy ([manual fallback](#manual-fallback)), verify.
+Railway deploys `release/production` in ~1min. `/healthz` `commit` at tip: `graphyard master verify-deployment GY-N` per pending delivery; else `railway deployment list` shows failures; redeploy ([manual fallback](#manual-fallback)), verify.
 
 #### Production environment name
 
@@ -49,7 +49,7 @@ Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup ./graphyard.json` (`DATABASE_URL`), `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `graphyard version`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback**: older-schema images refuse to start. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
+**Backup:** `graphyard db backup ./graphyard.json`, `graphyard db verify FILE`; `graphyard db fence` before move (`--release` undoes). **Upgrade:** back up, deploy, check `graphyard version`, run [App-permission migrations](install.md#upgrading-an-existing-installation); **rollback**: older-schema images refuse to start; state (`master.json`, connection, cursor) keeps newer fields. **Restore:** `graphyard db migrate` empty database, `graphyard db restore FILE`.
 
 ## Manual fallback
 

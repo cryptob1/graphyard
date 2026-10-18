@@ -15,13 +15,15 @@ import { executorRunnableKinds, type NextActionKind } from './model/action-kinds
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { renderReleasePipeline } from './install/release-pipeline.js';
 import { assertUnitOwned, ForeignUnitRefusal, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
-import { coordinatorCheckoutRoot } from './master/profiles.js';
+import { coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
 import { herdrSync } from './herdr-host.js';
 
 export const hostIdSchema = z.string().trim().min(1).max(200);
-export const connectionSchema = z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict();
+// GY-1960: connection.json is forward-tolerant — a field a newer CLI wrote that this one does not
+// declare parses and is written back unchanged (setupRepository keeps the undeclared keys).
+export const connectionSchema = forwardTolerant(z.object({ url: z.string(), cliPath: z.string(), hostId: hostIdSchema, token: z.string().min(32).optional(), principal: z.string().optional() }).strict());
 export type Connection = z.infer<typeof connectionSchema>;
 export function serverOrigin(value: string) {
   const url = new URL(value);
@@ -246,7 +248,17 @@ export async function setupRepository(root: string, input: Connection, options: 
   const herdrRelink = herdrBoundElsewhere(herdrBound, connection.url) ? herdrBound!.bound : null;
   if (herdrRelink && !options.herdrRebind) throw new Error(herdrRebindRefusal(herdrRelink, connection.url));
   const directory = await localDirectory(connectionRoots(root)[0]);
-  await atomicWrite(resolve(directory, 'connection.json'), JSON.stringify(connection, null, 2), 0o600);
+  // GY-1960: setup rewrites connection.json whole from the fields this version declares, so an
+  // older or held CLI rerunning it keeps what a newer CLI wrote: only the keys this version does
+  // not declare ride under these updates. A declared key is never kept — a token or principal
+  // setup left out on purpose (a newly selected server, install.ts) stays out. A file that cannot
+  // be read or parsed is overwritten as before — setup is also the repair path for a corrupt one.
+  let kept: Record<string, unknown> = {};
+  try {
+    const existing = connectionSchema.parse(JSON.parse(await readFile(resolve(directory, 'connection.json'), 'utf8')));
+    kept = Object.fromEntries(Object.entries(existing).filter(([key]) => !(key in connectionSchema.shape)));
+  } catch { /* nothing kept */ }
+  await atomicWrite(resolve(directory, 'connection.json'), JSON.stringify({ ...kept, ...connection }, null, 2), 0o600);
   let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }
   await atomicWrite(instructionsFile, instructions, instructionsMode);
   const discovery = await saveDiscovery(root);
