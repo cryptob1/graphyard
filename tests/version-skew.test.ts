@@ -19,6 +19,8 @@ import { createContext, releaseSkew, versionSkewMessage } from '../src/cli/conte
 import { loadStoredMasterConfig, masterConfigSchema } from '../src/master.js';
 import { loadConnection, setupRepository } from '../src/repository-setup.js';
 import { daemonStatePath, emptyDaemonState, readDaemonState, writeDaemonState } from '../src/daemon/state.js';
+import { carryUndeclared } from '../src/daemon/state-cursor.js';
+import { noteConfigReload } from '../src/master-daemon.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const exec = promisify(execFile);
@@ -275,4 +277,21 @@ test('unit:state-files-forward-tolerant — the daemon cursor reads and writes u
   // Declared fields still validate: a malformed one refuses the read as before.
   await writeFile(file, JSON.stringify({ ...base, futureTop, cycle: 'seven' }));
   await assert.rejects(readDaemonState(root, master));
+});
+
+test('unit:state-files-forward-tolerant — the loop\'s own rewrites of its release and reload records keep the unknown fields nested under them', async () => {
+  const root = await gitRepository('skew-cursor-records');
+  const master = masterConfigSchema.parse(masterConfig(await writeCoordinatorCredential('skew-cursor-records')));
+  const file = daemonStatePath(master);
+  const futureRelease = { builtBy: 'a newer loop' }, futureReload = { since: 'a newer loop' };
+  await writeFile(file, JSON.stringify({ ...emptyDaemonState(master), release: { commit: sha40('a'), dirty: false, futureRelease }, config: { at: 'newer-loop', changed: [], refused: null, futureReload } }));
+  const state = await readDaemonState(root, master);
+  const persist = (current: typeof state) => writeDaemonState(master, current);
+  // A reload replaces the record's declared reading; the unknown field rides under it.
+  await noteConfigReload(state, { config: master, changed: ['maxWorkers'], at: '2030-01-01T00:00:00.000Z', refused: null }, persist);
+  const written = JSON.parse(await readFile(file, 'utf8'));
+  assert.deepEqual(written.config.futureReload, futureReload, 'the reload record keeps the unknown field');
+  assert.deepEqual(written.config.changed, ['maxWorkers'], 'the reload record names this reload');
+  assert.deepEqual(carryUndeclared(state.release, { commit: sha40('b'), dirty: false }), { commit: sha40('b'), dirty: false, futureRelease }, 'a release this process loaded keeps the unknown field under its own commit');
+  assert.equal(carryUndeclared(state.release, null), null, 'an unknown release clears the record as before');
 });

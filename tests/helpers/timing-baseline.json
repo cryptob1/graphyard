@@ -786,6 +786,7 @@
     "tests/soak-control-plane-observation-job.test.ts": 1500,
     "tests/soak-control-plane-observation.test.ts": 9000,
     "tests/soak-control-plane-switches.test.ts": 3000,
+    "tests/soak-cursor-forward-fields.test.ts": 15000,
     "tests/soak-day.test.ts": 112848,
     "tests/soak-decision-fault-restatements.test.ts": 60389,
     "tests/soak-decision-faults-settled.test.ts": 150000,

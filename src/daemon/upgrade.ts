@@ -15,6 +15,7 @@ import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
 import { promotionHolds, promotionWait } from '../master/release-lag.js';
+import { carryUndeclared } from './state-cursor.js';
 import { storeAction, touchStanding, message, type DaemonState, type UpgradeStallCause } from './state.js';
 import { detailChanged } from './decisions.js';
 import { checkoutState, loopCodeRoot, reconcileLoadedRelease, unquotePath, type CheckoutState } from './checkout-state.js';
@@ -173,13 +174,13 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const snapshot = relative(heldCliSnapshots(codeRoot), deps.loadedFrom ?? fileURLToPath(import.meta.url)).split(sep)[0];
   if (snapshot && snapshot !== '..' && !isAbsolute(snapshot)) {
     const commit = await Promise.resolve(deps.run('git', ['-C', join(heldCliSnapshots(codeRoot), snapshot), 'rev-parse', 'HEAD'])).then(out => out.trim(), () => '');
-    if (commit && state.release?.commit !== commit) state.release = { commit, dirty: false };
+    if (commit && state.release?.commit !== commit) state.release = carryUndeclared(state.release, { commit, dirty: false });
   } else if (state.release?.commit) {
     // GY-1899: the release the loop records is the CLI checkout's own reading, never the managed
     // repository's HEAD a startup read of the wrong root wrote; the cursor names the checkout the
     // loop runs, which the master-loop check and doctor read.
     const corrected = await reconcileLoadedRelease(codeRoot, state.release, deps.run);
-    if (corrected) { state.release = corrected; await persist(); }
+    if (corrected) { state.release = carryUndeclared(state.release, corrected); await persist(); }
   }
   const note = async (detail: string, failure: boolean, actionKey = key) => {
     storeAction(state, actionKey, { kind: 'config', work: null, principal: null, state: failure ? 'failed' : 'done', detail, attempts: (state.actions[actionKey]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });

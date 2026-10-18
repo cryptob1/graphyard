@@ -21,6 +21,12 @@ export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of
  */
 let tolerated: typeof daemonStateSchema | undefined;
 const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSchema);
+/**
+ * GY-1960: a cursor record the loop rewrites from what it declares (its release, its latest
+ * reload) keeps the fields a newer loop wrote under it. `next` sets every declared field, so only
+ * the undeclared ones of `previous` survive under it; a null `next` clears the record as before.
+ */
+export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
 export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
 /** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
