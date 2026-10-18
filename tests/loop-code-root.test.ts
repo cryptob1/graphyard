@@ -169,6 +169,23 @@ test('unit:loop-reports-cli-checkout-commit — loopCodeRoot names the launcher\
   assert.equal(loopCodeRoot(launcher, '/srv/repo'), '/srv/repo');
 });
 
+test('unit:checkout-guard-never-judges-the-suite-checkout — a suite standing under a temporary directory is still never a test\u2019s code root (GY-2018)', async () => {
+  // GY-2018: the merge writer's trial runs this suite from a short checkout on a durable root —
+  // /var/tmp here, which the guard's own gate names a temporary directory. At 9bc46db8 that gate
+  // judged the suite's own checkout, so every fixture config's launcher resolved to the suite's
+  // tree instead of the fixture it injected, and eight proofs across loop-code-root, loop-faults,
+  // loop-self-upgrade and executor-supervision failed on the base tip itself. A trial-shaped
+  // checkout held to the rule through the seam the fix carries fails there and passes here.
+  const trialCheckout = await temporaryDirectory('gy-2018-trial');
+  assert.equal(loopCodeRoot(join(trialCheckout, 'bin', 'graphyard.mjs'), '/srv/repo', trialCheckout), '/srv/repo', 'the suite checkout standing under a temporary directory is its own, never a judged one');
+  // The process's own working directory is what a bare launcher name resolves to; under the trial
+  // that is the trial checkout, and the default seam names it so it is refused here too.
+  assert.equal(loopCodeRoot('graphyard', '/srv/repo'), '/srv/repo');
+  // The exclusion is the suite's checkout alone: a fixture under a temporary directory is still judged.
+  const fixtureCheckout = await temporaryDirectory('gy-2018-fixture');
+  assert.equal(loopCodeRoot(join(fixtureCheckout, 'bin', 'graphyard.mjs'), '/srv/repo', trialCheckout), fixtureCheckout);
+});
+
 test('unit:upgrade-acts-on-cli-checkout-only — the upgrade fetches, diffs and moves the CLI checkout and leaves the managed repository\u2019s HEAD and working tree untouched', async () => {
   // GY-1958: the managed repository is another clone of the checkout's own origin — the fork shape
   // the upgrade still aligns — so the pass fetches and moves the CLI checkout, and the managed

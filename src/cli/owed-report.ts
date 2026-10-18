@@ -6,6 +6,9 @@ import { decideScopeRequest, scopeRefusalBlocker } from '../model/scope.js';
 import { scopeAskCommand } from '../model/scope-provenance.js';
 import { elapsed } from '../model/sessions.js';
 import { maxDecisionRequests } from '../daemon/decisions.js';
+import { trialRefusal } from '../model/gates.js';
+import { openAction } from '../model/concerns.js';
+import type { MergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { staleRelease, staleReleaseWaitBoundMs, unappliedReleases, type DecisionHistoryRow } from '../model/stale-release.js';
 
 /**
@@ -84,12 +87,96 @@ export function routedScopeStatus<S extends { work: { key: string; attention: st
  * beside an action that is running. Each names what is waiting, how long it has waited and the
  * command that answers it.
  */
-export function humanNeededAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
-  return humanNeededActions(snapshot.work, new Date(snapshot.now)).map(row => ({
-    subject: row.key,
-    text: `${row.reason} — no executor may run it; ${row.decision} has been owed for ${elapsed(row.waitedMs)}`,
-    ...agentOwner('master', row.resolve, 'approver'),
-  }));
+export function humanNeededAttention(snapshot: { work: Work[]; now: string }, writer?: MergeWriterSummary | null): AttentionItem[] {
+  const now = Date.parse(snapshot.now);
+  return humanNeededActions(snapshot.work, new Date(snapshot.now)).flatMap(row => {
+    // GY-2015: a test-gate trial refusal whose head the merge writer's queue holds is the writer's
+    // own serial work — the line's only answerer is the writer reaching the head, not a judgment
+    // nobody takes — so while the writer moves the line carries `inMotionUntil` past its newest
+    // movement's bound (GY-1315), and when the writer itself cannot move past that bound the
+    // queue's one stall line (mergeWriterStallAttention) stands instead of it and of every
+    // per-item line beside it. A trial refusal whose head the queue does not hold, and every
+    // other owed line, stand as they did.
+    const work = row.source === 'action' ? snapshot.work.find(entry => entry.key === row.key) : undefined;
+    const held = work ? mergeWriterHoldsTrial(work, writer, now) : null;
+    if (held === 'stalled') return [];
+    const item: AttentionItem = { subject: row.key,
+      text: `${row.reason} — no executor may run it; ${row.decision} has been owed for ${elapsed(row.waitedMs)}`,
+      ...agentOwner('master', row.resolve, 'approver') };
+    if (held === 'moving') item.inMotionUntil = new Date(mergeWriterMovement(writer)!.at + mergeWriterMotionBoundMs).toISOString();
+    return [item];
+  });
+}
+
+/**
+ * GY-2015. How long a merge writer's newest demonstrated movement may stand before a trial wait it
+ * owns counts as a decision fault. The writer's trials are one at a time (mergeQueue: oldest first,
+ * an open intent blocks the queue), each bounded by the shadow gate's timeout, so a head refused
+ * `merge writer has not trialled …` waits for the writer to reach it, not for a judgment; the
+ * bound covers a settled trial plus the next cycle's start at the default timeout, and an install
+ * that lengthens the timeout keeps a trial in flight, which is movement on its own.
+ */
+export const mergeWriterMotionBoundMs = 30 * 60_000;
+
+/**
+ * The writer's newest demonstrated step — a trial begun, a delivery, a refusal recorded, a trial
+ * failure whose rework was requested — or null when it names none (GY-2015, the GY-1966 reading):
+ * the newest of the facts the writer's own summary holds, in the reader's words, so the stall it
+ * bounds names what the loop last saw the writer do.
+ */
+export function mergeWriterMovement(writer: MergeWriterSummary | null | undefined): { at: number; what: string } | null {
+  if (!writer) return null;
+  let at = Number.NaN, what = '';
+  const consider = (instant: string | null | undefined, text: () => string) => {
+    const parsed = instant ? Date.parse(instant) : Number.NaN;
+    if (Number.isFinite(parsed) && (Number.isNaN(at) || parsed >= at)) { at = parsed; what = text(); }
+  };
+  const flight = writer.inFlight;
+  consider(flight?.startedAt, () => `the trial of ${flight!.key}'s head ${flight!.head.slice(0, 12)} started ${flight!.startedAt} and is in flight`);
+  consider(writer.lastMergeAt, () => `the last merge was delivered ${writer.lastMergeAt}`);
+  const refusal = writer.refusals.at(-1);
+  consider(refusal?.at, () => `the newest refusal was recorded ${refusal!.at}: ${refusal!.key} ${refusal!.reason.slice(0, 120)}`);
+  const rework = writer.reworks.at(-1);
+  consider(rework?.refusedAt, () => `the newest trial failure was recorded ${rework!.refusedAt}: ${rework!.key}'s rework is requested`);
+  return Number.isNaN(at) ? null : { at, what };
+}
+
+/**
+ * Whether the writer holds the head an item's trial refusal names: its test-gate refusal is that
+ * candidate's exact `merge writer has not trialled …`, and the writer's queue holds the head —
+ * the writer knows it and will trial it. Held and moving (a trial in flight, or any recorded
+ * movement inside the bound), it is the writer's work; held with no trial in flight and no
+ * movement past the bound, the writer itself cannot move and the queue's one stall stands for it.
+ * A trial refusal whose head the queue does not hold is a genuine unanswered decision: the writer
+ * will never reach that head on its own.
+ */
+export function mergeWriterHoldsTrial(work: Work, writer: MergeWriterSummary | null | undefined, now: number): 'moving' | 'stalled' | null {
+  if (!writer) return null;
+  const candidate = work.candidate, action = openAction(work);
+  if (!candidate || !action || action.gate !== 'test' || action.refusal !== trialRefusal(candidate.sha, candidate.baseSha)) return null;
+  if (!writer.queue.some(entry => entry.key === work.key && entry.head === candidate.sha.toLowerCase())) return null;
+  const movement = mergeWriterMovement(writer);
+  return !writer.inFlight && (!movement || now - movement.at > mergeWriterMotionBoundMs) ? 'stalled' : 'moving';
+}
+
+/**
+ * GY-2015: the one writer-level stall that stands for a queue the merge writer cannot move, in
+ * place of an owed decision per held head. It counts only past the movement bound — the ordinary
+ * pace of a serial trial backlog is movement, however long the whole queue takes — and its text
+ * names the writer's newest movement or its absence, and the front head's wait, so the master
+ * reads what stopped rather than a symptom per item.
+ */
+export function mergeWriterStallAttention(writer: MergeWriterSummary | null | undefined, now: number): AttentionItem | null {
+  if (!writer || !writer.queue.length || writer.inFlight) return null;
+  const movement = mergeWriterMovement(writer);
+  if (movement && now - movement.at <= mergeWriterMotionBoundMs) return null;
+  const front = writer.queue[0]!;
+  const since = movement
+    ? `its newest movement is ${movement.what}, ${Math.max(0, Math.round((now - movement.at) / 60_000))} minutes ago`
+    : 'it names no movement at all';
+  return { subject: 'merge-writer', kind: 'stalled-step',
+    text: `The merge writer's queue holds ${writer.queue.length} head(s) it cannot move: no trial is in flight and ${since}; ${front.key}'s head ${front.head.slice(0, 12)} has waited ${Math.round(front.waitingMs / 60_000)} minutes at the front. One stall stands for the queue instead of an owed decision per head`,
+    ...agentOwner('master', 'Nothing to run per item: the queue\'s only mover is the loop\'s merge-writer step. Check the loop is cycling (master status names its liveness; systemctl --user restart graphyard-master.service restarts a stopped loop) and file the merge-writer defect that left its queue unmoved') };
 }
 
 /**
@@ -109,9 +196,13 @@ export function needsHumanActions<T extends { waiting: { id: string }[]; idle: {
  * item says this once, and the rest would be named nowhere at all — and how many attention lines
  * the owed items and scope requests add to the total.
  */
-export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { key: string; attention: string | null; routedScope?: string }[], scopeRequests: AttentionItem[]) {
+export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { key: string; attention: string | null; routedScope?: string }[], scopeRequests: AttentionItem[], writer?: MergeWriterSummary | null) {
+  const now = Date.parse(snapshot.now);
   const rowAttention = (key: string) => !!rows.find(row => row.key === key)?.attention;
-  const items = humanNeededAttention(snapshot).filter(item => !rowAttention(item.subject));
+  // GY-2015: the writer stall stands for a queue the writer cannot move, beside the per-item owed
+  // lines it replaces (held heads are dropped from humanNeededAttention while it stands).
+  const stall = mergeWriterStallAttention(writer, now);
+  const items = [...(stall ? [stall] : []), ...humanNeededAttention(snapshot, writer).filter(item => !rowAttention(item.subject))];
   // The rule refusal's escalation of a request the approver is judging is answered by that decision.
   const routed = (key: string) => rows.find(row => row.key === key)?.routedScope;
   return { rows: humanNeededActions(snapshot.work, new Date(snapshot.now)).map(row => row.source === 'action' && routed(row.key)
