@@ -358,7 +358,7 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
-test('unit:workspace-failure-spares-profile — a rework whose PR branch moved or cannot be fetched releases the claim as a workspace failure before anything is reserved', async () => {
+test('unit:workspace-failure-spares-profile — a rework whose registered start object is missing or unregistered releases the claim as a workspace failure before anything is reserved', async () => {
   const root = await host();
   const origin = await temporaryDirectory('branch-lock-origin');
   try {
@@ -377,17 +377,17 @@ test('unit:workspace-failure-spares-profile — a rework whose PR branch moved o
       const outcome = await command.run(context, { id: 'work-870', key: 'GY-870', submission: { epoch: 1, pr: 7 }, workspaces: [{ epoch: 1, branch }], ...work }).then(() => null, (error: Error) => error);
       return { calls, outcome };
     };
-    // The PR branch moved past the head Graphyard observed.
-    const moved = await drive({ candidate: { sha: 'f'.repeat(40) } });
-    assert.match(moved.outcome?.message ?? '', /Submitted PR branch changed.*released as a workspace failure/);
-    assert.deepEqual(moved.calls.map(([path]) => path), ['status', 'work/work-870/release'], 'the claim is released, and nothing is reserved');
-    assert.match((moved.calls[1][1] as { failure: { message: string } }).failure.message, /Submitted PR branch changed/);
-    assert.equal((moved.calls[1][1] as { epoch: number }).epoch, 2);
-    // The PR branch cannot be fetched at all.
-    const missing = await drive({ workspaces: [{ epoch: 1, branch: 'graphyard/gy-870-9' }], candidate: { sha: 'f'.repeat(40) } });
-    assert.match(missing.outcome?.message ?? '', /Git worktree creation failed while fetching graphyard\/gy-870-9/);
-    assert.deepEqual(missing.calls.map(([path]) => path), ['status', 'work/work-870/release']);
-    assert.ok(workspaceDispatchFailure(missing.outcome!.message) && workspaceDispatchFailure(moved.outcome!.message), 'both are workspace failures to the loop');
+    // A registered head the shared object store does not hold: nothing the store has answers for it, and the registered branch is gone.
+    const missing = await drive({ candidate: { sha: 'f'.repeat(40) } });
+    assert.match(missing.outcome?.message ?? '', /missing from the shared object store.*released as a workspace failure/);
+    assert.deepEqual(missing.calls.map(([path]) => path), ['status', 'work/work-870/release'], 'the claim is released, and nothing is reserved');
+    assert.match((missing.calls[1][1] as { failure: { message: string } }).failure.message, /missing from the shared object store/);
+    assert.equal((missing.calls[1][1] as { epoch: number }).epoch, 2);
+    // No start object is registered at all: no head is bound, and the store holds no branch by the workspace's name.
+    const unregistered = await drive({ workspaces: [{ epoch: 1, branch: 'graphyard/gy-870-9' }] });
+    assert.match(unregistered.outcome?.message ?? '', /No start object is registered for graphyard\/gy-870-9/);
+    assert.deepEqual(unregistered.calls.map(([path]) => path), ['status', 'work/work-870/release']);
+    assert.ok(workspaceDispatchFailure(unregistered.outcome!.message) && workspaceDispatchFailure(missing.outcome!.message), 'both are workspace failures to the loop');
   } finally { await rm(root, { recursive: true, force: true }); await rm(origin, { recursive: true, force: true }); }
 });
 

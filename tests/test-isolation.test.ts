@@ -1,19 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { chmod, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { abnormalTestExit, containedInstall, containmentWorks, isolatedTestEnvironment, loaderDigest, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
+import { abnormalTestExit, containedInstall, containmentWorks, holdPort, isolatedTestEnvironment, loaderDigest, passedTestControls, reserveTestPorts, testPortEnvironment, npmCiArgs, npmCiEnvironment, repeatedRequiredTitle } from '../src/cli/test-isolation.js';
 import { countProofCases, runProof } from '../src/cli/verify.js';
 import { bindEvidence, leaseCommands, testedBinding } from '../src/cli/lease.js';
 import { githubPauseReset, pauseRetry, submitThroughPause } from '../src/cli/complete.js';
 import { ensureWorktreeDependencies, installMatchesLockfile } from '../src/repository-setup.js';
 import { installUnderLease } from '../src/cli/workspace.js';
-import { runTests } from './helpers/run-tests.js';
+import { durableTestTmpdir, runTests } from './helpers/run-tests.js';
 import { hostMemoryVariable } from '../src/master-resources.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-24 pause resets are judged against the injected now () => clock of that test; the live command's reset is Date.now()+300, so it moves with the wall clock.
@@ -25,6 +25,43 @@ const listen = (port = 0) => new Promise<{ port: number; close(): Promise<void> 
   server.once('error', reject);
   server.listen({ port, host: '127.0.0.1', exclusive: true }, () => resolve({ port: (server.address() as { port: number }).port, close: () => new Promise(done => server.close(() => done())) }));
 });
+
+/**
+ * A port region the host allocates nothing into automatically: past the kernel's ephemeral source
+ * range when it leaves room, else just below it (never reaching under 1024, where binds need
+ * privilege), else the Linux default range's tail. The suite's own reservations run
+ * defaultTestPortBase..highestBase, so nothing of a parallel suite reaches here either — a
+ * scenario played out inside it sees no port move under it (GY-2013).
+ */
+function unallocatedPortRegion(): { first: number; last: number } {
+  try {
+    const [start, end] = readFileSync('/proc/sys/net/ipv4/ip_local_port_range', 'utf8').trim().split(/\s+/).map(Number);
+    if (Number.isInteger(start) && Number.isInteger(end) && start >= 1024 && end <= 65_535) {
+      if (end + 451 <= 65_535) return { first: end + 1, last: 65_535 };
+      if (start >= 1475) return { first: start - 451, last: start - 11 };
+    }
+  } catch { /* not Linux, or the range is not exposed: the default below */ }
+  return { first: 61_000, last: 65_535 };
+}
+
+/**
+ * A stand-in for the host's port allocation the scan rules can be proved against deterministically:
+ * `probe` answers from a set where `hold`'s check-and-set is one synchronous step, exactly as the
+ * kernel's exclusive bind refuses a second holder in one atomic decision. Nothing schedules these
+ * answers, so a window cannot move under an assertion the way a real socket can.
+ */
+function simulatedPorts(): { busy: Set<number>; probe: (port: number) => Promise<boolean>; hold: typeof holdPort } {
+  const busy = new Set<number>();
+  return {
+    busy,
+    probe: async port => !busy.has(port),
+    hold: async port => {
+      if (busy.has(port)) return null;
+      busy.add(port);
+      return { close: () => { busy.delete(port); } };
+    },
+  };
+}
 
 test('unit:test-isolation strips every GRAPHYARD_* and HERDR_* variable the runner did not set', () => {
   const environment = isolatedTestEnvironment({
@@ -43,39 +80,83 @@ test('unit:test-isolation strips every GRAPHYARD_* and HERDR_* variable the runn
 });
 
 test('unit:test-isolation reserves a free port window per run: held and busy windows are skipped, concurrent reservations never share one, a killed holder leaves none behind', async () => {
-  const busy = await listen();
+  // The scan's own rules are proved in a simulated port world first: this test once anchored its
+  // range at a port-0 listener and asserted exact window bases, so it sat inside the kernel's
+  // ephemeral range, where every connection's source port and every other port-0 listener lands,
+  // and under a loaded host transient sockets moved its windows — its expectations failed on one
+  // run and passed on the next (GY-2013). A simulation cannot be moved under by any socket, so
+  // where the assertion is about the scan's logic it is made there, exactly. Where the assertion
+  // is about the kernel — a bind another process holds is refused, a SIGKILL leaves no lock — it
+  // stays real, in a quiet playground (GY-2013), and asserts what the kernel decides rather than
+  // which window anyone was handed: the scan's answer is read from the reservation itself, so no
+  // window can move under it.
+  const base = 20_000, span = 4, world = simulatedPorts();
+  const options = { first: base, span, last: base + 39, probe: world.probe, hold: world.hold };
+  world.busy.add(base + 1); // a transient socket inside the first window, never its sentinel
+  const live = await reserveTestPorts(options);
+  assert.equal(live.base, base + span, 'a window holding a busy port is skipped');
+  assert.equal(live.sentinel, live.base + live.span - 1);
+  const second = await reserveTestPorts(options);
+  assert.equal(second.base, live.base + live.span, 'a window another live run holds is skipped');
+  live.release();
+  const again = await reserveTestPorts(options);
+  assert.equal(again.base, live.base, 'a released window is free again');
+  again.release(); second.release();
+
+  // Reservations racing for the same windows: the sentinel claim is one atomic check-and-set, so
+  // no two of them take one window however their probes interleave, and each scan runs upward from
+  // `first`, so six racers claim the six lowest free windows.
+  const racing = await Promise.all(Array.from({ length: 6 }, () => reserveTestPorts(options)));
+  assert.deepEqual(racing.map(entry => entry.base).sort((a, b) => a - b), Array.from({ length: 6 }, (_, index) => base + span * (index + 1)), 'each concurrent reservation holds its own window');
+  for (const entry of racing) entry.release();
+
+  // A range with no window left is an error, whichever way its last window is occupied: a busy
+  // port inside it, and a sentinel another run holds, each refuse the scan.
+  await assert.rejects(reserveTestPorts({ ...options, last: base + span - 1 }), new RegExp(`No free window of ${span} test ports between ${base} and ${base + span - 1}`));
+  world.busy.add(base + span * 2 - 1);
+  await assert.rejects(reserveTestPorts({ ...options, first: base + span, last: base + span * 2 - 1 }), new RegExp(`No free window of ${span} test ports between ${base + span} and ${base + span * 2 - 1}`));
+
+  // The kernel's own decisions, in a region no other process allocates into. This test once ran
+  // its whole scenario inside the ephemeral range; the playground is reserved through
+  // reserveTestPorts itself, so the kernel-decided sentinel bind keeps concurrent copies of this
+  // test — a trial beside a worker suite — in disjoint playgrounds (GY-2013), and the scenario
+  // never leaves the playground it reserved.
+  let real: { first: number; span: number; last: number }, teardown: () => Promise<unknown>;
   try {
-    const options = { first: busy.port, span: 4, last: busy.port + 400 };
-    const first = await reserveTestPorts(options);
-    assert.ok(first.base > busy.port, 'the window holding a listening port is skipped');
+    const playground = await reserveTestPorts({ ...unallocatedPortRegion(), span: 41 });
+    const busy = await listen(playground.base);
+    real = { first: busy.port, span: 4, last: playground.base + 39 };
+    teardown = async () => { await busy.close(); playground.release(); };
+  } catch {
+    // Nowhere quiet on this host: anchor at a port-0 listener. The kernel decides, and every
+    // assertion below reads the scan's answer instead of naming a window, so the scenario still
+    // holds where ports move under it.
+    const busy = await listen();
+    real = { first: busy.port, span: 4, last: busy.port + 400 };
+    teardown = () => busy.close();
+  }
+  try {
+    const first = await reserveTestPorts(real);
+    assert.ok(first.base > real.first, 'the window holding a listening port is skipped');
     assert.equal(first.sentinel, first.base + first.span - 1);
-    const second = await reserveTestPorts(options);
-    assert.ok(second.base >= first.base + first.span, 'a window another live run holds is skipped');
-    first.release(); await new Promise(done => setTimeout(done, 50));
-    const again = await reserveTestPorts(options);
-    assert.equal(again.base, first.base, 'a released window is free again');
-    again.release(); second.release(); await new Promise(done => setTimeout(done, 50));
+    first.release();
 
-    // Reservations racing for the same windows: the sentinel bind is the kernel's decision, so no
-    // two of them take one window, however their probes interleave.
-    const racing = await Promise.all(Array.from({ length: 6 }, () => reserveTestPorts(options)));
-    assert.equal(new Set(racing.map(entry => entry.base)).size, racing.length, 'each concurrent reservation holds its own window');
-    for (const entry of racing) entry.release();
-    await new Promise(done => setTimeout(done, 50));
-
-    // A run killed while holding its window leaves nothing behind to reclaim.
+    // A run killed while holding its window leaves nothing behind to reclaim: while it lives its
+    // sentinel bind refuses every other reservation, and the moment the kernel reaps it the scan
+    // anchored at its window returns that exact window again.
     const holder = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e',
-      `const { reserveTestPorts } = await import(${JSON.stringify(new URL('src/cli/test-isolation.ts', repository).href)}); const held = await reserveTestPorts(${JSON.stringify(options)}); console.log(held.base); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'inherit'] });
+      `const { reserveTestPorts } = await import(${JSON.stringify(new URL('src/cli/test-isolation.ts', repository).href)}); const held = await reserveTestPorts(${JSON.stringify(real)}); console.log(held.base); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'inherit'] });
     const heldBase = await new Promise<number>((resolve, reject) => { holder.stdout!.once('data', chunk => resolve(Number(String(chunk).trim()))); holder.once('exit', code => reject(new Error(`holder exited ${code}`))); });
-    assert.equal(heldBase, first.base);
-    const beside = await reserveTestPorts(options);
-    assert.notEqual(beside.base, heldBase, 'a window held by another process is skipped');
+    // The scan is anchored at the held window: from there it can only move upward, so the
+    // assertion survives a foreign socket freeing an earlier window.
+    const beside = await reserveTestPorts({ ...real, first: heldBase });
+    assert.ok(beside.base > heldBase, 'a window held by another live process is skipped');
     beside.release();
     await new Promise(done => { holder.once('exit', done); holder.kill('SIGKILL'); });
-    const after = await reserveTestPorts(options);
+    const after = await reserveTestPorts({ ...real, first: heldBase });
     assert.equal(after.base, heldBase, 'the killed holder\'s window is free at once');
     after.release();
-  } finally { await busy.close(); }
+  } finally { await teardown(); }
 });
 
 test('unit:test-isolation two concurrent test runs on one host both pass', async () => {
@@ -519,4 +600,12 @@ test('unit:proof-and-cli-self-sufficient graphyard complete refused during a Git
   assert.ok(requests.every(request => request.path === 'work/work-1/submit' && JSON.stringify(request.data) === JSON.stringify({ epoch: 3, pr: 42 })));
   assert.equal(requests[0].key, requests[1].key);
   assert.equal(printed[0].submitted, true);
+});
+
+test('unit:durable-test-tmpdir — a suite whose tmpdir is a tmpfs runs under a short directory on disk outside any checkout; any other tmpdir stands (GY-2001)', async () => {
+  const home = await scratch('home');
+  assert.equal(durableTestTmpdir('/tmp', home, () => ({ type: 0x01021994 })), join(home, '.gy', 'tmp'));
+  assert.equal(statSync(join(home, '.gy', 'tmp')).mode & 0o7777, 0o1777, 'the directory is made sticky and shared, as /tmp is');
+  assert.equal(durableTestTmpdir('/tmp', home, () => ({ type: 0xef53 })), null, 'a disk tmpdir stands');
+  assert.equal(durableTestTmpdir('/tmp', home, () => { throw new Error('ENOENT'); }), null, 'an unreadable tmpdir stands');
 });
