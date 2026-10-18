@@ -9,8 +9,7 @@
 //
 // It reads this host's .graphyard/master.json for the launch profiles the dispatching actions
 // need and authenticates with the coordinator credential named there — the same credential
-// `master run` uses, and nothing broader; the one exception is verify-deployment's filing of a
-// post-deploy follow-up, which, like the loop's own filings, creates work as the operator agent. `--kinds` narrows what this executor claims; the
+// `master run` uses, and nothing broader. `--kinds` narrows what this executor claims; the
 // default is every kind it has a handler for. Two kinds can never be among them: `escalate` and
 // `request-rework` are judgments made in the step itself, and the process refuses to start with a
 // handler for either, which is what keeps a language model out of the loop rather than inside it.
