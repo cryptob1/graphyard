@@ -1,4 +1,4 @@
-import { isClosed, type Gate, type Work } from '../model.js';
+import { deliveryState, isClosed, type Gate, type Work } from '../model.js';
 import { latestCheck } from '../merge-queue.js';
 import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
@@ -162,8 +162,16 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
     }
     // The Deploy step is gone from the items (GY-1979): the release line on the board's top bar
-    // carries the deployment. Nothing waits on a per-item deploy any more.
-    case 'deploy': return { detail: 'waiting for the live release to serve it', who: 'Graphyard (automatic)' };
+    // carries the deployment. The recorded flow keeps the step, so a merged change the release
+    // does not serve yet still names what it waits on — the smoke check, a deployment that has
+    // not appeared, or a failed one — never one fixed string for every state.
+    case 'deploy': {
+      const state = deliveryState(work);
+      return state === 'delivered-with-failure' ? { detail: 'the check after deploying failed', who: 'Master agent' }
+        : release.failed.has(work.key) ? { detail: 'production has not deployed it', who: 'Master agent' }
+        : state === 'awaiting-smoke' ? { detail: 'checking the live release', who: 'Prover agent' }
+          : { detail: 'waiting for the live release to serve it', who: 'Graphyard (automatic)' };
+    }
   }
 }
 
@@ -243,7 +251,10 @@ export function flowStep(work: Work, now: number, release: ReleaseView = noRelea
  * the folded steps, or the hand-in instant on the item's own timeline — and a later move between
  * the folded steps does not restart it; a return to Build and a fresh hand-in does. Doing keeps
  * the builder's clock (`statusSince`: the claim), Done starts at the merge, and anything the moves
- * cannot say falls back to the item's own record (`statusSince`).
+ * cannot say falls back to the item's own record (`statusSince`). The move list is the board's
+ * — one list for the whole board (web/main.tsx `useStepMoves`) — so a move counts for this clock
+ * only when it is this item's own (`move.key === work.key`): another item's move into Checking
+ * must never start this item's clock or its overdue flag.
  */
 export function stepSince(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): string {
   const current = prSteps(work, now, release).current;
@@ -252,6 +263,7 @@ export function stepSince(work: Work, now: number, moves?: readonly StepTransiti
   const at = (value: string | null | undefined) => value && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now ? Date.parse(value) : null;
   if (current === 'done') return work.delivery?.mergedAt ?? work.observation?.mergedAt ?? own;
   const intoChecking = (moves ?? []).filter(move => {
+    if (move.key !== work.key) return false; // the board's list is board-wide: only this item's own moves count
     const to = at(move.at) !== null && (stepIds as readonly string[]).includes(String(move.to)) ? move.to : null;
     const from = move.from !== null && (stepIds as readonly string[]).includes(String(move.from)) ? move.from : null;
     return to !== null && (checkingSteps as StepId[]).includes(to) && (from === null || from === 'build');

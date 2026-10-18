@@ -47,7 +47,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
     <span className="row-key mono">{item.key}</span>
     <span className="row-main">
       <h3><button type="button" className="card-open" data-title aria-label={`${item.title} — open ${item.key}`} onClick={e => { e.stopPropagation(); onOpen(item.id); }}>{item.title}</button></h3>
-      <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{blocker && <span className="blocker-class" data-blocker-class={blocker.class} data-needs-someone={blocker.needsSomeone} title={blocker.lastProbe ? `${blocker.lastProbe.probe}: ${blocker.lastProbe.detail}` : undefined}>{probe && <> · <span className="mono">{blocker.class}</span> · {probe}</>}</span>}</span>
+      <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No commit recorded yet' : '')}{blocker && <span className="blocker-class" data-blocker-class={blocker.class} data-needs-someone={blocker.needsSomeone} title={blocker.lastProbe ? `${blocker.lastProbe.probe}: ${blocker.lastProbe.detail}` : undefined}>{probe && <> · <span className="mono">{blocker.class}</span> · {probe}</>}</span>}</span>
     </span>
     {steps ? <span className="row-steps"><StepsBar steps={steps} labelled={group !== 'blocked'}/></span> : <span className="row-steps"/>}
     <span className="row-who" title="Who acts next">{actor.who}</span>

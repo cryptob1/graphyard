@@ -5,14 +5,16 @@ import { fixtureWork, NOW } from '../scripts/dashboard-fixture.mjs';
 import type { Work } from '../src/model.js';
 import { deliveryLabel } from '../src/model/format.js';
 import { plainStatus } from '../src/model/plain-status.js';
-import { buildBoard, groupOf } from '../src/model/board.js';
+import { buildBoard, groupOf, groups } from '../src/model/board.js';
 
-// GY-1845: a done item's outcome must read as where production has carried it, so merged code can
-// never pass for shipped. Every post-merge state headlines its own label — 'Merged, awaiting
-// deployment', 'Deployed, awaiting verification', 'Production verified', 'Deployed with a
-// failure' — on the plain status and on the board row alike, never the word Done and never a bare
-// Merged. These tests read the same model functions the dashboard, the item page and `master
-// status` render from, over the checked-in fixture's delivered item reshaped into each state.
+// GY-1845, under GY-1979's board: a done item's outcome must read as where production has carried
+// it, so merged code can never pass for shipped. Every post-merge state headlines its own label —
+// 'Merged, awaiting deployment', 'Deployed, awaiting verification', 'Production verified', 'Deployed
+// with a failure' — on the plain status the item page reads, never the word Done and never a bare
+// Merged. The board itself no longer carries merged rows at all (GY-1979): a merged item is Done
+// and has left every group, and the top bar's one release line carries the deployment. These tests
+// read the same model functions the dashboard, the item page and `master status` render from, over
+// the checked-in fixture's delivered item reshaped into each state.
 
 const work = fixtureWork() as Work[];
 const find = (key: string) => work.find(item => item.key === key)!;
@@ -71,18 +73,12 @@ test('unit:completion-states-shown — a delivered item in every DeliveryState h
     else assert.match(status.outcome!, / — release a1b2c3d4 serving it$/, state);
     assert.equal(status.phase, 'shipped', state);
 
-    // The board row the item lands on carries the same outcome; a state whose release already
-    // serves it has left the open board, and says so through `shipped`, not through a bare Merged.
-    const group = groupOf(item, NOW);
-    if (group === 'shipped') {
-      assert.equal(state === 'smoke-passed' || state === 'delivered', true, `${state} left the open board`);
-    } else {
-      const board = buildBoard([item], NOW);
-      const row = [...board.groups.moving, ...board.groups.blocked].find(entry => entry.key === item.key);
-      assert.ok(row, `${state}: the item has a board row`);
-      assert.equal(row!.outcome, status.outcome, `${state}: the board row headlines the same outcome`);
-      assert.ok(!/\bDone\b/.test(row!.outcome!), state);
-    }
+    // GY-1979: a merged item is Done and has left the open board in every delivery state — the
+    // release line on the top bar carries the deployment, not a board row. Its page still renders
+    // from the same plain status, so the state's own label stays the headline the operator reads.
+    assert.equal(groupOf(item, NOW), 'shipped', `${state}: a merged item has left the board`);
+    const board = buildBoard([item], NOW);
+    for (const group of groups) assert.ok(!board.groups[group].some(entry => entry.key === item.key), `${state}: no ${group} row for a merged item`);
   }
 });
 

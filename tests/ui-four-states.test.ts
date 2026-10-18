@@ -5,7 +5,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../browser-tests/ui-board.js';
 import { boardFromStatus, groupLabel, groups } from '../web/groups.js';
-import { prSteps, stateIds } from '../src/model/pr-steps.js';
+import { prSteps, stateIds, stepSince, type StepTransition } from '../src/model/pr-steps.js';
 import TopBar, { ReleaseLine } from '../web/components/top-bar.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
@@ -147,4 +147,20 @@ test('unit:ui-four-states-board — the board API and the Work page list only To
   assert.match(unobserved, /Production has not been observed yet/);
   // The Work page carries the line in its top bar, at the same place the reader starts.
   assert.match(home(work, { status: status as Dashboard['status'] }), /data-release-line="serving"/);
+});
+
+test('unit:ui-four-states-clock — a Checking item\'s clock starts at its own hand-in move, never at another item\'s move in the board-wide list (GY-1979 B2)', () => {
+  const checking = find('GY-22');
+  assert.equal(prSteps(checking, NOW).current, 'checking');
+  // The move list is the board's, one list handed to every card (web/main.tsx `useStepMoves`):
+  // another item's build → folded-step move must not start this item's clock (or its overdue flag).
+  const other = { key: 'GY-999', from: 'build', to: 'test', at: new Date(NOW - minute).toISOString() } as StepTransition;
+  assert.equal(stepSince(checking, NOW, [other]), stepSince(checking, NOW, []), 'another item\'s move does not move this clock');
+  // Its own move into the folded Checking state does start it, even beside another item's move.
+  const mine = { key: checking.key, from: 'build', to: 'validate', at: new Date(NOW - 2 * hour).toISOString() } as StepTransition;
+  assert.equal(stepSince(checking, NOW, [mine, other]), mine.at);
+  // A move between the folded steps does not restart it; a later own move out of Build (a rework's
+  // fresh hand-in) does.
+  const between = { key: checking.key, from: 'validate', to: 'test', at: new Date(NOW - hour).toISOString() } as StepTransition;
+  assert.equal(stepSince(checking, NOW, [mine, between, other]), mine.at);
 });

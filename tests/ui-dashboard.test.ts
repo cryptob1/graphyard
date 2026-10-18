@@ -1018,7 +1018,7 @@ test('GY-161 review: a refusing ready gate keeps handed-in work at Build, in the
 test('GY-161 review: a step entered before the drill-down window still starts its clock at its entry; a truncated scan ends every step move where it stopped', () => {
   // At Checking since 12 days ago, with gate facts at that step 10 and 9 days ago (other checks changing),
   // and nothing recorded in the 7-day window: the carried move starts at the entry, not at the last fact.
-  const testing = board().find(item => prSteps(item, NOW).current === 'checking')!;;
+  const testing = board().find(item => prSteps(item, NOW).current === 'checking')!;
   const day = 24 * hour;
   const fact = (id: number, ago: number, details: Record<string, unknown>) => ({ id, workId: testing.id, workKey: testing.key, kind: 'gates.changed', observedAt: new Date(NOW - ago).toISOString(), details });
   const atTest = { stage: 'review', unmet: ['test', 'review'], firstUnmet: 'test', hasCandidate: true, reasons: [] };

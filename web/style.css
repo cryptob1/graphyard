@@ -92,14 +92,17 @@ abbr.term{text-decoration:underline dotted var(--text-2);text-underline-offset:3
 .flow-summary section{margin:0 0 26px}.flow-summary .flow-card strong{margin:6px 0 0}.flow-headline{font-size:14px;color:var(--text)}.flow-headline strong{font-size:22px;font-weight:500;color:var(--text)}.flow-unreadable{max-width:62ch;color:var(--text-2)}
 .criteria-fields{border:1px solid var(--border);border-radius:7px;padding:12px 14px;display:grid;gap:12px}.criteria-fields legend{font-size:12px;color:var(--text);padding:0 6px}.criteria-fields code{display:inline;padding:1px 4px;margin:0}.criterion-row{display:grid;gap:10px;padding-bottom:10px;border-bottom:1px solid var(--border)}
 .main .page-heading .eyebrow{display:none}
-.top-bar{height:56px}.main>.page-heading,.main .page-heading{margin:18px 0 14px}.main .page-heading h1{font-size:28px}
+/* GY-1979: the top bar lays the release line and the section's tabs out inside itself — a column
+   that grows with its content (min-height, never a fixed height), so a sectioned page's line and
+   tabs never spill onto the page heading. The line reads as text, one row, no paragraph margins. */
+.top-bar{display:flex;flex-direction:column;justify-content:center;gap:var(--space-1);min-height:56px}.release-line{margin:0;font-size:var(--type-small);color:var(--text-2)}.main>.page-heading,.main .page-heading{margin:18px 0 14px}.main .page-heading h1{font-size:28px}
 .stage-strip{margin-bottom:10px}.stage-strip .node{padding:8px 10px}.stage-strip .node strong{font-size:20px;margin:4px 0 0}
 .list-tools{margin:0 0 4px}.work-list{margin:0 0 14px}.work-list>h2,.work-list>summary{margin:0 0 8px}
 .card{padding:12px 14px}.card h3{margin:6px 0 6px;min-height:0}.cards{gap:10px}
 .home-columns{display:grid;grid-template-columns:minmax(0,1fr) 290px;gap:28px;align-items:start}.home-columns>aside .graph-section{padding:14px}.shipped-recently li{padding:6px 0}
 @media(max-width:1000px){.home-columns{grid-template-columns:1fr}}
 @media(max-width:1000px){.sidebar{width:185px;min-width:185px}.sidebar-inner{padding:25px 13px}.main{margin-left:0}}
-@media(max-width:650px){.sidebar{width:100%;min-width:0}.sidebar-inner{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:10px;padding:14px 16px}.primary-nav{flex-direction:row;margin:0;flex-wrap:wrap}.docs-link{display:none}.top-bar{height:auto;min-height:56px;flex-wrap:wrap;padding:8px 0}.top-bar .live{display:none}.facts{grid-template-columns:1fr;gap:2px}.facts dd{margin-bottom:8px}.list-tools{justify-content:flex-start;flex-wrap:wrap}.list-tools input{width:160px}}
+@media(max-width:650px){.sidebar{width:100%;min-width:0}.sidebar-inner{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;gap:10px;padding:14px 16px}.primary-nav{flex-direction:row;margin:0;flex-wrap:wrap}.docs-link{display:none}.top-bar{padding:var(--space-1) 0}.top-bar .live{display:none}.facts{grid-template-columns:1fr;gap:2px}.facts dd{margin-bottom:8px}.list-tools{justify-content:flex-start;flex-wrap:wrap}.list-tools input{width:160px}}
 .status-age{white-space:nowrap;flex-shrink:0;font-variant-numeric:tabular-nums;color:var(--text-2)}
 .status-age.overdue{color:var(--blocked);font-weight:650}
 .overdue-mark{font-size:9px;vertical-align:1px}

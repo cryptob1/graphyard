@@ -204,7 +204,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
   test(`the four-state bar and the release line show on ${viewport.name}`, async ({ page }) => {
     const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60000).toISOString();
     const state = (key: string, stage: string, submission: boolean, minutesAgo: number, lease = false) => ({ ...work, id: `fixture-${key.toLowerCase()}`, key, stage, stageEnteredAt: at(minutesAgo), submission: submission ? { epoch: 1 } : null, candidate: null,
-      ...(lease ? { lease: { owner: 'worker-1', epoch: 1, expiresAt: at(30) } } : {}) });
+      ...(lease ? { lease: { owner: 'worker-1', epoch: 1, expiresAt: at(-30) } } : {}) });
     const items = [state('GY-2', 'ready', false, 45), state('GY-3', 'build', false, 30, true), state('GY-4', 'review', true, 890)];
     const status = { actor: { id: 'fixture', role: 'admin', sessionKind: 'human' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [],
       production: { observedAt: at(1), serving: 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345a6b', error: null, pending: ['GY-9'], incidents: [] } };
@@ -236,6 +236,33 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     // Nothing clips at this width: the bar fits its row and the line wraps within the page.
     const clipped = await page.locator('.steps-track, .release-line').evaluateAll(nodes => nodes.map(element => element.scrollWidth > element.clientWidth + 1));
     expect(clipped).not.toContain(true);
+  });
+}
+
+// GY-1979: on a sectioned page (Settings, Shipped) the top bar holds the release line and the
+// section's tabs together — the bar grows with its content instead of holding a fixed height, so
+// neither spills onto the page heading, at desktop or phone width.
+for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'phone', width: 390, height: 844 }]) {
+  test(`the release line and the section tabs share the top bar on ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await fixture(page); await login(page);
+    await openPage(page, 'Settings', 'Test cases');
+    const line = page.locator('.release-line');
+    const tabs = page.getByRole('navigation', { name: 'Pages in this section' });
+    await expect(line).toBeVisible();
+    await expect(tabs).toBeVisible();
+    expect(await tabs.getByRole('button').count()).toBeGreaterThanOrEqual(2);
+    const boxes = await page.evaluate(() => {
+      const bounds = (element: Element | null) => { if (!element) return null; const box = element.getBoundingClientRect(); return { top: box.top, bottom: box.bottom, left: box.left, right: box.right }; };
+      return { bar: bounds(document.querySelector('.top-bar')), line: bounds(document.querySelector('.release-line')), tabs: bounds(document.querySelector('nav.tabs')), heading: bounds(document.querySelector('.main h1')) };
+    });
+    const overlap = (a: { top: number; bottom: number; left: number; right: number }, b: { top: number; bottom: number; left: number; right: number }) =>
+      Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1 && Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1;
+    // The bar contains both rows, they do not cover each other, and the page heading starts below the bar.
+    expect(boxes.bar!.top).toBeLessThanOrEqual(boxes.line!.top + 1);
+    expect(boxes.bar!.bottom).toBeGreaterThanOrEqual(boxes.tabs!.bottom - 1);
+    expect(overlap(boxes.line!, boxes.tabs!)).toBe(false);
+    expect(boxes.heading!.top).toBeGreaterThanOrEqual(boxes.bar!.bottom - 1);
   });
 }
 
