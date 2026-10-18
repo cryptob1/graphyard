@@ -33,7 +33,7 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Resolver
 
-Every `run.doctor.intervalMinutes` (10min) the loop launches one resolver session on the doctor role (`doctorPrompt`, `src/daemon/doctor.ts`): a short act-don't-ask charter over open items, standing faults, failed actions and attention lines. It acts on whatever stalled 20 minutes or more: re-dispatching dead attempts, unblocking cleared blockers, reworking a head naming why, closing obsolete or duplicate work, deciding in-intent scope and requirements; else one line on why waiting is fine. Never a person. An item only for a code change judged needed; its allowlist refuses merge, dispatch, evidence and lease commands.
+Every `run.doctor.intervalMinutes` (10min) the loop launches one resolver session on the doctor role (`doctorPrompt`, `src/daemon/doctor.ts`): a short act-don't-ask charter over open items, standing faults, failed actions and attention lines. It acts on whatever stalled 20+ minutes: re-dispatching dead attempts, unblocking cleared blockers, reworking a head naming why, closing obsolete or duplicate work, deciding in-intent scope and requirements; else one line on why waiting is fine. Never a person. An item only for a code change judged needed; its allowlist refuses merge, dispatch, evidence and lease commands.
 
 ## Fault classes
 
