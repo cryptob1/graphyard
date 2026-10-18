@@ -43,25 +43,29 @@ test('unit:complete-pushes-graphyard-branch — a failed push is reported, not t
   assert.ok(result.failure);
 });
 
-test('unit:worktree-pushes-local-candidate — a local head at the candidate sha is pushed when the fetch fails; another sha refuses', async () => {
-  const { submittedBranchRefusal } = await import('../src/master/worktrees.js');
+test('unit:worktree-starts-from-registered-head — the rework start resolves the registered local head with no fetch and no push; nothing registered or missing from the store refuses', async () => {
+  const { registeredReworkHead } = await import('../src/master/worktrees.js');
   const { origin, work } = await repository('graphyard/gy-3-1');
+  const network: string[] = [];
   const run = ((command: string, args: string[], options: { cwd: string }) => {
-    if (args[0] === 'fetch') throw new Error('fatal: couldn\'t find remote ref');
+    if (args[0] === 'fetch' || args[0] === 'push') { network.push(args[0]); throw new Error(`a rework start runs no git ${args[0]}`); }
     const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8' });
     if (result.status !== 0) throw new Error(result.stderr);
     return result.stdout;
   }) as never;
-  const remote = 'refs/remotes/origin/graphyard/gy-3-1';
-  git(work, 'update-ref', remote, git(work, 'rev-parse', 'HEAD~0'));
   git(work, 'commit', '--allow-empty', '-m', 'second');
   const second = git(work, 'rev-parse', 'HEAD');
-  assert.equal(await submittedBranchRefusal(work, 'graphyard/gy-3-1', remote, second, run), null);
-  // The remote-tracking ref the worktree starts from names the pushed candidate, however narrow the fetch refspec.
-  assert.equal(git(work, 'rev-parse', remote), second);
-  assert.match(remoteHeads(origin), /graphyard\/gy-3-1/);
-  const moved = await submittedBranchRefusal(work, 'graphyard/gy-3-1', remote, 'b'.repeat(40), run);
-  assert.match(moved!, /^Git worktree creation failed while fetching graphyard\/gy-3-1: /);
+  assert.equal(await registeredReworkHead(work, 'graphyard/gy-3-1', second, run), second);
+  // A requirements revision that cleared the candidate leaves the registered branch holding the head.
+  assert.equal(await registeredReworkHead(work, 'graphyard/gy-3-1', undefined, run), second);
+  assert.deepEqual(network, [], 'the registered local head is read from the object store alone');
+  assert.match(remoteHeads(origin).trim(), /^$/, 'the fake remote holds no worker branch and was never pushed to');
+  // A registered head the store does not hold refuses, and so does a start object nothing registers.
+  await assert.rejects(registeredReworkHead(work, 'graphyard/gy-3-1', 'b'.repeat(40), run), /missing from the shared object store/);
+  await assert.rejects(registeredReworkHead(work, 'graphyard/gy-3-9', undefined, run), /No start object is registered/);
+  // An interrupted attempt's commits past the registered head are partial work, never the start: the registered head still resolves.
+  git(work, 'commit', '--allow-empty', '-m', 'WIP: partial');
+  assert.equal(await registeredReworkHead(work, 'graphyard/gy-3-1', second, run), second);
 });
 
 test('unit:github-pages-environment-detected — a pages-deploy.yml workflow names github-pages when none is configured', async () => {
