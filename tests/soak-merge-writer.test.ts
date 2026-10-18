@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { mergeWriterIdle, mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { baseMovedReason, type MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import { systemInvariants } from '../src/model/invariants.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
@@ -18,8 +19,10 @@ import type { Work } from '../src/model.js';
  * (one re-trial lands, one head exhausts its re-trials and is queued again); some trials fail
  * (refused, reworked, resubmitted on a new head); the coordinator's merge-record route is down for
  * stretches (a step fails before or after the push, and the next cycle reconciles or retries);
- * the executor is killed between a push and its record (reconciled, no second push); and the
- * rework decision route refuses a few requests before taking them. The writer must deliver every
+ * the executor is killed between a push and its record (reconciled, no second push); some trials
+ * time out (the head yields its queue turn, and a second timeout where another head passed refuses
+ * it to rework, GY-2079); and the rework decision route refuses a few requests before taking them.
+ * The writer must deliver every
  * item exactly once, push every merge commit exactly once, run one merge at a time, request each
  * owed rework exactly once, keep its state bounded, and hold every system invariant
  * docs/master-agent.md#system-invariants names.
@@ -37,6 +40,7 @@ const docs = fileURLToPath(new URL('../docs/master-agent.md', import.meta.url));
 const items = 150, submitEveryMs = 9 * minute, cycleMs = 2 * minute, cycles = (24 * 60) / 2;
 const sensitive = (n: number) => n % 10 === 0;
 const failsTrial = (n: number) => n % 17 === 0;
+const timesOut = (n: number) => n % 29 === 0 && !failsTrial(n);
 const refusedDecisions = (n: number) => n % 34 === 0 ? 2 : 0;
 const tipMovesOnce = (n: number) => n % 11 === 0 && !failsTrial(n);
 const tipMovesAlways = (n: number) => n === 53;
@@ -99,6 +103,9 @@ class World {
         // A foreign commit lands on main during the trial: the leased push below is rejected.
         if ((tipMovesOnce(n) && world.trials % 2 === 1 && first) || (tipMovesAlways(n) && world.movedAlways < 4 && first)) { world.main.unshift(sha(`foreign:${world.trials}`)); if (tipMovesAlways(n)) world.movedAlways += 1; }
         const failed = failsTrial(n) && first;
+        // GY-2079: a head whose trial keeps outrunning the time budget yields its turn and, on a
+        // second timeout where other heads passed, is refused to rework; its resubmitted head passes.
+        if (timesOut(n) && first) throw new TrialTimeoutError('tests', 1_200_000, '$ node --import tsx tests/helpers/run-tests.ts --files-from tests-1.txt\nok 1 - tests/fast.test.ts\nnot ok 2 - tests/slow.test.ts');
         return { build: 'pass', tests: { passed: failed ? 0 : 1, failed: failed ? ['tests/item.test.ts'] : [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: failed ? 1 : 0 } } };
       },
       push: async (mergeSha, baseTip) => {
@@ -139,7 +146,7 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: reads, decide: world.decide } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, mergeWriter: reads, decide: world.decide } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   const invariantNames = new Set<string>();
   let failedCycles = 0;
@@ -148,7 +155,7 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
     // A reworked item comes back on a new head half an hour after its rework was confirmed.
     for (const [n, { confirmedAt }] of world.reworked) if (world.submissions.get(n)!.head === sha(`head${n}-1`) && now >= confirmedAt + 30 * minute) world.submit(n, 2, now);
     const result = await runCycle(config, state, effects, () => now);
-    for (const action of result.actions) if (action.kind === 'merge' && action.state === 'failed' && /failed before it was recorded|timed out/.test(action.detail) && !/route down|killed between the/.test(action.detail)) { failedCycles += 1; console.error(action.detail); }
+    for (const action of result.actions) if (action.kind === 'merge' && action.state === 'failed' && /failed before it was recorded|timed out/.test(action.detail) && !/route down|killed between the|timed out (in|its) /.test(action.detail)) { failedCycles += 1; console.error(action.detail); }
     await mergeWriterIdle(state);
     assert.ok(state.mergeWriter.queue.length <= mergeWriterKeptQueue && state.mergeWriter.refusals.length <= mergeWriterKeptRefusals && state.mergeWriter.reworks.length <= mergeWriterKeptReworks, `cycle ${cycle}: the state is bounded`);
     assert.ok(world.widest <= 1, `cycle ${cycle}: one merge in flight`);
@@ -170,8 +177,15 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
   assert.ok(reasons(53).includes(baseMovedReason(4)), `GY-53 exhausted its re-trials: ${reasons(53).join(' | ')}`);
   assert.equal(final.find(item => item.key === 'GY-53')!.stage, 'done', 'and was merged once the tip held still');
   const failing = Array.from({ length: items }, (_, index) => index + 1).filter(failsTrial);
-  assert.deepEqual(world.decided.map(entry => entry.n).sort((a, b) => a - b), failing, 'each failed trial got exactly one rework request, the refused ones included');
+  const timingOut = Array.from({ length: items }, (_, index) => index + 1).filter(timesOut);
+  assert.ok(timingOut.length > 0, 'the day scripts trial timeouts');
+  assert.deepEqual(world.decided.map(entry => entry.n).sort((a, b) => a - b), [...failing, ...timingOut].sort((a, b) => a - b), 'each failed or repeatedly timed-out trial got exactly one rework request, the refused ones included');
   for (const n of failing) { assert.ok(reasons(n).some(reason => reason.startsWith(trialFailurePrefix)), `GY-${n} was refused for its trial`); assert.equal(world.refusedRequests.get(n) ?? 0, refusedDecisions(n), `GY-${n}'s request was refused ${refusedDecisions(n)} times first`); assert.equal(world.submissions.get(n)!.head, sha(`head${n}-2`), `GY-${n} came back on a new head`); }
+  for (const n of timingOut) {
+    const grounds = [...new Set(reasons(n).filter(reason => reason.startsWith(`${trialFailurePrefix}: the trial timed out`)))];
+    assert.deepEqual(grounds, [`${trialFailurePrefix}: the trial timed out 2 times while other heads' trials passed: tests/fast.test.ts, tests/slow.test.ts`], `GY-${n} was refused once at the bound, naming the slow files, not retried without bound: ${reasons(n).join(' | ')}`);
+    assert.equal(world.submissions.get(n)!.head, sha(`head${n}-2`), `GY-${n} came back on a new head`);
+  }
   assert.ok(failing.some(n => refusedDecisions(n) > 0), 'some requests were refused before they were taken');
   assert.deepEqual(state.mergeWriter.reworks, [], 'no rework is still owed');
   for (const n of [23, 77]) {
