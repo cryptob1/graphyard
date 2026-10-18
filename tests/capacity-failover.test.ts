@@ -438,6 +438,16 @@ test('integration:capacity-exhausted-escalation — with every account of a role
   }
   launchConfig = reviewerConfig;
 
+  // GY-2097: the four submissions above stand at the in-flight cap, so the waiting item can start
+  // only once one merges. `reviewed`'s review arrives (the ticks above proved the reviewer wait on
+  // the request itself), GitHub merges it, and the observing cycle's successor — not the same
+  // cycle, whose snapshot still counts the merge — frees the slot the reset cycle below uses.
+  const delivered = await reload(reviewed.id), deliveredCandidate = { sha: delivered.candidate!.sha, baseSha: delivered.candidate!.baseSha };
+  await store.pool.query('UPDATE jobs SET available_at=now(),locked_until=NULL,token=NULL WHERE work_id=$1', [delivered.id]);
+  await processJob(engine, { observe: async (item: Work) => seen(item, deliveredCandidate), publish: async () => {} } as unknown as GitHub);
+  await githubMerges(reviewed);
+  await cycle(state);
+
   // An account resets: the escalation is withdrawn on the record and the item is dispatched, by the loop alone.
   clock.skewMs += 2 * 3_600_000 + 60_000; const restored = await cycle(state);
   assert.deepEqual(calls.dispatch, [{ work: waiting.key, profile: 'builder', account: 'env-a' }]);
