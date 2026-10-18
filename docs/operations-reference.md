@@ -69,7 +69,7 @@ Ungated merges are permanent violations: repair access, file follow-up. Admin di
 
 ## Merge-intent withdrawal
 
-`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin, loop stopped, managed repository only) dequeues or disarms each unmerged pull request; reruns write nothing; failures exit 1; without `--apply`, plans.
+No pull request is queued or armed, so there is nothing to withdraw: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself; with automatic merging off each merge is a [two-party decision](glossary.md#who-decides), and `master withdraw GY-N DECISION REASON` takes one back.
 
 ## Credentials
 

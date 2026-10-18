@@ -15,14 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([r
 
 ## GitHub administration through the browser
 
-Flows (`master browser app-permissions`, `master browser installation-accept`) drive the `master init --browser-profile` profile:
-
-| Flow | Effect
-| --- | ---
-| `app-permissions` | Permissions raised
-| `installation-accept` | Requests accepted
-
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup (`master browser fixtures`)); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human, following each offered method's control as a button or a link; a refused capture's record names the controls it saw. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing/retired rules: `harness` drift, reapplied each cycle.
+Graphyard holds no GitHub App: its one GitHub credential is the merge writer's deploy key ([install](install.md)), and `/api/github/installation` is 404. `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing App credential; `master browser fixtures` lists the Confirm-access captures earlier flows kept under `.graphyard/master-actions/`. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing/retired rules: `harness` drift, reapplied each cycle.
 
 ## Typed actions and executors
 

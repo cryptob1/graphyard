@@ -99,9 +99,9 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; verified promotions repin\./],
   // GY-1778 AC-2: plan-read bounds live on the protocol read-endpoints page (docs/github.md deleted in GY-2010).
   ['docs/protocol/read-endpoints.md', /`\/api\/work`: the fleet \(open items whole, settled deliveries summarized\), `\?pr=N` only the item whose candidate or submission names pull request N \(else `\[\]`\)/],
-  // GY-1686 AC-3: both master-agent pages name master browser capture as the remedy for a criterion needing a live Confirm-access fixture, never a human.
-  ['docs/master-agent.md', /Live Confirm-access fixtures: \[`master browser capture`\]\(master-agent-reference\.md#github-administration-through-the-browser\), never a human/],
-  ['docs/master-agent-reference.md', /a criterion needing a live one runs `master browser capture \[--dry-run\]` on the sudo-protected App permissions page, submitting nothing, never a human/],
+  // GY-2010: no GitHub App is held, so both master-agent pages say the App browser flows refuse (GY-1686's capture remedy is gone).
+  ['docs/master-agent.md', /No GitHub App is held, so the \[browser flows\]\(master-agent-reference\.md#github-administration-through-the-browser\) refuse/],
+  ['docs/master-agent-reference.md', /`master browser app-permissions\|installation-accept\|capture` therefore refuse, naming the missing App credential/],
   // GY-1784 AC-6 and GY-1828: the operations page states the worktree-disk reading's answered condition (out of reach over the plan, the pass's own removals included), its currency bound, the hard line and the recovery band.
   ['docs/operations.md', /`disk` attention under `run\.diskThresholdGb` is answered \(reported, faultless\) while the latest worktree-reclaim pass is ≤30 min old and out of reach \(nothing disposable now, no backlog or error, its removals included; no fault standing\); ≤ half the threshold, or ENOSPC\/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers/],
   // GY-1690 AC-3 and GY-1729: the release-candidate section says the chart exercise forwards a free port it re-establishes, waits for the rollout, retries transient API failures and names the last line a failed job ends on.
