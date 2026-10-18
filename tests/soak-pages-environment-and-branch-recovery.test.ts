@@ -9,8 +9,9 @@ import { simulateDay } from './helpers/soak-simulation.js';
 
 /**
  * GY-1753: over a simulated day of loop cycles the environment the loop publishes is the one deployments are read
- * under (stable, published once), and failed-fetch branch recovery pushes a local-only head once per item and
- * stays bounded across items, with every system invariant holding in the real loop's day.
+ * under (stable, published once), and rework workspace starts read the registered local head with no worker-ref
+ * network operation across items, with every system invariant holding in the real loop's day. GY-2017 replaced
+ * the failed-fetch recovery push with the local-commit contract: nothing is fetched or pushed for a rework start.
  */
 soakControlPlanes('soak-pages-environment-and-branch-recovery', 1753);
 
@@ -21,7 +22,7 @@ test('unit:soak-invariants-hold — a Pages-only repository publishes one stable
 
   const { daemonEffects } = await import('../src/daemon/effects.js');
   const { deploymentEnvironmentName } = await import('../src/daemon/deployment.js');
-  const { submittedBranchRefusal } = await import('../src/master/worktrees.js');
+  const { registeredReworkHead } = await import('../src/master/worktrees.js');
   const root = await temporaryDirectory('soak-pages');
   await mkdir(join(root, '.github', 'workflows'), { recursive: true });
   await writeFile(join(root, '.github', 'workflows', 'pages-deploy.yml'), 'name: pages\n');
@@ -40,7 +41,7 @@ test('unit:soak-invariants-hold — a Pages-only repository publishes one stable
   const calls: string[][] = [];
   const run = ((command: string, args: string[], options: { cwd: string }) => {
     calls.push(args);
-    if (args[0] === 'fetch') throw new Error('fatal: couldn\'t find remote ref');
+    if (args[0] === 'fetch' || args[0] === 'push') throw new Error(`a rework start runs no git ${args[0]}`);
     const result = spawnSync(command, args, { cwd: options.cwd, encoding: 'utf8' });
     if (result.status !== 0) throw new Error(result.stderr);
     return result.stdout;
@@ -49,8 +50,10 @@ test('unit:soak-invariants-hold — a Pages-only repository publishes one stable
     const branch = `graphyard/gy-${item}-1`;
     sh(work, 'checkout', '-q', '-B', branch); sh(work, 'commit', '-q', '--allow-empty', '-m', `item ${item}`);
     const sha = sh(work, 'rev-parse', 'HEAD').stdout.trim();
-    assert.equal(await submittedBranchRefusal(work, branch, `refs/remotes/origin/${branch}`, sha, run), null);
+    assert.equal(await registeredReworkHead(work, branch, sha, run), sha);
+    // A cleared candidate leaves the branch holding the registered head.
+    assert.equal(await registeredReworkHead(work, branch, undefined, run), sha);
   }
-  assert.equal(calls.filter(args => args[0] === 'push').length, 20, 'one push per item, none repeated');
-  assert.equal(sh(origin, 'branch', '--list').stdout.trim().split('\n').length, 20);
+  assert.equal(calls.filter(args => args[0] === 'fetch' || args[0] === 'push').length, 0, 'no worker-ref network operation ran for any start');
+  assert.equal(sh(origin, 'branch', '--list').stdout.trim(), '', 'the fake remote holds no worker branch: nothing was pushed');
 });
