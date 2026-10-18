@@ -210,8 +210,8 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
     goals: async () => (await request(coordinator, 'goals?open=1')).goals,
     runner: async (role, attempt, goal) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
       ? { goal: goal.key, verdict: 'approve', reason: 'One small item a worker finishes in one change' }
-      : { goal: goal.key, note: 'A greeting module under src/, served by the existing application.',
-        items: [{ ref: 'greeting', title: 'Greet the customer', description: 'Add the greeting module', type: 'feature', priority: 2,
+      : { goal: goal.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
+        items: [{ ref: 'greeting', title: 'Greet the customer', plain: 'Customers see a greeting.', description: 'Add the greeting module', type: 'feature', priority: 2,
           outcomes: ['greeting'], cases: ['greeting'],
           criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], plannedFiles: ['src/greeting.ts', 'public/greeting.json'], dependsOn: [] }] }, runs) }),
     plan: (goal, plan) => request(operatorAgent, `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),

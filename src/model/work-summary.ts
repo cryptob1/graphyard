@@ -8,7 +8,8 @@ import type { Work } from './work.js';
  * from the last day, and the pipeline timeline reduced to what the speed report measures.
  * `GET /api/work/:id` answers the whole document when a reader needs more.
  */
-export type WorkSummary = Pick<Work, 'id' | 'key' | 'title' | 'stage'> & Partial<Work> & {
+export type WorkSummary = Pick<Work, 'id' | 'key' | 'title' | 'stage'> & Omit<Partial<Work>, 'summary'> & {
+  /** The marker, standing in for the item's plain `summary` sentence (GY-2011), which the whole document carries. */
   summary: true;
   /** How many action rows the item completed; its resolved rows themselves are left out. */
   completedActions?: number;
