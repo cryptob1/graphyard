@@ -55,7 +55,10 @@ test('unit:soak-invariants-hold — an install with its own Herdr instance runs 
   process.env.PATH = `${bin}${delimiter}${path}`;
   try {
     const { root, master: base } = await failoverInstalled();
-    const instance = installHerdrInstance('owner-project', await temporaryDirectory('soak-herdr-home'));
+    // A Unix socket path holds 107 bytes, so the fake home sits directly under /tmp: any tmpdir
+    // root may be deeper than that (the durable runner's on-disk redirect included) and would
+    // leave the instance no socket to bind (GY-2033).
+    const instance = installHerdrInstance('owner-project', await temporaryDirectory('soak-herdr-home', '/tmp'));
     assert.equal(await recordHerdrInstance(root, instance, 'w1'), true);
     const master = await loadMasterConfig(root);
     assert.deepEqual(master.herdrInstance, instance, 'master.json records the instance');

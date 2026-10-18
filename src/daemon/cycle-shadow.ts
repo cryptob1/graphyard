@@ -28,8 +28,13 @@ export interface ShadowReads {
   enabled: boolean;
   /** The base branch tip the promotion ledger last fetched; null when the checkout holds none. */
   mainTip(): Promise<string | null>;
-  /** Fetches the head's branch (and the base) into the coordinator checkout; moves no local branch. */
-  fetch(branch: string): Promise<void>;
+  /**
+   * Brings the base and the head into the coordinator checkout; moves no local branch. Under the
+   * GitHub merger it fetches the base and the head's branch from origin. Under the control-plane
+   * merger (`local`) workers never push, so it fetches only the base and reads the head from the
+   * shared object store, rejecting with ShadowHeadAbsentError when the commit is not there (GY-2043).
+   */
+  fetch(branch: string, head: string, local: boolean): Promise<void>;
   /** The trial of `head` on `baseTip`: its merge commit, the files the merge changes, the build and test run, and the checkout left behind when its removal failed. Rejects with TrialTimeoutError past the time budget. */
   trial(head: string, baseTip: string, key: string): Promise<{ mergeSha: string | null; conflict: string[]; files: string[]; run: TrialRun | null; leftover?: string }>;
   /** Posts the verdict to the coordinator (`POST /api/work/:id/shadow-verdict`). */
@@ -64,7 +69,11 @@ export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, ro
       }
       return null;
     },
-    fetch: async branch => { await git('fetch', '--no-tags', 'origin', config.baseBranch, branch); },
+    fetch: async (branch, head, local) => {
+      if (!local) { await git('fetch', '--no-tags', 'origin', config.baseBranch, branch); return; }
+      await git('fetch', '--no-tags', 'origin', config.baseBranch);
+      try { await git('cat-file', '-e', `${head}^{commit}`); } catch { throw new ShadowHeadAbsentError(head, branch); }
+    },
     trial: async (head, baseTip, key) => {
       const merged = await trialMerge(gitAs, { head, baseTip });
       if ('conflict' in merged) return { mergeSha: null, conflict: merged.conflict, files: [], run: null };
@@ -77,6 +86,11 @@ export function shadowReads(config: Pick<MasterConfig, 'baseBranch' | 'run'>, ro
       }
     },
   };
+}
+
+/** A control-plane head the shared object store does not hold: the trial is skipped against that tip with this reason, never fetched by branch (GY-2043). */
+export class ShadowHeadAbsentError extends Error {
+  constructor(head: string, branch: string) { super(`head ${head} of ${branch} is not in the coordinator checkout's object store, and under the control-plane merger the worker branch is never fetched from origin`); this.name = 'ShadowHeadAbsentError'; }
 }
 
 interface Flight { key: string; head: string; baseTip: string; settled: { error: unknown } | { verdict: Omit<ShadowVerdict, 'outcome'>; work: Work; leftover?: string } | null }
@@ -175,6 +189,9 @@ export async function shadowStep(cycle: Cycle) {
         const attempts = runnerFailures(state, flight.head, flight.baseTip) + 1, given = attempts >= shadowRunnerRetries;
         performed.push(storeAction(state, shadowRunnerKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: shadowRunnerDetail(flight, error, attempts, given), attempts, epoch: null, cycle: state.cycle, at }, null));
         if (given) performed.push(storeAction(state, `shadow-runner-failures:${flight.key}:${flight.baseTip}`, { kind: 'escalation', work: flight.key, principal: null, state: 'done', detail: `Shadow merge gate runner failure: ${flight.key} head ${flight.head} on ${flight.baseTip} ended ${attempts} trials with its ${error.phase} runner exiting (${error.signal ? `signal ${error.signal}` : `status ${error.status ?? 'unknown'}`}) and no failing test named, so it has no verdict against this tip; read the record under ${shadowRunnerKey(flight.head, flight.baseTip)}, nothing is changed`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }, null));
+      } else if (error instanceof ShadowHeadAbsentError) {
+        // A skip, not a failure: recorded done under the error key, so the pair is not retried against this tip and no step stall counts it.
+        performed.push(storeAction(state, shadowErrorKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'done', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} skipped, so no verdict was recorded: ${error.message}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at }, null));
       } else {
         const reason = error instanceof Error ? error.message : String(error);
         performed.push(storeAction(state, shadowErrorKey(flight.head, flight.baseTip), { kind: 'merge', work: flight.key, principal: null, state: 'failed', detail: `Shadow trial of ${flight.key} head ${flight.head} on ${flight.baseTip} could not run, so no verdict was recorded: ${reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at }, null));
@@ -269,7 +286,7 @@ export async function shadowStep(cycle: Cycle) {
       const entry: Flight = { key: due.key, head, baseTip: tip, settled: null };
       flights.set(state, entry);
       void (async () => {
-        await reads.fetch(branch);
+        await reads.fetch(branch, head, controlPlane);
         const trial = await reads.trial(head, tip, due.key);
         const risk = classifyRisk(trial.files.map(path => ({ path }))).risk;
         const build = trial.run?.build ?? 'fail';

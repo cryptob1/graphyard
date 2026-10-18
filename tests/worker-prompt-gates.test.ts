@@ -117,3 +117,29 @@ test('unit:fast-gates-exist — the gate list is one exported constant that name
   const coordination = readFileSync(`${root}docs/coordination.md`, 'utf8');
   for (const gate of gates) assert.ok(coordination.includes(gate), `docs/coordination.md names ${gate}`);
 });
+
+test('unit:worker-prompt-names-review-self — every worker request names review self with the item key and the configured CLI, before the autonomous-session line (GY-1987)', () => {
+  // The instruction is unconditional: any item's request carries it, with the configured CLI path
+  // and the item's key, so the worker judges its own diff by the reviewer's standard before it
+  // submits, and the sentence sits directly before the autonomous-session line that ends the
+  // request, so reading order runs: do the work, self-review it, then decide and act on your own.
+  const sentence = (cli: string, key: string) => `Before complete, run node ${cli} review self ${key}, judge your diff by what it prints and fix each BLOCKING finding first. `;
+  for (const fastGates of [true, false]) {
+    const request = render(fastGates);
+    assert.ok(request.includes(sentence(cli, 'GY-1')), 'the request names review self with the configured CLI and the item key');
+    const at = request.indexOf(sentence(cli, 'GY-1')), autonomous = request.indexOf('Decide and act on your own: implement the item');
+    assert.ok(at >= 0 && at < autonomous, 'the self-review instruction sits before the autonomous-session line');
+    assert.equal(request.split(sentence(cli, 'GY-1')).length, 2, 'the instruction appears exactly once');
+    assert.ok(request.indexOf('review self') === at + `Before complete, run node ${cli} `.length, 'the self-review instruction is the first mention of review self');
+  }
+  // An item with everything attached — criteria, documentation obligation, planned files — carries
+  // the same instruction, naming its own key.
+  const full = workerPrompt(
+    { cliPath: cli, repository: 'owner/graphyard', fastGates: true },
+    { key: 'GY-2', title: 'Anything', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], plannedFiles: ['src/x.ts'], documentation: { id: 'DOCS', text: 'Documentation reflects this change', paths: ['docs/'], changelog: null } },
+    { principal: 'graphyard-test-1' }, 3,
+  );
+  assert.ok(full.includes(sentence(cli, 'GY-2')), 'any item\'s request names review self with its own key');
+  // The sentence is a pure function of its inputs: the same item renders byte-identical requests.
+  assert.equal(workerPrompt({ cliPath: cli }, { key: 'GY-2', title: 'Anything' }, { principal: 'graphyard-test-1' }, 3), workerPrompt({ cliPath: cli }, { key: 'GY-2', title: 'Anything' }, { principal: 'graphyard-test-1' }, 3), 'the same inputs render byte-identical');
+});
