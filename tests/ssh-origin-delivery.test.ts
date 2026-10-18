@@ -141,7 +141,13 @@ before(async () => {
   http = server(engine, credentials, null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  assert.equal((await request(coordinator, 'status')).mergeWriter.merger, 'control-plane', 'the control plane is the merge writer');
+  // The merger setting: control-plane is the store's default, so the recorded setting is read back
+  // and set (as an install's `up` does) only when it is not already there.
+  const recorded = (await request(coordinator, 'status')).mergeWriter as { merger: string };
+  if (recorded.merger !== 'control-plane') {
+    const merged = await request(operatorAgent, 'merger', { merger: 'control-plane', reason: 'GY-1932: the merge writer holds the only key to the SSH origin' });
+    assert.equal(merged.merger, 'control-plane', 'the plane records the control plane as the merge writer');
+  }
 });
 
 after(async () => {
@@ -232,7 +238,7 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
   const greetingCase = { id: 'greeting', title: 'greeting answers', tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', name: 'read the greeting', method: 'GET', path: '/greeting.json', status: 200, expect: [{ path: 'greeting', includes: 'Hello' }] }] };
   const run: ChildRun = (command, args, options) => { if (command === 'git' && args.includes('push')) pushes.push({ args, env: options?.env }); return defaultChildRun(command, args, options); };
   const trial = async (input: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => ({ build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) });
-  const recordedMerger = async () => (await request(coordinator, 'status')).mergeWriter.merger as 'control-plane';
+  const recordedMerger = async () => (await request(coordinator, 'status')).mergeWriter.merger as 'github' | 'control-plane';
   const record: MergePorts['record'] = async (work, event) => request(coordinator, `work/${work.id}/merge-record`, event, mergeRecordKey(work, event));
   const reads = mergeWriterReads(config, checkout, run, { base: managed, record, merger: recordedMerger, trial });
   // The advisory budget run would build the fixture merge commit for real; it is not this scenario's

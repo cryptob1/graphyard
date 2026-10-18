@@ -113,7 +113,7 @@ test('unit:launch-lease-keepalive — GY-717 instances 1 and 3: a launch slower 
 // GY-1373's worktree on a loaded host outlasted the 120 s lease, so every launch from epoch 1 met
 // "Lease missing, expired, or superseded" minting its push credential and failed before any
 // session started. The renewal now starts at the claim, while the worktree is still being built.
-test('unit:launch-lease-keepalive — GY-1373: a worktree slower than the lease is built under a renewed claim, so the launch starts on a live lease', async () => {
+test('unit:launch-lease-keepalive — GY-1373: a worktree slower than the lease is built under a renewed claim, so the credential is minted on a live lease', async () => {
   const fixture = await installation();
   try {
     const leaseMs = 150, worktreeMs = 500;
@@ -124,6 +124,9 @@ test('unit:launch-lease-keepalive — GY-1373: a worktree slower than the lease 
       return prepared;
     };
     const mint = (claims: ReturnType<typeof leasedClaims>) => async () => { if (!claims.live()) throw new Error(`Worker launch failed: no push credential could be minted (${lapsed})`); };
+    // Base: a preparer whose claim the launch does not hear of — renewal starts after the worktree, too late.
+    const base = leasedClaims(fixture.root, leaseMs), baseHerdr = slowHerdr(base, 0);
+    await assert.rejects(dispatchWork(fixture.root, item('GY-1373'), launchProfile('one', fixture.credential), [], baseHerdr.run, [item('GY-1373')], slowWorktree(base, false), base.release, 1, new Date().toISOString(), { supervisor: () => false, renew: base.renew, renewIntervalMs: 40, credential: mint(base) }), /Lease missing, expired, or superseded/);
     // Candidate: the claim is renewed from the moment it is held.
     const kept = leasedClaims(fixture.root, leaseMs), keptHerdr = slowHerdr(kept, 0);
     await dispatchWork(fixture.root, item('GY-1373'), launchProfile('two', fixture.credential), [], keptHerdr.run, [item('GY-1373')], slowWorktree(kept, true), kept.release, 1, new Date().toISOString(), { supervisor: () => false, renew: kept.renew, renewIntervalMs: 40, credential: mint(kept) });

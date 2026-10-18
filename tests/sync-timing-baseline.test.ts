@@ -70,8 +70,7 @@ async function fakeServer(work: () => Work[]) {
   return { env, close: () => new Promise<void>(resolve => http.close(() => resolve())) };
 }
 
-// The loop fetches the shared object store before each sync; sync itself fetches nothing.
-const sync = (cwd: string, env: NodeJS.ProcessEnv) => exec('git', ['fetch', '-q', '--no-tags', 'origin'], { cwd }).then(() => exec(process.execPath, [launcher, 'sync', 'GY-1'], { cwd, env })).then(result => ({ code: 0, output: JSON.parse(result.stdout) }), (error: any) => ({ code: error.code as number, output: JSON.parse(error.stdout) }));
+const sync = (cwd: string, env: NodeJS.ProcessEnv) => exec(process.execPath, [launcher, 'sync', 'GY-1'], { cwd, env }).then(result => ({ code: 0, output: JSON.parse(result.stdout) }), (error: any) => ({ code: error.code as number, output: JSON.parse(error.stdout) }));
 
 test('unit:sync-resolves-timing-baseline-conflict — the resolver writes the base tip\u2019s file plus only the branch\u2019s own test-file lines, dropping foreign edits', () => {
   const base = baseline({ 'tests/alpha.test.ts': 100, 'tests/beta.test.ts': 150, 'tests/omega.test.ts': 100 });

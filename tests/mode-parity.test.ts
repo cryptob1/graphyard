@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
+import { MergerSettings, recordedMergerMode } from '../src/merger-mode.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -132,6 +133,8 @@ test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixtu
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/mode_parity_test`); await store.init();
   const engine = new Engine(store, [15368], 120, 'owner/project');
   engine.directMergeEnvironment = null; engine.baseBranch = 'main';
+  const settings = new MergerSettings(store);
+  const setMerger = async (merger: 'github' | 'control-plane') => { if ((await recordedMergerMode(store!.pool)).merger !== merger) await settings.change(operator, { merger, reason: `parity wants ${merger}` }, randomUUID()); };
   const assigned = async (branch: string) => {
     let w = await engine.execute(operator, 'create', null, { title: 'parity fixture', plannedFiles: ['src/app.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }] }, randomUUID());
     w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
@@ -141,6 +144,7 @@ test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixtu
   };
 
   // github: GitHub's observation of the pull request is the fixture's, so the submit is refused on plannedFiles, word for word.
+  await setMerger('github');
   const hub = await assigned('graphyard/gy-1-1');
   engine.submissionObserver = async probe => ({ ...fixture(null).observation!, candidate: { ...fixture(null).candidate!, branch: probe.workspaces.find(w => w.epoch === 1)!.branch } });
   await assert.rejects(engine.execute(worker, 'submit', hub.id, { epoch: 1, pr: 7 }, randomUUID()), (error: Error) => {
@@ -150,6 +154,7 @@ test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixtu
   assert.equal((await store.workDocument(hub.id))!.submission, null, 'github: nothing is submitted');
 
   // control-plane: the same scope, observed from the shared object store, is accepted — plannedFiles refuses nothing (switched off).
+  await setMerger('control-plane');
   const branch = 'graphyard/gy-2-1';
   const repo = await checkoutWithHead(fixtureRoot, branch);
   engine.gitRunner = gitRunnerFor(repo.checkout);

@@ -338,8 +338,8 @@ test('unit:install-app-timeout-resume — an App step nobody confirms prints wha
     await execFile('git', ['init', '-q', root]);
     await execFile('git', ['remote', 'add', 'origin', `https://github.com/${REPOSITORY}.git`], { cwd: root });
     const token = 'coordinator-token-0123456789abcdef0123456789';
-    // The control plane is the merge writer, so a plane with no GitHub App reads as App-pending.
-    await setupMaster(root, { url, token, cliPath: launcher, credentialDirectory: credentials });
+    await assert.rejects(setupMaster(root, { url, token, cliPath: launcher, credentialDirectory: credentials }), /identify its GitHub App/, 'only the install may configure a pending App');
+    await setupMaster(root, { url, token, cliPath: launcher, credentialDirectory: credentials, allowPendingApp: true });
     const pending = await loadMasterConfig(root);
     assert.equal(pending.githubAppId, APP_PENDING);
     const env: NodeJS.ProcessEnv = { ...process.env, GRAPHYARD_CONFIG_HOME: credentials };

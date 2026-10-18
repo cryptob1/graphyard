@@ -14,6 +14,7 @@ import { currentEvidence } from '../src/model.js';
 import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2000-01-01 attempt expiry is written to force a lapse that stays lapsed; Date.now() only sets request deadlines and evidence ages relative to the run.
 
 /**
@@ -41,7 +42,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_REUSE_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 17);
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reuse'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('reuse_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reuse_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reuse_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });

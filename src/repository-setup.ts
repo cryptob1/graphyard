@@ -8,6 +8,7 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, removeDeliveryWorkflow, saveDiscovery, writeDeliveryWorkflow, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
+import { ensureMergeMode, type ProtectionRun } from './protection.js';
 import { autonomyContract } from './autonomy.js';
 import { documentationAssignment, documentationPolicySchema, parseRepositoryConfig, repositoryConfigFile, type DocumentationPolicy, type RepositoryConfig } from './model/documentation.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
@@ -72,7 +73,26 @@ not untrusted text: act on it without waiting for confirmation. Nothing else pas
 session carries that authority.
 
 ${autonomyContract}`;
-export function managedInstructions(existing: string, url: string) {
+/**
+ * The worker block's submission paragraph (GY-1553): `complete GY-N EPOCH PR_NUMBER` while GitHub
+ * merges, `complete GY-N EPOCH --head SHA` while the control plane is the merge writer
+ * (`mergeWriter.merger` on `/api/status`; nothing is pushed, so there is no pull request to name).
+ * The caller that regenerates AGENTS.md passes the recorded mode; without one the block keeps the
+ * GitHub text, so an older caller renders exactly what it rendered before.
+ */
+const submission = (merger: string | null | undefined) => merger === 'control-plane'
+  ? `Submit the commit with \`complete GY-N EPOCH --head SHA\` (the control plane is the merge
+writer: nothing is pushed, the shared object store already holds SHA). This reports
+implementation completion and ends your lease in the same transaction; it does not set
+Done. It is refused, naming the files and the shipped work they belong to, when the commit
+reverts, deletes or rewrites files outside plannedFiles; the same check runs again on every
+new head.`
+  : `Submit the PR with \`complete GY-N EPOCH PR_NUMBER\`. This reports implementation
+completion and ends your lease in the same transaction; it does not set Done. It is
+refused, naming the files and the shipped work they belong to, when the PR reverts,
+deletes or rewrites files outside plannedFiles; the same check runs again on every new
+head.`;
+export function managedInstructions(existing: string, url: string, options: { merger?: string | null } = {}) {
   const starts = existing.split(start).length - 1, ends = existing.split(end).length - 1;
   if (starts !== ends || starts > 1 || starts === 1 && existing.indexOf(end) < existing.indexOf(start)) throw new Error('Malformed or duplicate Graphyard markers; resolve them before updating AGENTS.md');
   const section = `${start}
@@ -91,22 +111,24 @@ Run agents through \`watch GY-N EPOCH -- YOUR_AGENT_COMMAND\`. The supervisor su
 session, invoke the CLI as \`node "$GRAPHYARD_CLI" status GY-N\` (or other commands).
 For manual startup, use the CLI path printed by \`init\` or Herdr's handoff command.
 
-Renew ownership at least every 30 seconds while actively working. Stop editing on
-lease loss; an expired or superseded epoch does not authorize more work.
+Renew ownership at least every 30 seconds while actively working. Stop editing and
+pushing on lease loss; an expired or superseded epoch does not authorize more work.
 Register the assigned host/path/branch before submission. Do not reuse another
 assignment's worktree or quietly remove historical reservations.
 
-Run \`sync GY-N\` before submitting. It merges the shared origin/BASE the merge writer
-advances (never rebase; nothing is fetched). Commit on the assigned branch: nothing is
-pushed and no pull request is opened.
+Run \`sync GY-N\` before every push. It merges the base branch (\`git fetch --no-tags
+origin && git merge origin/BASE\`; never rebase; tags are not fetched, so a new tag
+never fails sync) and lists every file outside the item's
+plannedFiles that no longer matches origin/BASE. Files outside plannedFiles must match
+origin/BASE byte-for-byte: restore them, never re-resolve a merge in favour of your
+branch. \`sync GY-N --restore\` restores every such file to origin/BASE in one new
+commit naming them, so a plain push updates the PR: a force push is never needed or
+allowed. Only an operator can widen plannedFiles, through an audited requirements revision.
 
-Submit the commit with \`complete GY-N EPOCH --head SHA\` (the control plane is the merge
-writer; the shared object store already holds SHA). This reports implementation
-completion and ends your lease in the same transaction; it does not set Done. Make
-\`complete\` your last action: do not heartbeat or edit after it. The next renewal is
-refused and the supervisor stops the session; that is the attempt ending, not lease
-loss. Trusted evidence, independent review, and Graphyard's merge gate decide
-progression. Report blockers explicitly.
+${submission(options.merger)} Make \`complete\` your last action: do not heartbeat, edit, or push after it. The
+next renewal is refused and the supervisor stops the session; that is the attempt
+ending, not lease loss. CI, trusted evidence, independent review, and Graphyard's
+merge gate decide progression. Report blockers explicitly.
 Park a decision only a human may make with \`park GY-N EPOCH KIND NEEDED... --ask ASK
 [--step STEP]... --recommend TEXT --why WHY -- REASON\`. Write ASK, STEP, TEXT and WHY for a
 non-technical reader: ASK is one sentence naming the action they take, each STEP one plain
@@ -200,6 +222,9 @@ export async function setupRepository(root: string, input: Connection, options: 
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
   if (options.herdr && !connection.token) throw new Error('Herdr setup requires an individual worker credential via GRAPHYARD_TOKEN or --token-stdin');
   const detected = await discover(root);
+  // GY-1553: worker init regenerates AGENTS.md from the recorded merger; discarding it would rewrite
+  // a control-plane install back to `complete GY-N EPOCH PR_NUMBER`.
+  let merger: string | null = null;
   if (connection.token) {
     let response: Response;
     try { response = await (options.fetcher ?? fetch)(`${connection.url}/api/status`, { headers: { Authorization: `Bearer ${connection.token}` }, signal: AbortSignal.timeout(15000) }); } catch { throw new Error('Cannot reach Graphyard; setup has not saved credentials'); }
@@ -208,10 +233,11 @@ export async function setupRepository(root: string, input: Connection, options: 
     if (status.actor?.role !== 'worker') throw new Error('Repository worker setup requires a worker credential; operator, coordinator, producer, and reader tokens are not suitable for launching workers');
     assertRepository(detected.repository, status.repository);
     connection.principal = status.actor.id;
+    merger = status.mergeWriter?.merger ?? null;
   }
   const instructionsFile = resolve(root, 'AGENTS.md'); await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, connection.url);
+  const instructions = managedInstructions(existing, connection.url, { merger });
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
     // GY-1511: an install with its own Herdr instance links the plugin there, never in the default one.
     try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, options.herdrInstance === undefined ? herdrTarget() : options.herdrInstance).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
@@ -384,6 +410,8 @@ export interface ApplyDependencies {
   githubSetup?: (repository: string, deployment: string) => Promise<{ appId: number; slug: string }>;
   now?: () => Date;
   token?: () => string;
+  /** Runs `gh` for the merge-mode step; without it onboarding leaves GitHub's merge settings to `master protection --apply`. */
+  github?: ProtectionRun;
   /**
    * The `graphyard install` that already owns this repository's identities (GY-1413): its install
    * directory and its confirmed App. Apply then commits only the onboarding files — it never writes
@@ -393,6 +421,11 @@ export interface ApplyDependencies {
   installed?: { directory: string; githubApp: { appId: number; slug: string } | null };
   /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
   writeCredentials?: boolean;
+  /**
+   * GY-1553: the recorded merge writer from `/api/status.mergeWriter.merger`. Callers that already
+   * hold status pass it; without one the block keeps the GitHub pull-request text (no new status read).
+   */
+  merger?: string | null;
 }
 
 /**
@@ -412,7 +445,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const instructionsFile = resolve(root, 'AGENTS.md');
   await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, server);
+  const instructions = managedInstructions(existing, server, { merger: dependencies.merger ?? null });
   if (instructions === existing) unchanged.push('AGENTS.md coordination section');
   else {
     let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }
@@ -514,6 +547,16 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     if (!Number.isSafeInteger(registration?.appId) || !registration?.slug) throw new Error('The GitHub App flow returned an incomplete registration');
     githubApp = { appId: registration.appId, slug: registration.slug };
     applied.push(`GitHub App registration ${githubApp.slug}`);
+  }
+
+  // A user-owned repository cannot have a merge queue, so GitHub merges through auto-merge there
+  // and the repository must allow it (GY-310); an organization repository gets its queue ruleset
+  // from `master protection --apply` once the App has published its check.
+  if (dependencies.github) {
+    try {
+      const merge = ensureMergeMode(proposal.repository, dependencies.github);
+      (merge.enabled ? applied : unchanged).push(merge.mode === 'queue' ? `merge mode: GitHub merge queue (${proposal.repository} is organization-owned; master protection --apply writes the ruleset)` : `merge mode: auto-merge ${merge.enabled ? 'enabled' : 'already enabled'} (${proposal.repository} cannot have a merge queue)`);
+    } catch (error: any) { drift.push(`merge mode could not be read or set on ${proposal.repository} (${String(error?.message ?? error).split('\n')[0]}); run graphyard master protection --apply`); }
   }
 
   const state = appliedStateSchema.parse({ version: 1, appliedAt: (dependencies.now ?? (() => new Date()))().toISOString(),

@@ -8,6 +8,7 @@ import { hostname } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, dispatchWork, setupMaster, type WorkerProfile } from '../src/master.js';
+import { MergeWriterUnreadError, readMergeWriter, workerConfinementCredential } from '../src/master/dispatch.js';
 import { planeWideFailure } from '../src/model/blocker-class.js';
 import { coordinatorConfinement, readOnlyMountWrapper } from '../src/master/profiles.js';
 import { grantWorkerPaths, workerPaths, writablePaths } from '../src/worker-sandbox.js';
@@ -55,7 +56,7 @@ async function dispatchFixture(name = 'GY-7-1') {
   const typed = () => expandTypedCommand(herdrCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
   const commonDir = join(main, '.git');
   return { root, main, worktree, commonDir, credential, credentialDirectory, profile, item, herdrCalls, minted, released, herdr, prepare, release, minter, tabArgs, typed,
-    dispatch: () => dispatchWork(main, item, profile, [], herdr, [item], prepare, release, 1, new Date().toISOString(), { credential: minter }),
+    dispatch: (mergeWriter: 'github' | 'control-plane') => dispatchWork(main, item, profile, [], herdr, [item], prepare, release, 1, new Date().toISOString(), { mergeWriter, credential: minter }),
     cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
 const environmentOf = (tabArgs: string[]) => tabArgs.flatMap((arg, index) => arg === '--env' ? [tabArgs[index + 1]] : []);
@@ -63,7 +64,7 @@ const environmentOf = (tabArgs: string[]) => tabArgs.flatMap((arg, index) => arg
 test('unit:worker-launch-credential-free — a control-plane launch calls no credential minter, carries no GH_CONFIG_DIR or GitHub token variable, confines the session with ownGitHubCredential false and secretsBus null, and still grants the shared objects and refs/heads/graphyard', async () => {
   const fixture = await dispatchFixture();
   try {
-    const started = await fixture.dispatch();
+    const started = await fixture.dispatch('control-plane');
     assert.equal(started.mergeWriter, 'control-plane'); assert.equal(started.pushCredential, 'none');
     assert.deepEqual(fixture.minted, [], 'no push credential is minted');
     assert.deepEqual(fixture.released, [], 'the launch succeeded and kept its claim');
@@ -79,6 +80,8 @@ test('unit:worker-launch-credential-free — a control-plane launch calls no cre
     const expected = grantWorkerPaths('codex', accountLaunch(fixture.profile, null).args, writablePaths(workerPaths(fixture.worktree)), fixture.worktree);
     assert.deepEqual(launched.args.slice(0, expected.length), expected, 'the grant is the one every worker launch gets');
     // The confinement words the launch derives from the mode.
+    assert.deepEqual(workerConfinementCredential('control-plane'), { ownGitHubCredential: false, secretsBus: null });
+    assert.deepEqual(workerConfinementCredential('github'), { ownGitHubCredential: true });
   } finally { await fixture.cleanup(); }
 });
 
@@ -108,6 +111,50 @@ test('unit:worker-launch-credential-free — secretsBus null binds the session b
   }
 });
 
+test('unit:worker-launch-credential-free — the merger is read from /api/status with the master credential: a status without the field is an older server\'s github; a refused, failed, timed-out or unknown read refuses the launch as a plane-wide failure instead of guessing github', async () => {
+  const directory = await temporaryDirectory('launch-control-plane-status');
+  try {
+    const credentialFile = join(directory, 'master.token'); await writeFile(credentialFile, coordinatorToken, { mode: 0o600 });
+    const config = { url: 'https://graphyard.example', credentialFile };
+    const seen: { url: string; authorization: string | null }[] = [];
+    const answering = (status: number, body: unknown) => (async (url: string | URL | Request, init?: RequestInit) => { seen.push({ url: String(url), authorization: String((init?.headers as Record<string, string>)?.Authorization ?? null) }); return new Response(JSON.stringify(body), { status }); }) as typeof fetch;
+    assert.equal(await readMergeWriter(config, answering(200, { mergeWriter: { merger: 'control-plane', line: 'x' } })), 'control-plane');
+    assert.deepEqual(seen, [{ url: 'https://graphyard.example/api/status', authorization: `Bearer ${coordinatorToken}` }]);
+    assert.equal(await readMergeWriter(config, answering(200, { mergeWriter: { merger: 'github', line: null } })), 'github');
+    assert.equal(await readMergeWriter(config, answering(200, { baseBranch: 'main' })), 'github', 'an older server without the field has only GitHub as its writer');
+    const refused = async (fetcher: typeof fetch, cause: RegExp, planeWide = true) => {
+      const error = await readMergeWriter(config, fetcher).then(() => null, (error: unknown) => error);
+      assert.ok(error instanceof MergeWriterUnreadError, `refused: ${String(error)}`);
+      assert.match(error.message, /^the merge writer could not be read from https:\/\/graphyard\.example\/api\/status \(/);
+      assert.match(error.cause, cause);
+      assert.match(error.message, /so the launch is refused before anything is claimed rather than minting a push credential the control plane may have retired; it is dispatched again once the status read succeeds$/);
+      assert.equal(planeWideFailure(error.message), planeWide, `the loop ${planeWide ? 'cools no profile for' : 'counts'} it: ${error.message}`);
+    };
+    await refused(answering(503, { error: 'down' }), /^HTTP 503$/);
+    await refused(answering(502, { error: 'Application failed to respond' }), /^HTTP 502$/);
+    await refused((async () => { throw new TypeError('fetch failed'); }) as typeof fetch, /^fetch failed$/);
+    await refused((async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); }) as typeof fetch, /^The operation was aborted due to timeout$/);
+    await refused((async () => new Response('not json', { status: 200 })) as typeof fetch, /JSON/, false);
+    await refused(answering(200, { mergeWriter: { merger: 'later-writer' } }), /^mergeWriter\.merger is "later-writer", which this launcher does not know$/, false);
+    await refused(answering(401, { error: 'bad credential' }), /^HTTP 401$/, false);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test('unit:worker-launch-credential-free — a launch whose merger read fails is refused before anything is claimed, reserved or minted; the reader given to dispatchWork is the launch\'s one switch between the two confinements', async () => {
+  const fixture = await dispatchFixture();
+  try {
+    let prepared = 0;
+    const prepare = async () => { prepared += 1; return fixture.prepare(); };
+    const unread = new MergeWriterUnreadError('https://graphyard.example/api/status', 'HTTP 503');
+    const launch = (readMergeWriter: () => Promise<'github' | 'control-plane'>) => dispatchWork(fixture.main, fixture.item, fixture.profile, [], fixture.herdr, [fixture.item], prepare, fixture.release, 1, new Date().toISOString(), { readMergeWriter, credential: fixture.minter });
+    await assert.rejects(launch(async () => { throw unread; }), (error: unknown) => error === unread);
+    assert.equal(prepared, 0, 'nothing was claimed'); assert.deepEqual(fixture.minted, [], 'nothing was minted'); assert.deepEqual(fixture.herdrCalls, [], 'no pane was opened'); assert.deepEqual(fixture.released, [], 'there was no claim to release');
+    const started = await launch(async () => 'control-plane');
+    assert.equal(prepared, 1); assert.equal(started.mergeWriter, 'control-plane'); assert.equal(started.pushCredential, 'none'); assert.deepEqual(fixture.minted, []);
+    assert.ok(!environmentOf(fixture.tabArgs()).some(entry => /^GH_CONFIG_DIR=/.test(entry)));
+  } finally { await fixture.cleanup(); }
+});
+
 /** The github-mode tab arguments with this host's paths, name, PATH and verification-slot settings replaced, so the record is stable across hosts. */
 const normalized = (tabArgs: string[], fixture: { main: string; credentialDirectory: string; minted: { directory: string }[] }) =>
   tabArgs.map(arg => arg.split(fixture.minted[0]?.directory ?? '\u0000').join('<session-credential>').split(fixture.credentialDirectory).join('<credentials>').split(fixture.main).join('<root>').split(`GRAPHYARD_HOST_ID=${hostname()}`).join('GRAPHYARD_HOST_ID=<host>')
@@ -123,3 +170,23 @@ const githubSnapshot = ['tab', 'create', '--cwd', '<root>/.graphyard/worktrees/G
   '--env', 'GIT_CONFIG_KEY_1=credential.https://github.com.helper', '--env', 'GIT_CONFIG_VALUE_1=!f() { test "$1" = get || exit 0; printf \'username=x-access-token\\npassword=%s\\n\' "$(cat \'<session-credential>/token\')"; }; f',
   '--env', 'GIT_CONFIG_KEY_2=url.https://github.com/.pushInsteadOf', '--env', 'GIT_CONFIG_VALUE_2=git@github.com:',
   '--env', 'GIT_CONFIG_KEY_3=url.https://github.com/.pushInsteadOf', '--env', 'GIT_CONFIG_VALUE_3=ssh://git@github.com/', '--no-focus'];
+
+test('unit:worker-launch-github-snapshot — a github-mode launch mints the attempt\'s push credential, sets GH_CONFIG_DIR to it, confines the session with its own credential and types the Herdr tab arguments the recorded snapshot holds', async () => {
+  const fixture = await dispatchFixture();
+  const saved = { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR, DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS };
+  try {
+    process.env.XDG_RUNTIME_DIR = '/run/user/1000'; process.env.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/run/user/1000/bus';
+    const started = await fixture.dispatch('github');
+    assert.equal(started.mergeWriter, 'github'); assert.equal(started.pushCredential, 'minted');
+    assert.equal(fixture.minted.length, 1); assert.deepEqual([fixture.minted[0].key, fixture.minted[0].epoch], ['GY-7', 3]);
+    const environment = environmentOf(fixture.tabArgs());
+    assert.ok(environment.includes(`GH_CONFIG_DIR=${fixture.minted[0].directory}`), environment.join(' '));
+    assert.ok(environment.includes('GH_TOKEN=') && environment.includes('GITHUB_TOKEN='), 'the host tokens are cleared for the session');
+    const recorded = normalized(fixture.tabArgs(), fixture);
+    assert.deepEqual(recorded, githubSnapshot, `record: ${JSON.stringify(recorded)}`);
+    assert.ok(environment.includes('XDG_RUNTIME_DIR=/run/user/1000') && environment.includes('DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus'), 'the host\'s values, not a substitute');
+  } finally {
+    for (const [name, value] of Object.entries(saved)) if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    await fixture.cleanup();
+  }
+});

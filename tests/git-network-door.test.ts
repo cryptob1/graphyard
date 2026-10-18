@@ -183,6 +183,7 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)', door: 'the push exists only in the PR form, which the engine accepts only while GitHub is the merger (GY-1523) — exactly when the control plane is not the merge writer, so there is no writer queue to hand the push to; the writer\'s one push door (sync-push) carries only a pure base sync of the worker\'s own assigned branch, and the answer to a sandbox that cannot push is `complete --head`, which pushes nothing (GY-1925)' },
   'src/cli/planned-files-intent.ts': { subcommands: ['fetch'], runs: 'the worker CLI reading the planned-files intent (`sync`)', credential: 'the worker checkout\'s own git credential', door: 'the best-effort fetch refreshes origin/BASE in the coordinator checkout before plannedFiles is derived against its tree — on `master create`, `master requirements` and the loop\'s scope and diagnosis reads; the merge writer runs as a serial queue step and publishes no base read other processes can await, and a failed fetch falls back to the last fetched base' },
   'src/cli/workspace-worktree.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s workspace tools (`handoff`, `restore-branch`)', credential: 'the workspace checkout\'s own git credential', door: 'the fetch fills the workspace checkout\'s own remote-tracking refs for the worker\'s branch (and an adopted pull request\'s branch), which the merge writer neither holds nor pushes; it only ever writes the base, and `restore-branch`\'s lease push replaces a worker branch the merge writer has no lease on' },
+  'src/cli/workspace.ts': { subcommands: ['fetch'], runs: '`graphyard sync` in a workspace without a control plane', credential: 'the workspace checkout\'s own git credential', door: 'it runs only without a control plane (`if (!controlPlane)`), where no loop and so no merge writer exists to ask; under a control plane `sync` fetches nothing' },
   'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential', door: 'it reads the open candidates\' worker branches, which the merge writer never fetches (its one read is the base tip), synchronously inside the status probe\'s time budget; the writer has no port for branch reads and is not wired under the github merger' },
   'src/daemon/acceptance.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s acceptance step opening a goal\'s acceptance pull request under the github merger (base read, acceptance-branch push); under control-plane its base read is the merge writer\'s fetch', credential: 'the coordinator checkout\'s own git credential',
     door: 'under the github merger GitHub merges the acceptance pull request, so its branch must be on the remote before one opens, and no merge writer runs; the writer pushes only a leased merge onto the base tip, never a review branch' },
@@ -234,6 +235,7 @@ export const baseline = [
   'src/cli/complete.ts',
   'src/cli/planned-files-intent.ts',
   'src/cli/workspace-worktree.ts',
+  'src/cli/workspace.ts',
   'src/conflicts.ts',
   'src/daemon/acceptance.ts',
   'src/daemon/blocker-probes.ts',
@@ -349,6 +351,7 @@ test('unit:git-network-door — every release and promotion cluster file is off 
 export const docsSyncWorkspaceCluster = [
   'src/cli/checkout-restore-release.ts',
   'src/cli/workspace-worktree.ts',
+  'src/cli/workspace.ts',
   'src/daemon/held-cli.ts',
   'src/docs-sync.ts',
   'src/install/host.ts',

@@ -16,15 +16,16 @@ import { fakeTransport, type Transport } from '../src/install/transport.js';
 import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
 import { appKey, temporaryRepository } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 const execFile = promisify(execFileCallback);
 
 /**
- * GY-1550 / GY-1552 (children of GY-1527, `up`):
+ * GY-1550 / GY-1552 (children of GY-1527, `up --merger control-plane`):
  * - GY-1550: `graphyard install --no-github-app` installs a control plane with no GitHub App; the
  *   proof runs the installer against a live server started without GitHub and checks no App flow
  *   runs, no GITHUB_APP_* variable is written, and `/api/status.github` is false.
- * - GY-1552: `up` step order (proofs unit:up-control-plane-steps and
+ * - GY-1552: `up --merger control-plane` step order (proofs unit:up-control-plane-steps and
  *   unit:up-github-steps-unchanged) lands after the install-flag and deploy-key children.
  */
 const INSTALL_ID = 'owner-project';
@@ -52,7 +53,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_INSTALL_TEST_PORT ?? 0) || await freePort();
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('no-app-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: (message: unknown) => console.error('postgres:', String(message)), postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_no_app');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_no_app`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_no_app`); await store.init(); await recordLegacyMerger(store);
   const engine = new Engine(store, [15368], 120, 'owner/project');
   // The server exactly as src/server/main.ts starts it without GITHUB_APP_ID: githubFromEnv() is null.
   http = server(engine, principals.map(principal => ({ ...principal, token: tokens.get(principal.id)! })), null);
@@ -254,9 +255,9 @@ test('integration:install-without-github-app refuses the flags that need an App:
 });
 
 /**
- * GY-1552 (child of GY-1527): every unsupervised `up` — step order, install --no-github-app, no
- * browser profile, gh repo create when missing, the deploy key, and no GitHub protection. Proofs:
- * unit:up-control-plane-steps, unit:up-github-steps-unchanged.
+ * GY-1552 (child of GY-1527): `up --merger control-plane` — step order, install --no-github-app,
+ * no browser profile, gh repo create when missing, deploy-key + POST /api/merger, and the github-mode
+ * step list unchanged. Proofs: unit:up-control-plane-steps, unit:up-github-steps-unchanged.
  */
 const upModule = () => import('../src/up.js');
 const UP_SERVER = 'http://127.0.0.1:4310';
@@ -273,9 +274,10 @@ const UP_ADMIN = 'a'.repeat(40);
 function controlPlaneUpWorld(options: { settled?: boolean; operatorToken?: string | null } = {}) {
   const calls: string[][] = [];
   const ghCalls: string[][] = [];
-  let installed = !!options.settled, accounts = !!options.settled, loop = !!options.settled;
+  let installed = !!options.settled, accounts = !!options.settled, loop = !!options.settled, merger: 'github' | 'control-plane' = options.settled ? 'control-plane' : 'github';
   let repoExists = false;
   const deployKeys: string[] = [];
+  const mergers: { token: string; requestId: string }[] = [];
   /** The goal submissions the run made, with the credential each carried and its request id. */
   const goals: { token: string | null; requestId: string | null }[] = [];
   /** The install's own worker credential: what a child with no GRAPHYARD_TOKEN falls back to. */
@@ -283,11 +285,11 @@ function controlPlaneUpWorld(options: { settled?: boolean; operatorToken?: strin
   let clock = 0;
   const status = () => installed ? {
     github: false, githubRepository: 'owner/project', appPermissions: { missing: [] }, reviewerApps: [],
-    mergeWriter: { merger: 'control-plane', line: 'control-plane writer' },
+    mergeWriter: { merger, line: merger === 'control-plane' ? 'control-plane writer' : null },
     fleet: accounts
       ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] }
       : { roles: [], accounts: [] },
-    setup: { loop },
+    setup: { protection: 'off', loop },
   } : null;
   const deps = (checkout: string, events: UpEvent[]): UpDependencies => ({
     root: checkout, pollMs: 1, emit: event => { events.push(event); },
@@ -304,6 +306,7 @@ function controlPlaneUpWorld(options: { settled?: boolean; operatorToken?: strin
       deployKeys.push(`${installDir}:${repository}`);
       return join(installDir, 'deploy-key');
     },
+    setMerger: async (token, requestId) => { mergers.push({ token, requestId }); merger = 'control-plane'; },
     gh: async args => {
       ghCalls.push(args);
       if (args[0] === 'repo' && args[1] === 'view') return repoExists ? { code: 0, stdout: '{"name":"project"}' } : { code: 1, stdout: '', stderr: 'not found' };
@@ -334,16 +337,16 @@ function controlPlaneUpWorld(options: { settled?: boolean; operatorToken?: strin
       return { code: 0, stdout: '{}' };
     },
   });
-  return { calls, ghCalls, deployKeys, goals, setRepoExists: (value: boolean) => { repoExists = value; }, deps };
+  return { calls, ghCalls, deployKeys, mergers, goals, setRepoExists: (value: boolean) => { repoExists = value; }, deps };
 }
 
-test('unit:up-control-plane-steps — up runs preflight, control-plane (install --no-github-app), host-supervisor, deploy-key, master-autonomy, onboarding, accounts, harness, master-loop, goal; needs no browser profile; creates the repository with gh repo create when missing', async () => {
+test('unit:up-control-plane-steps — up --merger control-plane runs preflight, control-plane (install --no-github-app), host-supervisor, deploy-key, merger-setting, master-autonomy, onboarding, accounts, harness, master-loop, goal; needs no browser profile; creates the repository with gh repo create when missing', async () => {
   const { runUp, upRequestFromArgs, upControlPlaneSteps, upStepsFor, upMergerControlPlane } = await upModule();
-  const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--goal', 'goal.md']);
+  const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--merger', 'control-plane', '--goal', 'goal.md']);
   assert.equal(request.merger, 'control-plane');
   assert.equal(upMergerControlPlane(request), true);
   assert.deepEqual([...upStepsFor(request)], [...upControlPlaneSteps]);
-  assert.deepEqual([...upControlPlaneSteps], ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal']);
+  assert.deepEqual([...upControlPlaneSteps], ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'merger-setting', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal']);
 
   const checkout = await temporaryDirectory('up-control-plane-steps');
   await writeFile(join(checkout, 'goal.md'), 'Ship the control-plane merger path for a repository with no GitHub Apps.\n');
@@ -367,23 +370,24 @@ test('unit:up-control-plane-steps — up runs preflight, control-plane (install 
   assert.deepEqual(world.ghCalls[1], ['repo', 'create', 'owner/project', '--private', '--source', '.', '--push']);
   assert.equal(world.deployKeys.length, 1);
   assert.match(world.deployKeys[0]!, /install-dir:owner\/project$/);
-  assert.ok(!world.ghCalls.some(args => args.some(arg => /rulesets|protection/.test(arg))), 'no GitHub protection is read or written');
+  assert.equal(world.mergers.length, 1);
+  assert.equal(world.mergers[0]!.token, UP_ADMIN);
+  assert.ok(world.mergers[0]!.requestId.length >= 32, 'Idempotency-Key is fixed for the merger POST');
   assert.ok(result.completed.includes('goal'));
   assert.ok(!events.some(event => event.kind === 'handoff'), 'no browser or device handoff');
 });
 
-test('unit:up-github-steps-unchanged — the GitHub App path (a request recorded with no merger) keeps its step list and install still registers Apps (no --no-github-app, no deploy-key); --local takes the control plane too (GY-1978)', async () => {
+test('unit:up-github-steps-unchanged — without --merger control-plane the step list stays the github-mode list and install still registers Apps (no --no-github-app, no deploy-key or merger-setting)', async () => {
   const { runUp, upRequestFromArgs, upSteps, upStepsFor, upControlPlaneSteps, upMergerControlPlane } = await upModule();
   assert.deepEqual([...upSteps], ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal']);
-  assert.ok(!upSteps.includes('deploy-key' as never), 'the App path has no deploy-key');
-  assert.notDeepEqual([...upSteps], [...upControlPlaneSteps], 'control-plane inserts the deploy key');
+  assert.ok(!upSteps.includes('deploy-key' as never) && !upSteps.includes('merger-setting' as never), 'github-mode list has no deploy-key or merger-setting');
+  assert.notDeepEqual([...upSteps], [...upControlPlaneSteps], 'control-plane inserts the two merger steps');
 
-  // Every up is control-plane, --local (supervised) too: no pull request awaits the operator, so the merge writer needs its deploy key.
-  assert.equal(upMergerControlPlane(upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose'])), true);
-  const local = upRequestFromArgs(['--repo', 'owner/project', '--local']);
-  assert.equal(local.merger, 'control-plane');
-  assert.deepEqual([...upStepsFor(local)], [...upControlPlaneSteps]);
-  assert.deepEqual([...upStepsFor({ merger: undefined })], [...upSteps], 'only a request recorded with no merger keeps the App path');
+  // GY-1833: a bare up is control-plane; the github-mode list is the legacy --merger github path.
+  const github = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--merger', 'github']);
+  assert.equal(github.merger, 'github');
+  assert.equal(upMergerControlPlane(github), false);
+  assert.deepEqual([...upStepsFor(github)], [...upSteps]);
 
   const checkout = await temporaryDirectory('up-github-steps-unchanged');
   const calls: string[][] = [];
@@ -403,7 +407,7 @@ test('unit:up-github-steps-unchanged — the GitHub App path (a request recorded
       fleet: accounts
         ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] }
         : { roles: [], accounts: [] },
-      setup: { loop },
+      setup: { protection: app ? 'checks' : 'off', loop },
     } : null,
     publishOnboarding: async () => null,
     onboardingMerged: async () => true,
@@ -423,20 +427,20 @@ test('unit:up-github-steps-unchanged — the GitHub App path (a request recorded
     },
   });
   assert.equal(result.exitCode, 0, result.next);
-  assert.ok(!result.completed.some(step => step === 'deploy-key'));
+  assert.ok(!result.completed.some(step => step === 'deploy-key' || step === 'merger-setting'));
   assert.deepEqual(result.completed, [...upSteps].filter(step => step !== 'goal'));
   const applies = calls.filter(args => args[0] === 'install' && args.includes('--apply'));
   assert.ok(applies.length && applies.every(args => args.includes('--reviewer') && args.includes('claude')), 'github mode still passes --reviewer');
   assert.ok(applies.every(args => !args.includes('--no-github-app')), 'github mode never passes --no-github-app');
-  assert.ok(!events.some(event => event.kind === 'step' && event.step === 'deploy-key'));
+  assert.ok(!events.some(event => event.kind === 'step' && (event.step === 'deploy-key' || event.step === 'merger-setting')));
 });
 
 test('unit:up-goal-uses-operator-credential — the goal step files with the operator\'s admin credential (else the master\'s operator-agent identity holding intent:create) and the saved request id, and the goal is created; never with the install\'s worker credential', async () => {
   const { runUp, upRequestFromArgs } = await upModule();
-  const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--goal', 'goal.md']);
+  const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--merger', 'control-plane', '--goal', 'goal.md']);
   const goalText = 'Customers can be greeted by name when they open the application.\n';
 
-  // The operator's admin credential is on this machine: the goal child carries it.
+  // The operator's admin credential is on this machine (as merger-setting resolves it): the goal child carries it.
   const checkout = await temporaryDirectory('up-goal-operator-credential');
   await writeFile(join(checkout, 'goal.md'), goalText);
   const world = controlPlaneUpWorld();
@@ -472,13 +476,13 @@ test('unit:up-goal-uses-operator-credential — the goal step files with the ope
 
 test('unit:up-goal-missing-operator-credential — with neither the operator\'s admin credential nor the master\'s operator-agent identity on the machine, the goal step stops with exit 2 naming the credential and the rerun command, and never calls graphyard goal with the worker credential', async () => {
   const { runUp, upRequestFromArgs, upControlPlaneSteps, upStateFile } = await upModule();
-  const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--goal', 'goal.md']);
+  const request = upRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--agent', '--merger', 'control-plane', '--goal', 'goal.md']);
   const checkout = await temporaryDirectory('up-goal-missing-operator-credential');
   await writeFile(join(checkout, 'goal.md'), 'Customers can be greeted by name when they open the application.\n');
-  // Every step but the goal is done by an earlier run: its master identities were
+  // Every step but the goal is done by an earlier run: its merger setting and master identities were
   // provisioned with the admin credential then; this machine holds neither credential now.
   await mkdir(join(checkout, '.graphyard'), { recursive: true });
-  await writeFile(upStateFile(checkout), `${JSON.stringify({ version: 1, repository: 'owner/project', provider: 'compose', completed: [...upControlPlaneSteps].filter(step => step !== 'goal'), noHerdr: false, goal: null }, null, 2)}\n`);
+  await writeFile(upStateFile(checkout), `${JSON.stringify({ version: 1, repository: 'owner/project', provider: 'compose', merger: 'control-plane', completed: [...upControlPlaneSteps].filter(step => step !== 'goal'), noHerdr: false, goal: null }, null, 2)}\n`);
   const world = controlPlaneUpWorld({ settled: true, operatorToken: null });
   const events: UpEvent[] = [];
   const result = await runUp(request, world.deps(checkout, events));
@@ -491,4 +495,9 @@ test('unit:up-goal-missing-operator-credential — with neither the operator\'s 
   assert.equal(failed?.step, 'goal');
   assert.equal(failed?.exitCode, 2);
   assert.match(failed?.detail ?? '', /neither the operator's admin credential nor the master's operator-agent credential/);
+});
+
+test('up --merger control-plane is refused beside --local, which provisions no master identities', async () => {
+  const { upRequestFromArgs } = await import('../src/up.js');
+  assert.throws(() => upRequestFromArgs(['--repo', 'acme/shop', '--local', '--merger', 'control-plane']), /cannot be combined with --local/);
 });

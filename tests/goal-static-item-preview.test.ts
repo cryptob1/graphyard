@@ -115,7 +115,7 @@ function loop(options: { remote?: boolean } = {}) {
   };
   // A remote loop runs on another host than the server, as a workstation loop beside a hosted server does: the loopback origin it records is one the server cannot reach.
   const open: typeof openPreview = async (input, opened) => { const preview = await openPreview(input, opened); return options.remote && preview.url ? { ...preview, url: unreachable } : preview; };
-  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'control-plane', environment: { PATH: process.env.PATH }, itemPreviews: { open } }), advisory: undefined };
+  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'github', environment: { PATH: process.env.PATH }, itemPreviews: { open } }), advisory: undefined };
   const step = async (ids: string[]) => {
     const work = await Promise.all(ids.map(read));
     await mergeWriterStep({ state, effects: { mergeWriter: reads, persist: async () => {} }, now: Date.now, snapshot: { work }, performed: [] } as unknown as Cycle);

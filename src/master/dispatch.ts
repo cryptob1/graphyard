@@ -75,6 +75,20 @@ export interface DispatchOptions {
    * preparer supplies gets one only when a minter is given.
    */
   credential?: CredentialMinter;
+  /**
+   * Which writer lands heads on the base branch (GY-1523), read from `/api/status` `mergeWriter` for
+   * the worktree prepareWorkerLaunch creates (readMergeWriter) and taken as `github` for a worktree
+   * an injected preparer supplies unless given here. A `control-plane` launch mints no push
+   * credential, sets no GH_CONFIG_DIR and binds no keyring proxy: the worker's commit is read from
+   * the shared object store by `complete --head`, so the session has nowhere to push.
+   */
+  mergeWriter?: MergerMode;
+  /**
+   * Reads the merger when `mergeWriter` is not given (GY-1523): the control plane's `/api/status`
+   * (readMergeWriter) for the worktree prepareWorkerLaunch creates, and `github` for one an injected
+   * preparer supplies. Given by the soak day, whose real launches count and answer the reads.
+   */
+  readMergeWriter?: (config: MasterConfig) => Promise<MergerMode>;
   /** The coordinator checkout the worker's session is confined against, for a launcher embedded outside the CLI (startAgentSession's `coordinatorRoot`). */
   coordinatorRoot?: string;
   /**
@@ -116,6 +130,46 @@ export function launchLeaseKeepAlive(renew: (() => Promise<unknown>) | null, int
   // Stopping waits out a renewal in flight, so none lands after the release that follows.
   return { stop: async () => { stopped = true; clearInterval(timer); await pending; } };
 }
+/**
+ * A launch refused because the merger could not be read (GY-1523). The cause keeps the server's own
+ * words (an HTTP status, `fetch failed`, the timeout's text), so the loop classifies a plane-wide
+ * outage as one (model/blocker-class.ts planeWideFailure): it cools no profile, counts toward no
+ * dispatch-failure blocker, and the item is dispatched again once the plane answers.
+ */
+export class MergeWriterUnreadError extends Error {
+  constructor(readonly url: string, readonly cause: string) {
+    super(`the merge writer could not be read from ${url} (${cause}), so the launch is refused before anything is claimed rather than minting a push credential the control plane may have retired; it is dispatched again once the status read succeeds`);
+    this.name = 'MergeWriterUnreadError';
+  }
+}
+/**
+ * The recorded merger (GY-1523), read from the control plane with the master's credential. A status
+ * without the `mergeWriter` field is an older server's, which has only GitHub as its writer; a read
+ * that fails, times out, is refused or carries a merger this launcher does not know refuses the
+ * launch (MergeWriterUnreadError), never defaults: under a recorded `control-plane` merger a launch
+ * that guessed `github` would hand the worker a push credential the mode retired.
+ */
+export async function readMergeWriter(config: Pick<MasterConfig, 'url' | 'credentialFile'>, fetcher: typeof fetch = fetch): Promise<MergerMode> {
+  const url = `${config.url}/api/status`;
+  let response: Response, status: { mergeWriter?: { merger?: unknown } };
+  try {
+    response = await fetcher(url, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(5_000) });
+    if (!response.ok) throw new MergeWriterUnreadError(url, `HTTP ${response.status}`);
+    status = await response.json() as { mergeWriter?: { merger?: unknown } };
+  } catch (error) { throw error instanceof MergeWriterUnreadError ? error : new MergeWriterUnreadError(url, error instanceof Error ? error.message : String(error)); }
+  const merger = status.mergeWriter?.merger;
+  if (merger === undefined) return 'github';
+  if (merger === 'github' || merger === 'control-plane') return merger;
+  throw new MergeWriterUnreadError(url, `mergeWriter.merger is ${JSON.stringify(merger)}, which this launcher does not know`);
+}
+/**
+ * How a worker session's confinement treats GitHub credentials (GY-1523): with GitHub as the merge
+ * writer the session pushes with the credential minted for it, so it carries its own
+ * (`ownGitHubCredential: true`, which keeps the keyring proxy unbound); with the control plane as
+ * the writer it has none and must still reach no keyring, said as `secretsBus: null`.
+ */
+export const workerConfinementCredential = (mergeWriter: MergerMode): { ownGitHubCredential: boolean; secretsBus?: null } =>
+  mergeWriter === 'control-plane' ? { ownGitHubCredential: false, secretsBus: null } : { ownGitHubCredential: true };
 /** Mints the push credential of `key` epoch `epoch` for `profile` into `directory`. */
 export type CredentialMinter = (root: string, input: { key: string; epoch: number; profile: WorkerProfile; directory: string }) => Promise<unknown>;
 /** Refuses a hand launch past its `claimBy`: the item's backed-off dispatch action is the executor's again, so the launch claims nothing. */
@@ -158,9 +212,12 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
 export async function dispatchWork(root: string, work: Work, profile: WorkerProfile, agents: HerdrAgent[], run?: ChildRun, allWork: Work[] = [work], prepare: WorkerPreparer = prepareWorkerLaunch, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void> = releaseWorkerLaunch, agentTimeoutMs?: number, observedAt = new Date().toISOString(), options: DispatchOptions = {}) {
   assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
-  // GY-1523: a worker is launched with no push credential and no keyring proxy: the control plane is the only merge writer.
-  const mergeWriter: MergerMode = 'control-plane', credentialMint: CredentialMinter | null = null;
-  let round: ReworkRound;
+  // GY-1523: a control-plane worker is launched with no push credential and no keyring proxy. The
+  // merger is read once per launch, after the refusals that launch nothing (an existing-mode
+  // profile, a missing credential file, a name already visible in Herdr, an approval opt-out) and
+  // before anything is reserved, claimed or minted; a read that fails refuses the launch
+  // (readMergeWriter): the mode is never guessed.
+  let mergeWriter: MergerMode, credentialMint: CredentialMinter | null, round: ReworkRound;
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
   // GY-1772: which runtimes the worker is tried on first, judged from the change the item plans
@@ -185,6 +242,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     if (target && !reclaimableAgent(profile, target, allWork, now)) throw new DispatchReservedError('profile', profile.name, 'Launch profile agent name is already visible in Herdr');
     // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
+    mergeWriter = options.mergeWriter ?? await (options.readMergeWriter ?? (prepare === prepareWorkerLaunch ? readMergeWriter : async () => 'github' as const))(config);
+    credentialMint = mergeWriter === 'control-plane' ? null : options.credential ?? (prepare === prepareWorkerLaunch ? mintWorkerCredential : null);
     // A rework round's grounds are read before anything is claimed, too (GY-1569).
     round = await reworkRound(root, config, work, options.readDecisions ?? readReworkDecisions);
     // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
@@ -416,7 +475,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'control-plane', round: ReworkRound = { mechanical: null, rework: null }, cycle?: string) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, supervisor: NonNullable<DispatchOptions['supervisor']> = watchSupervisorRunning, stopSupervisor: NonNullable<DispatchOptions['stopSupervisor']> = stopLaunchSupervisor, credentialMint: CredentialMinter | null = null, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'github', round: ReworkRound = { mechanical: null, rework: null }, cycle?: string) {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -433,10 +492,11 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   keep(prepared.epoch);
   try { return await launchPrepared(); } finally { await keepAlive?.stop(); }
   async function launchPrepared() {
-    // With the control plane the only merge writer (GY-1523) the minter is null, so no push credential is minted.
+    // The session pushes with its own short-lived credential, never the host's login (GY-999); with
+    // the control plane as merge writer (GY-1523) the minter is null, so none is minted and
+    // workerCredentialEnvironment sets no GH_CONFIG_DIR.
     const credential = credentialMint && profile.credentialFile ? workerCredentialDirectory(profile.credentialFile, work.key, prepared.epoch) : null;
-    // The session has no GitHub credential and must still reach no keyring.
-    const confinementCredential = { ownGitHubCredential: false, secretsBus: null };
+    const confinementCredential = workerConfinementCredential(mergeWriter);
     // The worker writes its worktree, the worktree's own Git admin directory and the shared Git
     // paths the coordinator confinement re-exposes — never the common Git directory itself (GY-1321);
     // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
@@ -544,10 +604,10 @@ export function autonomousSession(outcome: string, blocker: string) {
  */
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
 /**
- * A worker that asked to rewrite a wrong commit waited on the master to say "fix forward" (GY-1477,
- * GY-1567): rewriting the assigned branch is never granted, so the request says so.
+ * A worker that asked for a force-push once it had pushed a wrong commit waited on the master to say
+ * "fix forward" (GY-1477, GY-1567): rewriting a pushed branch is never granted, so the request says so.
  */
-export const branchRewriteGuidance = 'Never rewrite the assigned branch: fix a wrong commit forward with a new commit. ';
+export const branchRewriteGuidance = 'Never force-push or rewrite a branch you have pushed: your runtime refuses it, so fix a pushed commit forward with a new commit and push normally. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>> & { fastGates?: boolean },
   work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles' | 'submission' | 'pipeline'>>,
@@ -583,7 +643,7 @@ export function workerPrompt(
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha });
-  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, commit on the assigned branch, and submit the commit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action (nothing is pushed and no pull request is opened): complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
+  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, open a PR, and submit it with complete as your last action: complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge the PR; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
     + (memoryDigest || '')
     + verificationMapDigest(verificationMaps, work.plannedFiles, 'worker')
@@ -601,7 +661,7 @@ export function workerPrompt(
     // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
     + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED --ask ASK --recommend TEXT --why SENTENCE -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide: every human step the item still needs, in this one request; ASK is one plain sentence naming the human's action; TEXT is the choice you recommend, or the safest way to obtain a value, such as a fine-grained token scoped to one repository with a short expiry and only the permissions needed, and SENTENCE is one plain sentence of why; a scope widening is never a park, ask for it with scope-request), which ends your lease and parks the item for the human, then stop. `
-    + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
+    + autonomousSession('implement the item, open the pull request and submit it with complete', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
 }
 
 /** What the previous attempt left for this one: the work an exhausted session had not committed, and a human's answer. */

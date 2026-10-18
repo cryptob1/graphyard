@@ -34,6 +34,51 @@ async function fixture(label: string, files: Record<string, string>) {
 const payload = (tool: string, path: string, cwd: string, input: Record<string, unknown> = {}) => JSON.stringify({ hook_event_name: 'PreToolUse', cwd, tool_name: tool,
   tool_input: tool === 'NotebookEdit' ? { notebook_path: path, ...input } : { file_path: path, ...input } });
 
+test('unit:worker-scope-hook-installed — a Claude worker\'s worktree settings and --settings role file each carry one PreToolUse scope-guard hook for its own item and epoch; operator hooks are kept and only Graphyard\'s entry is replaced', async () => {
+  const { workerHarnessPlan, sessionHarnessPlan, prepareSessionHarness, installWorkerHarness } = await import('../src/master/harness.js') as any;
+  const { writeHarnessPermissions } = await import('../src/harness.js') as any;
+  const expected = { matcher: 'Edit|Write|MultiEdit|NotebookEdit', hooks: [{ type: 'command', command: guardCommand, timeout: 30 }] };
+  const plan = workerHarnessPlan({ cliPath, branch: 'graphyard/gy-9-4', baseBranch: 'main', credentialHome: '/home/op/.config/graphyard', key: 'GY-9', epoch: 4 });
+  assert.equal(plan.hooks?.length, 1);
+  assert.equal(plan.hooks[0].command, guardCommand);
+
+  // The worktree settings: an operator hook and an earlier attempt's guard are already there.
+  const worktree = await fixture('scope-guard-hook-worktree', { '.gitignore': '.claude/settings.local.json\n' });
+  await mkdir(join(worktree, '.claude'), { recursive: true });
+  const operatorHook = { matcher: 'Bash', hooks: [{ type: 'command', command: 'echo operator' }] };
+  await writeFile(join(worktree, '.claude/settings.local.json'), JSON.stringify({ hooks: { PreToolUse: [operatorHook, { matcher: 'Edit|Write', hooks: [{ type: 'command', command: `node ${cliPath} scope-guard GY-9 3` }] }],
+    PostToolUse: [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'echo after' }] }] } }));
+  await writeHarnessPermissions(worktree, plan, true);
+  let written = JSON.parse(await readFile(join(worktree, '.claude/settings.local.json'), 'utf8'));
+  assert.deepEqual(written.hooks.PreToolUse, [operatorHook, expected], 'the operator hook is kept and the earlier guard is replaced by this epoch\'s');
+  assert.deepEqual(written.hooks.PostToolUse, [{ matcher: 'Edit', hooks: [{ type: 'command', command: 'echo after' }] }], 'other events are untouched');
+  await writeHarnessPermissions(worktree, plan, true);
+  written = JSON.parse(await readFile(join(worktree, '.claude/settings.local.json'), 'utf8'));
+  assert.equal(written.hooks.PreToolUse.filter((entry: any) => entry.hooks.some((hook: any) => / scope-guard /.test(hook.command))).length, 1, 'writing again leaves one guard');
+
+  // installWorkerHarness, as dispatch calls it, writes the same hook for the prepared epoch.
+  const fresh = await fixture('scope-guard-hook-install', { '.gitignore': '.claude/settings.local.json\n' });
+  const profile = { name: 'claude-primary', kind: 'claude', agentArgs: [] } as unknown as WorkerProfile;
+  await installWorkerHarness(config, profile, 'GY-9', { path: fresh, epoch: 4 });
+  const installed = JSON.parse(await readFile(join(fresh, '.claude/settings.local.json'), 'utf8'));
+  assert.deepEqual(installed.hooks.PreToolUse, [expected]);
+
+  // The --settings role file of the worker session carries the same single hook.
+  const shared = { cliPath, repository: 'owner/project', baseBranch: 'main', credentialHome: '/home/op/.config/graphyard', credentialDirectories: [] };
+  assert.deepEqual(sessionHarnessPlan({ ...shared, role: 'worker', kind: 'claude', branch: 'graphyard/gy-9-4', key: 'GY-9', epoch: 4 }).hooks.map((hook: any) => hook.command), [guardCommand]);
+  const root = await temporaryDirectory('scope-guard-hook-role');
+  await mkdir(join(root, '.claude'), { recursive: true });
+  await writeFile(join(root, '.claude', 'settings.local.json'), '{}\n');
+  const harness = await prepareSessionHarness(root, config, { role: 'worker', kind: 'claude', profile: 'claude-primary', branch: 'graphyard/gy-9-4', key: 'GY-9', epoch: 4 });
+  assert.deepEqual(harness.args, ['--setting-sources', 'user', '--settings', harness.file]);
+  const role = JSON.parse(await readFile(harness.file, 'utf8'));
+  assert.deepEqual(role.hooks, { PreToolUse: [expected] });
+  assert.ok(role.permissions.allow.length > 0, 'the role file keeps its permissions');
+
+  // Other roles carry no guard.
+  for (const roleName of ['reviewer', 'producer']) assert.equal(sessionHarnessPlan({ ...shared, role: roleName, kind: 'claude' }).hooks, undefined, roleName);
+});
+
 const baseline = (files: Record<string, number>) => `${JSON.stringify({ schema: 1, files }, null, 2)}\n`;
 
 test('unit:scope-guard-parity — the guard allows a path outside the worktree, and inside it allows exactly what classifyScope would not refuse at complete, judged against plannedFiles read at the call', async () => {

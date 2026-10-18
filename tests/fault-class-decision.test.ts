@@ -483,6 +483,28 @@ test('manual:fault-class-decision — an exhausted run whose decision was never 
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
 });
 
+test('manual:fault-class-decision — a merge-writer status read that met the plane\'s 502 while opening a draft is no decision fault', async () => {
+  const { acceptanceStep, clearDrafts, draftsSettled } = await import('../src/daemon/acceptance.js');
+  const { MergeWriterUnreadError } = await import('../src/master/dispatch.js');
+  clearDrafts();
+  const state = emptyDaemonState(config()), goal = { id: 'goal-draft', key: 'GOAL-3', stage: 'acceptance-drafting', revision: 1, drafts: 0 };
+  const draft = { goal: 'GOAL-3', outcomes: [{ id: 'greeting', title: 'A customer is greeted', criteria: ['The greeting names the customer'], case: { id: 'greeting', title: 'greeting answers', tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', name: 'read', method: 'GET', path: '/', status: 200 }] } }] };
+  const runner = { name: 'stub', start: (_p: string, options: { tool: string; validate: (value: unknown) => unknown }) => { const payload = options.validate(draft); return { id: 'r', events: [], onEvent: () => () => {}, cancel() {}, result: async () => ({ ok: true, tool: options.tool, payload, payloads: [payload] }) }; } };
+  const effects = { settings: { enabled: true, model: 'm', fallbackModel: 'f', timeoutMinutes: 1 }, cwd: '/nonexistent', goals: async () => [goal], runner: async () => ({ runner, runtime: 'stub', model: 'm' }),
+    commit: async () => ({ branch: 'b', head: 'h' }), writer: {}, merger: async () => { throw new MergeWriterUnreadError('https://x/api/status', 'HTTP 502'); }, open: async () => ({ pr: 1, branch: 'b', head: 'h' }) };
+  let clock = Date.parse('2026-10-12T23:43:05.011Z');
+  for (let tick = 0; tick < 2; tick++) {
+    clock += 6 * 60_000;
+    await acceptanceStep({ config: config(), state, effects: { acceptance: effects, persist: async () => {} }, now: () => clock, clock, performed: [],
+      isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as never);
+    await draftsSettled();
+  }
+  assert.match(state.actions['acceptance:goal-draft']?.detail ?? '', /could not be opened: the merge writer could not be read/);
+  assert.equal(state.actions['acceptance:goal-draft']?.state, 'failed');
+  assert.deepEqual(state.faults.instances, []);
+  clearDrafts();
+});
+
 test('manual:fault-class-decision — a partial observation settles no held escalation; the next full one does', () => {
   const id = '66666666-d9c1-4cd2-8467-9f1866b0fd41', state = emptyDaemonState(config());
   exhaust(state, id, '2026-10-12T02:16:50.000Z');

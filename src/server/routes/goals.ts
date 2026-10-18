@@ -7,6 +7,7 @@ import type { Engine } from '../../engine.js';
 import { landableCarried } from '../../landable-check.js';
 import type { GitHub } from '../../github.js';
 import type { Store } from '../../store.js';
+import { recordedMergerMode } from '../../merger-mode.js';
 import { gitRunnerFor, type GitResult, type GitRunner } from '../../merge-writer/local-observation.js';
 import { revertApproverVariables } from '../../main-guard.js';
 import { Refusal } from '../../model/refusal.js';
@@ -245,6 +246,7 @@ export const goalRoutes = defineRoutes('goals', [
       if (goal.merged && goal.stage !== 'accepted') return { goal, landing: { state: 'merged', mergeSha: goal.merged.mergeSha, detail: goal.merged.pr === null ? `merged as ${goal.merged.mergeSha}` : `#${goal.merged.pr} merged` } };
       demand(goal.stage === 'accepted' && goal.acceptance && goal.approval, `${goal.key} is ${goal.stage}; only an approved acceptance draft is landed`);
       if (goal.acceptance.pr === null) {
+        demand((await recordedMergerMode(engine.store.pool)).merger === 'control-plane', `${goal.key}'s acceptance change is landed only by the control-plane merge writer, and the recorded merger is github`, 409);
         demand(body.mergeSha, `${goal.key}'s acceptance change has no pull request: the merge writer lands it and names the merge commit it pushed`, 422);
         demand(goal.approval.by !== goal.acceptance.author && goal.approval.head === goal.acceptance.head, `${goal.key}'s acceptance change is sensitive and lands only on an approver's verdict on its exact head by another identity`, 403);
         if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());

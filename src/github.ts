@@ -1,5 +1,5 @@
 import { ReconciliationRetry, Refusal, MergeConflict, requireCurrent } from './model.js';
-import { mergeHold, type MergerMode } from './merger-mode.js';
+import { mergeHold, recordedMergerMode, type MergerMode } from './merger-mode.js';
 import { createHash, createSign, randomUUID } from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -1826,19 +1826,6 @@ export class GitHub {
       ...(pr.merged ? { mergeVerdict: mergeVerdictRun(checks, this.config.appId, pr.head.sha) } : {}),
     };
   }
-  /**
-   * GY-1978: the reviews of a pull request submitted before the control plane became the only merge
-   * writer, as `observe` records them (each identity's latest verdict), so the checkout observation
-   * of its head still sees an approval posted after submission.
-   */
-  async pullReviews(pr: number): Promise<Pick<Observation, 'reviews' | 'reviewIds' | 'dismissedReviewIds'>> {
-    const reviews = await this.pages(`/pulls/${pr}/reviews`);
-    const latest = new Map<string, any>();
-    for (const r of reviews) if (['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(r.state)) latest.set(r.user.login, r);
-    return { reviewIds: reviews.every(r => Number.isSafeInteger(r.id) && r.id > 0) ? reviews.map(r => r.id) : undefined, dismissedReviewIds: dismissedReviewIds(reviews),
-      reviews: [...latest.values()].map(r => ({ id: r.id, reviewer: r.user.login, sha: r.commit_id, state: r.state, submittedAt: r.submitted_at,
-        ...(r.state === 'CHANGES_REQUESTED' && typeof r.body === 'string' && r.body.trim() ? observedReviewBody(r.body) : {}) })) };
-  }
   /** The latest run of one check on one commit, other than this App's own, or null when it has none. */
   private async latestCheckRun(sha: string, name: string): Promise<{ id: number; conclusion: string | null } | null> {
     const runs = (await this.pages(`/commits/${sha}/check-runs?check_name=${encodeURIComponent(name)}&filter=latest`, 'check_runs'))
@@ -3381,8 +3368,11 @@ export async function processJob(engine: Engine, github: GitHub, spent?: (charge
   let held: string | null = null;
   // The automatic-merging hold over this item's authorized head (GY-1927): a held head is observed at the idle cadence, not the merge band's.
   let mergeHeld: string | null = null;
-  // The control plane is the only merge writer.
-  const mergerNow = async (): Promise<MergerMode> => 'control-plane';
+  // The recorded merger, read once per claim and only when a control-plane candidate asks for it
+  // (GY-1835): a GitHub-mode observation spends no query on it, and a mode read is cheap beside
+  // the observation it gates.
+  let merger: MergerMode | null = null;
+  const mergerNow = async (): Promise<MergerMode> => merger ??= (await recordedMergerMode(engine.store.pool)).merger;
   // Whether this run saved an observation (GY-506): every claimed job either saves one or records
   // why it did not — in the job's error, hold or deferral — and the job's consecutive
   // no-observation count is reset or incremented accordingly, whichever way it ends.

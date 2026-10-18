@@ -130,8 +130,13 @@ export type DiagnosticianPost = (method: 'GET' | 'POST', path: string, body?: un
 export const diagnosticianEffects = (config: MasterConfig, root: string, post: DiagnosticianPost, run: (command: string, args: string[]) => string | Promise<unknown>): DiagnosticianEffects => {
   const settings = diagnosticianSettings(config.run);
   const lines = async (command: string[]) => String(await run(command[0], command.slice(1))).split('\n');
-  // The control plane is the only merge writer (GY-1835 reads it here).
-  const merger = async (): Promise<MergerMode> => 'control-plane';
+  // GY-1835: the merger as the operator-agent identity reads it. An unreadable setting (an older
+  // server without the route, a refused call) keeps today's github reads rather than blinding a
+  // diagnostician over a plane hiccup.
+  const merger = async (): Promise<MergerMode> => {
+    try { const status = await post('GET', 'merger') as { merger?: unknown } | undefined; return status?.merger === 'control-plane' ? 'control-plane' : 'github'; }
+    catch { return 'github'; }
+  };
   return {
     settings, cwd: root, merger,
     runner: async (attempt, subject) => {

@@ -10,6 +10,7 @@ import type { ReplayRecord } from '../src/evidence-replay.js';
 import type { ArtifactBackend } from '../src/artifacts.js';
 import { defineScenario } from '../src/scenarios.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 /**
  * GY-1841: evaluator recovery. Judging a proof's retained evidence is an evaluation the pinned
@@ -42,7 +43,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_EVALUATOR_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1841);
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('evaluator-recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('evaluator_recovery_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/evaluator_recovery_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/evaluator_recovery_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');
   validation.evaluationRecovery = { sleep: async ms => { waits.push(ms); } };
 });

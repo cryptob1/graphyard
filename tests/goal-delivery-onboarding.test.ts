@@ -117,23 +117,23 @@ test('integration:goal-local-delivery-onboarding — normal init of a fixture re
   const again = await onboard(root, 'control-plane');
   assert.deepEqual(again.config.delivery, delivery);
 
-  // An explicit release-candidate delivery keeps the GitHub release-candidate pipeline and its Railway adapter.
+  // An explicit GitHub merger keeps the GitHub release-candidate pipeline and its Railway adapter.
   const legacy = await fixtureRepository();
-  const github = await onboard(legacy, 'control-plane', ['--delivery', 'release-candidate']);
+  const github = await onboard(legacy, 'github');
   assert.equal(github.config.delivery.mode, 'release-candidate');
   assert.equal(github.config.delivery.deploy.adapter, 'railway');
   assert.equal(github.config.delivery.previews, undefined);
-  for (const path of generatedWorkflowFiles) assert.equal(await exists(join(legacy, path)), true, `${path} is generated for release candidates`);
+  for (const path of generatedWorkflowFiles) assert.equal(await exists(join(legacy, path)), true, `${path} is generated under the GitHub merger`);
   // Switching that release-candidate repository to local removes the generated candidate and promotion
   // workflows, so nothing keeps releasing outside the control plane; a hand-written one is named instead.
   const switched = await fixtureRepository({ 'graphyard.json': `${JSON.stringify({ documentation: github.config.documentation, delivery: github.config.delivery }, null, 2)}\n` });
   for (const path of generatedWorkflowFiles) { await mkdir(join(switched, path, '..'), { recursive: true }); await writeFile(join(switched, path), await readFile(join(legacy, path), 'utf8')); }
-  const local = await onboard(switched, 'control-plane', ['--delivery', 'local']);
+  const local = await onboard(switched, 'github', ['--delivery', 'local']);
   assert.equal(local.config.delivery.mode, 'local');
   for (const path of generatedWorkflowFiles) assert.equal(await exists(join(switched, path)), false, `${path} is removed on the switch to local`);
   assert.ok(generatedWorkflowFiles.every(path => local.applied.applied.some((line: string) => line.startsWith(`removed ${path}`))), 'the apply reports each removal');
   const handWritten = await fixtureRepository({ 'graphyard.json': `${JSON.stringify({ documentation: github.config.documentation, delivery: github.config.delivery }, null, 2)}\n`, [generatedWorkflowFiles[0]]: 'name: mine\non: workflow_dispatch\n' });
-  const kept = await onboard(handWritten, 'control-plane', ['--delivery', 'local']);
+  const kept = await onboard(handWritten, 'github', ['--delivery', 'local']);
   assert.equal(await exists(join(handWritten, generatedWorkflowFiles[0])), true, 'a workflow init did not generate is never deleted');
   assert.ok(kept.applied.drift.some((line: string) => line.startsWith(`${generatedWorkflowFiles[0]} is not one init generated`)));
 
@@ -154,9 +154,9 @@ test('integration:goal-local-delivery-onboarding — normal init of a fixture re
   assert.deepEqual(bare.scanned.proposal.policy.checks, [], 'local mode requires no GitHub check when the repository has no CI');
   // A no-CI repository an earlier mode gave the delivery workflow loses it on the switch to local.
   const earlier = await fixtureRepository({ '.github/workflows/ci.yml': null });
-  await onboard(earlier, 'control-plane', ['--delivery', 'per-pr']);
-  assert.equal(await exists(join(earlier, deliveryWorkflowFile)), true, 'the per-pr mode generates the delivery workflow');
-  const switchedBare = await onboard(earlier, 'control-plane', ['--delivery', 'local']);
+  await onboard(earlier, 'github');
+  assert.equal(await exists(join(earlier, deliveryWorkflowFile)), true, 'the GitHub merger generates the delivery workflow');
+  const switchedBare = await onboard(earlier, 'github', ['--delivery', 'local']);
   assert.equal(await exists(join(earlier, deliveryWorkflowFile)), false, 'local mode removes the generated delivery workflow');
   assert.ok(switchedBare.applied.applied.some((line: string) => line.startsWith(`removed ${deliveryWorkflowFile}`)));
   await rm(join(root, '..'), { recursive: true, force: true });
@@ -212,7 +212,7 @@ test('integration:goal-delivery-defaults-visible — /api/status and the Deliver
   serving({ mode: 'local', previews: 'local', candidateMaxChanges: 5, productionVerification: true, applications, cases: { 'fixture-static-home': 'site', 'fixture-compose-app': 'app' } });
   const status = await read('status');
   assert.deepEqual(status.project.delivery, { mode: 'local', previews: 'local', candidateMaxChanges: 5, productionVerification: true, applications, cases: { 'fixture-static-home': 'site', 'fixture-compose-app': 'app' }, source: 'environment' });
-  assert.equal(status.mergeWriter.merger, 'control-plane', 'the control plane is the merge writer');
+  assert.equal((await read('merger')).mode, 'control-plane', 'a new database merges through the control plane, GitHub only a mirror');
   // The effective defaults fill what a declaration leaves out; declaring nothing is the rapid path.
   serving({ mode: 'local' });
   assert.deepEqual((await read('status')).project.delivery, { mode: 'local', previews: 'local', candidateMaxChanges: 5, productionVerification: true, applications: [], cases: {}, source: 'environment' });

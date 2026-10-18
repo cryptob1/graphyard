@@ -214,8 +214,6 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
       await commit(clone, 'Mine');
       await writeFile(join(originRepo, 'shared.txt'), 'theirs\n');
       await commit(originRepo, 'Theirs');
-      // The loop fetches the shared object store; sync itself fetches nothing.
-      await new Promise((done, fail) => execFileCallback('git', ['-C', clone, 'fetch', '-q', 'origin'], error => error ? fail(error) : done(null)));
       const sync = execFile(process.execPath, [launcher, 'sync', 'GY-1'], { cwd: clone, env: { ...process.env, GRAPHYARD_URL: syncOrigin, GRAPHYARD_TOKEN: 'fixture' } });
       const outcome = await sync.then(() => ({ code: 0, output: '' }), (error: { code?: number | string; stdout?: string; stderr?: string }) =>
         ({ code: error.code, output: `stdout: ${error.stdout ?? ''}\nstderr: ${error.stderr ?? ''}`.trim() }));

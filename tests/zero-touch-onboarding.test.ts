@@ -281,6 +281,8 @@ test('unit:zero-touch-onboarding — `graphyard up --agent --goal FILE` on a fre
         return { code: 0, stdout: JSON.stringify({ ok: true, installDirectory, principals: [{ id: operator.id, role: 'admin', tokenFile: operatorTokenFile }] }) };
       }
       if (joined.startsWith('master init')) return { code: 0, stdout: '{}' };
+      // GY-1833: up --merger github records the legacy merger with the admin credential, since a fresh plane reads control-plane.
+      if (joined.startsWith('master merger github')) return { code: 0, stdout: JSON.stringify(await api(options.env!.GRAPHYARD_TOKEN, 'POST', 'merger', { merger: 'github', reason: 'graphyard up --merger github' }, options.env!.GRAPHYARD_REQUEST_ID)) };
       // GY-1479: the master's operator-agent and approver identities, provisioned with the admin credential on stdin.
       if (joined.startsWith('master autonomy')) {
         const admin = (options.stdin ?? '').trim(), scope = { repositories: [repository], workItems: ['*'] };
@@ -312,8 +314,7 @@ test('unit:zero-touch-onboarding — `graphyard up --agent --goal FILE` on a fre
   };
 
   // ---- The run --------------------------------------------------------------------------------------
-  // up's GitHub App path: the parsed request with no merger.
-  const request = { ...upRequestFromArgs(['--repo', repository, '--provider', 'compose', '--agent', '--goal', 'goal.md', '--browser-profile', 'Default']), merger: undefined };
+  const request = upRequestFromArgs(['--repo', repository, '--provider', 'compose', '--merger', 'github', '--agent', '--goal', 'goal.md', '--browser-profile', 'Default']);
   const result = await runUp(request, deps as unknown as UpDependencies);
   const humanRequests = () => [
     ...result.handoffs.slice(1).map(entry => `up handed off at ${entry.step}: ${entry.sentence}`),

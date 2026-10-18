@@ -23,6 +23,11 @@ import { composeBundle, PRIVATE_KEY_CONTAINER_PATH, REVERT_APPROVER_KEY_CONTAINE
  */
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const appId = 7001;
+const protection = {
+  required_status_checks: { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: appId }, { context: 'graphyard/landable', app_id: appId }] },
+  enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false },
+  required_pull_request_reviews: { required_approving_review_count: 0 },
+};
 const status = () => ({
   actor: { role: 'admin' }, github: true, githubAppId: appId, githubRepository: { id: 1, fullName: 'owner/scratch' }, baseBranch: 'main',
   appPermissions: { verifiedAt: '2026-10-06T00:00:00.000Z', missing: [], attention: [] }, reviewerApps: [] as unknown[],
@@ -54,7 +59,8 @@ async function installation() {
 
 type Fixture = Awaited<ReturnType<typeof installation>>;
 const input = (fixture: Fixture, overrides: Partial<SetupFromZeroInput> = {}): SetupFromZeroInput => ({
-  root: fixture.root, env: {}, status: status(), environments: fixture.environments, sandbox: () => null, ...overrides,
+  root: fixture.root, env: {}, status: status(), environments: fixture.environments, sandbox: () => null,
+  github: (_command, args) => args[1].endsWith('/protection') ? JSON.stringify(protection) : args[1].includes('rulesets') ? '[]' : '{}', ...overrides,
 });
 const lineOf = async (setup: SetupFromZeroInput, id: string) => {
   const checks = await setupFromZeroChecks(setup);
@@ -66,16 +72,19 @@ const lineOf = async (setup: SetupFromZeroInput, id: string) => {
 test('unit:doctor-setup-from-zero — a complete installation passes every named line; each missing prerequisite fails exactly its own line, naming the checklist step that fixes it', async () => {
   const fixture = await installation();
   const complete = await setupFromZeroChecks(input(fixture));
-  assert.deepEqual(complete.map(check => check.id), ['control-plane', 'credentials-file', 'github-app', 'reviewer-app', 'agent-environment:claude-a', 'agent-environment:codex-a', 'worker-sandbox']);
+  assert.deepEqual(complete.map(check => check.id), ['control-plane', 'credentials-file', 'github-app', 'reviewer-app', 'branch-protection', 'agent-environment:claude-a', 'agent-environment:codex-a', 'worker-sandbox']);
   assert.deepEqual(complete.filter(check => check.status !== 'pass').map(setupLine), [], 'a complete installation passes every line');
-  // GY-1978: the control plane is the only merge writer, so no App is required, whatever the supervision or the App bindings.
-  const appFree = await setupFromZeroChecks(input(fixture, { status: { ...status(), github: false, githubAppId: null, appPermissions: undefined, setup: { supervision: 'supervised' } } }));
-  assert.deepEqual(appFree.filter(check => check.status !== 'pass').map(setupLine), [], 'a supervised install with no App passes every line');
 
   const cases: [string, string, keyof typeof setupSteps, RegExp, (fixture: Fixture) => Promise<Partial<SetupFromZeroInput> | void>][] = [
     ['control plane unreachable', 'control-plane', 'install', /not reachable: connect ECONNREFUSED/, async () => ({ status: null, failure: 'connect ECONNREFUSED 127.0.0.1:4310' })],
     ['credentials file absent', 'credentials-file', 'install', /connection\.json does not exist/, async f => { await rm(join(f.root, '.graphyard/connection.json')); }],
     ['credentials file not 0600', 'credentials-file', 'install', /has mode 0644; it must be 0600/, async f => { await chmod(join(f.root, '.graphyard/connection.json'), 0o644); }],
+    ['GitHub App unbound', 'github-app', 'app', /no bound GitHub App/, async () => ({ status: { ...status(), github: false, githubAppId: null } })],
+    ['App permissions short', 'github-app', 'app', /missing permissions: deployments read/, async () => ({ status: { ...status(), appPermissions: { verifiedAt: '2026-10-06T00:00:00.000Z', missing: [{ permission: 'deployments', required: 'read' }], attention: [] } } })],
+    ['reviewer App unbound', 'reviewer-app', 'reviewer', /no reviewer App/, async f => { await writePrivate(join(f.root, '.graphyard/master.json'), json({})); }],
+    ['branch unprotected', 'branch-protection', 'protection', /protection is unreadable/, async () => ({ github: () => { throw new Error('gh: Branch not protected (HTTP 404)'); } })],
+    ['protection off policy', 'branch-protection', 'protection', /Required check Graphyard \/ merge is not bound to Graphyard App 7001; Administrator enforcement is disabled/,
+      async () => ({ github: (_command: string, args: string[]) => args[1].endsWith('/protection') ? JSON.stringify({ ...protection, enforce_admins: { enabled: false }, required_status_checks: { strict: false, checks: [] } }) : '{}' })],
     ['Claude not logged in', 'agent-environment:claude-a', 'environments', /not logged in/, async f => { await rm(join(f.claude, '.credentials.json')); }],
     ['Claude consent not given', 'agent-environment:claude-a', 'environments', /bypass-permissions consent is not recorded/, async f => { await writePrivate(join(f.claude, 'settings.json'), json({})); }],
     ['Claude first run not complete', 'agent-environment:claude-a', 'environments', /first-run onboarding is not complete/, async f => { await writePrivate(join(f.claude, '.claude.json'), json({})); }],
@@ -84,6 +93,8 @@ test('unit:doctor-setup-from-zero — a complete installation passes every named
     ['no agent environment', 'agent-environments', 'environments', /no agent environment/, async f => ({ environments: join(f.directory, 'none') })],
     ['sandbox cannot write the shared Git paths', 'worker-sandbox', 'sandbox', /the worker confinement cannot write the shared Git paths: bubblewrap \(bwrap\) is not installed/, async () => ({ sandbox: () => 'bubblewrap (bwrap) is not installed' })],
   ];
+  // Lines judged from a missing prerequisite's answer fail with it, saying so; nothing else may.
+  const dependents: Record<string, string[]> = { 'control plane unreachable': ['github-app', 'branch-protection'], 'GitHub App unbound': ['branch-protection'] };
   for (const [name, id, step, detail, remove] of cases) {
     const missing = await installation();
     const overrides = (await remove(missing)) ?? {};
@@ -94,7 +105,7 @@ test('unit:doctor-setup-from-zero — a complete installation passes every named
     assert.match(check.detail, detail, `${name}: the ${id} line says what is missing`);
     assert.equal(check.step, setupSteps[step], `${name}: the ${id} line names the checklist step that fixes it`);
     assert.match(setupLine(check), new RegExp(`^FAIL ${id}: .*\\(fix: docs/setup-from-zero\\.md step \\d+ \\(`), `${name}: the printed line is named and points at the checklist`);
-    const others = checks.filter(entry => entry.id !== id && entry.status === 'fail');
+    const others = checks.filter(entry => entry.id !== id && entry.status === 'fail' && !(dependents[name] ?? []).includes(entry.id));
     assert.deepEqual(others.map(setupLine), [], `${name}: only the missing prerequisite fails`);
   }
 });
@@ -103,11 +114,13 @@ test('unit:doctor-setup-from-zero — graphyard doctor prints the named lines fo
   const fixture = await installation();
   const shims = join(fixture.directory, 'bin');
   await mkdir(shims);
-  // bwrap's confinement probe succeeds.
+  // gh answers the protection read as a repository admin would; bwrap's confinement probe succeeds.
+  await writeFile(join(shims, 'gh'), `#!/usr/bin/env node\nconst path = process.argv[3] ?? '';\nprocess.stdout.write(path.endsWith('/protection') ? ${JSON.stringify(JSON.stringify(protection))} : path.includes('rulesets') ? '[]' : '{}');\n`, { mode: 0o755 });
   await writeFile(join(shims, 'bwrap'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  let reviewerApps: unknown[] = [];
   const server = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json');
-    if (request.url === '/api/status') return response.end(JSON.stringify(status()));
+    if (request.url === '/api/status') return response.end(JSON.stringify({ ...status(), reviewerApps }));
     if (request.url === '/api/validation/definitions') return response.end(JSON.stringify({ definitions: [] }));
     response.statusCode = 404; response.end('{}');
   });
@@ -127,13 +140,11 @@ test('unit:doctor-setup-from-zero — graphyard doctor prints the named lines fo
     assert.deepEqual(complete.setupFromZero.lines.filter((line: string) => !line.startsWith('PASS ')), [], 'every prerequisite of the complete fixture passes');
     assert.equal(complete.setupFromZero.ready, true);
     await writePrivate(join(fixture.root, '.graphyard/master.json'), json({}));
-    assert.equal((await doctor()).setupFromZero.ready, true, 'no reviewer App is required');
-    await writePrivate(join(fixture.claude, 'settings.json'), json({}));
     const missing = await doctor();
     assert.equal(missing.setupFromZero.ready, false);
-    const failed = missing.setupFromZero.lines.filter((line: string) => line.startsWith('FAIL '));
-    assert.equal(failed.length, 1, failed.join('\n'));
-    assert.match(failed[0], new RegExp(`^FAIL agent-environment:claude-a: .*bypass-permissions consent is not recorded.*\\(fix: ${setupSteps.environments.replace(/[()]/g, '\\$&')}\\)$`));
+    assert.deepEqual(missing.setupFromZero.lines.filter((line: string) => line.startsWith('FAIL ')), [`FAIL reviewer-app: no reviewer App: GRAPHYARD_REVIEWER_APPS is empty and .graphyard/master.json binds no reviewer (fix: ${setupSteps.reviewer})`]);
+    reviewerApps = [{ id: 'scratch-reviewer', runtime: 'claude', appId: 7002, botUserId: 1 }];
+    assert.equal((await doctor()).setupFromZero.ready, true, 'a reviewer App the server serves counts as bound');
   } finally { server.close(); }
 });
 

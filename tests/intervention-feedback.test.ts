@@ -19,6 +19,7 @@ import InterventionsPage from '../web/pages/interventions.js';
 import { views } from '../web/pages/index.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-01, 2026-10-06 and 2026-10-07 instants are ledger rows and the now handed to foldInterventions, detectPatterns and loopSettledInBound; Date.now() builds the database cases' fences relatively.
 
 // GY-98: every operator intervention is product feedback. Each test is named for the proof it
@@ -41,7 +42,7 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_INTERVENTION_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 32);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('interventions'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('interventions_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/interventions_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/interventions_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials, null, undefined, { env: { ...process.env, GRAPHYARD_INTERVENTION_PATTERN_THRESHOLD: '3', GRAPHYARD_INTERVENTION_PATTERN_WINDOW_DAYS: '7' } });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

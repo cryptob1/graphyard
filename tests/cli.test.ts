@@ -1063,10 +1063,10 @@ test('master run executes the durable loop as a supervised process and master st
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), /refuses a credential that is also allowed to produce evidence/);
     // GY-59: a deployed server behind the CLI's merge protocol is refused as version skew by the loop, naming
     // both commits, and master status reports the same skew without refusing. master merge runs no merge since
-    // GY-1235, so it only answers that the control plane merges.
+    // GY-1235, so it only answers that GitHub merges.
     proofScoped = false; skewed = true;
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), new RegExp(`server runs an unknown commit, CLI expects [0-9a-f]{40}: deploy main first \\(server merge protocol ${MERGE_PROTOCOL - 1}, CLI merge protocol ${MERGE_PROTOCOL}`));
-    assert.match((await exec(process.execPath, [launcher, 'master', 'merge', '--all'], { cwd: root, env })).stdout, /The control plane merges/);
+    assert.match((await exec(process.execPath, [launcher, 'master', 'merge', '--all'], { cwd: root, env })).stdout, /GitHub merges/);
     const skewedStatus = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
     assert.match(skewedStatus.versionSkew, /deploy main first/); assert.match(skewedStatus.cli.commit, /^[0-9a-f]{40}$/);
     assert.deepEqual(skewedStatus.controlPlane.build, { commit: null, protocol: MERGE_PROTOCOL - 1 });
@@ -1102,8 +1102,6 @@ test('sync merges origin/BASE without rebasing, passes in-scope and new files, a
     // Meanwhile main ships GY-33's change and a new file.
     await writeFile(join(origin, 'src/shipped.ts'), 'export const shipped = 2;\nexport const kept = true;\nexport const added = true;\n'); await writeFile(join(origin, 'src/other.ts'), 'export const other = 1;\n');
     const mainTip = await commit(origin, 'Ship GY-33');
-    // The loop fetches the shared object store; sync itself fetches nothing.
-    await git(clone, 'fetch', '-q', 'origin');
     const clean = JSON.parse((await sync()).stdout);
     assert.equal(clean.ok, true); assert.equal(clean.merged, true); assert.equal(clean.baseTip, mainTip); assert.deepEqual(clean.refused, []);
     assert.deepEqual(clean.files.map((f: any) => [f.path, f.kind]), [['src/scoped/feature.ts', 'in-scope']]);
@@ -1121,7 +1119,6 @@ test('sync merges origin/BASE without rebasing, passes in-scope and new files, a
     assert.equal(JSON.parse((await sync()).stdout).ok, true);
     // A conflicting base change stops before any scope verdict; nothing is rebased or resolved for the worker.
     await writeFile(join(origin, 'src/scoped/feature.ts'), 'feature from main\n'); await commit(origin, 'Conflicting change');
-    await git(clone, 'fetch', '-q', 'origin');
     const conflicted = await refusal();
     assert.equal(conflicted.merged, false); assert.deepEqual(conflicted.conflicts, [{ path: 'src/scoped/feature.ts', generated: false, shippedBy: [], landedSince: false }]); assert.deepEqual(conflicted.regenerated, []); assert.match(conflicted.next, /Resolve each remaining conflict/);
     await git(clone, 'merge', '--abort');

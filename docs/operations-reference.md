@@ -76,7 +76,7 @@ Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observa
 
 ### Reading under control-plane
 
-Every candidate is observed from the checkout, polling GitHub for no pull request/reviews/checks. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
+`master merger control-plane`: its candidates are observed from its checkout, polling GitHub for none of their pull request/reviews/checks; person-opened ones still are. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ### Webhook liveness
 

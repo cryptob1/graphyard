@@ -5,14 +5,16 @@ import { userInfo } from 'node:os';
 import { relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { atomicPrivateWrite, privateFile, type MasterBrowser, type MasterConfig } from './master.js';
-import type { ProtectionRun } from './protection.js';
+import { protectionPlan, readProtection, type ProtectionRun } from './protection.js';
+import type { Work } from './model.js';
 import type { InstallationState } from './github.js';
 import { controlPlanePermissions as declaredPermissions, requiredPermissions } from './github-permissions.js';
 
 /**
  * GitHub administration the master performs itself, through the operator's own authenticated
  * browser profile, when the REST and App APIs offer no path: App permission updates, acceptance
- * of the installation permission request those updates raise. Every flow is recorded step by step with
+ * of the installation permission request those updates raise, and classic branch-protection
+ * settings the operator's token may not patch. Every flow is recorded step by step with
  * screenshots, verified afterwards through the API, and appended to an audit ledger, so a
  * browser-driven change is as attributable as a CLI one.
  *
@@ -23,7 +25,7 @@ import { controlPlanePermissions as declaredPermissions, requiredPermissions } f
  * only to keep the Confirm-access views GitHub shows there as redacted fixtures, through the same
  * keep logic the administrative flows run, and stops without submitting, typing or sending anything.
  */
-export const browserFlows = ['app-permissions', 'installation-accept', 'capture'] as const;
+export const browserFlows = ['app-permissions', 'installation-accept', 'protection', 'capture'] as const;
 export type BrowserFlow = typeof browserFlows[number];
 
 // What the control-plane App must hold for every path Graphyard exercises, read from the one
@@ -1025,7 +1027,7 @@ export async function listConfirmAccessFixtures(root: string) {
 // ---- Flows ---------------------------------------------------------------------------------
 
 export interface FlowDependencies {
-  page?: BrowserPage; api?: ProtectionRun; coordinator?: string | null;
+  page?: BrowserPage; api?: ProtectionRun; work?: Work[]; coordinator?: string | null;
   /** The control plane's App-credential read of the installation (`GET /api/github/installation`). */
   installation?: () => Promise<InstallationState>;
   now?: () => Date; sleep?: (ms: number) => Promise<void>; sudo?: Partial<Pick<SudoOptions, 'timeoutMs' | 'pollMs' | 'maxAttempts'>>;
@@ -1144,7 +1146,7 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
           reason = verified ? `Installation ${installation.id} now grants ${missing.join(', ')}` : `Installation still lacks ${still.join(', ')} after acceptance`;
         }
       }
-    } else {
+    } else if (flow === 'capture') {
       // GY-1686: reach a Confirm-access page on purpose and keep its views as fixtures. The pass that
       // confirms access (passSudo) is never entered, so nothing is submitted, typed or sent and no
       // GitHub Mobile prompt is issued: the capture follows each view's own link and stops.
@@ -1191,6 +1193,39 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
           if (sendOnly) reason += '; the email method is offered only by a control that sends a code, which the capture never follows, so no email view is expected';
           page.note?.('capture', [outcome, reason]);
         }
+      }
+    } else {
+      const work = dependencies.work ?? [];
+      const plan = protectionPlan(readProtection(config, api), config, work);
+      before = { current: plan.current, strictOff: !plan.blockers.some(blocker => /up to date/.test(blocker)), enforceAdmins: !plan.blockers.some(blocker => /Administrator/.test(blocker)) };
+      entry.target = { ...entry.target, branch: config.baseBranch, mode: plan.mode };
+      // Only settings the browser form exposes are reconciled here; a missing App-bound check or a
+      // CODEOWNERS requirement stays a refusal exactly as it does for master protection --apply.
+      const unfixable = plan.blockers.filter(blocker => !/up to date|Administrator/.test(blocker));
+      const wanted = { strict: false, enforceAdmins: true, requiredApprovals: plan.desired.requiredApprovals, requireLastPushApproval: plan.desired.requireLastPushApproval, dismissStaleReviews: plan.desired.dismissStaleReviews };
+      if (unfixable.length) { outcome = 'refused'; reason = `Branch protection is missing settings the browser flow does not create: ${unfixable.join('; ')}`; }
+      else if (plan.consistent) { outcome = 'unchanged'; verified = true; reason = 'Branch protection already matches every open review policy'; }
+      else if (dependencies.dryRun) { outcome = 'unchanged'; reason = `Dry run; would change ${[...plan.changes, ...plan.blockers].join('; ')}`; }
+      else {
+        await visit(`https://github.com/${config.repository}/settings/branches`);
+        const rule = required(page.locate('link', config.baseBranch), `the classic protection rule for ${config.baseBranch}`, flow);
+        page.click(rule.selector);
+        await passSudo(page, { flow, record: entry.record, onCode: state => atomicPrivateWrite(sudoFile(root), state), onSettled: settle, capture, keep, sleep: dependencies.sleep, now, ...dependencies.sudo });
+        const checkbox = (label: string, checked: boolean) => { const control = required(page.locate('label', label), `the "${label}" setting`, flow); if (control.checked !== checked) page.setChecked(control.selector, checked); };
+        checkbox('Require a pull request before merging', true);
+        const count = required(page.locate('label', 'Required number of approvals before merging'), 'the required approvals count', flow);
+        if (count.value !== String(wanted.requiredApprovals)) page.select(count.selector, String(wanted.requiredApprovals));
+        checkbox('Dismiss stale pull request approvals when new commits are pushed', wanted.dismissStaleReviews);
+        checkbox('Require approval of the most recent reviewable push', wanted.requireLastPushApproval);
+        checkbox('Require status checks to pass before merging', true);
+        checkbox('Require branches to be up to date before merging', wanted.strict);
+        checkbox('Do not allow bypassing the above settings', wanted.enforceAdmins);
+        page.click(required(page.locate('button', 'Save changes'), 'the Save changes button', flow).selector);
+        page.wait(1_500);
+        const verifiedPlan = protectionPlan(readProtection(config, api), config, work);
+        after = { current: verifiedPlan.current, strictOff: !verifiedPlan.blockers.some(blocker => /up to date/.test(blocker)), enforceAdmins: !verifiedPlan.blockers.some(blocker => /Administrator/.test(blocker)) };
+        verified = verifiedPlan.consistent; outcome = verified ? 'applied' : 'refused';
+        reason = verified ? `Branch protection now matches the ${plan.mode} review policy: ${[...plan.changes, ...plan.blockers].join('; ')}` : `GitHub still reports ${[...verifiedPlan.changes, ...verifiedPlan.blockers].join('; ')} after saving`;
       }
     }
   } catch (error) {
