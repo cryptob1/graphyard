@@ -76,7 +76,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ## 3. Start the master
 
-`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as OS user whose GitHub credentials workers can't read; `--browser-profile`: a GitHub-signed-in Chrome profile; GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
+`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as OS user whose GitHub credentials workers can't read; `--browser-profile`: a GitHub-signed-in Chrome profile; GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
 
 ### The loop must be supervised
 
@@ -90,7 +90,7 @@ Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work (`maste
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: an agent reviewer reviews each head, the control plane merges it; no approver or escalation runs, so you answer decisions. `master status` prints `supervision`. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: an agent reviewer reviews each head, the control plane merges it; no approver or escalation runs, so you answer decisions. `master status` prints `supervision`. Promote: `master reviewer add`, then `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)); it also needs a reviewer App bound before GY-2010, so a new install stays supervised.
 
 ## 4. Prove the first change
 

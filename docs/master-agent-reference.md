@@ -7,7 +7,7 @@ Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-gran
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses there; `master.json` edits skip checks. Refuses until reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`.
+`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses there; `master.json` edits skip checks. Refuses until a reviewer profile and a reviewer App bound before GY-2010 exist (`master reviewer setup`/`bind` are removed, so new installs cannot promote), its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`.
 
 ## Conflict avoidance
 
