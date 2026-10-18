@@ -24,7 +24,7 @@ UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `g
 
 ### Pre-merge gate and release-candidate validation
 
-Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/chart/`upgrade` (`scripts/upgrade-from-stable.mjs`: seeded `stable` compose install upgrades intact; none: skipped); UAT's `zero-touch` merges an item.
+Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/chart/`upgrade` (`scripts/upgrade-from-stable.mjs`: `stable` compose upgrades intact, `/healthz`=candidate version+commit; none: skipped); UAT's `zero-touch` merges an item.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 

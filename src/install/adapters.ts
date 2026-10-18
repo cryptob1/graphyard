@@ -3,7 +3,7 @@ import { isAbsolute, relative, resolve } from 'node:path';
 import { fingerprint, Vault } from './secrets.js';
 import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
-import { cliRelease, defaultImageFor } from '../release.js';
+import { checkoutRelease, cliRelease, defaultImageFor } from '../release.js';
 import { hetznerQuote, spendConsent, type PriceQuote, type QuoteResult } from './pricing.js';
 import { localAdapter } from './local.js';
 import { buildIdentity, cliCommit } from '../protocol-version.js';
@@ -341,6 +341,16 @@ export async function composePort(ctx: AdapterContext): Promise<PreflightItem> {
   return { name, ok: false, detail: `127.0.0.1:${SERVER_PORT}-${SERVER_PORT + PORT_CANDIDATES - 1} are all taken`, fix: 'Free one of those ports, or rerun with a free --port N' };
 }
 
+/**
+ * The stamp a locally built image carries: the source checkout's release and commit. Without it
+ * the Dockerfile's `0.0.0-dev`/`unknown` defaults win and /healthz reports `unreleased unknown`,
+ * as the upgrade gate's compose install did after `graphyard upgrade` rebuilt its image (GY-1977).
+ */
+export function imageBuildArgs(sourceRoot: string) {
+  const release = checkoutRelease(sourceRoot, process.env.GRAPHYARD_BUILD_REVISION || 'unknown');
+  return ['--build-arg', `GRAPHYARD_VERSION=${release.version}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${release.revision}`];
+}
+
 export const composeAdapter: ProviderAdapter = {
   provider: 'compose',
   async preflight(ctx) {
@@ -364,12 +374,12 @@ export const composeAdapter: ProviderAdapter = {
   },
   plan(ctx, observation) {
     return [
-      { id: 'provider.image', target: 'provider', title: `Build the Graphyard image ${ctx.image} from ${ctx.sourceRoot}`, state: 'update', command: `docker build --tag ${ctx.image} ${ctx.sourceRoot}` },
+      { id: 'provider.image', target: 'provider', title: `Build the Graphyard image ${ctx.image} from ${ctx.sourceRoot}`, state: 'update', command: ['docker build', ...imageBuildArgs(ctx.sourceRoot).map(arg => /\s/.test(arg) ? shellQuote(arg) : arg), '--tag', ctx.image, ctx.sourceRoot].join(' ') },
       ...composeActions(ctx, observation, 'this machine'),
     ];
   },
   async provision(ctx) {
-    await ctx.transport.exec('docker', ['build', '--tag', ctx.image, ctx.sourceRoot], { timeout: 1_800_000 });
+    await ctx.transport.exec('docker', ['build', ...imageBuildArgs(ctx.sourceRoot), '--tag', ctx.image, ctx.sourceRoot], { timeout: 1_800_000 });
   },
   async setEnv(ctx, values) {
     for (const file of composeBundle(ctx, values, 'loopback')) await ctx.transport.putFile(file.path, file.content, file.mode, file.owner);
