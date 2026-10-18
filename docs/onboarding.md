@@ -86,7 +86,7 @@ Shared hosts: units are per repository (`graphyard-executor-OWNER-NAME@N.service
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore`); runs a `master-role` refusal's command, then unblocks; posts findings (`master status` `doctor`), escalates or files faults (deduped). Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (10) a Pi **doctor** acts, never asks people (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore`); runs a `master-role` refusal's command, then unblocks; posts findings (`master status` `doctor`); files only code-change items. Off: `run.doctor.enabled=false`.
 
 ### Supervised mode (up --local)
 
