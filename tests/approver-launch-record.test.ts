@@ -17,6 +17,7 @@ import { startedAtOnce } from './helpers/launch-shell.js';
 import type { Work } from '../src/model.js';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
+import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1339, 2026-10-06 ~01:16Z: the doctor ran its sanctioned `master approver GY-1335 DECISION`
@@ -25,11 +26,21 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // now lives under the managed data root keyed by the checkout, fails over to the checkout when the
 // data root refuses writes, and a record no location accepts never closes a started runtime.
 // One case per proof: integration:doctor-approver-launch, unit:approver-launch-record-writable.
+//
+// GY-2001: fixtures put GRAPHYARD_DATA_HOME under the host tmpdir, a tmpfs on many hosts. The
+// managed approval checkout refuses that volume unless the launch is given a durable filesystem
+// probe — the same stub other registry-launch proofs already pass. At 9bc46db8 runAutonomyCommand
+// never handed one through, so doctor-approver and idle-stall relaunches failed the worktree-root
+// guard on every trial that set TMPDIR on tmpfs.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const decision = 'c3835bc8-93fc-47fd-ac09-31c0f8d0e9c2';
 const runsAsRoot = process.getuid?.() === 0;
+/** Stub the managed-root preflight: fixtures' data homes sit on tmpfs, which production refuses. */
+const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
+const durableLaunch = { filesystem: durable };
+const durableScreen = { filesystem: durable, screenPauseMs: 0 };
 
 function item(): Work {
   const now = new Date().toISOString();
@@ -74,7 +85,7 @@ async function doctorApprover(root: string, config: MasterConfig, closed: string
   return await runAutonomyCommand(root, config, 'approver', ['GY-1335', decision, 'claude'], {
     coordinator: async () => ({ work: [item()], now: new Date().toISOString() }),
     readSecret: async () => '', agents: () => [], daemonLock: async () => null, runtime: herdr,
-    mutate: async () => ({}),
+    mutate: async () => ({}), filesystem: durable,
   }) as { agentName: string; pane: string | null; unrecorded?: string };
 }
 
@@ -208,7 +219,7 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
         decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', input: {}, approvedBy: null, requestedAt: new Date(Date.now() - 600_000).toISOString() }] }),
         approverLaunches: () => autonomy.readApproverLaunches(root),
         // The loop's approver effect: the real launcher against what Herdr lists now.
-        approver: async (subject, id) => { const launched = await autonomy.launchApprover(root, subject, id, 'claude', { agents: listed(), available: true }, herdr, {}, async () => ({})); return { agentName: launched.agentName, pane: launched.pane, runtime: launched.runtime, session: launched.session, ...(launched.replaced ? { replaced: launched.replaced } : {}) }; },
+        approver: async (subject, id) => { const launched = await autonomy.launchApprover(root, subject, id, 'claude', { agents: listed(), available: true }, herdr, {}, async () => ({}), durableLaunch); return { agentName: launched.agentName, pane: launched.pane, runtime: launched.runtime, session: launched.session, ...(launched.replaced ? { replaced: launched.replaced } : {}) }; },
       };
       const result = await runCycle(config, state, loop, () => Date.now());
       assert.deepEqual(closed, ['pane-old'], 'the idle session that never ran its request is closed within one cycle');
@@ -227,7 +238,7 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
             starts: { records: ageMs === null ? [] : records, boundMs: bound } });
       };
       const command = (agents: HerdrAgent[]) => runAutonomyCommand(root, config, 'approver', [work.key, decision, 'claude'], {
-        coordinator: async () => ({ work: [work], now: new Date().toISOString() }), readSecret: async () => '', agents: () => agents, daemonLock: async () => null, runtime: herdr, mutate: async () => ({}),
+        coordinator: async () => ({ work: [work], now: new Date().toISOString() }), readSecret: async () => '', agents: () => agents, daemonLock: async () => null, runtime: herdr, mutate: async () => ({}), filesystem: durable,
       }) as Promise<{ agentName: string; pane: string | null; replaced?: string }>;
       const reset = () => { panes.clear(); panes.add('pane-old'); closed.length = 0; };
       reset(); await recordLaunch(bound + 60_000);
@@ -260,7 +271,7 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       const idleStall = (await reportIdle(['╭─\n│ > \n╰─', '╭─\n│ > \n╰─'])).attentionItems.find(entry => entry.text.includes(decision));
       assert.match(idleStall?.text ?? '', new RegExp(`approver session ${name} sits idle at a still screen in Herdr past its start bound and recorded no outcome — a stall`));
       assert.match(JSON.stringify(idleStall), new RegExp(`"graphyard master approver ${work.key} ${decision} \\[AGENT_KIND\\] closes ${name} and puts it to a fresh approver"`));
-      const idleRelaunch = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 });
+      const idleRelaunch = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), durableScreen);
       assert.deepEqual(closed, ['pane-old'], 'the command status names closes the idle session it described');
       assert.equal(idleRelaunch.pane, 'pane-new');
       // The launcher records the pane it launched into, so the next judgement of that session is bound to it.
@@ -282,7 +293,7 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       for (const [status, ageMs, screens, why] of refusals) {
         reset(); if (ageMs !== null) await recordLaunch(ageMs);
         const run = stubHerdr(panes, closed, [...screens]);
-        await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor(status)], available: true }, run, {}, async () => ({}), { screenPauseMs: 0 }), why);
+        await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor(status)], available: true }, run, {}, async () => ({}), durableScreen), why);
         assert.deepEqual(closed, [], `a ${status} session is never closed under it`);
       }
       // A silent invocation (a tool waiting on the network, output buffered) leaves an idle screen still after the request ran: a
@@ -292,7 +303,7 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       for (const screen of [silent, scrolled]) {
         reset(); await recordLaunch(bound + 60_000);
         assert.equal((await reportIdle([screen, screen])).attentionItems.some(entry => entry.text.includes(decision)), false, 'an idle session whose still screen shows its request ran is no stall');
-        await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, [screen, screen]), {}, async () => ({}), { screenPauseMs: 0 }),
+        await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, [screen, screen]), {}, async () => ({}), durableScreen),
           /\(it is idle with a screen that shows its request ran, as while a silent command waits\)/);
         assert.deepEqual(closed, [], 'a silently working session is never closed under it');
       }
@@ -301,13 +312,13 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       reset(); await recordLaunch(bound + 60_000, 'pane-earlier');
       const stale = (await reportIdle(['╭─\n│ > \n╰─', '╭─\n│ > \n╰─'])).attentionItems.find(entry => entry.text.includes(decision));
       assert.match(JSON.stringify(stale), /herdr pane close pane-old \(master approver refuses it while it has no launch record bound to its pane, so its age is unknown\)/);
-      await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 }),
+      await assert.rejects(autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), durableScreen),
         /\(it has no launch record bound to its pane, so its age is unknown\)/);
       assert.deepEqual(closed, [], 'a session dated only by an earlier pane\'s record is never closed');
 
       // An idle session whose screen holds still across the pause and shows no trace of its request never ran it: closed and replaced.
       reset(); await recordLaunch(bound + 60_000);
-      const still = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), { screenPauseMs: 0 });
+      const still = await autonomy.launchApprover(root, work, decision, 'claude', { agents: [statusFor('idle')], available: true }, stubHerdr(panes, closed, ['╭─\n│ > \n╰─', '╭─\n│ > \n╰─']), {}, async () => ({}), durableScreen);
       assert.deepEqual(closed, ['pane-old']);
       assert.match(still.replaced ?? '', /idle in Herdr \d+s after its launch, past the \d+s start bound without running its request, its screen still/);
     });
@@ -417,12 +428,12 @@ test('unit:approver-stall-followup — stall checks date a session only by its o
       const herdr = stubHerdr(panes, closed);
       const stalledAgent: HerdrAgent = { name, pane_id: 'pane-stalled', agent: 'claude', agent_status: 'done' };
       // An end the registry refuses leaves the slot held: the launch is refused naming the session, and no replacement is chosen.
-      await assert.rejects(autonomy.launchApprover(root, work, decision, undefined, { agents: [stalledAgent], available: true }, herdr, { registry: client, quota: false, cacheMs: 0 }, async () => ({}), { screenPauseMs: 0 }),
+      await assert.rejects(autonomy.launchApprover(root, work, decision, undefined, { agents: [stalledAgent], available: true }, herdr, { registry: client, quota: false, cacheMs: 0 }, async () => ({}), durableScreen),
         (error: Error & { registrySession?: string }) => error.registrySession === 'registry-stalled' && /registry session registry-stalled could not be ended, so it still holds its slot, its pane is left open and no replacement was chosen: registry unavailable/.test(error.message));
       assert.deepEqual(closed, [], 'the stalled pane is left open, so the retry finds it and its launch record again');
       assert.deepEqual(order, ['end registry-stalled'], 'and no replacement is selected against the slot it still holds');
       endRefused = false; order.length = 0;
-      const replaced = await autonomy.launchApprover(root, work, decision, undefined, { agents: [stalledAgent], available: true }, herdr, { registry: client, quota: false, cacheMs: 0 }, async () => ({}), { screenPauseMs: 0 });
+      const replaced = await autonomy.launchApprover(root, work, decision, undefined, { agents: [stalledAgent], available: true }, herdr, { registry: client, quota: false, cacheMs: 0 }, async () => ({}), durableScreen);
       assert.deepEqual(closed, ['pane-stalled'], 'the stalled pane is closed');
       assert.equal(replaced.pane, 'pane-new', 'and the replacement launched');
       assert.equal(replaced.session, 'registry-replacement', 'on the slot the stalled session held');
@@ -469,4 +480,40 @@ test('a stalled approver whose registry session was already ended is freed on re
   await freeStalledSlot('registry-gone', 'approver session x (pane p)', async () => { throw new FleetUnreachableError('The agent registry at http://registry answered 404: Unknown session'); });
   await assert.rejects(freeStalledSlot('registry-held', 'approver session x (pane p)', async () => { throw new FleetUnreachableError('The agent registry at http://registry answered 503: unavailable'); }),
     (error: Error & { registrySession?: string }) => error.registrySession === 'registry-held', 'any other refusal still leaves the slot held');
+});
+
+// GY-2001: the merge trial on tip 9bc46db8 failed doctor-approver / idle-stall relaunch / registry-drives
+// Herdr launches because GRAPHYARD_DATA_HOME (and fixture worktree roots) sat on tmpfs and
+// runAutonomyCommand never handed a FilesystemProbe through to launchApprover.
+const brokenBase = '9bc46db8f4e8509e11f06ebf64e4bc79f5423ff0';
+test('manual:base-failure-repaired — at 9bc46db8 master approver never handed a filesystem probe through runAutonomyCommand, so a tmpfs data home refused the managed checkout; the candidate threads the probe and the launch succeeds', { skip: runsAsRoot ? 'root writes through read-only modes' : false }, async () => {
+  const { sourceTree } = await import('./helpers/base-tree.js');
+  const { probeFilesystem } = await import('../src/install/worktree-root.js');
+  const baseSource = await readFile(join(await sourceTree(brokenBase), 'src/master/autonomy.ts'), 'utf8');
+  assert.match(baseSource, /registrar\(work\.id\)\);/, 'the broken tip ends the approver launch at the registrar with no headless options');
+  assert.doesNotMatch(baseSource, /filesystem:\s*deps\.filesystem/, 'and never forwards a filesystem probe from AutonomyDependencies');
+  const candidateSource = await readFile(fileURLToPath(new URL('../src/master/autonomy.ts', import.meta.url)), 'utf8');
+  assert.match(candidateSource, /filesystem:\s*deps\.filesystem/, 'the candidate threads the probe into launchApprover');
+  const { root, config, cleanup } = await boundCheckout('base-failure-approver');
+  const dataHome = await temporaryDirectory('base-failure-approver-data');
+  const restore = await readOnlyCheckout(root);
+  try {
+    await withDataHome(dataHome, async () => {
+      const herdr = (_command: string, args: string[]) => {
+        if (args[0] === 'tab' && args[1] === 'create') return JSON.stringify({ result: { root_pane: { pane_id: 'pane-A', tab_id: 'tab-A' } } });
+        return startedAtOnce(args) ?? JSON.stringify({ result: {} });
+      };
+      // On a host whose tmpdir is tmpfs (the trial host), omitting the probe still refuses as 9bc46db8 did.
+      if ((await probeFilesystem(dataHome)).volatile) {
+        await assert.rejects(runAutonomyCommand(root, config, 'approver', ['GY-1335', decision, 'claude'], {
+          coordinator: async () => ({ work: [item()], now: new Date().toISOString() }),
+          readSecret: async () => '', agents: () => [], daemonLock: async () => null, runtime: herdr, mutate: async () => ({}),
+        }), /managed worktree root .* is on a tmpfs/, 'omitting the probe reproduces the tip\'s refusal on tmpfs');
+      }
+      const closed: string[] = [];
+      const launched = await doctorApprover(root, config, closed);
+      assert.equal(launched.pane, 'pane-A', 'handing the durable probe through lets the same launch succeed');
+      assert.deepEqual(closed, []);
+    });
+  } finally { await restore(); await cleanup(); }
 });
