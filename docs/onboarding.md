@@ -98,8 +98,8 @@ Every `run.doctor.intervalMinutes` (10) a Pi **doctor** fixes stuck work (`maste
 
 CI workflows should cancel superseded pull-request runs: group `${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}`, `cancel-in-progress: ${{ github.event_name == 'pull_request' }}`; runs on main are never cancelled.
 
-## 5. Inventory PRs
+## 5. Existing PRs
 
-`graphyard onboard inventory --repo OWNER/REPO [--mapping FILE] [--out FILE]` labels open PRs and drafts: `continue`, `hold` (draft), `adopt` (mergeable; protection, ruleset checks clean per App) or `superseded` (base holds the head). Read-only; `--mapping` binds keys.
+Graphyard reads no pull request, so there is no PR inventory (`graphyard onboard` is gone): open PRs stay with their existing controller; file work for one as an item.
 
 `master adopt GY-N --pr NUMBER --head SHA …` is refused: adoption binds a PR's live head and Graphyard reads no GitHub API, so no new adoption binds; a replayed key answers from its receipt. Items adopted earlier keep their binding: attempts start at the stored adopted head from the shared object store and submit with `complete GY-N EPOCH --head`, never through the PR.

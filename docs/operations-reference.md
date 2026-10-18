@@ -43,7 +43,7 @@ The merge writer reruns a trial's failing files on the same merge commit; a pass
 
 ## Observation
 
-Graphyard calls no GitHub API, so there is no request budget, rate-limit pause, webhook or observation cadence to read. Every candidate is observed from the shared checkout; the merge writer's ledger decides the test and merge gates. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
+Graphyard observes no pull request, check run or commit status through GitHub's API (directly or through `gh api`), so there is no request budget, rate-limit pause, webhook or observation cadence to read. Every candidate is observed from the shared checkout; the merge writer's ledger decides the test and merge gates. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ## Control-plane resources
 

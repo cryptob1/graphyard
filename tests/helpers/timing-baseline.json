@@ -520,7 +520,6 @@
     "tests/module-budgets.test.ts": 723,
     "tests/no-dated-limit-notices.test.ts": 243,
     "tests/no-wall-clock-time-bombs.test.ts": 1000,
-    "tests/onboard-inventory.test.ts": 500,
     "tests/onboarding-delivery-uat-fixture.test.ts": 12000,
     "tests/one-reviewer-per-request.test.ts": 7821,
     "tests/operator-agent-502-status.test.ts": 1186,

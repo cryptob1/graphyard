@@ -43,6 +43,8 @@ const gone = [
   'src/server/routes/github.ts',
   'src/server/push-credential.ts',
   'src/main-guard.ts',
+  'src/cli/onboard.ts',
+  'src/model/import-plan.ts',
 ] as const;
 
 const sha = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -63,7 +65,13 @@ test('unit:github-client-removed — the GitHub API client modules are gone, no 
     assert.doesNotMatch(text, /api\.github\.com/, `${file} must not call api.github.com`);
     assert.doesNotMatch(text, /\/app\/installations\/[^/\s]+\/access_tokens/, `${file} must not request a GitHub App installation token`);
     assert.doesNotMatch(text, /mintPushToken|installationToken\s*\(/, `${file} must not mint an App installation token`);
+    // Delegating the request to a subprocess (`gh api repos/R/pulls…`) still calls api.github.com:
+    // no pull request listing or detail, check run or commit status is read by any route.
+    assert.doesNotMatch(text, /repos\/[^'"`\n]*\/(?:check-runs|status\b|pulls(?:\?|\/\$\{[^}]+\}['"`]))/, `${file} must not read pull requests, check runs or commit statuses through GitHub's API`);
   }
+  // The pull-request inventory that read them is no command any more.
+  const { commands } = await import('../src/cli/index.js');
+  assert.equal(commands.some(command => command.name === 'onboard'), false, 'graphyard onboard is not registered');
 
   // The live control plane registers no GitHub webhook module: those paths answer 404, signed or not, as any unknown path does.
   for (const path of ['github/webhook', 'github/installation']) {
