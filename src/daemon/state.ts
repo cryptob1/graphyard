@@ -15,7 +15,7 @@ import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 import { mainWatchStateSchema } from './main-watch.js';
-import { shadowKeptVerdicts, shadowStateSchema } from './cycle-shadow.js'; import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // both lazy: they import this module
+import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
@@ -519,7 +519,6 @@ export const daemonStateSchema = z.object({
   deployment: deploymentObservationSchema.nullable().default(null),
   promotion: promotionStateSchema.nullable().default(null), // the loop's promotion drive (GY-1302)
   mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits and the promotion freeze; lazy as main-watch.ts imports this module
-  shadow: z.lazy(() => shadowStateSchema).default([]), // GY-1522: the shadow merge gate's last 200 verdicts; lazy as cycle-shadow.ts imports this module
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),

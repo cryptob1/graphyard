@@ -7,10 +7,22 @@ import { parseFailedTests } from '../model/base-failure.js';
 import { leadingProof } from '../model/flake-ledger.js';
 import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { submittedAtOf } from './shadow.js';
 import { runTrial, trialAttempts, TrialCleanupError, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
+
+/**
+ * When the item's current head was handed in. The pipeline timeline's resubmission or submission
+ * when the snapshot carries it; the loop's coordination view drops that timeline, so there the
+ * moment this very head was first observed (`headObserved`, set when the candidate changed) stands
+ * in, then the pull request's creation, then the stage entry.
+ */
+export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 'headObserved'>): number {
+  const pipeline = (item as { pipeline?: { submittedAt?: string | null; resubmittedAt?: string | null } }).pipeline;
+  const observed = item.headObserved && item.candidate && item.headObserved.sha.toLowerCase() === item.candidate.sha.toLowerCase() ? item.headObserved.at : null;
+  for (const at of [pipeline?.resubmittedAt, pipeline?.submittedAt, observed, item.candidate?.createdAt, item.stageEnteredAt]) if (at && Number.isFinite(Date.parse(at))) return Date.parse(at);
+  return 0;
+}
 
 /**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
@@ -291,7 +303,7 @@ const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(
 const childOutput = (error: unknown) => { const failed = error as { stdout?: unknown; stderr?: unknown }; return `${typeof failed.stdout === 'string' ? failed.stdout : ''}${typeof failed.stderr === 'string' ? failed.stderr : ''}`; };
 
 /**
- * The shadow gate's trial (trial.ts `runTrial`) on the merge commit, with the test selection
+ * The trial (trial.ts `runTrial`) on the merge commit, with the test selection
  * widened to the files carrying the item's proofs and the run reported as TAP, so the verdict counts
  * each proof's executed and failed cases (AC-2). The child runner is decorated, never the trial:
  * the affected selection (`scripts/ci-tests.mjs affected`, or the `select` fallback an older merge

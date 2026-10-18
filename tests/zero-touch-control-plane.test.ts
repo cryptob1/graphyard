@@ -251,7 +251,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
       closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
       recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-      github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: reads } as unknown as DaemonEffects;
+      github: githubDouble, merge: githubDouble, mergeWriter: reads } as unknown as DaemonEffects;
     await runCycle(config, state, effects, () => clock);
     await mergeWriterIdle(state);
     await runCycle(config, state, effects, () => clock);
