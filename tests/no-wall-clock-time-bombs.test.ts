@@ -938,7 +938,7 @@ export const allowances: Record<string, Allowance> = {
   'tests/soak-checkout-restore.test.ts': { why: 'the 2030-01-01 simulated clock is the loop\'s injected now and every request/journal instant derives from it; D', dates: ['2030-01-01'], readings: 1 },
   'tests/speed-metric.test.ts': { why: 'the 2026-10-07 delivery and timeline fixtures are measured against the explicit now constant; pipelineSpeedSum', dates: ['2026-10-07'], readings: 1 },
   'tests/stale-rework-requests.test.ts': { why: 'the 2030-01-01 clock is the loop\'s injected now beside the snapshot\'s now iso(0); the Date.now()-based pause t', dates: ['2030-01-01'], readings: 1 },
-  'tests/stalled-actions.test.ts': { why: 'the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merg', dates: ['2026-01-01', '2026-02-01', '2026-09-21'], readings: 13 },
+  'tests/stalled-actions.test.ts': { why: 'the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merg', dates: ['2026-01-01', '2026-02-01', '2026-09-21', '2026-10-18'], readings: 13 },
   'tests/stalled-gate-faults.test.ts': { why: 'the 2026-10-01/02 instants are past fixture ats whose stall reading (actionStall) reads row history, not the c', dates: ['2026-10-01', '2026-10-02'], readings: 7 },
   'tests/status-conflict-probe-bounded.test.ts': { why: 'the 2030-01-01 stamps are work/cache fixture fields and the explicit status now; nothing dates them against th', dates: ['2030-01-01'], readings: 8 },
   'tests/submit-head.test.ts': { why: 'the 2026-10-08 observation at and the 12:30 evaluate now are past and handed explicitly to observeHead/evaluat', dates: ['2026-10-08'], readings: 1 },
