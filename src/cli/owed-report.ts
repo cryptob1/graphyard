@@ -102,7 +102,8 @@ export function humanNeededAttention(snapshot: { work: Work[]; now: string }, wr
     const item: AttentionItem = { subject: row.key,
       text: `${row.reason} — no executor may run it; ${row.decision} has been owed for ${elapsed(row.waitedMs)}`,
       ...agentOwner('master', row.resolve, 'approver') };
-    if (held === 'moving') item.inMotionUntil = new Date(mergeWriterMovement(writer)!.at + mergeWriterMotionBound(writer)).toISOString();
+    // GY-2053: a live flight is movement on its own, so its hold is dated from this reading, never from a movement aged past the bound.
+    if (held === 'moving') item.inMotionUntil = new Date((writer!.inFlight ? now : mergeWriterMovement(writer)!.at) + mergeWriterMotionBound(writer)).toISOString();
     return [item];
   });
 }
