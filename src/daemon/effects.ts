@@ -12,6 +12,7 @@ import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, 
 import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
+import type { MergeWriterSummary } from './cycle-merge-writer.js';
 import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -398,7 +399,9 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    * is the report's last step over the whole list — a ledger refusal in place of the launch symptoms it causes, a resource at its bound
    * named in place of its symptom — so one cause is tracked as the report shows it, once.
    */
-  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string }) => Promise<ReportedAttention>;
+  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string;
+    /** GY-2015: the loop's own merge-writer summary, so a trial refusal its queue holds reads as its motion, not an owed decision. */
+    mergeWriter?: MergeWriterSummary | null }) => Promise<ReportedAttention>;
   masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
 }
 
