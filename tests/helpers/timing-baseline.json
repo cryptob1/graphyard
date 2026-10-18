@@ -626,6 +626,7 @@
     "tests/plane-hot-calls-latency.test.ts": 49722,
     "tests/plane-load.test.ts": 615867,
     "tests/planned-files-derived.test.ts": 1268,
+    "tests/planned-files-not-a-lock.test.ts": 1700,
     "tests/post-deploy-criteria.test.ts": 600,
     "tests/post-deploy-follow-ups.test.ts": 600,
     "tests/post-deploy-observation-state.test.ts": 657,
@@ -977,6 +978,7 @@
     "tests/goal-candidate-promotion.test.ts": 5000,
     "tests/release-uat-after-read.test.ts": 400,
     "tests/control-plane-rework-workspace.test.ts": 1500,
-    "tests/merge-writer-trial-timeout-queue.test.ts": 1000
+    "tests/merge-writer-trial-timeout-queue.test.ts": 1000,
+    "~": 0
   }
 }
