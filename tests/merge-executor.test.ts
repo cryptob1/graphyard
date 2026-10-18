@@ -402,7 +402,7 @@ test('integration:executor-trial-failure-rework-no-approver — a rework request
 
 test('unit:merge-writer-status — master status and the daemon summary show mergeWriter.queue (oldest first), inFlight, lastMergeAt and refusals; the loop\'s own effects wire the reads with the merge-record post under one key per step; docs/delivery-redesign.md Merge writer states the sequence and the reconcile rule within 80 net words', async () => {
   const state = emptyDaemonState(config);
-  state.mergeWriter = { lastMergeAt: iso(start), queue: [{ key: 'GY-2', id: 'w2', head: sha('head2'), submittedAt: iso(start - minute), waitingMs: minute }], inFlight: { key: 'GY-1', id: 'w1', head: sha('head1'), startedAt: iso(start) }, refusals: [{ key: 'GY-3', head: sha('head3'), reason: baseMovedReason(4), at: iso(start) }], reworks: [{ key: 'GY-3', id: 'w3', head: sha('head3'), reason: `${trialFailurePrefix}: tests tests/x.test.ts`, refusedAt: iso(start), attempts: 2, lastError: 'route down' }] };
+  state.mergeWriter = { lastMergeAt: iso(start), queue: [{ key: 'GY-2', id: 'w2', head: sha('head2'), submittedAt: iso(start - minute), waitingMs: minute }], inFlight: { key: 'GY-1', id: 'w1', head: sha('head1'), startedAt: iso(start) }, refusals: [{ key: 'GY-3', head: sha('head3'), reason: baseMovedReason(4), at: iso(start) }], reworks: [{ key: 'GY-3', id: 'w3', head: sha('head3'), reason: `${trialFailurePrefix}: tests tests/x.test.ts`, refusedAt: iso(start), attempts: 2, lastError: 'route down' }], timeouts: [] };
   const summary = daemonSummary(state, start, config.run.intervalSeconds * 1000, config.hostId);
   assert.deepEqual(summary.mergeWriter, mergeWriterSummary(state.mergeWriter));
   assert.deepEqual(summary.mergeWriter.queue.map(entry => entry.key), ['GY-2']);
@@ -411,7 +411,7 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   assert.deepEqual(mergeWriterSummary(undefined), { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] });
   assert.match(readFileSync(`${root}src/cli/master/operations.ts`, 'utf8'), /mergeWriter: mergeWriterSummary\(state\?\.mergeWriter\)/, 'master status prints the section beside shadowGate');
   assert.throws(() => mergeWriterStateSchema.parse({ queue: Array.from({ length: 51 }, () => state.mergeWriter.queue[0]) }), 'the queue keeps at most 50');
-  assert.deepEqual(emptyDaemonState(config).mergeWriter, { lastMergeAt: null, queue: [], inFlight: null, refusals: [], reworks: [] });
+  assert.deepEqual(emptyDaemonState(config).mergeWriter, { lastMergeAt: null, queue: [], inFlight: null, refusals: [], reworks: [], timeouts: [] });
   // The loop's effects: the reads over the coordinator checkout, each step posted as the coordinator under its own key.
   const posted: { path: string; data: unknown; key?: string }[] = [];
   const git = recordingRun(() => `${tip}\n`);
