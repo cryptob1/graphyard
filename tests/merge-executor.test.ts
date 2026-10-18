@@ -11,7 +11,7 @@ import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type Daem
 import { daemonEffects } from '../src/daemon/effects.js';
 import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstParentHolds, mergeOne, mergeQueue, nextToMerge, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
-import { defaultDeployKeyFile, defaultMergeWriterRetrials, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
+import { defaultDeployKeyFile, defaultMergeWriterRetrials, defaultTrialTimeoutMinutes, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { deliveredReason, otherHeadRefusal, unheldShaRefusal, unintendedShaRefusal } from '../src/server/merge-record.js';
 import { mergeWriterApprover, mergeWriterTrialGround, reworkGround, trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
@@ -241,10 +241,11 @@ test('unit:executor-push-leased-deploy-key-only — the push is `git push origin
   const fetch = git.calls.find(call => call.args.includes('fetch'))!;
   assert.deepEqual(fetch.args, ['-C', '/coordinator', 'fetch', '--no-tags', 'origin', 'main'], 'only the base is fetched: the head is already in the shared object store');
   // The deploy key defaults to the install's, under ~/.config/graphyard/<install>/deploy-key, and `~/` is the home directory.
-  assert.deepEqual(mergeWriterSettings({}, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/.config/graphyard/owner-project/deploy-key', retrials: defaultMergeWriterRetrials });
+  assert.deepEqual(mergeWriterSettings({}, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/.config/graphyard/owner-project/deploy-key', retrials: defaultMergeWriterRetrials, trialTimeoutMinutes: defaultTrialTimeoutMinutes });
   assert.equal(defaultDeployKeyFile('owner-project', '/h'), '/h/.config/graphyard/owner-project/deploy-key');
-  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', retrials: 1 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', retrials: 1 });
+  assert.deepEqual(mergeWriterSettings({ mergeWriter: { deployKeyFile: '~/keys/deploy', retrials: 1, trialTimeoutMinutes: 45 } }, 'owner-project', '/home/loop'), { deployKeyFile: '/home/loop/keys/deploy', retrials: 1, trialTimeoutMinutes: 45 });
   assert.throws(() => mergeWriterSettingsSchema.parse({ retrials: 11 }));
+  assert.throws(() => mergeWriterSettingsSchema.parse({ trialTimeoutMinutes: 121 }), 'a trial runs at most two hours');
   assert.throws(() => mergeWriterSettingsSchema.parse({ deployKey: '/k' }), /unrecognized/i);
   assert.equal(masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: '/k', retrials: 2 } } }).run.mergeWriter?.retrials, 2, 'run.mergeWriter is a master.json setting');
 });
@@ -305,7 +306,7 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   const work = [submitted(2, 5), submitted(1, 30)], now = () => start;
   const { metrics } = await runCycle(config, emptyDaemonState(config), effectsFor({ work: () => [], now, mergeWriter: null }), now);
   const steps = (metrics.timings?.steps ?? []).map(step => step.step);
-  assert.ok(steps.indexOf('merge writer') > steps.indexOf('merges') && steps.indexOf('merge writer') < steps.indexOf('shadow gate'), `the step runs right after the merge step: ${steps.join(', ')}`);
+  assert.ok(steps.indexOf('merge writer') > steps.indexOf('merges') && steps.indexOf('merge writer') < steps.indexOf('deployment verification'), `the step runs right after the merge step: ${steps.join(', ')}`);
   const bare = emptyDaemonState(config);
   await runCycle(config, bare, effectsFor({ work: () => work, now, mergeWriter: null }), now);
   assert.deepEqual(bare.mergeWriter, emptyMergeWriterState());
@@ -409,7 +410,7 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   assert.equal(summary.mergeWriter.inFlight?.key, 'GY-1');
   assert.deepEqual(summary.mergeWriter.reworks.map(entry => [entry.key, entry.attempts, entry.lastError]), [['GY-3', 2, 'route down']], 'the reworks still owed are shown with their attempts');
   assert.deepEqual(mergeWriterSummary(undefined), { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] });
-  assert.match(readFileSync(`${root}src/cli/master/operations.ts`, 'utf8'), /mergeWriter: mergeWriterSummary\(state\?\.mergeWriter\)/, 'master status prints the section beside shadowGate');
+  assert.match(readFileSync(`${root}src/cli/master/operations.ts`, 'utf8'), /mergeWriter: mergeWriterSummary\(state\?\.mergeWriter\)/, 'master status prints the section');
   assert.throws(() => mergeWriterStateSchema.parse({ queue: Array.from({ length: 51 }, () => state.mergeWriter.queue[0]) }), 'the queue keeps at most 50');
   assert.deepEqual(emptyDaemonState(config).mergeWriter, { lastMergeAt: null, queue: [], inFlight: null, refusals: [], reworks: [] });
   // The loop's effects: the reads over the coordinator checkout, each step posted as the coordinator under its own key.

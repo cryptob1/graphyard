@@ -6,7 +6,7 @@ import { reportFormats } from '../src/report-adapters.js';
 import { buildProposal } from '../src/onboarding.js';
 
 const example = JSON.parse(await readFile('examples/setup-proposal.json', 'utf8'));
-const connected = { url: 'https://graphyard.example.test', reachable: true, role: 'admin', github: true, githubPermissions: { pull_requests: 'write', checks: 'write', contents: 'write', issues: 'write' } };
+const connected = { url: 'https://graphyard.example.test', reachable: true, role: 'admin' };
 const applied = { proposal: '.graphyard/setup-proposal.json', appliedAt: '2026-09-18T10:00:00.000Z', githubApp: { appId: 1, slug: 'graphyard-orders' }, drift: [], unreadable: [] };
 const runnerPath = { environments: 1, runners: 1, collectors: 1, builders: 1, bundles: 1 };
 
@@ -24,30 +24,14 @@ test('a fully configured through-merge repository is ready, and every missing it
   assert.equal(byId.repository.status, 'missing'); assert.match(byId.repository.recovery!, /git remote add origin/);
   assert.equal(byId.server.status, 'missing'); assert.match(byId.server.recovery!, /GRAPHYARD_URL and GRAPHYARD_TOKEN/); assert.match(byId.server.detail, /fetch failed/);
   assert.equal(byId['setup-proposal'].status, 'missing'); assert.match(byId['setup-proposal'].recovery!, /init --scan/);
-  assert.equal(byId['github-app'].status, 'missing'); assert.match(byId['github-app'].recovery!, /github-setup/);
-  assert.equal(byId['github-permissions'].status, 'unknown');
+  assert.equal(byId['github-app'], undefined, 'no GitHub App item: the deploy key is the install\'s only remote credential (GY-2010)');
   assert.equal(unreachable.next, byId.repository.recovery);
 });
 
-test('missing credentials and permissions are reported with direct recovery', () => {
+test('a missing credential role is reported with direct recovery', () => {
   const worker = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, role: 'worker' }, setup: applied, proposal: example });
   const role = worker.items.find(i => i.id === 'credential-role')!;
   assert.equal(role.status, 'missing'); assert.match(role.recovery!, /operator \(admin\) credential/);
-  const limited = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, githubPermissions: { pull_requests: 'write', checks: 'read', issues: 'read' } }, setup: applied, proposal: example });
-  const permissions = limited.items.find(i => i.id === 'github-permissions')!;
-  assert.equal(permissions.status, 'missing'); assert.match(permissions.detail, /checks, contents/); assert.match(permissions.recovery!, /Grant checks, contents to the App/);
-  // A verified App-permission preflight outranks the raw scope map and names the migration.
-  const preflight = { verifiedAt: '2030-01-01T00:00:00Z', missing: [{ permission: 'contents', required: 'write', granted: 'read' }], attention: ['contents: write is required for the merge queue'] };
-  const migrate = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, appPermissions: preflight }, setup: applied, proposal: example });
-  const owed = migrate.items.find(i => i.id === 'github-permissions')!;
-  assert.equal(owed.status, 'missing'); assert.match(owed.detail, /contents needs write \(granted read\)/); assert.match(owed.recovery!, /github-setup --update-permissions/); assert.equal(migrate.next, owed.recovery);
-  const verified = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, githubPermissions: {}, appPermissions: { ...preflight, missing: [], attention: [] } }, setup: applied, proposal: example });
-  assert.equal(verified.items.find(i => i.id === 'github-permissions')!.status, 'ready');
-  const unverified = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, appPermissions: { ...preflight, verifiedAt: null } }, setup: applied, proposal: example });
-  assert.equal(unverified.items.find(i => i.id === 'github-permissions')!.status, 'ready');
-  const registered = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: { ...connected, github: false }, setup: applied, proposal: example });
-  const app = registered.items.find(i => i.id === 'github-app')!;
-  assert.equal(app.status, 'missing'); assert.match(app.detail, /registered locally but the server does not report it/); assert.match(app.recovery!, /GITHUB_APP_ID, GITHUB_INSTALLATION_ID/);
   const drifted = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: connected, setup: { ...applied, drift: ['stack changed'] }, proposal: example });
   assert.match(drifted.items.find(i => i.id === 'setup-proposal')!.recovery!, /Rerun `graphyard init --scan`/);
   const unreadable = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: connected, setup: { ...applied, unreadable: ['.graphyard/setup-proposal.json invalid'] }, proposal: example });
