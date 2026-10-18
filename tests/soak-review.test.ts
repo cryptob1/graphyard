@@ -1,15 +1,23 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { type Work } from '../src/model.js';
-import { automaticReviewerConcurrency, loadMasterConfig, profileConcurrency } from '../src/master.js';
-import { checkInvariants, emptyInvariantRecord, invariantDefaults } from '../src/model/invariants.js';
-import { type ReviewRecord, heldNameAttention, readReviewLedger, settledCloseAttempts } from '../src/reviewer.js';
-import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
+import { type HerdrAgent, automaticReviewerConcurrency, decisionInput, loadMasterConfig, profileConcurrency } from '../src/master.js';
+import { checkInvariants, emptyInvariantRecord, invariantDefaults, systemInvariants } from '../src/model/invariants.js';
+import { type ReviewRecord, heldNameAttention, launchReview, readReviewLedger, settledCloseAttempts } from '../src/reviewer.js';
+import { type DispatchEffects, emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { daemonEffects } from '../src/daemon/effects-production.js';
+import { cappedEscalationKey, cappedFilingKey, cappedRefusalRequest, cappedRereviewKey, maxCappedFilingAttempts } from '../src/daemon/cycle-review-cap.js';
+import { cappedReworkBinding } from '../src/daemon/decisions.js';
+import { blockingFindings } from '../src/review-cap.js';
+import { readReviewBinding } from '../src/review-post.js';
+import { launchDirectory } from '../src/master/launch.js';
 import { fleet, requested } from './helpers/review-fleet.js';
 import { clock, hour, minute } from './helpers/soak-world.js';
-import { api, file, principals, soakControlPlanes, store } from './helpers/soak-plane.js';
+import { api, file, principals, soakControlPlanes, store, url } from './helpers/soak-plane.js';
 import { simulateDay } from './helpers/soak-simulation.js';
 
 /**
@@ -440,4 +448,151 @@ test('unit:soak-invariants-hold — a capped rework asked again on a head whose 
     assert.ok(refused.every(decision => raised!.detail.includes(decision.id)), `${work.key}: the escalation names both refusals: ${raised!.detail}`);
     assert.ok(raised!.attempts <= 2, `${work.key}: re-recorded only when its refusals changed, not every cycle (${raised!.attempts})`);
   }
+});
+
+test('unit:soak-invariants-hold — refused capped reworks of control-plane heads under the real loop across simulated days: each change request is withdrawn once in the control plane\'s own review record with no GitHub request, stranded withdrawals that failed against GitHub earlier are picked up on the next cycle, each head is re-reviewed on the same head by a launched reviewer listing the findings as FOLLOW-UP, a head whose re-reviews keep requesting changes is asked again, withdrawn once more and escalated, never withdrawn a third time, withdrawals, wakes and sessions stay bounded, settled sessions are cleaned up, and every invariant holds', { timeout: 300_000 }, async () => {
+  // GY-2078: under the control-plane merger a head has no pull request, so withdrawing through GitHub's
+  // review dismissal failed five times and stranded the item. Six control-plane items enter over two days,
+  // each past its review-round cap with the reviewer's BLOCKING: change request on its head and an approver's
+  // refusal of the capped rework the loop asked for; two carry the exhausted GitHub withdrawal the earlier release left
+  // once that refusal landed (GY-2010, GY-1998), and the sixth's re-reviews keep requesting changes. Every cycle is the real loop (runCycle) and
+  // the real dispatcher tick (runDispatchTick) over the soak's control plane, whose routes withdraw, register
+  // the reviewer launch and take its verdict; every GitHub read or write throws.
+  const host = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
+  try {
+    const config = await loadMasterConfig(host.root);
+    const reviewerBot = `${config.reviewer!.slug}[bot]`, cycleMs = 10 * minute, cycles = (2 * 24 * hour) / cycleMs, verdictAfterMs = 20 * minute;
+    const total = 6, stranded = new Set([2, 5]), again = 6;
+    const dayStart = clock.now(), enterAt = (n: number) => dayStart + [1, 1, 12, 14, 26, 30][n - 1]! * hour;
+    const head = (n: number) => `c${n}`.padEnd(40, 'd'), base = 'b'.repeat(40), reviewId = (n: number) => 9000 + n;
+    const finding = (n: number) => `src/server/routes/work.ts:${10 + n} — GY-${700 + n}'s handler size exceeds its budget`;
+    const ghCalls: string[] = [], wakes: string[] = [], decided: string[] = [], approvals: string[] = [];
+    const githubDouble = new Proxy({}, { get: (_, name) => { ghCalls.push(String(name)); throw new Error(`the loop called GitHub (${String(name)})`); } });
+    const syncClock = () => store.pool.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
+    const items = new Map<number, Work>();
+    const enter = async (n: number) => {
+      const now = new Date(clock.now()).toISOString(), sha = head(n), body = `AC-1 is judged on ${sha.slice(0, 12)}.\nBLOCKING: ${finding(n)}`;
+      const candidate = { sha, baseSha: base, pr: 700 + n, branch: `graphyard/gy-${700 + n}-1`, author: 'implementer' };
+      const work = { id: randomUUID(), key: `GY-${700 + n}`, title: `Item ${n}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
+        policy: { checks: ['test'], review: true }, plannedFiles: ['src/server/routes/work.ts'], stage: 'review', revision: 3, policyRevision: 1, createdAt: now, updatedAt: now, stageEnteredAt: now, ready: true, epoch: 1, lease: null,
+        workspaces: [{ host: 'h', path: `/w/${n}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false,
+        scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['implementer'], systemDriven: true,
+        observation: { source: 'control-plane', at: now, candidate, checks: [], merged: false, mergeSha: null, mergeable: true, protected: false, baseTip: base, baseTipContained: true, files: ['src/server/routes/work.ts'],
+          scopeFiles: [{ path: 'src/server/routes/work.ts', status: 'modified', sha: 'e'.repeat(40), additions: 1, deletions: 0, binary: false }],
+          reviews: [{ reviewer: reviewerBot, sha, state: 'CHANGES_REQUESTED', id: reviewId(n), submittedAt: now, body, blocking: blockingFindings(body), source: 'control-plane' }], reviewIds: [reviewId(n)] },
+        pipeline: { attempts: [], submittedAt: now, reworkRounds: 4, interventions: { blocked: 0, requirements: 0 } } } as unknown as Work;
+      await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
+      items.set(n, work);
+    };
+    const snapshot = async () => ({ work: (await store.list()).filter(item => [...items.values()].some(entry => entry.id === item.id)), now: new Date(clock.now()).toISOString() });
+    // The withdraw effect is the production wiring: a control-plane verdict goes to the review-withdraw route, nothing to gh or GitHub.
+    const production = daemonEffects(host.root, config, {
+      snapshot, mutate: (path: string, data: unknown, key?: string) => api(principals.coordinator, 'POST', path, data, key),
+      run: (async (command: string, args: string[]) => { ghCalls.push([command, ...args].join(' ')); throw new Error('no child process in this soak'); }) as never,
+      fetcher: (async (input: unknown) => { ghCalls.push(String(input)); throw new Error('no network in this soak'); }) as never,
+    } as never);
+    const state = emptyDaemonState(config);
+    const effects = { agents: () => [...host.agents], herdr: () => ({ agents: [...host.agents], available: true }), credentials: async () => ({}), snapshot,
+      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock.now()).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, github: githubDouble, merge: githubDouble, shadow: null,
+      decisions: async (work: Work) => api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
+      // The loop requests each capped round through the plane's decide route, and the independent approver it launches refuses it as non-blocking.
+      decide: (work: Work, action: string, reason: string, input: Record<string, unknown> = {}) => { decided.push(`${work.key} ${action} ${String(input.binding)}`); return api(principals.operatorAgent, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }); },
+      approver: async (work: Work, decision: string) => {
+        approvals.push(`${work.key} ${decision}`);
+        await api(principals.approver, 'POST', `work/${work.id}/approve`, { action: 'refuse', decision, reason: `Refused: ${work.key}'s finding is real but not blocking; file it as a follow-up` });
+        // What the release before GY-2078 left on the stranded items once their refusal landed: five withdrawals GitHub refused for want of a pull request, and their escalation.
+        const n = Number(work.key.slice(3)) - 700, sha = work.candidate!.sha, now = new Date(clock.now()).toISOString();
+        if (stranded.has(n) && !state.actions[cappedFilingKey(work, { sha, reviewId: reviewId(n) })]) {
+          const spent = `${work.key} is in review round 5, past its cap of 3, and ${reviewerBot} requested changes naming a blocking finding`;
+          state.actions[cappedEscalationKey(work, sha)] = { kind: 'escalation', work: work.key, principal: null, epoch: null, at: now, state: 'done', detail: `${spent}; withdrawing it failed 5 times (GitHub refused to dismiss review ${reviewId(n)} (404))`, attempts: 1, cycle: state.cycle };
+          state.actions[cappedFilingKey(work, { sha, reviewId: reviewId(n) })] = { kind: 'review', work: work.key, principal: null, epoch: null, at: now, state: 'failed', detail: `${spent}, but withdrawing it failed: GitHub refused to dismiss review ${reviewId(n)} (404)`, attempts: maxCappedFilingAttempts, cycle: state.cycle };
+        }
+        return { agentName: `approver-${decision.slice(0, 8)}`, pane: null };
+      },
+      withdrawReview: production.withdrawReview, wakeObservation: async (work: Work) => { wakes.push(work.key); } } as unknown as DaemonEffects;
+    // The dispatcher's launch is the real reviewer launch over the fleet's Herdr, registered with the plane's review-launch route,
+    // and reading the refusal its prompt carries from the plane's decision history as readCappedRefusal does.
+    const prompts = new Map<string, string>();
+    const dispatch = { ...host.effects(() => [], () => config), snapshot: async () => ({ work: (await snapshot()).work.filter(item => item.stage !== 'done'), now: new Date(clock.now()).toISOString() }),
+      launchReview: (work: Work, request: { id: string }, profile: { name: string }, herdr: HerdrAgent[], observedAt: string) => launchReview(host.root, work, profile.name, herdr, observedAt, { run: host.run, mint: host.mint, requestId: request.id,
+        registerLaunch: (item, launch) => api(principals.coordinator, 'POST', `work/${item.id}/review-launch`, launch, `review-launch:${launch.tokenHash}`),
+        cappedRefusal: async (item, sha) => {
+          const history = (await api(principals.operatorAgent, 'GET', `work/${encodeURIComponent(item.id)}/decisions`)).decisions;
+          const request = cappedRefusalRequest(item, sha, config, history, (await snapshot()).work);
+          return request ? { request } : null;
+        } }) } as DispatchEffects;
+    const cursor = emptyDispatchCursor(config), answered = new Set<string>(), refusedLaunches: string[] = [], invariants = new Set<string>();
+    let peakSessions = 0;
+    for (let cycle = 0; cycle < cycles; cycle++) {
+      for (let n = 1; n <= total; n++) if (!items.has(n) && clock.now() >= enterAt(n)) await enter(n);
+      // The plane's observation job reads each open candidate every few seconds (GY-1675): the observation is as fresh as the cycle.
+      await store.pool.query("UPDATE work_items SET document=jsonb_set(document, '{observation,at}', to_jsonb($2::text)) WHERE id = ANY($1)", [[...items.values()].map(work => work.id), new Date(clock.now()).toISOString()]);
+      await runCycle(config, state, effects, () => clock.now());
+      for (const check of state.invariants.report) { invariants.add(check.invariant); assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`); }
+      const tick = await runDispatchTick(config, cursor, dispatch, () => clock.now());
+      refusedLaunches.push(...tick.refused.map(entry => `${entry.work}: ${entry.reason}`));
+      // Each launched reviewer posts its one verdict as its launch token: an approval listing the refused finding as FOLLOW-UP, except the sixth item's change request.
+      for (const record of (await readReviewLedger(host.root)).reviews) {
+        if (record.state !== 'pending' || !record.pane) continue;
+        if (!prompts.has(record.id)) prompts.set(record.id, await readFile(join(launchDirectory(record.checkout!), `${record.agentName}.request`), 'utf8'));
+        if (answered.has(record.id) || clock.now() - Date.parse(record.requestedAt) < verdictAfterMs) continue;
+        const { verdictToken } = await readReviewBinding(join(dirname(config.reviewer!.credentialFile), 'sessions', record.id));
+        const n = Number(record.key.slice(3)) - 700, changes = n === again;
+        const body = changes ? `AC-1 is judged on ${record.sha.slice(0, 12)}.\nBLOCKING: ${finding(n)}` : `AC-1: MET.\nFOLLOW-UP: ${finding(n)}`;
+        const response = await fetch(`${url}/api/work/${encodeURIComponent(items.get(n)!.id)}/review-verdict`, { method: 'POST', headers: { Authorization: `Bearer ${verdictToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+          body: JSON.stringify({ event: changes ? 'REQUEST_CHANGES' : 'APPROVE', body, sha: record.sha, token: verdictToken }) });
+        assert.equal(response.status, 200, `${record.key}: the verdict is taken: ${await response.text()}`);
+        answered.add(record.id);
+      }
+      peakSessions = Math.max(peakSessions, host.agents.length);
+      clock.advance(cycleMs); await syncClock();
+    }
+    assert.equal(items.size, total, 'every item entered');
+    assert.deepEqual(ghCalls, [], 'nothing read or wrote GitHub, nor ran gh, all days');
+    assert.deepEqual(refusedLaunches, [], 'no reviewer launch was refused');
+    const final = (await snapshot()).work, ledger = (await readReviewLedger(host.root)).reviews;
+    for (const [n, work] of items) {
+      const item = final.find(entry => entry.id === work.id)!, sha = head(n), repeated = n === again;
+      // The loop asked for the capped round itself, once per change request it judged, and one approver refused each.
+      const asked = decided.filter(entry => entry.startsWith(`${work.key} `));
+      assert.deepEqual(asked, Array(repeated ? 3 : 1).fill(`${work.key} rework ${cappedReworkBinding(sha, reviewerBot)}`), `${work.key}: the capped rounds the loop requested`);
+      assert.equal(approvals.filter(entry => entry.startsWith(`${work.key} `)).length, asked.length, `${work.key}: one approver per capped round, none launched again`);
+      // Withdrawn in the control plane's own record, once per refusal the step may withdraw on, never a third time.
+      const withdrawn = (await store.pool.query('SELECT payload FROM events WHERE work_id=$1 AND kind=$2 ORDER BY seq', [work.id, 'review.withdrawn'])).rows.map(row => row.payload);
+      assert.equal(withdrawn.length, repeated ? 2 : 1, `${work.key}: withdrawn ${repeated ? 'twice' : 'once'} across every cycle: ${JSON.stringify(withdrawn)}`);
+      assert.equal(withdrawn[0].reviewId, reviewId(n), `${work.key}: the capped change request was the first withdrawn`);
+      for (const entry of withdrawn) {
+        assert.equal(entry.sha, sha, `${work.key}: only the capped head's change requests were withdrawn`);
+        assert.match(entry.reason, /list(?:ing)? these findings as FOLLOW-UP threads/, `${work.key}: the withdrawal carries the re-review request`);
+        assert.equal(item.observation!.reviews.find(review => review.id === entry.reviewId)!.state, 'DISMISSED');
+      }
+      assert.equal(wakes.filter(key => key === work.key).length, withdrawn.length, `${work.key}: its observation was woken once per withdrawal`);
+      const filing = state.actions[cappedFilingKey(work, { sha, reviewId: reviewId(n) })]!;
+      assert.equal(filing.state, 'done', `${work.key}: ${filing.detail}`);
+      if (stranded.has(n)) assert.equal(filing.attempts, maxCappedFilingAttempts + 1, `${work.key}: the stranded withdrawal was retried once, on the first cycle that saw it, with no hand action`);
+      assert.equal(state.actions[cappedRereviewKey(work, sha)]?.state, 'done', `${work.key}: one re-review requested for its head`);
+      // A reviewer launched on the same head after each withdrawal, its request carrying the refusal and the findings as FOLLOW-UP; each settled and left no pane.
+      const sessions = ledger.filter(record => record.key === work.key);
+      assert.deepEqual(sessions.map(record => [record.sha, record.state]), Array(withdrawn.length).fill([sha, 'completed']), `${work.key}: one re-review session per withdrawal on the same head, each completed`);
+      for (const session of sessions) {
+        const prompt = prompts.get(session.id)!;
+        assert.match(prompt, /An independent approver refused the capped rework this head's last change request asked for/);
+        assert.ok(prompt.includes(`Re-review head ${sha} and `) && /list(?:ing)? these findings as FOLLOW-UP threads/.test(prompt), `${work.key}: the re-review lists the findings as FOLLOW-UP: ${prompt.slice(0, 400)}`);
+        assert.ok(!host.agents.some(agent => agent.pane_id === session.pane), `${work.key}: the settled reviewer's pane was closed`);
+      }
+      const review = item.gates.find(gate => gate.name === 'review')!;
+      if (repeated) {
+        assert.ok(review.reasons.includes('Outstanding change requests must be resolved through a new review'), `${work.key}: the change request after its second withdrawal stands`);
+        const raised = state.actions[cappedEscalationKey(work, sha)]!;
+        assert.match(raised.detail, /not withdrawn a third time/);
+        assert.ok(raised.attempts <= 2, `${work.key}: re-recorded only when its refusals changed, not every cycle (${raised.attempts})`);
+      } else assert.ok(!review.reasons.some(reason => /Outstanding change requests|Independent approval/.test(reason)), `${work.key}: the re-review's approval passes review: ${review.reasons.join('; ')}`);
+    }
+    assert.equal(ledger.length, total + 1, 'one reviewer session per withdrawal, never relaunched');
+    assert.ok(peakSessions <= total, `sessions stayed bounded (peak ${peakSessions})`);
+    assert.deepEqual(host.agents, [], 'no reviewer session is left running');
+    for (const invariant of systemInvariants) assert.ok(invariants.has(invariant), `${invariant} was judged over the days`);
+  } finally { await host.cleanup(); }
 });
