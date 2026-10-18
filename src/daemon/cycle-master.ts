@@ -1,16 +1,16 @@
-// Concern: the master-session step (GY-898) — launch, adopt, supervise, rotate and wake the loop's own master session.
+// Concern: the master-session step (GY-898) — launch, adopt, supervise, rotate and wake the loop's own master session, and the loop-step stall's master wake (GY-1854, moved here from step-stalls.ts by GY-1980 as this wake's only consumer).
 import { detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer } from '../consent-prompt.js';
 import { detectExhaustion, detectRetryingExhaustion } from '../model/capacity.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEffects } from './effects.js';
-import { actionableSubjects } from './metrics.js';
+import { actionableSubjects, type ActionableSubject } from './metrics.js';
 import { detailChanged } from './decisions.js';
 import { message } from './state.js';
-import { emptyMasterSession, type DaemonAction, type DaemonState, type MasterSessionState } from './state.js';
+import { emptyMasterSession, type DaemonAction, type DaemonState, type MasterSessionState, type StepStall } from './state.js';
 import type { MasterConfig } from '../master.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
-import { stallWakeSubjects } from './step-stalls.js';
+import { stallCycleBound, stallSubjectKey } from './step-stalls.js';
 import { PromptNotAcceptedError } from '../master/launch.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { HerdrAgent } from '../master/herdr.js';
@@ -33,6 +33,37 @@ export const masterDeafRotationBound = 3;
 export const masterWakeKey = 'master:wake';
 /** How long past its budget a rotation waits for a guarded merge in flight: never longer than this. */
 export const masterMergeDeferralMs = 30 * 60_000;
+
+/**
+ * Whether a stall needs the master session: no remedy binds to it, or its one bound remedy was
+ * refused or did not verify, or a verified remedy has stood through a second full run of failures —
+ * otherwise the loop would back the call off indefinitely and nobody would be told.
+ */
+export function stallNeedsMaster(stall: StepStall): boolean {
+  if (!stall.stalledAt) return false;
+  if (!stall.remedy) return true;
+  return stall.remedy.outcome === 'refused' || !stall.remedy.verified || stall.count >= 2 * stallCycleBound;
+}
+
+/**
+ * The task an unbound stall wakes the master session with: the signature, the step, the stall's own
+ * recording instant, and the remedy attempt when one was made (GY-1854 AC-1). Everything in it is
+ * stable for as long as one run stands — the live count and last error stay on the cursor, where
+ * `master status` reads them — so the digest machinery wakes the session once per run, never once
+ * per cycle and never again per backed-off attempt of a standing stall.
+ */
+export function stallWakeTask(stall: StepStall, cliPath: string): string {
+  const remedy = !stall.remedy ? ''
+    : stall.remedy.outcome === 'started' ? ` Its ${stall.remedy.kind} remedy was started once at ${stall.remedy.at} and never reported: ${stall.remedy.detail}`
+      : ` Its ${stall.remedy.kind} remedy was applied once at ${stall.remedy.at} and ${stall.remedy.outcome}${stall.remedy.verified ? ', verified' : ', unverified'}: ${stall.remedy.detail}`;
+  return `Loop-step stall: the ${stall.step} call failed with one signature on ${stallCycleBound} consecutive cycles and stands stalled since ${stall.stalledAt}.${remedy} Step: ${stall.step}. Signature: ${stall.signature}. The call is attempted at most once per five minutes while this stands. Run node ${cliPath} master status (daemon.stepStalls, subject ${stallSubjectKey(stall.signature)}) for the failing attempts so far, judge the cause, and clear it or file what does.`;
+}
+
+/** The stalls that need the master session, as master-wake subjects the digest machinery wakes once per changed task. */
+export function stallWakeSubjects(state: DaemonState, cliPath: string): ActionableSubject[] {
+  return Object.values(state.stepStalls).filter(stallNeedsMaster)
+    .map(stall => ({ key: stallSubjectKey(stall.signature), kind: 'wake' as const, work: null, detail: stallWakeTask(stall, cliPath) }));
+}
 
 /**
  * The master session (GY-898), one step of the cycle between close and dispatch. At most one runs:
