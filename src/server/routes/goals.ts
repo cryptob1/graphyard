@@ -178,8 +178,7 @@ export const goalRoutes = defineRoutes('goals', [
     },
   },
   {
-    // The loop lands an approved acceptance pull request: merged at its approved head, it is recorded merged; closed, moved, conflicting or merged unapproved, it is closed (when open) and recorded closed, so the goal is drafted again.
-    // GY-1535: a merge-writer change (no pull request) is landed by the loop's merge writer, which names the merge commit it pushed; it is recorded merged only once the base holds that merge of the approved head.
+    // GY-1535: an approved acceptance change is landed by the loop's merge writer, which names the merge commit it pushed; it is recorded merged only once the base holds that merge of the approved head.
     method: 'POST', path: /^\/api\/goals\/([^/]+)\/land$/,
     async handle(context, [ref]) {
       intent(context);
