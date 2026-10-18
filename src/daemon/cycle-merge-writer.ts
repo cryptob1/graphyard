@@ -12,7 +12,8 @@ import { mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-
 import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../merge-writer/trial.js';
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import { loadProjectDelivery } from '../project-applications.js';
-import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeOne, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergeOutcome, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { mergeBatch, type BatchResult } from '../merge-writer/batch.js';
+import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { LoopFiledItem } from './effects.js';
 import type { Cycle } from './cycle.js';
@@ -69,6 +70,8 @@ export interface MergeWriterReads extends MergePorts {
    * every due merge starts.
    */
   admit?(): boolean;
+  /** GY-2088: how many queued heads one merge takes together (`run.mergeWriter.batch`); absent, one at a time. */
+  batch?: number;
   /** GY-1902: the item previews' ports (merge-writer/preview.ts `itemPreviewStep`); absent, no item is previewed. */
   itemPreviews?: ItemPreviewPorts;
 }
@@ -97,7 +100,7 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     return sha;
   };
   return {
-    baseBranch: base, retrials: settings.retrials, now: options.now ?? Date.now, merger: options.merger, record: options.record, ...(options.hold ? { hold: options.hold } : {}),
+    baseBranch: base, retrials: settings.retrials, batch: settings.batch, now: options.now ?? Date.now, merger: options.merger, record: options.record, ...(options.hold ? { hold: options.hold } : {}),
     fetch: async () => { await git('fetch', '--no-tags', 'origin', base); return tip(); },
     merge: async (head, baseTip) => {
       const merged = await trialMerge(gitAs, { head, baseTip });
@@ -293,7 +296,7 @@ function takeFailures(advisory: AdvisoryState, merge: { key: string; mergeSha: s
   return owed.slice(room);
 }
 
-interface Flight { key: string; id: string; head: string; startedAt: string; settled: { outcome: MergeOutcome; work: Work } | { error: unknown } | null }
+interface Flight { key: string; id: string; head: string; startedAt: string; settled: { results: BatchResult[] } | { error: unknown } | null }
 const flights = new WeakMap<DaemonState, Flight>();
 /** Resolves once the merge in flight for `state` has settled; for the step's tests. */
 /** The item previews this loop process serves, by item key (GY-1902). */
@@ -429,7 +432,7 @@ export async function requestPendingReworks(cycle: Pick<Cycle, 'state' | 'effect
  * (delivered, refused, re-queued or failed), and every rework a trial failure grounds is requested
  * until the server confirms it (AC-3); then, with nothing in flight, every intent a crash left open is reconciled
  * against the base (AC-5) before anything new; then the queue is read from the snapshot and its
- * oldest head is merged beside the cycle, one at a time (AC-1). A timeout measures the host, not
+ * oldest heads, up to `run.mergeWriter.batch`, are merged together beside the cycle, one batch at a time (AC-1, GY-2088). A timeout measures the host, not
  * the merge: the head stays queued and is tried again.
  */
 export async function mergeWriterStep(cycle: Cycle) {
@@ -449,28 +452,33 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (flight?.settled) {
     flights.delete(state);
     writer.inFlight = null; changed = true;
-    const key = mergeWriterActionKey(flight.key, flight.head), attempts = (state.actions[key]?.attempts ?? 0) + 1;
-    const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, key, { kind: 'merge', work: flight.key, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at: at() }, actionState === 'done' ? undefined : null));
-    if ('error' in flight.settled) {
-      const error = flight.settled.error;
-      action('failed', error instanceof TrialTimeoutError ? `Merge of ${flight.key} head ${flight.head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head stays queued and is tried again`
-        : keyReusedRefusal(error) ? `Merge of ${flight.key} head ${flight.head} was refused a record key reused with different input; that key is never sent again: the item's merge ledger is adopted and the head is tried again under a new attempt id`
-        : `Merge of ${flight.key} head ${flight.head} failed before it was recorded, so the head stays queued and is tried again: ${error instanceof Error ? error.message : String(error)}`);
-    } else {
-      const { outcome, work } = flight.settled;
+    // A batch (GY-2088) settles each of its heads as a merge of its own.
+    const results: BatchResult[] = 'error' in flight.settled ? [{ work: { key: flight.key, id: flight.id } as Work, error: flight.settled.error }] : flight.settled.results;
+    for (const result of results) {
+      const { key: itemKey, id } = result.work, head = result.work.candidate?.sha.toLowerCase() ?? flight.head;
+      const key = mergeWriterActionKey(itemKey, head), attempts = (state.actions[key]?.attempts ?? 0) + 1;
+      const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, key, { kind: 'merge', work: itemKey, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at: at() }, actionState === 'done' ? undefined : null));
+      if ('error' in result) {
+        const error = result.error;
+        action('failed', error instanceof TrialTimeoutError ? `Merge of ${itemKey} head ${head} timed out in its trial (${error.message}); a timeout measures the host, not the merge, so the head stays queued and is tried again`
+          : keyReusedRefusal(error) ? `Merge of ${itemKey} head ${head} was refused a record key reused with different input; that key is never sent again: the item's merge ledger is adopted and the head is tried again under a new attempt id`
+          : `Merge of ${itemKey} head ${head} failed before it was recorded, so the head stays queued and is tried again: ${error instanceof Error ? error.message : String(error)}`);
+        continue;
+      }
+      const { outcome } = result;
       if (outcome.outcome === 'merged' || outcome.outcome === 'reconciled') {
         writer.lastMergeAt = at();
-        // The advisory budget tests run once on what this merge delivered (GY-1528).
-        delivered = { key: flight.key, mergeSha: outcome.mergeSha };
-        action('done', outcome.outcome === 'merged' ? `Merged ${flight.key} head ${flight.head} as ${outcome.mergeSha} onto ${outcome.baseTip} with ${outcome.pushes} push(es); ${reads.baseBranch} observed at ${outcome.observedTip} and the item delivered`
-          : `Reconciled ${flight.key} head ${flight.head}: ${reads.baseBranch} already held ${outcome.mergeSha} (observed at ${outcome.observedTip}), so it was delivered without a second push`);
+        // The advisory budget tests run once on what this merge delivered (GY-1528); a batch's other merges are owed from the ledger.
+        delivered = { key: itemKey, mergeSha: outcome.mergeSha };
+        action('done', outcome.outcome === 'merged' ? `Merged ${itemKey} head ${head} as ${outcome.mergeSha} onto ${outcome.baseTip} with ${outcome.pushes} push(es); ${reads.baseBranch} observed at ${outcome.observedTip} and the item delivered`
+          : `Reconciled ${itemKey} head ${head}: ${reads.baseBranch} already held ${outcome.mergeSha} (observed at ${outcome.observedTip}), so it was delivered without a second push`);
       } else {
-        writer.refusals = [...writer.refusals, { key: flight.key, head: flight.head, reason: outcome.reason.slice(0, 2000), at: at() }].slice(-mergeWriterKeptRefusals);
-        action('failed', outcome.outcome === 'requeued' ? `Merge of ${flight.key} head ${flight.head} refused: ${outcome.reason} (${outcome.pushes} leased pushes rejected); the head stays queued`
-          : `Merge of ${flight.key} head ${flight.head} refused: ${outcome.reason}; the refusal is recorded on the ledger and the rework it grounds is requested`);
+        writer.refusals = [...writer.refusals, { key: itemKey, head, reason: outcome.reason.slice(0, 2000), at: at() }].slice(-mergeWriterKeptRefusals);
+        action('failed', outcome.outcome === 'requeued' ? `Merge of ${itemKey} head ${head} refused: ${outcome.reason} (${outcome.pushes} leased pushes rejected); the head stays queued`
+          : `Merge of ${itemKey} head ${head} refused: ${outcome.reason}; the refusal is recorded on the ledger and the rework it grounds is requested`);
         // The trial failed the head (AC-3): the rework is owed until the server confirms it, and asked for below.
-        if (outcome.outcome === 'refused' && !writer.reworks.some(entry => entry.key === flight.key && entry.head === flight.head)) {
-          writer.reworks = [...writer.reworks, { key: flight.key, id: flight.id, head: flight.head, reason: outcome.reason.slice(0, 2000), refusedAt: at(), attempts: 0, lastError: null }].slice(-mergeWriterKeptReworks);
+        if (outcome.outcome === 'refused' && !writer.reworks.some(entry => entry.key === itemKey && entry.head === head)) {
+          writer.reworks = [...writer.reworks, { key: itemKey, id, head, reason: outcome.reason.slice(0, 2000), refusedAt: at(), attempts: 0, lastError: null }].slice(-mergeWriterKeptReworks);
         }
       }
     }
@@ -506,6 +514,8 @@ export async function mergeWriterStep(cycle: Cycle) {
         // At the cap of unconfirmed reworks nothing new starts: the plane is not taking the writer's decisions.
         const next = writer.reworks.length >= mergeWriterKeptReworks ? null : queue.next;
         const due = next?.candidate && (reads.admit?.() ?? true) ? next : null;
+        // GY-2088: the oldest heads, up to the batch size, are merged together; the flight is named by the oldest.
+        const batch = queue.due.slice(0, Math.max(1, reads.batch ?? 1));
         if (due?.candidate) {
           const head = due.candidate.sha.toLowerCase();
           const entry: Flight = { key: due.key, id: due.id, head, startedAt: at(), settled: null };
@@ -514,7 +524,7 @@ export async function mergeWriterStep(cycle: Cycle) {
           writer.inFlight = { key: due.key, id: due.id, head, startedAt: entry.startedAt, attempt }; changed = true;
           try { await effects.persist(state); } catch (error) { writer.inFlight = null; throw error; }
           flights.set(state, entry);
-          void mergeOne({ ...reads, record: attemptRecorder(writer, reads.record, attempt, at) }, due).then(outcome => { entry.settled = { outcome, work: due }; }, error => { entry.settled = { error }; });
+          void mergeBatch({ ...reads, record: attemptRecorder(writer, reads.record, attempt, at) }, batch).then(results => { entry.settled = { results }; }, error => { entry.settled = { error }; });
         }
       }
     }

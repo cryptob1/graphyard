@@ -14,7 +14,7 @@ Only Graphyard writes to main.
 
 ## Merge writer
 
-Oldest first, one in flight: `merge.intent`; merge-commit trial (affected and proof tests; no tests without `scripts/ci-tests.mjs`, build without `package.json`; failed probes: runner failures; host-sized, slot-declared shards; one retry on timeout, cancel, host failure; `merge.trial`: `outcome`, `phase`, `reason`, `phases`, `attempts`); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved-tip rejection waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Record keys name persisted attempts: lost replies replay exactly (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger, then retry anew. `master status`: `mergeWriter.queue`.
+Oldest first, `run.mergeWriter.batch` (4) heads chained per trial and push, each delivered at its own commit; a conflicting head reworks; a failing batch merges singly. Steps: `merge.intent`; merge-commit trial (affected and proof tests; host-sized shards; one retry on no verdict; `merge.trial`: `outcome`, `phase`, `reason`, `phases`, `attempts`); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved-tip rejection waits; a failed trial reworks (`mergeWriter.reworks` until confirmed). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Lost record replies replay exactly (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 
@@ -37,4 +37,4 @@ The control plane is every install's only merge writer: nothing sets another, an
 
 ## Measures
 
-Weekly: defects reaching production (escapes), merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk, batched merge validation, a per-test flake ledger.
+Weekly: defects reaching production (escapes), merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk, a per-test flake ledger.

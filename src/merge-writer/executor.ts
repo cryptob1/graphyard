@@ -34,6 +34,8 @@ export interface QueuedMerge { key: string; id: string; head: string; submittedA
 export interface MergeQueue {
   /** The candidate the writer merges next, or null: nothing is due, or an open intent blocks the queue. */
   next: Work | null;
+  /** Every candidate due a merge, oldest first (`next` leading it), or none while an open intent blocks the queue: what a batch takes from (GY-2088). */
+  due: Work[];
   queue: QueuedMerge[];
   /** The item whose open intent (or unreconciled push) holds the queue until it is reconciled; null when none does. */
   blockedBy: string | null;
@@ -71,7 +73,7 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     return true;
   }).sort((a, b) => submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
   const queue = owed.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
-  return { next: blocking ? null : owed[0] ?? null, queue, blockedBy: blocking?.key ?? null };
+  return { next: blocking ? null : owed[0] ?? null, due: blocking ? [] : owed, queue, blockedBy: blocking?.key ?? null };
 }
 /** The oldest-submitted candidate due a merge, or null while nothing is due or an open intent blocks the queue (AC-1). */
 export const nextToMerge = (work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number) => mergeQueue(work, ledger, now).next;

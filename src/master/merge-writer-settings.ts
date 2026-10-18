@@ -33,16 +33,22 @@ export const shadowGateSettings = (run: { shadowGate?: ShadowGateSettings }) => 
 export const defaultMergeWriterRetrials = 3;
 /** The most re-trials an install may ask for: every one is a full build and test run on a fresh merge commit. */
 export const maxMergeWriterRetrials = 10;
+/** How many queued heads one merge-writer batch takes by default (GY-2088): one trial and one push for all of them. */
+export const defaultMergeBatch = 4;
+/** The widest batch an install may ask for: a failing batch re-trials each of its heads alone. */
+export const maxMergeBatch = 10;
 /** The install's deploy key by default: `<config home>/<install>/deploy-key` (`~/.config/graphyard`, or GRAPHYARD_CONFIG_HOME), the one credential the push child sees. */
 export const defaultDeployKeyFile = (installId: string, home?: string) => join(home === undefined ? configHome() : join(home, '.config', 'graphyard'), installId, 'deploy-key');
 
 /**
  * `run.mergeWriter` in .graphyard/master.json: the control-plane merge executor's deploy key and
- * its re-trial bound. Unset, the key is the install's default and the bound `defaultMergeWriterRetrials`.
+ * its re-trial bound and batch size. Unset, the key is the install's default, the bound `defaultMergeWriterRetrials` and the batch `defaultMergeBatch`.
  */
 export const mergeWriterSettingsSchema = z.object({
   deployKeyFile: z.string().trim().min(1).max(1000).optional(),
   retrials: z.number().int().min(0).max(maxMergeWriterRetrials).optional(),
+  /** GY-2088: how many queued heads one trial and one push take together; 1 merges one head at a time. */
+  batch: z.number().int().min(1).max(maxMergeBatch).optional(),
 }).strict();
 export type MergeWriterSettings = z.infer<typeof mergeWriterSettingsSchema>;
 
@@ -53,6 +59,7 @@ const expandHome = (path: string, home: string) => path === '~' ? home : path.st
 export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home?: string) => ({
   deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), home ?? homedir()),
   retrials: run.mergeWriter?.retrials ?? defaultMergeWriterRetrials,
+  batch: run.mergeWriter?.batch ?? defaultMergeBatch,
 });
 
 // ---- The loop-driven candidate cut (GY-1526) ------------------------------------------------------
