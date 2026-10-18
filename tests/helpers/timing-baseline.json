@@ -841,6 +841,7 @@
     "tests/soak-repeated-limit.test.ts": 11000,
     "tests/soak-review-launch.test.ts": 3970,
     "tests/soak-review.test.ts": 76000,
+    "tests/capped-withdrawal-control-plane.test.ts": 5000,
     "tests/soak-rework-brief.test.ts": 22063,
     "tests/soak-rework-ground.test.ts": 1213,
     "tests/soak-scope-race.test.ts": 4281,
@@ -981,7 +982,6 @@
     "tests/goal-candidate-promotion.test.ts": 5000,
     "tests/release-uat-after-read.test.ts": 400,
     "tests/control-plane-rework-workspace.test.ts": 1500,
-    "tests/merge-writer-trial-timeout-queue.test.ts": 1000,
-    "tests/capped-withdrawal-control-plane.test.ts": 5000
+    "tests/merge-writer-trial-timeout-queue.test.ts": 1000
   }
 }
