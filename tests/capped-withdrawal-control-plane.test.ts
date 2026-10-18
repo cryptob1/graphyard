@@ -134,7 +134,7 @@ function planeItem(key: string, overrides: Record<string, unknown> = {}): Work {
 test('unit:capped-withdrawal-without-github — an approver refusing a capped rework withdraws the control-plane change request in the control plane\'s own review record, with no GitHub request, and the re-review of the same head is launched with the findings listed as FOLLOW-UP', async () => {
   assert.equal(controlPlaneWithdrawal(capped('x'), 4242), true, 'the control-plane verdict is withdrawn in the review record');
   const githubMode = capped('x');
-  githubMode.observation = { at: at(), candidate: githubMode.candidate, checks: [], reviews: githubMode.observation!.reviews, merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false };
+  githubMode.observation = { at: at(), candidate: githubMode.candidate!, checks: [], reviews: githubMode.observation!.reviews, merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false };
   assert.equal(controlPlaneWithdrawal(githubMode, 4242), false, 'a GitHub-observed item\'s change request is dismissed on GitHub');
 
   // The review-cap step over the production wiring: refusal in, withdrawal out, through the control plane alone.
@@ -143,7 +143,7 @@ test('unit:capped-withdrawal-without-github — an approver refusing a capped re
   assert.equal(judged.kind, 'escalate');
   // The rework decision stands before its approver: the round is the approver's, and the step takes nothing.
   await run.cycle();
-  assert.deepEqual(run.world.writes, []);
+  assert.equal(run.world.writes.length, 0);
   // The approver refuses it as non-blocking.
   run.world.history = [decision('refused')];
   await run.cycle();
@@ -217,8 +217,8 @@ test('unit:capped-withdrawal-failed-earlier-recovers — an item stranded by a w
   const run = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'), [decision('refused')], [followUp]);
   // What the earlier code left behind: five failed withdrawal attempts naming GitHub's refusal, and the escalation they earned.
   const spent = `${run.item.key} is in review round 5, past its cap of 3, and graphyard-reviewer[bot] requested changes naming a blocking finding`;
-  run.state.actions[cappedEscalationKey(run.item, H)] = { kind: 'escalation', work: run.item.key, principal: null, state: 'done', detail: `${spent}; withdrawing it failed 5 times (GitHub refused to dismiss review 4242 (404))`, attempts: 1, cycle: run.state.cycle };
-  run.state.actions[cappedFilingKey(run.item, { sha: H, reviewId: 4242 })] = { kind: 'review', work: run.item.key, principal: null, state: 'failed', detail: `${spent}, but withdrawing it failed: GitHub refused to dismiss review 4242 (404)`, attempts: maxCappedFilingAttempts, cycle: run.state.cycle };
+  run.state.actions[cappedEscalationKey(run.item, H)] = { kind: 'escalation', work: run.item.key, principal: null, epoch: null, at: at(), state: 'done', detail: `${spent}; withdrawing it failed 5 times (GitHub refused to dismiss review 4242 (404))`, attempts: 1, cycle: run.state.cycle };
+  run.state.actions[cappedFilingKey(run.item, { sha: H, reviewId: 4242 })] = { kind: 'review', work: run.item.key, principal: null, epoch: null, at: at(), state: 'failed', detail: `${spent}, but withdrawing it failed: GitHub refused to dismiss review 4242 (404)`, attempts: maxCappedFilingAttempts, cycle: run.state.cycle };
   await run.cycle();
   assert.deepEqual(run.world.writes.map(write => write.path), [`work/${run.item.id}/review-withdraw`], 'the stranded withdrawal is retried where it now works, on the step\'s next cycle');
   assert.deepEqual(run.world.children, [], 'no gh ran');
@@ -233,7 +233,7 @@ test('unit:capped-withdrawal-failed-earlier-recovers — an item stranded by a w
 
   // A withdrawal that failed for a reason that still stands keeps its cap: five failures on the control-plane path itself escalate, none retried.
   const stuck = harness(capped('BLOCKING: former hotspot files exceed their size budgets.'), [decision('refused')], []);
-  stuck.state.actions[cappedFilingKey(stuck.item, { sha: H, reviewId: 4242 })] = { kind: 'review', work: stuck.item.key, principal: null, state: 'failed', detail: `${spent}, but withdrawing it failed: Graphyard refused work/${stuck.item.id}/review-withdraw (503): the plane did not answer`, attempts: maxCappedFilingAttempts, cycle: stuck.state.cycle };
+  stuck.state.actions[cappedFilingKey(stuck.item, { sha: H, reviewId: 4242 })] = { kind: 'review', work: stuck.item.key, principal: null, epoch: null, at: at(), state: 'failed', detail: `${spent}, but withdrawing it failed: Graphyard refused work/${stuck.item.id}/review-withdraw (503): the plane did not answer`, attempts: maxCappedFilingAttempts, cycle: stuck.state.cycle };
   await stuck.cycle();
   assert.deepEqual(stuck.world.writes, []);
   assert.match(stuck.state.actions[cappedEscalationKey(stuck.item, H)]!.detail, /withdrawing it failed 5 times/);
