@@ -1,13 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
 import { actorlessSubmissions } from '../src/cli/actorless-submissions.js';
+import { stalledActionAttention } from '../src/cli/stalled-actions.js';
 import { syncConflict } from '../src/daemon/decisions.js';
 import { reviewNeed } from '../src/model/dispatch.js';
+import { actionId, type ActionRecord, type ActionRow } from '../src/model/actions.js';
+import { actionStall, actionStallThreshold } from '../src/model/action-progress.js';
+import { classifyAttention, faultClassPolicyFromEnv } from '../src/model/fault-classes.js';
+import { recurringClasses } from '../src/model/fault-class-recurrence.js';
+import { trackFaults } from '../src/model/fault-record.js';
 import { coordinationSnapshot } from '../src/server/work-view.js';
 
 // GY-1403 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 3
@@ -126,3 +133,54 @@ for (const instance of instances.filter(entry => entry.kind === 'blocker')) {
     assert.deepEqual(stalledGate({ ...blocked(instance), epoch: instance.epoch + 1 } as Work, instance.at).faults.map(fault => fault.kind), ['blocker']);
   });
 }
+
+// ---- GY-2014: permanent reasons no longer feed stalled-gate recurrence ---------------------------
+
+const t0 = '2026-10-18T02:00:00.000Z';
+const shiftIso = (at: string, ms: number) => new Date(Date.parse(at) + ms).toISOString();
+const emptyFaultRecord = () => ({ instances: [] as never[], open: {} as Record<string, string>, failing: {} as Record<string, string> });
+
+/** Several items stalled on one of GY-2014's permanent reasons. */
+function boundReasonStalls() {
+  const reasons: { key: string; kind: ActionRow['kind']; reason: string }[] = [
+    { key: 'GY-1963', kind: 'verify-deployment', reason: 'Deployment endpoint answered 404' },
+    { key: 'GY-1960', kind: 'verify-deployment', reason: 'Deployment endpoint answered 404' },
+    { key: 'GY-1976', kind: 'verify-deployment', reason: 'Deployment endpoint answered 404' },
+    { key: 'GY-1994', kind: 'dispatch', reason: 'Command failed: node bin/graphyard.mjs claim GY-1994\n{"error":"A valid Graphyard bearer token is required"}' },
+    { key: 'GY-1998', kind: 'request-review', reason: 'The control plane refused the reviewer launch of GY-1998 (400): Invalid input' },
+    { key: 'GY-2009', kind: 'request-review', reason: 'The control plane refused the reviewer launch of GY-2009 (400): Invalid input' },
+  ];
+  return reasons.map(({ key, kind, reason }, index) => {
+    const at = shiftIso(t0, index * 60_000), id = randomUUID(), failures = actionStallThreshold;
+    const first = shiftIso(at, -failures * 60_000);
+    const history: ActionRecord[] = [{ at: shiftIso(first, -60_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: `${key} needs ${kind}` }];
+    for (let n = 0; n < failures; n++) {
+      const failed = shiftIso(first, (n + 1) * 60_000);
+      history.push({ at: shiftIso(failed, -10_000), event: 'claimed', requester: 'graphyard', executor: 'x', result: null, reason: `attempt ${n + 1}` },
+        { at: failed, event: 'failed', requester: 'graphyard', executor: 'x', result: 'failed', reason });
+    }
+    const row: ActionRow = { id: actionId(kind, id, `${kind}:1`), kind, work: id, key, inputs: { kind } as ActionRow['inputs'], gate: 'build', refusal: null, reason: `${key} needs ${kind}`, binding: `${kind}:1`,
+      requestedBy: 'graphyard', requestedAt: history[0].at, state: 'pending', claim: null, attempts: failures, retryAt: shiftIso(at, 60_000), resolvedAt: at, result: 'failed', resolution: reason, history };
+    row.stall = actionStall(row)!;
+    return { id, key, stage: 'build', actionQueue: { actions: [row], history: [] } } as unknown as Work;
+  });
+}
+
+test('integration:stalled-gate-recurrence-bound-reasons — several items stalled only on permanent bound reasons file no stalled-action instances and no recurring stalled-gate item', () => {
+  const work = boundReasonStalls();
+  const now = shiftIso(t0, 10 * 60_000);
+  const attention = stalledActionAttention({ work, now });
+  assert.equal(attention.length, work.length, 'each stall is still visible');
+  assert.ok(attention.every(entry => entry.kind === 'setup' && entry.subject === 'setup'), 'every line is the installation-level setup attention');
+  assert.ok(!attention.some(entry => entry.kind === 'stalled-action'), 'none is a per-item stalled-action');
+
+  const record = emptyFaultRecord();
+  const opened = trackFaults(record, classifyAttention(attention), now);
+  assert.ok(opened.every(instance => instance.faultClass === 'configuration' && instance.kind === 'setup'), 'instances land in configuration/setup');
+  assert.ok(!opened.some(instance => instance.faultClass === 'stalled-gate' || instance.kind === 'stalled-action'), 'stalled-gate observes none from them');
+
+  const policy = faultClassPolicyFromEnv({});
+  const recurrence = recurringClasses(record.instances, [], policy, Date.parse(now));
+  assert.equal(recurrence.find(entry => entry.faultClass === 'stalled-gate'), undefined, 'no stalled-gate class item is filed');
+  assert.ok(!recurrence.some(entry => entry.faultClass === 'stalled-gate' && entry.file), 'and nothing past the 3-in-24h threshold files one');
+});
