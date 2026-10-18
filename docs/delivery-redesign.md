@@ -18,13 +18,13 @@ Oldest first, one in flight: `merge.intent`; merge-commit trial (affected and pr
 
 ## Removed and kept
 
-Removed: GitHub Apps, branch protection, required checks, PR approval, the merge queue, plannedFiles and scope requests, sync-restore, proof-producer sessions, approver agents outside sensitive diffs, docs and module budgets.
+Removed: GitHub Apps, branch protection, required checks, PR approval, merge queue, plannedFiles and scope requests, sync-restore, proof-producer sessions, approver agents outside sensitive diffs, docs and module budgets, rulesets, auto-merge.
 
 Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinned commit.
 
 ## The merger
 
-The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read (`/api/status` `mergeWriter`). Launches get no push credential or keyring proxy; no GitHub branch protection, ruleset or auto-merge is used. Setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`; AGENTS.md: `--head SHA`. A pull-request candidate is observed from the shared object store and queued for the writer.
+The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read (`/api/status` `mergeWriter`). Launches get no push credential or keyring proxy. Setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`; AGENTS.md: `--head SHA`. Pull-request candidates are observed from the shared object store, queued for the writer.
 
 `POST /api/work/:id/merge-record` (coordinator, `Idempotency-Key`) records each step; `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
 

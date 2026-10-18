@@ -180,3 +180,10 @@ test('unit:docs-no-duplication — no two pages share a heading, a paragraph of 
   assert.equal(check.status, 0, check.stderr || check.stdout);
   assert.match(check.stdout, /all relative links, anchors and generated indexes resolve/);
 });
+
+test('unit:docs-budget — docs/master-agent-reference.md states the merge writer\'s trial is the only trial, the shadow gate gone (GY-2043, GY-2010), and the budgeted pages stay within their per-page and total budgets', () => {
+  const trial = read('docs/master-agent-reference.md').split('## Merge writer trial')[1]!.split('\n## ')[0]!;
+  assert.match(trial, /The shadow gate, `run\.shadowGate` and its routes are gone \(GY-2010\)/);
+  for (const page of pages) assert.ok(words(read(page)) <= PAGE_BUDGET, `${page} is within its ${PAGE_BUDGET}-word budget`);
+  assert.ok(pages.reduce((sum, page) => sum + words(read(page)), 0) <= TOTAL_BUDGET, `the set is within its ${TOTAL_BUDGET}-word budget`);
+});

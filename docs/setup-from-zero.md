@@ -37,7 +37,7 @@ Once green, **Describe what you want built** records a goal.
 
 ## Troubleshooting: manual steps
 
-`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite, naming its step; **HUMAN** marks agent-impossible steps.
+`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite; **HUMAN** marks agent-impossible steps.
 
 ## 1. Machine prerequisites
 
@@ -65,7 +65,7 @@ Needs a GitHub `origin` the deploy key can push to over SSH. **Verify:** doctor 
 
 ## 6. Onboard the checkout
 
-`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`); no App is registered. **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`); no App is registered. Scans skip `.claude`. **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 8. Agent environments
 
