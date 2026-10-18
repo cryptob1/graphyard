@@ -8,7 +8,7 @@ import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { shadowErrorKey, shadowIdle, shadowReads, shadowRunnerKey, shadowRunnerRetries } from '../src/daemon/cycle-shadow.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -586,6 +586,30 @@ test('unit:trial-checkout-outside-temp — with /tmp a tmpfs and the process tmp
   writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: 2 ** 22 + 7, startedAt: 1, pidNamespace: processPidNamespace(), at: '' })}\n`);
   assert.deepEqual(await reclaimTrialCheckouts(trials!), [crashed]);
   assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed)), existsSync(live)], [false, false, true]);
+});
+
+test('unit:trial-checkout-reclaim-durable — a crashed checkout that left the trials folder short of space is taken back before the space is measured, and a checkout whose removal failed keeps its owner marker and is taken back by a later pass (GY-2020)', async () => {
+  const home = await temporaryDirectory('gy-trial-home', homedir());
+  const [trials] = trialCheckoutRoots(home);
+  mkdirSync(trials!, { recursive: true });
+  // Low space while the crashed checkout stands, room once it is gone: the reclaim runs first, so the root is chosen.
+  const crashed = join(trials!, `${trialCheckoutPrefix}full`);
+  mkdirSync(join(crashed, 'checkout', 'node_modules'), { recursive: true });
+  writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: 2 ** 22 + 9, startedAt: 1, pidNamespace: processPidNamespace(), at: '' })}\n`);
+  const measured: boolean[] = [];
+  const filling: FilesystemProbe = async path => { measured.push(existsSync(crashed)); return { probed: path, volatile: null, freeBytes: existsSync(crashed) ? 1e9 : 1e12 }; };
+  assert.equal(await trialCheckoutRoot([trials!], 2e9, filling, []), lookupPoisoned(trials!) ? null : trials);
+  assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed)), measured], [false, false, [false]], 'the space is measured after the stale checkout went');
+  // A removal that fails keeps the directory marked as this live process's own, and the next pass takes it back.
+  const stuck = join(trials!, `${trialCheckoutPrefix}stuck`), live = join(trials!, `${trialCheckoutPrefix}live`);
+  mkdirSync(join(stuck, 'checkout'), { recursive: true }); mkdirSync(live);
+  await writeTempOwner(stuck); await writeTempOwner(live);
+  await assert.rejects(clearTrialCheckout(stuck, async () => { throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); }), /EBUSY/);
+  assert.deepEqual([existsSync(stuck), existsSync(tempOwnerMarker(stuck))], [true, true], 'the failed removal keeps its owner marker');
+  assert.deepEqual(await reclaimTrialCheckouts(trials!), [stuck], 'a later pass takes the abandoned checkout back, never a live one');
+  assert.deepEqual([existsSync(stuck), existsSync(tempOwnerMarker(stuck)), existsSync(live)], [false, false, true]);
+  await clearTrialCheckout(live);
+  assert.deepEqual([existsSync(live), existsSync(tempOwnerMarker(live))], [false, false], 'a removal that succeeds takes its marker with it');
 });
 
 /**

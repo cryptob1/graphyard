@@ -116,11 +116,14 @@ const within = (path: string, root: string) => { const to = relative(root, path)
  * memory-backed volume, is made if missing, and that no stray node_modules, .git or package.json sits
  * in or above (`lookupPoisoned`), so a module the checkout's own install lacks never resolves upward
  * into a stray tree; null when none does, and the checkout stays in the managed session directory.
+ * Each root's leftovers are taken back (`reclaimTrialCheckouts`) before its free space is measured,
+ * so a crashed checkout that left the volume short never keeps its own space from being reclaimed.
  */
 export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe, excluded: readonly string[] = trialExcludedRoots()): Promise<string | null> {
   for (const root of roots) {
     if (excluded.some(temporary => within(root, temporary))) continue;
     try {
+      await reclaimTrialCheckouts(root);
       await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) });
       await mkdir(root, { recursive: true });
       if (!lookupPoisoned(root)) return root;
@@ -128,10 +131,13 @@ export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: 
   }
   return null;
 }
+/** This process's trial checkouts whose removal failed (GY-2020): kept marked as its own, and taken back by the next reclaim pass though it lives. */
+const abandonedTrialCheckouts = new Set<string>();
 /**
  * Takes back the short checkouts a crashed trial left in `root` (GY-2020): the tmp reclaim scans only
- * the temporary roots, so a `gy-c` directory here whose owner marker names a process that is gone is
- * removed, with its marker, before the next trial makes its own. Best effort: nothing here fails a trial.
+ * the temporary roots, so a `gy-c` directory here whose owner marker names a process that is gone, or
+ * one this process failed to remove (`clearTrialCheckout`), is removed, with its marker, before the
+ * next trial makes its own. Best effort: nothing here fails a trial.
  */
 export async function reclaimTrialCheckouts(root: string): Promise<string[]> {
   const removed: string[] = [];
@@ -139,10 +145,20 @@ export async function reclaimTrialCheckouts(root: string): Promise<string[]> {
   for (const name of names) {
     if (!name.startsWith(trialCheckoutPrefix) || name.endsWith('.owner')) continue;
     const directory = join(root, name), owner = await readTempOwner(directory).catch(() => null);
-    if (!owner || !tempOwnerGone(owner)) continue;
-    try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); } catch { /* the next */ }
+    if (!owner || !(abandonedTrialCheckouts.has(directory) || tempOwnerGone(owner))) continue;
+    try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); abandonedTrialCheckouts.delete(directory); removed.push(directory); } catch { /* the next */ }
   }
   return removed;
+}
+/**
+ * Removes a trial's short checkout directory (GY-2020). Its owner marker goes only once the directory
+ * has: the trials folder has no tmp reclaim to take an ownerless leftover, so a removal that fails
+ * keeps the marker and is remembered as abandoned, and the next trial's reclaim pass (or any pass once
+ * this process is gone) takes it back. The failure is rethrown.
+ */
+export async function clearTrialCheckout(directory: string, remove: (path: string) => Promise<void> = path => rm(path, { recursive: true, force: true })): Promise<void> {
+  try { await remove(directory); } catch (error) { abandonedTrialCheckouts.add(directory); throw error; }
+  await rm(tempOwnerMarker(directory), { force: true }).catch(() => {});
 }
 /**
  * The name prefix of a trial's temporary directory. It stays this short, as CI's /tmp is
@@ -519,7 +535,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
   const clear = async (directory: string) => {
-    // A directory that would not go loses its owner marker, so the tmp reclaim takes it once it ages rather than keeping it for this live process.
+    if (directory === place) return clearTrialCheckout(directory);
+    // A temporary directory that would not go loses its owner marker, so the tmp reclaim takes it once it ages rather than keeping it for this live process.
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
   };
   try {
@@ -527,7 +544,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
     const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
-    if (near) { await reclaimTrialCheckouts(near); place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
+    if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
   }
   catch (error) {
     for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
