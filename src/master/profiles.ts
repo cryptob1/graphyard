@@ -35,14 +35,22 @@ const safeEnvironment = z.record(
  * wrote parses here instead of failing it. The rebuilt schema keeps its own type — a ZodObject
  * stays one, shape included — so readers of the schema see exactly what they saw. A key a version
  * declared and later retired is not unknown: schemas keep dropping those on purpose (master
- * config's mergeQueue, GY-1264).
+ * config's mergeQueue, GY-1264). A schema marked with `keepStrict` is a closed selection and stays
+ * as it was.
  */
 export function forwardTolerant<T extends z.ZodTypeAny>(schema: T): T {
   return tolerateSchema(schema, new Map()) as T;
 }
 
+const keptStrict = new WeakSet<object>();
+/** Marks `schema` as a closed selection `forwardTolerant` leaves strict: a key it does not declare is refused, not kept. */
+export function keepStrict<T extends z.ZodTypeAny>(schema: T): T {
+  keptStrict.add(schema);
+  return schema;
+}
+
 function tolerateSchema(schema: unknown, seen: Map<unknown, unknown>): any {
-  if (!schema || typeof schema !== 'object' || !(schema as any)._zod?.def) return schema;
+  if (!schema || typeof schema !== 'object' || !(schema as any)._zod?.def || keptStrict.has(schema)) return schema;
   if (seen.has(schema)) return seen.get(schema);
   const def = (schema as any)._zod.def;
   let rebuilt: unknown;
@@ -337,7 +345,8 @@ export const masterRunSchema = z.object({
   quotaCeilingPercent: z.number().int().min(50).max(100).optional(),
   // The runtime of each narrow role (GY-169): `herdr` terminal session, or `pi` headless runner
   // (the approver and unit proof producer). `pi` names the wrapper and model those runs use.
-  runtimes: narrowRoleRuntimeSchema.optional(),
+  // A closed selection: only the narrow roles choose a runtime, so a key naming any other role is refused.
+  runtimes: keepStrict(narrowRoleRuntimeSchema).optional(),
   pi: piRuntimeSchema.optional(),
   // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
