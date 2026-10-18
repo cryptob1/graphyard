@@ -20,7 +20,7 @@ import { containmentAttestation, containmentSettlementRefusals, containmentVerif
 import { containmentPhase } from './model/containment.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { unauthorizedMergeViolation } from './merge-queue.js';
-import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
+import { conflictSince, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
@@ -196,7 +196,6 @@ const commands = {
   // The coordinator — the master loop's operator-agent identity — asking the control plane to merge
   // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
   // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
-  refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
   // No `mergerefused`: GitHub merges on every passing gate (GY-1235) and Graphyard keeps no guarded
   // merge (GY-1236), so nothing reports a merge refusal and none sends a candidate back (GY-1391).
   // GY-1849: one existing pull request adopted into this item on its same branch and head; the live
@@ -233,7 +232,7 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', window: 'intent:unblock', adopt: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', window: 'intent:unblock', adopt: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
   const capability = operatorCapabilitiesByCommand[command];
@@ -1530,20 +1529,6 @@ export class Engine {
         // every superseded exhaustion record for this candidate.
         work.reviewFailovers = (work.reviewFailovers ?? []).filter(failover => failover.sha !== work.candidate?.sha
           || failover.baseSha !== work.candidate?.baseSha || failover.policyRevision !== work.policyRevision);
-      }
-      if (command === 'refresh') {
-        if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        demand(work.submission && !work.observation?.merged && work.stage !== 'done' && !work.reworkRequested, 'Open submitted work is required');
-        const candidate = work.candidate, observation = work.observation;
-        demand(candidate && observation?.candidate.sha === candidate.sha && observation.prState === 'open' && observation.draft === false, 'An open pull request observed at the current head is required');
-        demand(observation!.baseTip === data.base, `The base branch tip last observed for ${work.key} is ${observation!.baseTip?.slice(0, 12) ?? 'unknown'}, not ${data.base.slice(0, 12)}; retry once it is observed`, 409);
-        demand(observation!.baseTipContained === false, `${work.key} head ${candidate!.sha.slice(0, 12)} already contains base branch tip ${data.base.slice(0, 12)}; there is nothing to merge in`);
-        const refresh = work.baseRefresh;
-        demand(!(refresh && refresh.from.sha === candidate!.sha && refresh.base === data.base && refresh.policyRevision === work.policyRevision),
-          `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} onto ${data.base.slice(0, 12)} is already recorded`);
-        demand(!requestedBaseRefresh(work), `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
-        // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
-        work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
       }
       if (command === 'adopt') {
         // The master's own non-weakening intent — an adoption rewrites no criterion: the operator-agent
