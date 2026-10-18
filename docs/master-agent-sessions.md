@@ -55,7 +55,7 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active (`counts.dis
 
 **Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision, listed threads; control-plane: `mode`, `verdictToken`) into the session's `GH_CONFIG_DIR`; no binding, no session. Control-plane launches register the reviewer App's bot identity `SLUG[bot]`; verdicts post as it. Reviewer posts only via `graphyard review post --event APPROVE|REQUEST_CHANGES|COMMENT [--body TEXT]` (body else stdin); raw calls denied. Nothing posts on missing binding, `GRAPHYARD_REVIEW` ≠ `KEY@SHA`, moved head, `mergeable` UNKNOWN after 2min, unlisted thread, or approval leaving a listed thread unclassified; else one review POST.
 
-**Worker self-review**: before `complete`, `graphyard review self GY-N` prints the reviewer's judging standard for HEAD against the base merge-base; it gates nothing.
+**Self-review**: before `complete`, workers run `graphyard review self GY-N`, printing the reviewer's standard for their diff.
 
 **Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45min after first idle, 10 after re-prompt: new attempt on its branch <60min from last activity. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown, stalled-gate fault past 120min; without progress (PR or head in 15min) the loop stops the supervisor; reclaim requeues, keeping branch and worktree; from 130min renewal refused (`no-submission-bound`, not lease loss). Open scope requests exempt. **Blocked**: destructive prompts declined; usage-limit menu fails over; folder-trust dialog relaunches; others fail after **5min**, unreadable ones untimed.
 
