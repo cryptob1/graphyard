@@ -1,14 +1,8 @@
 // Concern: the goal picture page's flowchart data (GY-2011) — dependency order, Todo/Doing/
-// Checking/Done colours, and SVG box positions drawn from the plan alone; no chart library.
+// Checking/Done states, and SVG box positions drawn from the plan alone; no chart library.
 // Kept free of src/model/goal-plan (and its e2e/case Node imports) so the dashboard bundle stays browser-safe.
 
 export type PlanState = 'Todo' | 'Doing' | 'Checking' | 'Done';
-export const planStateColor: Record<PlanState, string> = {
-  Todo: '#64748b',
-  Doing: '#2563eb',
-  Checking: '#d97706',
-  Done: '#15803d',
-};
 
 export interface PlanFlowItem {
   ref: string;

@@ -235,7 +235,8 @@ img.mark{width:26px;height:26px}
 .outcome-cards li{padding:var(--space-3);border:1px solid var(--border);border-radius:var(--radius);background:var(--bg)}.outcome-cards strong{display:block;margin-bottom:var(--space-2)}.outcome-cards p{margin:0;font-size:var(--type-small);color:var(--text-2)}
 .flow-toolbar{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3)}.play-plan{min-height:36px;padding:0 var(--space-4);border-radius:var(--radius);background:var(--accent);color:var(--on-accent);font-weight:600;border:0;cursor:pointer}.play-plan:disabled{opacity:.6;cursor:default}
 .flow-caption{margin:0;font-size:var(--type-body);min-height:1.5em}.plan-flow{display:block;max-width:100%;height:auto;color:var(--text-2)}.plan-arrow{stroke:currentColor;stroke-width:2}
-.plan-box{cursor:pointer}.plan-box.lit rect{stroke:#fff;stroke-width:3}
+.plan-box{cursor:pointer}.plan-box.lit rect{stroke:var(--text);stroke-width:3}.plan-box text{fill:var(--bg);font-size:13px}.plan-box .plan-box-key{font-family:var(--font-mono);font-size:12px}
+.plan-box.state-todo rect,.swatch.state-todo{fill:var(--text-2);background:var(--text-2)}.plan-box.state-doing rect,.swatch.state-doing{fill:var(--moving);background:var(--moving)}.plan-box.state-checking rect,.swatch.state-checking{fill:var(--needs-you);background:var(--needs-you)}.plan-box.state-done rect,.swatch.state-done{fill:var(--shipped);background:var(--shipped)}
 .flow-legend{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:var(--space-3);font-size:var(--type-small)}.flow-legend .swatch{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:middle}
 
 /* Insights: headline numbers, the Flow panel, the charts, one Show details toggle (GY-168). */

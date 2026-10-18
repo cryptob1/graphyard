@@ -64,8 +64,8 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
  * summary sentence (GY-2011; or the title when none), what state it is in (its group's badge), why
  * (one plain sentence), who acts next (a role, never a code name), where it is in the seven
  * pull-request steps, and its pull request, linked once in the header. A decision only the human
- * may make is answered right here. The full description and criteria fold under Details. Below
- * that (GY-171): What is left, Pull request, Test cases and Activity. Everything technical — gate
+ * may make is answered right here. Below it (GY-171): What is left, then Details (the full
+ * description and criteria, folded), Pull request, Test cases and Activity. Everything technical — gate
  * internals, sessions and their attach commands, review provider, next action and executors, agent
  * requests, evidence — is in one collapsed "Technical details" section, and policy changes are in
  * the admin Edit menu.
@@ -163,6 +163,9 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
       {failedDelivery && postDeployment}
     </section>
+    <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
+      {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
+      {laterLeft.length > 0 && <details className="later-steps"><summary>Later steps ({laterLeft.length})</summary>{laterLeft.map(leftGroup)}</details>}</section>
     <details className="panel item-details-fold" aria-label="Details"><summary>Details</summary>
       {item.description ? <p className="item-description">{item.description}</p> : <p className="muted">No description.</p>}
       <section className="requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
@@ -171,9 +174,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
             <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
             <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
     </details>
-    <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
-      {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
-      {laterLeft.length > 0 && <details className="later-steps"><summary>Later steps ({laterLeft.length})</summary>{laterLeft.map(leftGroup)}</details>}</section>
     <section className="panel" aria-label="Pull request"><h2>Pull request</h2>
       {item.candidate ? <dl className="facts">
         {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`Pull request on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}

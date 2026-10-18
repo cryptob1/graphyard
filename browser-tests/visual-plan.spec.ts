@@ -63,6 +63,9 @@ test('integration:goal-visual-plan — a goal page shows summary, outcomes, four
   await expect(flow.locator('g.plan-box[data-state="Doing"]')).toHaveCount(1);
   await expect(flow.locator('g.plan-box[data-state="Checking"]')).toHaveCount(1);
   await expect(flow.locator('g.plan-box[data-state="Todo"]')).toHaveCount(1);
+  // Each state draws its own colour (the shared Todo/Doing/Checking/Done tokens).
+  const fills = await flow.locator('g.plan-box rect').evaluateAll(rects => rects.map(rect => getComputedStyle(rect).fill));
+  expect(new Set(fills).size).toBe(4);
   await expect(flow.locator('line.plan-arrow[data-from="api"][data-to="page"]')).toHaveCount(1);
   await expect(flow.locator('line.plan-arrow[data-from="billing"][data-to="notify"]')).toHaveCount(1);
   // Boxes follow dependency order: api, page, billing, notify.

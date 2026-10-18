@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Goal } from '../../src/model/goal.js';
 import type { Work } from '../../src/model/work.js';
-import { planStateColor, planFlowchart, type PlanState } from '../visual-plan';
+import { planFlowchart, type PlanState } from '../visual-plan';
 
 /**
  * One goal's picture page (GY-2011): the plan summary, approved outcomes as short cards, an SVG
@@ -80,14 +80,14 @@ export default function GoalPage({ goalKey, token, work, api, setSelected, onBac
           return <g key={box.ref} className={`plan-box state-${box.state.toLowerCase()}${lit ? ' lit' : ''}`} data-ref={box.ref} data-state={box.state}
             transform={`translate(${box.x},${box.y})`} role="link" tabIndex={0}
             onClick={() => box.id && setSelected(box.id)} onKeyDown={event => { if ((event.key === 'Enter' || event.key === ' ') && box.id) { event.preventDefault(); setSelected(box.id); } }}>
-            <rect width={box.width} height={box.height} rx="8" fill={planStateColor[box.state as PlanState]} opacity={lit || activeRef === null ? 1 : 0.45}/>
-            <text x="12" y="28" fill="#fff" fontSize="12" fontFamily="ui-monospace,monospace">{box.key ?? box.ref}</text>
-            <text x="12" y="50" fill="#fff" fontSize="13">{box.plain.length > 36 ? `${box.plain.slice(0, 34)}…` : box.plain}</text>
+            <rect width={box.width} height={box.height} rx="8" opacity={lit || activeRef === null ? 1 : 0.45}/>
+            <text className="plan-box-key" x="12" y="28">{box.key ?? box.ref}</text>
+            <text className="plan-box-plain" x="12" y="50">{box.plain.length > 36 ? `${box.plain.slice(0, 34)}…` : box.plain}</text>
           </g>;
         })}
       </svg>
       <ul className="flow-legend" aria-label="State colours">{(['Todo', 'Doing', 'Checking', 'Done'] as PlanState[]).map(state =>
-        <li key={state}><span className="swatch" style={{ background: planStateColor[state] }}/>{state}</li>)}</ul>
+        <li key={state}><span className={`swatch state-${state.toLowerCase()}`}/>{state}</li>)}</ul>
     </section> : <p className="muted">This goal has no plan yet.</p>}
   </article>;
 }
