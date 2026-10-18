@@ -666,6 +666,8 @@ export interface AutonomyDependencies {
    * snapshot clock the decision is then built from, so a later read cannot move the item under it.
    */
   assertDecision?: (work: Work, action: string, input: unknown, now: number, flags: { precedent?: string }) => void | Promise<void>;
+  /** Filesystem facts for the approver's managed checkout (tests stub a durable volume when GRAPHYARD_DATA_HOME is on tmpfs). */
+  filesystem?: FilesystemProbe;
 }
 const words = (args: string[]) => args.join(' ').trim();
 async function jsonArgument(value: string) { return JSON.parse(value.startsWith('@') ? await readFile(value.slice(1), 'utf8') : value); }
@@ -767,7 +769,8 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   if (id === 'approver') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
     // `deps.agents` throws when Herdr cannot be read, so a listing it returns was read.
-    const launched = await launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, { agents: await deps.agents(), available: true }, deps.runtime, {}, registrar(work.id));
+    const launched = await launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, { agents: await deps.agents(), available: true }, deps.runtime, {}, registrar(work.id),
+      deps.filesystem ? { filesystem: deps.filesystem } : {});
     // A headless approver runs in this process, so the command waits for its verdict and reports the run.
     const { settled, ...report } = launched;
     return settled ? { ...report, run: await settled } : report;
