@@ -411,14 +411,14 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   assert.deepEqual({ repository: routed.repository, provider: routed.provider, agent: routed.agent, reuseApps: routed.reuseApps }, { repository: 'acme/shop', provider: 'compose', agent: true, reuseApps: ['SLUG', 'REVIEWER_SLUG'] }, 'the route runs as written, reusing both Apps');
   // The route and the rerun carry every option the operator set up with, not only the provider and --agent.
   const custom: string[] = [];
-  const options = ['--provider', 'hetzner', '--reviewer', 'codex', '--master', 'codex', '--goal', 'goals/first game.md', '--ssh-host', 'build.example.com', '--ssh-user', 'ops', '--confirm-price', '4.51', '--wait', '45', '--reuse-app', 'acme-graphyard'];
+  const options = ['--provider', 'hetzner', '--master', 'codex', '--goal', 'goals/first game.md', '--ssh-host', 'build.example.com', '--ssh-user', 'ops', '--confirm-price', '4.51', '--wait', '45', '--reuse-app', 'acme-graphyard'];
   const customRequest = await upRequest(...options);
   const customDrive = recordedAppDriver(await temporaryDirectory('sudo-import-options'), customRequest, { profile: 'Default' }, () => appDrivePage(clock, clock.t + 30_000), timing);
   assert.deepEqual(await customDrive.drive(LOCAL, sentence => { custom.push(sentence); }), { state: 'done' });
   const words = (command: string) => command.match(/'[^']*'|\S+/g)!.map(word => word.replace(/^'(.*)'$/, '$1'));
   const carried = upRequestFromArgs(words(custom[0].split('\n').at(-1)!.match(/`graphyard up ([^`]+)`/)![1]));
   const { reuseApps: _reuse, ...expected } = customRequest;
-  assert.deepEqual({ ...carried, reuseApps: undefined, merger: undefined }, { ...expected, reuseApps: undefined, merger: undefined }, 'a non-default --reviewer, --master, --goal, SSH, price and wait survive the route');
+  assert.deepEqual({ ...carried, reuseApps: undefined, merger: undefined }, { ...expected, reuseApps: undefined, merger: undefined }, 'a non-default --master, --goal, SSH, price and wait survive the route');
   assert.deepEqual(carried.reuseApps, ['SLUG', 'REVIEWER_SLUG'], 'the route names its own --reuse-app per App');
 
   // An App set up exactly as the route says passes --reuse-app's preflight for its role: the permissions

@@ -1345,14 +1345,13 @@ export async function upSudoCode(root: string, args: string[]) {
 const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 /**
  * The operator's up command past its repository (GY-1457): the provider and --agent, then every
- * other option that shapes the setup (reviewer, master, goal, browser profile, install consent and
+ * other option that shapes the setup (master, goal, browser profile, install consent and
  * SSH inputs, Mobile preference, wait), so a printed rerun or App-import route sets up the same thing.
  * --reuse-app and --no-wait are left to the command that prints it.
  */
 export function upCommandFlags(request: UpRequest) {
   const flags: string[] = ['--provider', request.provider, ...(request.agent ? ['--agent'] : [])];
   const option = (name: string, value: string | null | undefined) => { if (value) flags.push(name, value); };
-  if (request.reviewer !== 'claude' && !upMergerControlPlane(request)) option('--reviewer', request.reviewer);
   if (request.master !== 'claude') option('--master', request.master);
   option('--goal', request.goalFile);
   if (!upMergerControlPlane(request)) option('--browser-profile', request.browserProfile);
