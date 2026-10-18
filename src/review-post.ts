@@ -178,9 +178,8 @@ export async function postReview(input: { event: string | undefined; body: strin
     // code no hunk since that head changes, on a path no earlier finding named, naming no unmet
     // criterion, is refused — it belongs on a Nit: line, which stays advisory.
     if (event === 'REQUEST_CHANGES' && bound.previousHead) {
-      let diff: string | null;
-      try { diff = String(await dependencies.run('git', ['diff', '-U0', bound.previousHead, bound.head!])); } catch { diff = null; }
-      const unchanged = diff === null ? [] : unchangedCodeFindings(body, bound, diff);
+      const diff = await Promise.resolve().then(() => dependencies.run('git', ['diff', '-U0', bound.previousHead!, bound.head!])).then(String, (error: unknown) => refuse(`git diff -U0 ${bound.previousHead} ${bound.head} failed (${error instanceof Error ? error.message : String(error)}), so this change request cannot be checked against what changed since the earlier head; run git fetch in the checkout and post again`));
+      const unchanged = unchangedCodeFindings(body, bound, diff);
       if (unchanged.length) refuse(`${unchanged.map(finding => `"${finding}"`).join('; ')} name${unchanged.length === 1 ? 's' : ''} code unchanged since the earlier head ${bound.previousHead} this round deltas from, and no earlier finding named ${unchanged.length === 1 ? 'its path' : 'their paths'}; this round judges only what changed: move it to a "Nit: PATH:LINE — FINDING" line, or name the acceptance criterion (AC-N) it leaves unmet`);
     }
     const base = input.environment.GRAPHYARD_URL;

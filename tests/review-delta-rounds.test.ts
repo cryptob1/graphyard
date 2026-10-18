@@ -153,13 +153,16 @@ test('unit:review-post-refuses-blocking-on-unchanged-code — a control-plane re
     assert.deepEqual([first.posted!.reviewId, first.gits.length, first.calls.length], [41, 0, 1], 'round one posts unchanged-code findings untouched');
   } finally { await rm(directory, { recursive: true, force: true }); }
 
-  // A diff read that fails judges nothing: the post stands rather than a review dying on a missing object.
+  // A diff read that fails checks nothing, so the change request is refused with the error and a retry, posting nothing.
   const failing = await temporaryDirectory('delta-rounds-failing');
   try {
     await writeReviewBinding(failing, deltaBinding({ previousHead: H1 }));
-    const posted = await postReview({ event: 'REQUEST_CHANGES', body: `BLOCKING: ${unchanged}\n${threads}`, cliPath: launcher, environment: { GH_CONFIG_DIR: failing, GRAPHYARD_REVIEW: `GY-1988@${H2}`, GRAPHYARD_URL: 'https://graphyard.example' } },
-      { run: (async () => { throw new Error('git diff failed: object missing'); }) as never, fetch: (async () => new Response(JSON.stringify({ recorded: true, reviewId: 43 }), { status: 200 })) as unknown as typeof fetch });
-    assert.equal(posted.reviewId, 43);
+    const calls: string[] = [];
+    const refused = await postReview({ event: 'REQUEST_CHANGES', body: `BLOCKING: ${unchanged}\n${threads}`, cliPath: launcher, environment: { GH_CONFIG_DIR: failing, GRAPHYARD_REVIEW: `GY-1988@${H2}`, GRAPHYARD_URL: 'https://graphyard.example' } },
+      { run: (async () => { throw new Error('git diff failed: object missing'); }) as never, fetch: (async (url: string | URL | Request) => { calls.push(String(url)); return new Response(JSON.stringify({ recorded: true, reviewId: 43 }), { status: 200 }); }) as unknown as typeof fetch }).then(() => null, (error: Error) => error);
+    assert.ok(refused instanceof ReviewPostRefusal, String(refused));
+    assert.ok(refused!.message.includes('object missing') && refused!.message.includes('post again'), refused!.message);
+    assert.deepEqual(calls, [], 'a refused verdict spends no token');
   } finally { await rm(failing, { recursive: true, force: true }); }
 });
 
