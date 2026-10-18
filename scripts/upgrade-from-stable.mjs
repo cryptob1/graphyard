@@ -129,7 +129,10 @@ export function liveSteps(options) {
     resolvePrevious: () => resolvePrevious(source, options.previous),
     async install(previous) {
       await mkdir(work, { recursive: true });
-      sh('git', ['clone', '--quiet', '--no-checkout', source, cliRoot]);
+      // A local checkout borrowing the source's objects: the gate opens no git network door.
+      sh('git', ['init', '--quiet', cliRoot]);
+      await writeFile(join(cliRoot, '.git/objects/info/alternates'), `${join(git(source, 'rev-parse', '--path-format=absolute', '--git-common-dir'), 'objects')}\n`);
+      git(cliRoot, 'remote', 'add', 'origin', source);
       git(cliRoot, '-c', 'advice.detachedHead=false', 'checkout', '--quiet', '--detach', previous.revision);
       sh('npm', ['ci', '--no-audit', '--no-fund'], { cwd: cliRoot });
       sh('git', ['init', '--quiet', '-b', 'main', repoRoot]);
