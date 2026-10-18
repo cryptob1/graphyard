@@ -808,6 +808,7 @@
     "tests/soak-exact-candidates.test.ts": 32000,
     "tests/goal-candidate-promotion.test.ts": 5000,
     "tests/release-uat-after-read.test.ts": 400,
-    "tests/control-plane-rework-workspace.test.ts": 1500
+    "tests/control-plane-rework-workspace.test.ts": 1500,
+    "tests/merge-writer-trial-timeout-queue.test.ts": 1000
   }
 }

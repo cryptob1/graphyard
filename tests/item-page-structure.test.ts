@@ -100,10 +100,11 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   const requirements = html.slice(html.indexOf('aria-label="Requirements"'), html.indexOf('aria-label="Pull request"'));
   assert.equal(requirements.match(/<details class="criterion-full"><summary><span class="criterion-mark" title="Pending">○<\/span> <span class="mono">AC-\d<\/span>/g)?.length, 2, 'each criterion once, marked pending');
   for (const ac of item.criteria) assert.ok(requirements.includes(`<p>${escape(ac.text)}</p></details>`), `${ac.id}: full text behind its line`);
-  // The lines themselves are never behind a closed disclosure: the panel is a plain section, and only each criterion's full text folds.
+  // The criteria fold with the description under one closed Details (GY-2011 AC-3); inside it each criterion's full text folds again.
   assert.match(requirements, /^aria-label="Requirements"><h2>Requirements <small>/);
-  assert.match(html, /<section class="panel requirements" aria-label="Requirements">/);
-  const shown = visibleWords(html).join(' ');
+  assert.match(html, /<details class="panel item-details-fold" aria-label="Details"><summary>Details<\/summary>[\s\S]*<section class="requirements" aria-label="Requirements">/);
+  // What a reader sees once Details is opened: each criterion's line, its full text still folded.
+  const shown = visibleWords(html.replace('<details class="panel item-details-fold"', '<details open class="panel item-details-fold"')).join(' ');
   assert.match(shown, /AC-1 Below the existing summary the item page shows What is left, Requirements, Pull request… unit:item-page-sections pending/, 'one line: the first sentence, capped');
   assert.doesNotMatch(shown, /A test renders a real-shaped item mid-review/, 'the rest waits for the expand');
   // A criterion whose every proof passed is marked met (GY-16 in the fixture: two of its three proofs passed).

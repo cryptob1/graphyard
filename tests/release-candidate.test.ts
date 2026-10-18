@@ -475,7 +475,7 @@ test('unit:candidate-records-pending-outcomes-at-cut — the candidate records, 
   // The plane's own goal record distils to that shape: a merged goal with an approved plan and its released item, while an unmerged one delivers nothing.
   const { goalDeliveries } = await import('../src/daemon/planner.js');
   const released: any = { id: 'g-1', key: 'GOAL-9', merged: { at: '2026-10-03T10:00:00.000Z', by: 'approver', pr: 1153, mergeSha: 'a'.repeat(40) }, protected: { cases: ['goal-case'], outcomes: ['goal-outcome'] },
-    plan: { note: 'note', items: [{ ref: 'routes', title: 'Routes', description: '', outcomes: ['goal-outcome'], cases: ['goal-case'], criteria: [], plannedFiles: ['src/x.ts'], dependsOn: [] }], author: 'planner', draftedAt: '2026-10-03T10:00:00.000Z' },
+    plan: { summary: 'The goal ships routes.', note: 'note', items: [{ ref: 'routes', title: 'Routes', plain: 'Routes serve the goal.', description: '', outcomes: ['goal-outcome'], cases: ['goal-case'], criteria: [], plannedFiles: ['src/x.ts'], dependsOn: [] }], author: 'planner', draftedAt: '2026-10-03T10:00:00.000Z' },
     items: [{ ref: 'routes', key: 'GY-900', id: 'w-1' }] };
   const drafting: any = { id: 'g-2', key: 'GOAL-8', merged: null, protected: { cases: [], outcomes: [] }, plan: null, items: [] };
   assert.deepEqual(goalDeliveries([released, drafting]), goal, 'the plane\'s goal record reads as the cut\'s pending-outcome input');
@@ -1070,7 +1070,7 @@ test('unit:pending-at-cut-reads-the-plane — repeated cuts read the plane\'s go
     { id: 'plain-outcome', title: 'A plain outcome', criteria: ['Something else a customer does'], cases: ['plain-case', 'shared-case'] },
   ] });
   const merged: any = { id: 'g-1', key: 'GOAL-9', merged: { at: '2026-10-03T10:00:00.000Z', by: 'approver', pr: 1153, mergeSha: 'a'.repeat(40) }, protected: { cases: ['goal-case'], outcomes: ['goal-outcome'] },
-    plan: { note: 'n', items: [{ ref: 'routes', title: 'Routes', description: '', outcomes: ['goal-outcome'], cases: ['goal-case'], criteria: [], plannedFiles: ['src/x.ts'], dependsOn: [] }] },
+    plan: { summary: 'The goal ships routes.', note: 'n', items: [{ ref: 'routes', title: 'Routes', plain: 'Routes serve the goal.', description: '', outcomes: ['goal-outcome'], cases: ['goal-case'], criteria: [], plannedFiles: ['src/x.ts'], dependsOn: [] }] },
     items: [{ ref: 'routes', key: 'GY-900', id: 'w-1' }] };
   let stage = 'build';
   const at = { sha: 'b'.repeat(40), undelivered: new Set<string>() };
