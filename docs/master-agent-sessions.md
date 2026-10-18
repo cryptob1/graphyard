@@ -55,7 +55,9 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active (`counts.dis
 
 **Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision, listed threads; control-plane: `mode`, `verdictToken`) into the session's `GH_CONFIG_DIR`; no binding, no session. Control-plane verdicts post as the reviewer App's bot `SLUG[bot]`. Reviewer posts only via `graphyard review post --event APPROVE|REQUEST_CHANGES|COMMENT [--body TEXT]`; raw calls denied; it posts one review, or nothing on missing binding, `GRAPHYARD_REVIEW` ≠ `KEY@SHA`, moved head, `mergeable` UNKNOWN after 2min, or an unlisted or (approving) unclassified thread.
 
-**Idle-with-lease** (25min quiet, nothing open): one re-prompt; quiet 45min after first idle, 10 after re-prompt: new attempt on its branch <60min from last activity. **Unsubmitted past the bound** (lease 60min, no submission): `unsubmitted-attempt` shown, stalled-gate fault past 120min; without progress (PR or head in 15min) the loop stops the supervisor; reclaim requeues, keeping branch and worktree; 130min: [`no-submission-bound`](protocol/leases.md). Open scope requests exempt. **Blocked**: destructive prompts declined; usage-limit menu fails over; folder-trust dialog relaunches; others fail after **5min**, unreadable ones untimed.
+**Self-review**: before `complete`, workers run `graphyard review self GY-N`, printing the reviewer's standard for their diff.
+
+**Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45min after first idle, 10 after re-prompt: new attempt on its branch <60min from last activity. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown, stalled-gate fault past 120min; without progress (PR or head in 15min) the loop stops the supervisor; reclaim requeues, keeping branch and worktree; from 130min renewal refused (`no-submission-bound`, not lease loss). Open scope requests exempt. **Blocked**: destructive prompts declined; usage-limit menu fails over; folder-trust dialog relaunches; others fail after **5min**, unreadable ones untimed.
 
 ### Panes are closed and reclaimed
 

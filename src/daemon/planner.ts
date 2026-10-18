@@ -12,6 +12,7 @@ import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
 import { Refusal, RefusedResponse } from '../model/refusal.js';
 import { refusedOutright } from './acceptance.js';
+import { simplicityParagraph } from '../reviewer.js';
 /** A plan the control plane rejects as input (422): it counts as a refused plan round. Authority and state refusals (401, 403, 409) do not, and are posted again in an hour. */
 const invalidPlan = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422;
 import type { MasterConfig } from '../master.js';
@@ -79,6 +80,7 @@ export function plannerPrompt(config: { repository: string }, goal: Goal) {
     lastRefusal: goal.planRefusal ? `${goal.planRefusal.by}: ${goal.planRefusal.reason}` : null };
   return `You are the Graphyard planner (architect) for ${config.repository}. The goal below has approved customer outcomes, each proved by a required uat case that is already merged and protected. Plan how to build it. `
     + 'This session is read-only: never edit, commit, push, claim or decide anything, and never ask anyone anything. Read the repository to learn its stack and module layout. '
+    + simplicityParagraph
     + `Then call the ${planTool} tool exactly once with goal "${goal.key}", a note of at most ${planNoteMaxWords} words (stack, module layout, data and deploy approach), and items: `
     + 'each item a ref (lower-case letters, digits and -), a title, a description, the outcome ids it serves, the case ids it must make pass (at least the case of every outcome it serves), '
     + 'criteria (AC-1, AC-2, ... each id once, each with text and unit:, integration: or manual: proofs), the plannedFiles it changes, and dependsOn naming the refs it must land after. '
