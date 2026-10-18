@@ -94,8 +94,6 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
   const diskAttention = [...diskPressureAttention(disk), ...managedRoot.attention, ...loopMemoryAttention(cycling)];
   // Loop health first, standing stalls beside it (GY-1855): a stalled coordinator is why nothing else moves.
-  // The progress watchdog's two lines (GY-1980) follow: one when nothing has progressed, one when
-  // merges have not reached the release. They carry no fault class, so nothing files them.
   const stallItems = stallStatusAttention(cursor, master.cliPath);
   const watchdogItems = progressAttention(snapshot.work, cursor?.promotion ?? null, Date.parse(snapshot.now) || Date.now());
   const loopItems: AttentionItem[] = cycling
