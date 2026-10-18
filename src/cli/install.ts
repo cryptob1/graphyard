@@ -1,4 +1,4 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
@@ -6,7 +6,7 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { acquireApplyLock, appCommand, applyInstall, applyRosterChange, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
-import { installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
+import { importPrincipalToken, installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
 import { runManifestFlow } from '../install/manifest.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
@@ -49,17 +49,19 @@ export async function capacityForPrincipals(principalsFile: string, status: () =
 /**
  * `graphyard principal add|remove` (GY-1879): one entry of this host's installation roster. The
  * install.json record is the roster; `add` judges the entry as the planner judges its own
- * (`rosterEntry`: a producer needs an explicit grant), and `applyRosterChange` writes its
- * credential, hands the deployment GRAPHYARD_PRINCIPALS alone and reads the served roster back.
- * The installer's own principals are refused: `install --apply` plans them. Repeating either
- * command changes nothing and only reads the roster back.
+ * (`rosterEntry`: a producer needs an explicit lane grant or proof seed), and `applyRosterChange`
+ * writes its credential, hands the deployment GRAPHYARD_PRINCIPALS alone and reads the served
+ * roster back. `--token-file` restores a former credential so existing dispatcher files keep
+ * working (GY-1998); `--proof` reads back the producer's recorded grant, which a roster edit never widens.
+ * The installer's own principals are refused: `install --apply` plans them.
+ * Repeating either command changes nothing and only reads the roster back.
  */
 export async function principalCommand(args: string[], dependencies: InstallDependencies & { cwd: string }) {
   const [action, id, ...rest] = args;
-  const { values } = parseArgs({ args: rest, options: { role: { type: 'string' }, 'session-kind': { type: 'string' }, grant: { type: 'string', multiple: true }, repo: { type: 'string' } }, allowPositionals: false });
-  if ((action !== 'add' && action !== 'remove') || !id) throw new Error('Use principal add ID --role ROLE [--session-kind ai|human] [--grant NAME]... [--repo OWNER/NAME], or principal remove ID [--repo OWNER/NAME]');
-  if (action === 'remove' && (values.role || values['session-kind'] || values.grant?.length)) throw new Error('principal remove takes only ID and --repo');
-  const entry = action === 'add' ? rosterEntry({ id, role: values.role, sessionKind: values['session-kind'], grants: values.grant }) : null;
+  const { values } = parseArgs({ args: rest, options: { role: { type: 'string' }, 'session-kind': { type: 'string' }, grant: { type: 'string', multiple: true }, proof: { type: 'string', multiple: true }, 'token-file': { type: 'string' }, repo: { type: 'string' } }, allowPositionals: false });
+  if ((action !== 'add' && action !== 'remove') || !id) throw new Error('Use principal add ID --role ROLE [--session-kind ai|human] [--grant NAME]... [--proof PATTERN]... [--token-file PATH] [--repo OWNER/NAME], or principal remove ID [--repo OWNER/NAME]');
+  if (action === 'remove' && (values.role || values['session-kind'] || values.grant?.length || values.proof?.length || values['token-file'])) throw new Error('principal remove takes only ID and --repo');
+  const entry = action === 'add' ? rosterEntry({ id, role: values.role, sessionKind: values['session-kind'], grants: values.grant, proofs: values.proof }) : null;
   const root = repositoryRoot(dependencies.cwd);
   const repository = values.repo ?? (await discover(root)).repository;
   if (!repository) throw new Error('Use --repo OWNER/NAME, or run from a checkout whose origin is the managed repository');
@@ -68,18 +70,28 @@ export async function principalCommand(args: string[], dependencies: InstallDepe
   // The edit holds the installation's apply lock from reading the roster until it is persisted and read back,
   // so two edits, or an edit and an install --apply, never each deploy a roster missing the other's entry.
   const release = await acquireApplyLock(directory, (dependencies.now ?? Date.now)());
-  try { return await editRoster(root, directory, id, entry, dependencies); } finally { await release(); }
+  try { return await editRoster(root, directory, id, entry, dependencies, values['token-file'] ? resolve(values['token-file']) : null); } finally { await release(); }
 }
-async function editRoster(root: string, directory: string, id: string, entry: ReturnType<typeof rosterEntry> | null, dependencies: InstallDependencies & { cwd: string }) {
+async function editRoster(root: string, directory: string, id: string, entry: ReturnType<typeof rosterEntry> | null, dependencies: InstallDependencies & { cwd: string }, tokenSource: string | null = null) {
   const record = await readInstallRecord(directory);
   if (!record) throw new Error(`No installation is recorded under ${directory}; run graphyard install --apply first`);
   const { roster, changed } = entry ? upsertRosterEntry(recordedRoster(record), entry) : removeRosterEntry(recordedRoster(record), id);
+  // GY-1998: --token-file is judged only after the edit is: a refused edit imports nothing. A
+  // self-contained host keeps every credential on the host and mints its own, so it is refused there.
+  if (tokenSource && record.selfContained) throw new Error(`--token-file restores a credential this machine keeps under ${directory}/tokens; a self-contained ${record.provider} installation keeps its credentials on the host, where principal add mints them. Nothing was imported; add ${id} without --token-file`);
   // The deployment is reached where install --apply reached it: its SSH host and user, local mode, port and image.
   const at = record.deployment;
   if (!at?.sshHost && !at?.local && (record.provider === 'docker-host' || record.provider === 'host')) throw new Error(`${directory}/install.json does not record the host this installation runs on; rerun graphyard install --apply once to record it, then edit the roster`);
-  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}), ...(record.noGithubApp ? { noGithubApp: true } : {}),
+  const imported = tokenSource ? await importPrincipalToken(directory, id, tokenSource, record.principals?.find(principal => principal.id === id)?.fingerprint ?? null) : null;
+  try {
+    const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}), ...(record.noGithubApp ? { noGithubApp: true } : {}),
     ...(at ? { sshUser: at.sshUser, ...(at.sshHost ? { sshHost: at.sshHost } : {}), ...(at.local ? { local: true } : {}), ...(at.port ? { port: at.port } : {}), ...(at.image ? { image: at.image } : {}) } : {}) }, dependencies, 'apply');
-  return applyRosterChange(session, record, roster, { id, changed, entry });
+    return await applyRosterChange(session, record, roster, { id, changed, entry });
+  } catch (error) {
+    // A credential imported for an edit that never reached install.json leaves with it, so no later add reuses it unasked.
+    if (imported?.created && !(await readInstallRecord(directory))?.principals?.some(principal => principal.id === id)) await rm(imported.path, { force: true });
+    throw error;
+  }
 }
 /** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
 export const installCommands = defineCommands([
@@ -255,13 +267,16 @@ export const installCommands = defineCommands([
     ],
     async run(context) { return runDoctor(context); },
   },
-  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer [--session-kind ai|human] [--grant external-runs:import|delivery:observe-sha] [--repo OWNER/NAME]',
+  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer [--session-kind ai|human]',
+    '              [--grant external-runs:import|delivery:observe-sha] [--proof unit:*|integration:*|e2e:*|manual:*]...',
+    '              [--token-file PATH] [--repo OWNER/NAME]',
     '  principal remove ID [--repo OWNER/NAME]',
     '                                Add or remove one principal of this host\'s installation: writes its credential and its',
     '                                install.json roster entry, sets GRAPHYARD_PRINCIPALS alone on the deployment, and reads the',
-    '                                roster back from the control plane. A producer needs an explicit --grant; delivery:observe-sha',
-    '                                is held alone, by a dedicated observer principal; a later',
-    '                                install --apply keeps the entry. Repeating either command changes nothing.'], readsConnection: () => false,
+    '                                roster back from the control plane. A producer needs an explicit --grant or --proof; --token-file',
+    '                                restores an existing credential instead of minting one (not on a self-contained host); delivery:observe-sha is held alone, by a',
+    '                                dedicated observer principal; a later install --apply keeps the entry. Repeating either command',
+    '                                changes nothing.'], readsConnection: () => false,
     async run(context) { context.print(await principalCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { cwd: process.cwd(), cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line) })); } },
   { name: 'app', help: ['  app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo R]', '  app list [--repo OWNER/NAME]  Import an App made elsewhere (key proven by an App JWT, saved 0600,',
     '                                never printed) for --reuse-app without sudo; list reusable Apps per role',
