@@ -39,7 +39,7 @@ async function fixture(page: Page) {
     if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'fixture', role: 'admin', sessionKind: 'human' }, github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] } });
     if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work, now } });
     if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus(work as any, Date.parse(now), null) });
-    if (path.endsWith('/goals/GOAL-V')) return route.fulfill({ json: goal });
+    if (path.endsWith('/goals/GOAL-V')) return route.fulfill({ json: { goal, history: [] } });
     if (path.includes('/events')) return route.fulfill({ json: [] });
     return route.fulfill({ json: path.endsWith('/work') ? work : [] });
   });

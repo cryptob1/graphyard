@@ -24,7 +24,7 @@ export default function GoalPage({ goalKey, token, work, api, setSelected, onBac
 
   useEffect(() => {
     let active = true;
-    void api(`goals/${encodeURIComponent(goalKey)}`).then((body: Goal) => { if (active) { setGoal(body); setError(''); } })
+    void api(`goals/${encodeURIComponent(goalKey)}`).then((body: { goal: Goal }) => { if (active) { setGoal(body.goal); setError(''); } })
       .catch((err: Error) => { if (active) setError(err.message); });
     return () => { active = false; };
   }, [goalKey, token]);
