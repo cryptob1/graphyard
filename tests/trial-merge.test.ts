@@ -8,18 +8,13 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
 import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { shadowErrorKey, shadowIdle, shadowReads, shadowRunnerKey, shadowRunnerRetries } from '../src/daemon/cycle-shadow.js';
-import { masterConfigSchema } from '../src/master.js';
-import type { Work } from '../src/model.js';
 import { preMergeTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { processPidNamespace, reclaimTmpDirectories, tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
-// Time-bomb allowance (GY-1694): the 2030-03-01 start is both the loop's injected now and its snapshot's now, so the fixture's stamps are judged against it; new Date() only stamps a crashed-trial owner marker.
 
-// GY-1522: the shadow gate's trial merge — the exact merge commit made in the object store, and its
+// GY-1522: the merge writer's trial merge — the exact merge commit made in the object store, and its
 // build and affected tests run in a detached, credential-free checkout that is always removed.
 
 // Every scratch directory here sits under the host's tmpdir without the `graphyard-` prefix: a trial takes seconds to
@@ -30,9 +25,6 @@ const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd
 const gitFor = (root: string) => async (args: string[], env: Record<string, string> = {}) => String(await defaultChildRun('git', ['-C', root, ...args], { env: { ...process.env, ...identity, ...env } }));
 // The install this checkout resolves, wherever it sits above it.
 const installedModules = resolve(dirname(createRequire(import.meta.url).resolve('tsx/package.json')), '..');
-const start = Date.parse('2030-03-01T00:00:00Z'), iso = (at: number) => new Date(at).toISOString();
-const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
 
 async function repository(files: Record<string, string>) {
   const root = await temporaryDirectory('trial-merge-repo', tmpdir());
@@ -474,30 +466,6 @@ test('integration:shadow-trial-failure-diagnostics — a runner that exits non-z
   const buildBroken = repo.commitOnBase({ 'break-build': '', 'tests/ok.test.ts': 'x\n' }, 'build broken');
   assert.equal((await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildBroken), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted })).build, 'fail');
 
-  // The loop's record of the runner exit, through the shadow step over this repository: against head, base tip and trial merge sha, with the exit and the tail.
-  const run = ((command: string, args: string[], options: unknown) => command === 'git' && args[2] === 'fetch' ? '' : defaultChildRun(command, args, options as never)) as never;
-  const reads = shadowReads(config, repo.root, run, { base: await temporaryDirectory('trial-merge-root', tmpdir()), record: async () => { assert.fail('a runner failure records no verdict'); }, trial: input => runTrial({ ...input, cores: 2 }) });
-  const work = [{ id: 'w1', key: 'GY-1548', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1,
-    createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 1 }, candidate: { sha: crashed, baseSha: repo.base, pr: 1, branch: 'graphyard/gy-1548-1', author: 'w' },
-    reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], stage: 'build' }] as unknown as Work[];
-  const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work, now: iso(start) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {}, github: {}, merge: {}, shadow: reads } as unknown as DaemonEffects;
-  const state = emptyDaemonState(config), now = () => start;
-  const attention: string[] = [];
-  for (let cycle = 0; cycle < 5; cycle++) { attention.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate runner failure:')).map(action => action.detail)); await shadowIdle(state); }
-  const record = state.actions[shadowRunnerKey(crashed, repo.base)];
-  assert.ok(record, 'the diagnostic record is keyed by head and base tip');
-  // The loop made its own trial merge of the head (the trial ref holds the newest); the record names that commit.
-  const loopMerge = gitIn(repo.root, 'rev-parse', trialRef(crashed));
-  assert.equal(record.state, 'failed');
-  assert.equal(record.attempts, shadowRunnerRetries, 'tried again once, then given up');
-  for (const named of [crashed, repo.base, loopMerge, 'tests runner exited (status 3)', '2 of the group\'s 2 file(s) finished', 'tests/crash.test.ts', 'given up against this tip', 'the runner process is leaving without a verdict', '[exit status 3]']) assert.ok(record.detail.includes(named), `the record names ${named}:\n${record.detail}`);
-  assert.ok(record.detail.length <= 2000);
-  assert.deepEqual(state.shadow, [], 'no verdict, so no shadow-only-fail can follow');
-  assert.equal(attention.length, 1, `one attention line, once: ${attention.join(' / ')}`);
-  assert.match(attention[0]!, /^Shadow merge gate runner failure: GY-1548 head [0-9a-f]{40} on [0-9a-f]{40} ended 2 trials with its tests runner exiting \(status 3\) and no failing test named/);
-  assert.ok(!state.actions[shadowErrorKey(crashed, repo.base)], 'a runner failure is not a trial error');
 });
 
 test('integration:trial-run-build-and-tests — the trial reads package.json and scripts/ci-tests.mjs from the merge commit: only a listing that answers without them skips install, build and selection, and a probe git cannot answer is a runner failure, never a passing trial with zero checks (GY-1675)', async () => {

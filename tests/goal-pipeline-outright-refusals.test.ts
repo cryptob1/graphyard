@@ -217,7 +217,7 @@ test('unit:goal-pipeline-outright-refusals — a plan whose post is refused with
   const { clearPlans, plannerStep, planRetryMs, plansSettled, planStepRetryMs, planTool } = await loop();
   const planAuthor: Principal = { id: 'refusal-planner', role: 'operator-agent', sessionKind: 'ai' } as Principal;
   const approver: Principal = { id: 'refusal-approver', role: 'admin', sessionKind: 'ai' } as Principal;
-  const item = (ref: string, outcomes: string[], plannedFiles: string[]) => ({ ref, title: `Build ${ref}`, description: `The ${ref} part`, type: 'feature' as const, priority: 2, outcomes,
+  const item = (ref: string, outcomes: string[], plannedFiles: string[]) => ({ ref, title: `Build ${ref}`, plain: `Customers get the ${ref} part.`, description: `The ${ref} part`, type: 'feature' as const, priority: 2, outcomes,
     cases: outcomes.map(id => `${id}-case`), criteria: [{ id: 'AC-1', text: `${ref} works`, proofs: ['unit:planned-behaviour'] }], plannedFiles, dependsOn: [] as string[] });
   for (const status of [401, 403, 409, 422]) {
     clearPlans();
@@ -226,7 +226,7 @@ test('unit:goal-pipeline-outright-refusals — a plan whose post is refused with
     goal = applyGoalCommand(goal, 'draft', { outcomes: [{ id: 'signup', title: 'A customer can sign up', criteria: ['The signup page answers'], case: caseOf('signup-case') }], pr: 1, branch: `graphyard/goal-p${status}`, head: 'a'.repeat(40) }, { actor: planAuthor, at });
     goal = applyGoalCommand(goal, 'approve', { reason: 'Right' }, { actor: approver, at });
     goal = applyGoalCommand(goal, 'merged', { pr: 1, mergeSha: 'b'.repeat(40) }, { actor: master, at });
-    const plan = { goal: goal.key, note: 'Node server, one module per outcome under src/, deployed by the release pipeline.', items: [item('signup', ['signup'], ['src/signup.ts'])] };
+    const plan = { goal: goal.key, summary: 'Customers can sign up. The build is one module. It ships with the release pipeline.', note: 'Node server, one module per outcome under src/, deployed by the release pipeline.', items: [item('signup', ['signup'], ['src/signup.ts'])] };
     let launches = 0;
     const posts: number[] = [], invalids: string[] = [];
     const fx: PlannerEffects = {

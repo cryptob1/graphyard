@@ -362,7 +362,7 @@ test('unit:post-deploy-criteria — an item of nothing but declared post-deploy 
   assert.equal(createSchema.safeParse(intent(only)).success, false);
   assert.equal(decisionInputs.requirements.safeParse(revision(only)).success, false, 'a requirements decision cannot leave an item with only declared verifications');
   assert.equal(decisionInputs.requirements.safeParse(revision([buildable, ...only])).success, true);
-  const plan = { ref: 'verify', title: 'Verify', outcomes: ['o1'], cases: ['c1'], plannedFiles: ['src/x.ts'], criteria: only };
+  const plan = { ref: 'verify', title: 'Verify', plain: 'Checks the live rate.', outcomes: ['o1'], cases: ['c1'], plannedFiles: ['src/x.ts'], criteria: only };
   assert.equal(planItemSchema.safeParse(plan).success, false, 'a goal plan item of only declared verifications is refused');
   assert.equal(planItemSchema.safeParse({ ...plan, criteria: [buildable, ...only] }).success, true);
   // master create and master requirements refuse it before reading the tree or posting, like an undeclared observation.
