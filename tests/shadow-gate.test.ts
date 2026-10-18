@@ -663,3 +663,32 @@ test('unit:shadow-failing-files-from-runner — a trial verdict\'s failing files
     assert.deepEqual(result.groups?.map(group => group.failed), [['tests/shadow-gate.test.ts']]);
   }
 });
+
+test('unit:shadow-trial-local-head-no-branch-fetch — under the control-plane merger a head whose branch was never pushed is read from the local object store: the trial fetches only the base and reaches a verdict, a head absent locally is skipped with a recorded reason, never fetched by branch, and the merge step records no stall for either', async () => {
+  const git = recordingGit(), now = () => start;
+  const inner = git.run as unknown as (command: string, args: string[]) => string;
+  const absent = sha('head2');
+  let probes = 0;
+  const run = ((command: string, args: string[]) => {
+    if (args[2] === 'cat-file' && args.includes(`${absent}^{commit}`)) probes += 1;
+    // origin holds no worker branch: a fetch naming one fails exactly as GitHub answers it.
+    if (args[2] === 'fetch' && args.some(arg => arg.startsWith('graphyard/'))) throw new Error(`fatal: couldn't find remote ref ${args.at(-1)}`);
+    if (args[2] === 'cat-file' && args.includes(`${absent}^{commit}`)) throw new Error('fatal: Not a valid object name');
+    return inner(command, args);
+  }) as never;
+  const reads = shadowReads(config, '/coordinator', run, { base: '/w', record: async () => {}, trial: async () => trialRun });
+  const work = [submitted(1, 30), submitted(2, 20)];
+  const state = emptyDaemonState(config);
+  const effects = { ...effectsFor({ work: () => work, now, shadow: reads }), mergeWriter: { merger: async () => 'control-plane' } } as unknown as DaemonEffects;
+  const actions: { kind: string; state: string; detail: string }[] = [];
+  for (let cycle = 0; cycle < 6; cycle++) { actions.push(...(await runCycle(config, state, effects, now)).actions); await shadowIdle(state); }
+  assert.deepEqual(state.shadow.map(entry => [entry.key, entry.build, entry.mergeSha]), [['GY-1', 'pass', sha('merge')]], 'the locally held head runs to a recorded verdict');
+  const fetches = git.calls.filter(call => call[3] === 'fetch');
+  assert.ok(fetches.length > 0 && fetches.every(call => call.slice(4).join(' ') === '--no-tags origin main'), `only the base is fetched: ${fetches.map(call => call.join(' ')).join(' / ')}`);
+  const skip = state.actions[shadowErrorKey(absent, tip)];
+  assert.equal(skip?.state, 'done', 'an absent head is a recorded skip, not a failure');
+  assert.match(skip?.detail ?? '', /GY-2 .* skipped, so no verdict was recorded: head [0-9a-f]{40} of graphyard\/gy-2-1 is not in the coordinator checkout's object store/);
+  assert.equal(probes, 1, 'the skipped pair is not retried against the same tip');
+  assert.deepEqual(actions.filter(action => action.state === 'failed' && /shadow/i.test(action.detail)), [], 'no shadow action fails');
+  assert.deepEqual(Object.values(state.stepStalls).filter(stall => /shadow/i.test(JSON.stringify(stall))), [], 'the merge step records no stall for the shadow trial');
+});
