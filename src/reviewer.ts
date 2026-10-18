@@ -783,18 +783,24 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
 export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:LINE — FINDING" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. ';
 /**
  * The judging part of a control-plane review request (GY-1987): what the diff is read with, the
- * criteria rule, the BLOCKING/Nit rule, the documentation and repetition sections and the
- * verification maps — everything a diff is judged by, and none of the session, posting and
- * credential instructions around it. The documentation obligation is judged beside the item's own
- * criteria, exactly as controlPlaneReviewPrompt judges it. `review self` prints this for the
- * worker's own head, so a worker applies the standard the independent reviewer will apply to the
- * same diff before it submits.
+ * criteria rule, the declared post-deploy rule, the BLOCKING/Nit rule, the documentation and
+ * repetition sections and the verification maps — everything a diff is judged by, and none of the
+ * session, posting and credential instructions around it. The documentation obligation is judged
+ * beside the item's own criteria, exactly as controlPlaneReviewPrompt judges it. `review self`
+ * prints this for the worker's own head, so a worker applies the standard the independent reviewer
+ * will apply to the same diff before it submits. `context` carries the request's project-memory and
+ * review-round sections through their exact pre-factoring positions inside this span, so the
+ * request stays byte-identical whatever a session's history and memory hold; a self-review passes
+ * none, and judges the diff by the shared standard alone.
  */
-export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null) {
+export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
   const judged = documentation ? [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }] : criteria;
   return `Read the change with: git diff ${binding.base} ${binding.head} (both commits are in this session's object store; git show --stat ${binding.head} lists its files). `
+    + (context?.memory ?? '')
     + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
+    + (context?.round ?? '')
     + criteriaRuleSection(binding.key, binding.head, judged)
+    + postDeployReviewSection(judged)
     + controlPlaneFindingSection
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files);
@@ -814,10 +820,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     ? 'Name each defect worth a fix on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
     : '';
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
-    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, own, documentation, verification)
-    + (memorySection || '')
-    + reviewRoundSection(plane.head, history, rounds)
-    + postDeployReviewSection(criteria)
+    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, own, documentation, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history, rounds) })
     + (research ? researchReviewSection(research) : '')
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')

@@ -20,7 +20,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // tests/worker-prompt-gates.test.ts.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const criteria = [{ id: 'AC-1', text: 'The feature ships behind its setting', proofs: ['unit:feature'] }];
+// The second criterion declares a post-deploy verification (GY-1660): the standard the reviewer
+// judges by gains the post-deploy rule, so review self must print it too — the worker on such an
+// item judges its own diff by the same pre-merge evidence rule, never by a standard without it.
+const criteria = [{ id: 'AC-1', text: 'The feature ships behind its setting', proofs: ['unit:feature'] }, { id: 'AC-2', text: 'The restarted loop serves the change', proofs: ['manual:post-deploy/loop-serves-change'] }];
 const documentation = { id: 'DOCS' as const, text: 'Documentation reflects this change: the diff updates this repository\'s documentation for any user-visible behaviour it changes, or the worker states at submission that it alters no documented behaviour.', paths: ['docs/', 'README.md', 'AGENTS.md'], changelog: null };
 const plannedFiles = ['src/feature.ts', 'docs/feature.md'];
 
@@ -86,6 +89,8 @@ test('unit:review-self-prints-standard — review self prints the reviewer stand
   const standard = reviewStandard({ key: 'GY-1', head, base }, criteria, { obligation: documentation, files: null }, { maps: [], plannedFiles });
   assert.ok(run.stdout.includes(standard), 'the printout is reviewStandard for HEAD against the merge-base');
   assert.ok(run.stdout.includes(`[AC-1] ${criteria[0]!.text}`), 'the item\'s criterion is named by ID and text');
+  assert.ok(run.stdout.includes(`[AC-2] ${criteria[1]!.text}`), 'the declared post-deploy criterion is named by ID and text too');
+  assert.ok(run.stdout.includes('is a declared post-deploy verification'), 'the post-deploy rule is in the printed standard, so the worker judges the declared criterion on pre-merge evidence');
   assert.ok(run.stdout.includes(`[DOCS] ${documentation.text}`), 'the documentation obligation is judged beside the criteria');
   assert.ok(run.stdout.includes(`git diff ${base} ${head}`), 'the diff to read is HEAD against the merge-base with origin/main');
   assert.deepEqual(requests.map(entry => entry.method), requests.map(() => 'GET'), 'every request the command makes is a read');
