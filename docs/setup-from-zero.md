@@ -3,7 +3,7 @@
 
 > set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
 
-The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human ([install hard rules](install.md#hard-rules)).
+The setup agent acts as the **master** identity `install --apply` records; the human keeps the operator credential ([install hard rules](install.md#hard-rules)).
 
 ## One command: graphyard up
 
@@ -61,11 +61,11 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ### Control-plane merger
 
-`up` creates an ed25519 deploy key and registers it read-write on OWNER/REPO for the [merge writer](delivery-redesign.md#the-merger), which pushes through an SSH origin; no App, no branch protection. The loop re-registers a missing key each setup run. **Verify:** `github-app` and `reviewer-app` print `PASS ... not required (merger: control-plane)`.
+`up` creates an ed25519 deploy key and registers it read-write on OWNER/REPO for the [merge writer](delivery-redesign.md#the-merger), which pushes over SSH; no App, no branch protection. The loop re-registers a missing key each setup run. **Verify:** `github-app` and `reviewer-app` print `PASS ... not required (merger: control-plane)`.
 
 ## 4. Register the GitHub App
 
-Only `install --apply` without `--no-github-app`; never `up`. It serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
+Only `install --apply` without `--no-github-app`; never `up`. It serves and prints `http://127.0.0.1:4311`, opening no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
 
 ## 6. Onboard the checkout
 

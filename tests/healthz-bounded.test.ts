@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { healthCheckQueryGraceMs, healthCheckWaitMs, healthRoutes } from '../src/server/routes/health.js';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { healthCheckQueryGraceMs, healthCheckWaitMs, healthRoutes, repositoryRootCause } from '../src/server/routes/health.js';
 
 // On a fresh process the reconciliation step can hold every pooled connection for minutes; an
 // unbounded SELECT 1 then failed the deploy's health check. The probe is bounded like the resource checks.
@@ -92,4 +96,32 @@ test('unit:healthz-select-bounded — while a probe is still queued behind the s
   const later = await healthRoutes.routes[0].handle(context, []) as any;
   for (const body of [...bodies, later]) assert.deepEqual(body.causes, [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`]);
   assert.equal(connects, 1, 'one acquisition waits in the pool queue, however many requests asked');
+});
+
+test('unit:healthz-unreadable-repository-root — a GRAPHYARD_REPOSITORY_ROOT that is missing or not a readable Git work tree is a /healthz cause naming the path and the plane is not healthy; a readable one adds none (GY-2054)', async () => {
+  const scratch = await mkdtemp(join(tmpdir(), 'healthz-repository-root-'));
+  const saved = process.env.GRAPHYARD_REPOSITORY_ROOT;
+  try {
+    const missing = join(scratch, 'reclaimed-worktree'), plain = join(scratch, 'plain'), checkout = join(scratch, 'checkout');
+    execFileSync('mkdir', [plain]);
+    execFileSync('git', ['init', '-q', checkout]);
+    assert.match((await repositoryRootCause(missing))!, new RegExp(`repository root ${missing} \\(GRAPHYARD_REPOSITORY_ROOT\\) is missing`));
+    assert.match((await repositoryRootCause(plain))!, new RegExp(`repository root ${plain} \\(GRAPHYARD_REPOSITORY_ROOT\\) is not a readable Git work tree`));
+    assert.equal(await repositoryRootCause(checkout), null);
+    assert.equal(await repositoryRootCause(''), null, 'a server given no repository root reports nothing about one');
+    // The route itself: the cause joins the others and the plane is unhealthy; a readable root leaves the verdict alone.
+    process.env.GRAPHYARD_REPOSITORY_ROOT = missing;
+    const unreadable = probe(() => new Promise(() => {}));
+    process.env.GRAPHYARD_REPOSITORY_ROOT = checkout;
+    const readable = probe(() => new Promise(() => {}));
+    const [broken, fine] = await Promise.all([unreadable, readable]) as any[];
+    assert.equal(broken.healthy, false);
+    assert.equal(broken.ok, false);
+    assert.ok(broken.causes.some((cause: string) => cause.includes(missing)), broken.causes.join('; '));
+    assert.equal(fine.healthy, true);
+    assert.deepEqual(fine.causes, [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`]);
+  } finally {
+    if (saved === undefined) delete process.env.GRAPHYARD_REPOSITORY_ROOT; else process.env.GRAPHYARD_REPOSITORY_ROOT = saved;
+    await rm(scratch, { recursive: true, force: true });
+  }
 });
