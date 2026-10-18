@@ -9,6 +9,8 @@ import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionChe
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { failingSummary, trialCutLine } from './shadow.js';
+import { runSecretScan, type SecretScanInput } from './secret-scan.js';
+import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master-resources.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -362,6 +364,11 @@ export interface RunTrialInput {
   /** The free space a short checkout's root must have, and how it is measured: the managed worktree root's default and probe unless given. */
   minFreeBytes?: number;
   probe?: FilesystemProbe;
+  /**
+   * GY-2009: the pinned gitleaks secret scan. Production runs `runSecretScan`; the test runner
+   * skips it unless a test injects a scan (or `false` to force a skip outside the suite).
+   */
+  secretScan?: ((input: SecretScanInput) => Promise<{ ok: true } | { ok: false; detail: string }>) | false;
 }
 const tailLength = 4000;
 /**
@@ -583,6 +590,17 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         return listing.split('\n').some(line => line.trim() === path);
       };
+      // GY-2009: the merge writer's trial runs the secret scan (formerly the Actions secrets job).
+      const scan = input.secretScan === false ? null
+        : input.secretScan ?? (underTestRunner() ? null : runSecretScan);
+      if (scan) {
+        const scanned = await scan({ worktree, cacheDirectory: temporary ?? checkout.directory, run, timeoutMs: remaining() });
+        if (!scanned.ok) {
+          log.push(`$ gitleaks git --redact --log-opts=HEAD\n${scanned.detail}`);
+          enter('build');
+          return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
+        }
+      }
       if (await holds('package.json')) {
         const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
         const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);

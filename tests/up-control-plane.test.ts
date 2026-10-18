@@ -108,7 +108,7 @@ test('integration:install-without-github-app — install --no-github-app registe
     ...dependenciesFor(recordingAdapter(environments), transport),
     githubApp: async () => { appFlows += 1; throw new Error('the App manifest flow must never run with --no-github-app'); },
   };
-  const { request } = installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--workers', '1', '--no-github-app', '--apply']);
+  const { request } = installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--workers', '1', '--apply']);
   assert.equal(request.noGithubApp, true);
   const session = await prepareInstall(root, request, dependencies);
   const plan = await buildPlan(session);
@@ -189,7 +189,7 @@ test('integration:install-without-github-app refuses a live App binding and merg
   }), new Vault());
 
   const boundEnv: EnvValue[][] = [];
-  const bound = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--no-github-app', '--apply']).request, dependenciesFor(recordingAdapter(boundEnv)));
+  const bound = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--apply']).request, dependenciesFor(recordingAdapter(boundEnv)));
   const boundPlan = await buildPlan(bound);
   const boundGate = boundPlan.preflight.find(item => item.name === 'GitHub App')!;
   assert.equal(boundGate.ok, false);
@@ -206,7 +206,7 @@ test('integration:install-without-github-app refuses a live App binding and merg
 
   const mergeEnv: EnvValue[][] = [];
   const leftover = { GITHUB_APP_ID: '42', GITHUB_INSTALLATION_ID: '7', GITHUB_PRIVATE_KEY: 'kept', GITHUB_WEBHOOK_SECRET: 'kept', GITHUB_CI_APP_IDS: '15368' };
-  const merge = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--no-github-app', '--apply']).request,
+  const merge = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--apply']).request,
     dependenciesFor(recordingAdapter(mergeEnv, { variables: leftover, merge: true })));
   const mergePlan = await buildPlan(merge);
   const mergeGate = mergePlan.preflight.find(item => item.name === 'GitHub App')!;
@@ -218,7 +218,7 @@ test('integration:install-without-github-app refuses a live App binding and merg
   // A merge-style service whose variable listing could not be read is refused too: the only
   // other guard would be the server reporting an App after the deploy.
   const unreadEnv: EnvValue[][] = [];
-  const unread = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--no-github-app', '--apply']).request,
+  const unread = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--apply']).request,
     dependenciesFor(recordingAdapter(unreadEnv, { merge: true, unread: true })));
   const unreadPlan = await buildPlan(unread);
   const unreadGate = unreadPlan.preflight.find(item => item.name === 'GitHub App')!;
@@ -227,13 +227,13 @@ test('integration:install-without-github-app refuses a live App binding and merg
   await assert.rejects(applyInstall(unread, unreadPlan), /Preflight is incomplete/);
   assert.deepEqual(unreadEnv, [], 'an unread merge-style listing writes no environment');
   // The same unread listing on a rewrite adapter is no refusal: the core-only write replaces it.
-  const unreadRewrite = await buildPlan(await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--no-github-app', '--apply']).request,
+  const unreadRewrite = await buildPlan(await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--apply']).request,
     dependenciesFor(recordingAdapter([], { unread: true }))));
   assert.ok(unreadRewrite.preflight.every(item => item.ok), JSON.stringify(unreadRewrite.preflight));
 
   // A whole-environment rewrite with orphaned App variables is allowed: the core-only write clears them.
   const rewriteEnv: EnvValue[][] = [];
-  const rewrite = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--no-github-app', '--apply']).request,
+  const rewrite = await prepareInstall(root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--apply']).request,
     dependenciesFor(recordingAdapter(rewriteEnv, { variables: leftover })));
   const rewritePlan = await buildPlan(rewrite);
   assert.ok(rewritePlan.preflight.every(item => item.ok), JSON.stringify(rewritePlan.preflight));
@@ -245,11 +245,11 @@ test('integration:install-without-github-app refuses a live App binding and merg
 });
 
 test('integration:install-without-github-app refuses the flags that need an App: --github-app, --reuse-app, --reviewer and a self-contained --target', () => {
-  const base = ['--provider', 'compose', '--repo', 'owner/project', '--no-github-app'];
+  const base = ['--provider', 'compose', '--repo', 'owner/project'];
   assert.throws(() => installRequestFromArgs([...base, '--github-app', 'app.json']), /--no-github-app registers no GitHub App, so it cannot be combined with --github-app/);
   assert.throws(() => installRequestFromArgs([...base, '--reuse-app', 'graphyard-owner-project']), /cannot be combined with --reuse-app/);
   assert.throws(() => installRequestFromArgs([...base, '--reviewer', 'claude-reviewer']), /cannot be combined with --reviewer/);
-  assert.throws(() => installRequestFromArgs(['--target', 'host', '--repo', 'owner/project', '--no-github-app']), /cannot be combined with --target/);
+  assert.throws(() => installRequestFromArgs(['--target', 'host', '--repo', 'owner/project']), /cannot be combined with --target/);
   assert.equal(installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project']).request.noGithubApp, undefined, 'without the flag the App flow stays the default');
 });
 

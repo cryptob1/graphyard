@@ -53,7 +53,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
+Needs a GitHub `origin`. Install writes no Actions workflows; the merge writer's trial is the gate. **Verify:** doctor readiness `repository` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -65,11 +65,11 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 4. Register the GitHub App
 
-Only `install --apply` without `--no-github-app`; never `up`. It serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
+Not required for the control-plane merger: install and `up` register no App and write no branch protection ([github](github.md)). Doctor `github-app` / `reviewer-app` print `PASS ... not required`. Optional legacy observation-only binding remains via `graphyard app import` / `app bind`. Reviewer and revert-approver Apps: only when an observation-only install still uses them.
 
 ## 6. Onboard the checkout
 
-`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). `--no-github-app` onboards App-less. **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json` to the base (never `.graphyard/` or `.github/workflows` — setup writes none). **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 8. Agent environments
 

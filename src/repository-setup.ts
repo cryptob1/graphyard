@@ -6,13 +6,12 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, removeDeliveryWorkflow, saveDiscovery, writeDeliveryWorkflow, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
+import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, removeDeliveryWorkflow, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { autonomyContract } from './autonomy.js';
 import { documentationAssignment, documentationPolicySchema, parseRepositoryConfig, repositoryConfigFile, type DocumentationPolicy, type RepositoryConfig } from './model/documentation.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
-import { renderReleasePipeline } from './install/release-pipeline.js';
 import { assertUnitOwned, ForeignUnitRefusal, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
 import { coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
@@ -429,21 +428,10 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   // committed delivery policy, and the candidate and promotion workflows are rendered from it.
   const delivery = proposal.delivery ? await applyDelivery(root, proposal.delivery, proposal.stack.name) : null;
   if (delivery) { applied.push(...delivery.applied); unchanged.push(...delivery.unchanged); drift.push(...delivery.drift); }
-  // GY-1480: a repository with no CI of its own gets a minimal delivery workflow — build and test
-  // for its stack, then Graphyard's gate job — in the onboarding change; it is reported among the
-  // workflows only once it is on disk. It decides "no CI" itself, so a rerun that finds only
-  // Graphyard's own workflows still reports it, matching the gate the proposed policy requires.
-  // The local mode (GY-1901) generates no GitHub Actions workflow, delivery workflow included.
-  const local = proposal.delivery?.mode === 'local';
-  const deliveryWorkflow = delivery && !local ? await writeDeliveryWorkflow(root) : null;
-  const staleWorkflow = delivery && local ? await removeDeliveryWorkflow(root) : null;
-  if (staleWorkflow) (staleWorkflow.state === 'removed' ? applied : drift).push(staleWorkflow.state === 'removed' ? `removed ${staleWorkflow.path}: the local mode generates no GitHub Actions workflow` : `${staleWorkflow.path} is not the generated workflow; delete it to finish switching to local delivery`);
-  // An operator's edit to it is drift: the edited file is kept, and still published as the workflow.
-  if (delivery && deliveryWorkflow) {
-    if (deliveryWorkflow.state === 'drift') drift.push(`${deliveryWorkflow.path} differs from the generated workflow; the edited file was kept`);
-    else (deliveryWorkflow.state === 'written' ? applied : unchanged).push(deliveryWorkflow.path);
-    delivery.workflows.push(deliveryWorkflow.path);
-  }
+  // GY-2009: repository setup writes no .github/workflows file; the merge writer's trial is the gate.
+  // Remove a leftover generated delivery workflow when present (local or not).
+  const staleWorkflow = delivery ? await removeDeliveryWorkflow(root) : null;
+  if (staleWorkflow) (staleWorkflow.state === 'removed' ? applied : drift).push(staleWorkflow.state === 'removed' ? `removed ${staleWorkflow.path}: install and CI use no GitHub Actions gates` : `${staleWorkflow.path} is not the generated workflow; delete it so no Actions gate remains`);
 
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
   const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
@@ -564,32 +552,15 @@ export async function applyDelivery(root: string, policyInput: DeliveryPolicy, s
     await atomicWrite(configFile, `${JSON.stringify({ ...config, delivery: policy }, null, 2)}\n`, 0o644);
     applied.push(`${repositoryConfigFile} delivery policy (${policy.mode}: pre-merge ${policy.mergeGate.preMerge.map(entry => entry.check).join(', ') || 'none'})`);
   }
-  let files: { path: string; content: string }[] = [];
-  try { files = renderReleasePipeline(policy, { stack, ...options }); }
-  catch (error: any) { drift.push(`release workflows were not generated: ${error.message}`); }
-  for (const file of files) {
-    const target = resolve(root, file.path);
-    let current: string | null = null;
-    try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-    if (current === file.content) { unchanged.push(file.path); continue; }
-    await mkdir(dirname(target), { recursive: true });
-    await atomicWrite(target, file.content, 0o644);
-    applied.push(file.path);
-  }
-  if (policy.mode === 'per-pr') for (const path of generatedWorkflowFiles) {
-    try { await stat(resolve(root, path)); drift.push(`${path} is left from the release-candidate model; delete it to finish opting out to per-PR delivery`); }
-    catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  }
-  // Under the local mode the control plane runs candidates itself (GY-1901): a candidate or promotion
-  // workflow init generated would keep releasing outside it, so it is removed; a hand-edited one is named.
-  if (policy.mode === 'local') for (const path of generatedWorkflowFiles) {
+  // GY-2009: never write .github/workflows; remove leftover generated candidate/promotion workflows.
+  for (const path of generatedWorkflowFiles) {
     let current: string | null = null;
     try { current = await readFile(resolve(root, path), 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
     if (current === null) continue;
-    if (current.split('\n', 3).includes('# Generated by graphyard init from the delivery policy in graphyard.json (docs/onboarding.md).')) { await rm(resolve(root, path)); applied.push(`removed ${path}: the local mode runs candidates in the control plane`); }
-    else drift.push(`${path} is not one init generated; delete it to finish switching to local delivery`);
+    if (current.split('\n', 3).includes('# Generated by graphyard init from the delivery policy in graphyard.json (docs/onboarding.md).')) { await rm(resolve(root, path)); applied.push(`removed ${path}: repository setup writes no GitHub Actions workflows`); }
+    else drift.push(`${path} is not one init generated; delete it so no Actions gate remains`);
   }
-  return { policy, requiredChecks: requiredPullRequestChecks(policy), workflows: files.map(file => file.path), applied, unchanged, drift };
+  return { policy, requiredChecks: requiredPullRequestChecks(policy), workflows: [], applied, unchanged, drift };
 }
 
 // --- Documentation policy: what the repository documents, proposed from the checkout (GY-215) ----
