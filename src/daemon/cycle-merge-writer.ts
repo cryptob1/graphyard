@@ -479,7 +479,7 @@ export async function mergeWriterStep(cycle: Cycle) {
   const at = () => new Date(now()).toISOString();
   let changed = false, delivered: { key: string; mergeSha: string } | null = null;
   // GY-2053: the summary names its own motion bound — the configured worst case for one flight — so the owed-decision readers hold a held head through the whole live flight however the install configures retrials and the shadow timeout.
-  const motionBoundMs = mergeWriterFlightBoundMs(cycle.config.run);
+  const motionBoundMs = mergeWriterFlightBoundMs(cycle.config?.run ?? {});
   if (writer.motionBoundMs !== motionBoundMs) { writer.motionBoundMs = motionBoundMs; changed = true; }
   const flight = flights.get(state);
   if (flight?.settled) {
