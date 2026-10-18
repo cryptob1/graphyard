@@ -1,4 +1,4 @@
-// Concern: the shadow gate's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
+// Concern: the merge writer's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
@@ -8,7 +8,6 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
-import { failingSummary, trialCutLine } from './shadow.js';
 import type { HostMemoryReading } from '../master-resources.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -18,6 +17,28 @@ export type TrialMergeResult = { mergeSha: string; tree: string } | { conflict: 
 export const trialAuthor = 'graphyard-merge-writer';
 export const trialRef = (head: string) => `refs/graphyard/trial/${head}`;
 const fullSha = /^[0-9a-f]{40}$/;
+
+// A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
+const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+/**
+ * The line a trial's log tail puts where it cut a failing group's output (GY-1639): what follows may
+ * be the middle of a `failing tests:` summary whose heading was cut, so it reopens summary reading.
+ */
+export const trialCutLine = "… (this group's earlier output was cut)";
+/**
+ * The runner's last `failing tests:` summary in one group's output (GY-1645): its heading through
+ * the last line of its entries (each `test at` line, its `✖` test and the indented error), or null
+ * when the output carries none. ANSI escapes are ignored when reading where it starts and ends.
+ */
+export function failingSummary(output: string): string | null {
+  const lines = output.split('\n'), plain = lines.map(line => line.replace(ansiEscape, ''));
+  // Only the runner's own heading, at column zero: a child run's summary a failing test printed is indented under it.
+  const start = plain.findLastIndex(line => /^✖ failing tests:\s*$/.test(line));
+  if (start < 0) return null;
+  let end = start + 1;
+  while (end < lines.length && (!plain[end]!.trim() || /^\s/.test(plain[end]!) || /^(test at |✖ )/.test(plain[end]!))) end++;
+  return lines.slice(start, end).join('\n').replace(/\n+$/, '');
+}
 const exitOf = (error: unknown) => error as { status?: number | null; stdout?: unknown };
 
 /**

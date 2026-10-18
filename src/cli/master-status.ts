@@ -69,7 +69,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const sections = new ReportSections(); // optional sections (GY-422)
   const { reviewRecords, reviewRuntime, producerRecords, reviews, producers, retries } = await reconcileLedgers(root, master, snapshot, runtime);
   // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
-  const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost, coordinator));
+  const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost));
   // Status reads the cursor as the loop would; the loop logs and persists any repair.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());

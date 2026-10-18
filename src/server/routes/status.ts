@@ -54,7 +54,7 @@ export const statusRoutes = defineRoutes('status', [
       // Presence recorded durably by any process counts, so a restart or deploy reads the fleet live (GY-1289).
       const executors = executorReport(visibleWork, executorRegistry(engine), observedAt, undefined, await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt), await durablePresence(presenceQuery(engine)));
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', github: false, check: 'Graphyard / merge', reviewProviders: ['github'], reviewerApps: engine.reviewerApps, githubAppId: null, heldJobs, starvedJobs, jobs,
+        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work

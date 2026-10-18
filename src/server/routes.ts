@@ -14,7 +14,6 @@ import type { Principal } from '../model.js';
 import type { Responder } from '../closed-question.js';
 import type { InterventionPolicy } from '../model/interventions.js';
 import { mainWatchRoutes } from './routes/main-watch.js';
-import { shadowDisagreementRoutes } from './shadow-verdict.js';
 import { candidateRoutes } from './routes/candidates.js';
 
 /** Everything the assembled control plane owns, handed to every route. */
@@ -77,13 +76,13 @@ export function defineRoutes(name: string, routes: Route[]): RouteModule { retur
 
 /**
  * The resources this module registers into the authenticated `/api/` table (GY-1519, GY-1560): the
- * main watch's routes, the shadow-disagreement explanation routes and the exact candidates (GY-1904)
+ * main watch's routes and the exact candidates (GY-1904)
  * go ahead of the operator-agent guard, as they authorize their callers themselves. index.ts assembles the table through this at
  * startup, once every module is loaded, so the registered module's binding is initialized when it
  * is read.
  */
 export function registerApiRoutes(modules: readonly RouteModule[]): readonly RouteModule[] {
-  return [mainWatchRoutes, shadowDisagreementRoutes, candidateRoutes, ...modules];
+  return [mainWatchRoutes, candidateRoutes, ...modules];
 }
 
 /** Match one route against a request; `null` when it does not apply. */

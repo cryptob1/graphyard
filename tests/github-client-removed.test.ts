@@ -1,16 +1,26 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { readFile, readdir } from 'node:fs/promises';
+import { mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { createServer } from 'node:http';
 import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
+import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
+import { server as controlPlane } from '../src/server.js';
 import { evaluate, type Principal, type Work } from '../src/model.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { mergeRecordKey, mergeWriterIdle, mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { daemonSummary } from '../src/daemon/run.js';
+import type { MergePorts, MergeTrialRun, runMergeTrial } from '../src/merge-writer/executor.js';
+import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
+import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
+import { completionBody } from '../src/cli/complete.js';
+import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-17 instant is the explicit `now` of evaluate() over a
-// PR-era item; new Date() only stamps documents the Postgres half writes and reads back.
+// Time-bomb allowance (GY-1694): the 2030-05-01 instant is the loop's injected clock and the explicit
+// `now` of evaluate(); new Date() only stamps documents the Postgres half writes and reads back.
 
 // GY-2010. The pull-request-era GitHub API client is gone: App credentials, webhooks, caches and
 // the request budget. Gates, status and the merge writer read Graphyard's own records. An item
@@ -28,12 +38,12 @@ const gone = [
   'src/cli/github-budget-attention.ts',
   'src/server/routes/github.ts',
   'src/server/push-credential.ts',
+  'src/main-guard.ts',
 ] as const;
 
 const sha = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
-const HEAD = sha('a1'), BASE = sha('b1'), MERGE = sha('c1');
-const now = new Date('2026-10-17T12:00:00.000Z');
-const at = now.toISOString();
+const clock = Date.parse('2030-05-01T00:00:00Z');
+const now = new Date(clock), at = now.toISOString();
 
 async function sourceFiles(directory: URL): Promise<string[]> {
   return (await Promise.all((await readdir(directory, { withFileTypes: true })).map(entry => entry.isDirectory()
@@ -51,107 +61,184 @@ test('unit:github-client-removed — the GitHub API client modules are gone, no 
     assert.doesNotMatch(text, /mintPushToken|installationToken\s*\(/, `${file} must not mint an App installation token`);
   }
 
-  // The server no longer registers a GitHub webhook module; those paths answer 404.
-  const { server } = await import('../src/server/index.js');
-  const engine = { store: { list: async () => [] }, principals: [] } as unknown as Engine;
-  const http = server(engine as Engine, [] as any);
-  await new Promise<void>((resolve, reject) => {
-    http.once('error', reject);
-    http.listen(0, '127.0.0.1', () => resolve());
-  });
-  try {
-    const { port } = http.address() as { port: number };
-    for (const path of ['/api/github/webhook', '/api/github/installation']) {
-      const response = await fetch(`http://127.0.0.1:${port}${path}`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json' } });
-      assert.equal(response.status, 404, `${path} answers 404`);
-    }
-  } finally {
-    await new Promise<void>((resolve, reject) => http.close(err => err ? reject(err) : resolve()));
+  // The live control plane registers no GitHub webhook module: those paths answer 404, signed or not, as any unknown path does.
+  for (const path of ['github/webhook', 'github/installation']) {
+    const unsigned = await fetch(`${url}/api/${path}`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json', 'x-github-event': 'pull_request', 'x-hub-signature-256': 'sha256=00' } });
+    assert.equal(unsigned.status, 404, `${path} answers 404 to GitHub's delivery`);
+    assert.equal((await request(coordinator, path, {})).status, 404, `${path} answers 404 to an authenticated caller`);
   }
 });
 
-let database: EmbeddedPostgres, store: Store, engine: Engine;
+const repository = 'owner/project';
 const operator: Principal = { id: 'operator', role: 'admin' };
+const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
+const worker: Principal = { id: 'implementer', role: 'worker' };
+const credentials = [operator, coordinator, worker].map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
+const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
+const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+/** A port the deleted GitHub client or shadow gate would have been: any touch fails the case. */
+const trap = (what: string) => new Proxy({}, { get: (_, name) => { if (name === 'then') return undefined; throw new Error(`the loop touched ${what} (${String(name)})`); } });
+
+let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof controlPlane>, url: string;
+let fixture: string, origin: string, checkout: string, managed: string, deployKey: string, baseTip: string, head: string;
+const branch = 'graphyard/gy-1-1';
+
+async function commit(cwd: string, path: string, text: string, message: string) {
+  await mkdir(join(cwd, path, '..'), { recursive: true });
+  await writeFile(join(cwd, path), text); git(cwd, 'add', '--', path); git(cwd, 'commit', '-q', '-m', message);
+  return git(cwd, 'rev-parse', 'HEAD');
+}
+
+async function request(principal: Principal, path: string, body?: unknown, key: string = randomUUID()) {
+  const response = await fetch(`${url}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
+  const text = await response.text();
+  return { status: response.status, body: text ? JSON.parse(text) : null };
+}
 
 before(async () => {
+  // The origin holds only the base branch; the worker's head sits in the shared object store alone.
+  fixture = await realpath(await temporaryDirectory('github-client-removed-repo'));
+  origin = join(fixture, 'origin.git'); checkout = join(fixture, 'checkout'); managed = join(fixture, 'managed'); deployKey = join(fixture, 'deploy-key');
+  await writeFile(deployKey, 'not a real key: the origin is a local path\n', { mode: 0o600 });
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', origin]);
+  execFileSync('git', ['clone', '-q', origin, checkout], { stdio: 'ignore' });
+  git(checkout, 'config', 'user.email', 't@example.com'); git(checkout, 'config', 'user.name', 'T');
+  await commit(checkout, 'src/a.ts', 'export const a = 1;\n', 'base');
+  await commit(checkout, 'tests/a.test.ts', "import { test } from 'node:test';\ntest('unit:a — a answers', () => {});\n", 'test');
+  git(checkout, 'push', '-q', 'origin', 'main');
+  baseTip = git(checkout, 'rev-parse', 'refs/remotes/origin/main');
+  const tree = join(checkout, '.graphyard', 'worktrees', 'GY-1-1');
+  git(checkout, 'worktree', 'add', '-q', '-b', branch, tree, baseTip);
+  git(tree, 'config', 'user.email', 't@example.com'); git(tree, 'config', 'user.name', 'T');
+  head = await commit(tree, 'src/a.ts', 'export const a = 2;\n', 'change');
+
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 2010;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('github-client-removed'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
-  engine.principals = [operator];
+  engine = new Engine(store, [15368], 120, repository);
+  engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
+  http = controlPlane(engine, credentials, null);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
-after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+after(async () => {
+  if (http) await new Promise<void>(resolve => http.close(() => resolve()));
+  if (store) await store.close(); if (database) await database.stop();
+});
 
-test('unit:pr-era-history-loads — a work item whose history carries pull-request observations, PR numbers and GitHub check results loads and evaluates; it progresses through the merge writer\'s trial and merge with no GitHub request; master status shows no Main guard or GitHub budget line', async () => {
-  let work = await engine.execute(operator, 'create', null, {
-    title: 'PR-era history before GY-2010',
-    plannedFiles: ['src/a.ts'],
-    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }],
-  }, randomUUID());
-  await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+const config = () => masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main', githubAppId: 1234,
+  hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { worktreeRoot: managed, mergeWriter: { deployKeyFile: deployKey, retrials: 2 } } });
+const baseEffects = (work: () => Promise<Work[]>, at: () => number) => ({
+  agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
+  snapshot: async () => ({ work: await work(), now: new Date(at()).toISOString() }),
+  closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+  observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at()).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
+  recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+  github: trap('the GitHub client'), merge: trap('GitHub\'s merge'), shadow: trap('the shadow gate'),
+});
 
-  // The document as a release that still observed GitHub wrote it: PR number, checks, reviews, mergeability.
-  const candidate = { sha: HEAD, baseSha: BASE, pr: 2010, branch: 'graphyard/gy-2010-1', author: 'worker' };
-  const prObservation = {
-    candidate: { ...candidate },
-    checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'failure', appId: 15368 }],
-    reviews: [{ reviewer: 'alice', sha: HEAD, state: 'APPROVED' }],
-    merged: false, mergeSha: null, mergeable: false, mergeabilityUnknown: false, protected: true,
-    prState: 'open', draft: false, baseTip: BASE, baseTipContained: true,
-    files: ['src/a.ts'],
-    scopeFiles: [{ path: 'src/a.ts', status: 'modified', sha: sha('d'), additions: 2, deletions: 1, binary: false }],
-    at,
+test('unit:pr-era-history-loads — a work item whose history carries pull-request observations, PR numbers and GitHub check results loads and evaluates; it progresses through the merge writer\'s trial and merge with no GitHub request; master status shows no Main guard or GitHub budget line', { timeout: 300_000 }, async () => {
+  // Submitted as today's workers submit, then rewritten as a release that still observed GitHub left it.
+  let work = await engine.execute(operator, 'create', null, { title: 'PR-era history before GY-2010', plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }, randomUUID());
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  const pulled = await engine.pullAssignment(worker, { work: work.id }, randomUUID());
+  assert.equal(pulled.assigned?.id, work.id, JSON.stringify(pulled.refused));
+  await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'worker-host', path: join(checkout, '.graphyard', 'worktrees', 'GY-1-1'), branch }, randomUUID());
+  work = await engine.execute(worker, 'submit', work.id, completionBody(['1', '--head', head], () => head), randomUUID());
+  assert.equal(work.candidate?.sha, head);
+  const githubChecks = [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'failure', appId: 15368 }];
+  await store.transaction(async db => {
+    const stored: Work & Record<string, unknown> = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document;
+    stored.submission = { ...stored.submission!, pr: 2010 };
+    stored.candidate = { ...stored.candidate!, pr: 2010 };
+    stored.headObserved = { at, pr: 2010, sha: head };
+    stored.observation = { ...stored.observation!, checks: githubChecks, reviews: [{ reviewer: 'alice', sha: head, state: 'CHANGES_REQUESTED' }], prState: 'open', draft: false, mergeable: false, mergeabilityUnknown: false, protected: true } as Work['observation'];
+    stored.mainGuardReverts = [{ mergeSha: sha('e1'), pr: 1999, state: 'merged', revertSha: sha('e2'), failing: ['test'] }];
+    stored.checkReruns = [{ sha: head, check: 'typecheck', failedRunId: 7, state: 'failed', at }];
+    await save(db, stored, 'github', 'github.observed', now);
+  });
+
+  // It loads, with every pull-request-era field intact, and evaluates on Graphyard's records alone.
+  const loaded = await store.workItem(work.id) as Work & Record<string, any>;
+  assert.equal(loaded.candidate?.pr, 2010, 'the PR number loads');
+  assert.equal(loaded.observation?.prState, 'open');
+  assert.deepEqual(loaded.observation?.checks, githubChecks, 'GitHub check results load');
+  assert.equal(loaded.mainGuardReverts.length, 1, 'main-guard history loads');
+  const history = (await store.pool.query('SELECT kind FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows.map((row: { kind: string }) => row.kind);
+  assert.ok(history.includes('github.observed'), `the stored history carries the GitHub observation: ${history.join(', ')}`);
+  const evaluated = evaluate(loaded, [loaded], now, [15368]);
+  const reasons = (name: string) => evaluated.gates.find(gate => gate.name === name)?.reasons ?? [];
+  assert.ok(reasons('test').some(reason => /merge writer has not trialled/.test(reason)), `the test gate waits on the merge writer: ${JSON.stringify(evaluated.gates)}`);
+  assert.ok(!reasons('test').some(reason => /typecheck|CI check/.test(reason)), 'a PR-era failed check refuses nothing');
+  assert.ok(!reasons('merge').some(reason => /mergeable|GitHub|conversation/.test(reason)), 'PR-era mergeability refuses nothing');
+
+  // The real loop and writer: the trial merge in the object store, the leased push, the ledger
+  // records through the plane's own route. GitHub is a trap and no `gh` child may run.
+  const children: string[][] = [];
+  const run: ChildRun = (command, args, options) => { children.push([command, ...args]); return defaultChildRun(command, args, options); };
+  const trials: string[] = [];
+  const trial = async (input: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => {
+    trials.push(input.mergeSha);
+    return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 5, logTail: 'ok', files: ['tests/a.test.ts'], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) };
   };
-  await store.pool.query(`UPDATE work_items SET document = document || $2::jsonb WHERE id=$1`, [work.id, JSON.stringify({
-    stage: 'test', ready: true, epoch: 1,
-    submission: { epoch: 1, pr: 2010 },
-    candidate,
-    observation: prObservation,
-    workspaces: [{ host: 'host', path: '/w', branch: candidate.branch, epoch: 1, owner: 'worker' }],
-  })]);
-
-  const loaded = await store.workItem(work.id) as Work & Record<string, unknown>;
-  assert.equal(loaded.key, work.key);
-  assert.equal(loaded.candidate?.pr, 2010, 'PR number from the pull-request era still loads');
-  assert.equal((loaded.observation as { prState?: string })?.prState, 'open');
-  assert.equal((loaded.observation as { checks: unknown[] }).checks.length, 2, 'GitHub check results still load');
-  assert.ok((await store.list()).some(item => item.id === work.id));
-
-  // Evaluation ignores the PR-era GitHub checks and mergeability: progression is the merge ledger.
-  const beforeLedger = evaluate(loaded, [loaded], now, [15368]);
-  assert.ok(beforeLedger.gates.find(g => g.name === 'test')?.reasons.some(r => /merge writer has not trialled/.test(r)),
-    `test gate waits on the merge writer, not GitHub checks: ${JSON.stringify(beforeLedger.gates)}`);
-  assert.ok(!beforeLedger.gates.find(g => g.name === 'test')?.reasons.some(r => /CI check|typecheck/.test(r)),
-    'PR-era failed typecheck does not refuse the test gate');
-  assert.ok(!beforeLedger.gates.find(g => g.name === 'merge')?.reasons.some(r => /Pull request is not mergeable|GitHub is computing|conversation/.test(r)),
-    'PR-era mergeability does not refuse the merge gate');
-
-  // The merge writer's trial and push: ledger alone opens the gates; no GitHub request is made.
-  const ledger = {
-    key: work.key, state: 'reconciled' as const, head: HEAD, baseTip: BASE, mergeSha: MERGE, risk: 'ordinary',
-    intentAt: at, pushedAt: at, observedTip: MERGE, refusal: null, events: 3,
+  const record: MergePorts['record'] = async (item, event) => {
+    const response = await request(coordinator, `work/${item.id}/merge-record`, event, mergeRecordKey(item, event));
+    if (response.status >= 300) throw new Error(`merge-record refused (${response.status}): ${JSON.stringify(response.body)}`);
+    return response.body;
   };
-  const progressed = { ...loaded, mergeLedger: ledger, observation: { ...prObservation, source: 'control-plane' as const, mergeable: true, protected: false, checks: [] } } as Work;
-  const after = evaluate(progressed, [progressed], now, [15368]);
-  assert.deepEqual(after.gates.find(g => g.name === 'test')?.reasons, [], 'trialled head opens the test gate');
-  assert.ok(!after.gates.find(g => g.name === 'merge')?.reasons.some(r => /merge writer has not pushed|GitHub|mergeable|CI check/.test(r)),
-    `merge gate opens from the ledger: ${JSON.stringify(after.gates.find(g => g.name === 'merge'))}`);
+  const master = config(), state = emptyDaemonState(master);
+  const reads = mergeWriterReads(master, checkout, run, { base: managed, record, merger: async () => 'control-plane', trial });
+  const effects = { ...baseEffects(async () => [(await store.workDocument(work.id))!], () => clock), mergeWriter: { ...reads, advisory: undefined } } as unknown as DaemonEffects;
+  const realFetch = globalThis.fetch, requested: string[] = [];
+  globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => { const target = String(input instanceof Request ? input.url : input); requested.push(target); return realFetch(input, init); }) as typeof fetch;
+  const actions: string[] = [];
+  try {
+    for (let cycle = 0; cycle < 3 && (await store.workDocument(work.id))!.stage !== 'done'; cycle++) {
+      actions.push(...(await runCycle(master, state, effects, () => clock)).actions.map(action => action.detail));
+      await mergeWriterIdle(state);
+    }
+  } finally { globalThis.fetch = realFetch; }
 
-  // master status attention never raises a Main guard or GitHub budget line once the client is gone.
-  const statusText = await readFile(new URL('src/master-status.ts', root), 'utf8');
-  assert.doesNotMatch(statusText, /githubBudgetAttention|github-budget-attention/, 'master-status imports no GitHub budget attention');
-  const attentionText = await readFile(new URL('src/daemon/cycle-delivery.ts', root), 'utf8').catch(() => '');
-  const mainGuardSources = ['src/master-status.ts', 'src/daemon/cycle-delivery.ts', 'src/cli/github-budget-attention.ts'];
-  for (const path of mainGuardSources) {
-    if (!existsSync(new URL(path, root))) continue;
-    const text = await readFile(new URL(path, root), 'utf8');
-    assert.doesNotMatch(text, /mainGuardAttention\(/, `${path} does not raise Main guard attention`);
+  const done = (await store.workDocument(work.id))!;
+  assert.equal(done.stage, 'done', `the PR-era item is delivered by the merge writer: ${JSON.stringify(done.gates)} ${JSON.stringify(state.mergeWriter.refusals ?? null)}`);
+  assert.ok(trials.length >= 1, 'the writer ran its trial');
+  assert.equal(git(origin, 'rev-parse', 'refs/heads/main'), done.delivery!.mergeSha, 'origin main is the delivered merge commit');
+  assert.equal(git(origin, 'rev-parse', `${done.delivery!.mergeSha}^2`), head, 'whose second parent is the submitted head');
+  const kinds = (await store.pool.query("SELECT kind FROM events WHERE work_id=$1 AND kind LIKE 'merge.%' ORDER BY seq", [work.id])).rows.map((row: { kind: string }) => row.kind);
+  assert.deepEqual(kinds, ['merge.intent', 'merge.trial', 'merge.pushed', 'merge.reconciled'], 'the merge ledger records the whole delivery');
+  assert.deepEqual(requested.filter(target => !target.startsWith(url)), [], 'no request left for anywhere but the control plane');
+  assert.deepEqual(children.filter(([command]) => command !== 'git'), [], `no child but git ran: ${JSON.stringify(children.filter(([command]) => command !== 'git'))}`);
+
+  // master status: the loop's lines, its run summary and the plane's status carry no Main guard or GitHub budget line.
+  const summary = JSON.stringify(daemonSummary(state, clock, 60_000));
+  for (const text of [...actions, summary]) assert.doesNotMatch(text, /Main guard|main guard|GitHub (request )?budget|githubBudget/, `no Main guard or GitHub budget line: ${text.slice(0, 300)}`);
+  const status = await request(coordinator, 'status');
+  assert.equal(status.status, 200);
+  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
+  assert.equal(status.body.mergeWriter.merger, 'control-plane', 'and reports the merge writer');
+  for (const path of ['src/master-status.ts', 'src/cli/master-status.ts', 'src/daemon/cycle-delivery.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
+});
+
+test('unit:shadow-gate-removed — the shadow gate is gone: its modules and routes are deleted, the loop runs no shadow trial step and touches no shadow port, and its report leaves the run summary', { timeout: 120_000 }, async () => {
+  for (const path of ['src/daemon/cycle-shadow.ts', 'src/merge-writer/shadow.ts', 'src/server/shadow-verdict.ts']) assert.equal(existsSync(new URL(path, root)), false, `${path} is deleted`);
+  const master = config(), state = emptyDaemonState(master);
+  const children: string[][] = [];
+  const run: ChildRun = (command, args, options) => { children.push([command, ...args]); return defaultChildRun(command, args, options); };
+  const reads = mergeWriterReads(master, checkout, run, { base: managed, record: async () => { throw new Error('nothing to record'); }, merger: async () => 'control-plane', trial: async () => { throw new Error('nothing to trial'); } });
+  // A shadow port that throws on any touch: a cycle that ran the old gate fails here.
+  const effects = { ...baseEffects(async () => [], () => clock), mergeWriter: { ...reads, advisory: undefined } } as unknown as DaemonEffects;
+  await runCycle(master, state, effects, () => clock);
+  await mergeWriterIdle(state);
+  const steps = state.metrics.flatMap(metric => metric.timings?.steps.map(entry => entry.step) ?? []);
+  assert.ok(steps.includes('merge writer'), `the writer's step ran: ${steps.join(', ')}`);
+  assert.ok(!steps.includes('shadow gate'), 'no shadow gate step ran');
+  assert.ok(!children.some(args => args.some(arg => arg.startsWith('graphyard/') || arg.includes('refs/heads/graphyard/'))), `no worker branch was fetched: ${JSON.stringify(children)}`);
+  assert.equal('shadow' in state, false, 'the cursor keeps no shadow verdicts');
+  assert.equal('shadowGate' in daemonSummary(state, clock, 60_000), false, 'the run summary has no shadowGate section');
+  for (const path of ['work/anything/shadow-verdict', 'shadow-explanations', 'shadow-disagreements']) {
+    const response = await request(coordinator, path, path.endsWith('verdict') ? {} : undefined);
+    assert.equal(response.status, 404, `${path} answers 404`);
   }
-  // Status payload shape: no githubBudget / mainGuard fields once the client is gone.
-  const statusRoute = await readFile(new URL('src/server/routes/status.ts', root), 'utf8');
-  assert.doesNotMatch(statusRoute, /\bgithubBudget\b/, 'status route reports no githubBudget');
-  assert.doesNotMatch(statusRoute, /\bmainGuard\b/, 'status route reports no mainGuard');
-  void createServer; // keep import used if server() shape changes in later edits
-  void attentionText;
 });

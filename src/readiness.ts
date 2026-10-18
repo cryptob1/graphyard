@@ -1,6 +1,5 @@
 import { reportFormats, type ReportFormat } from './report-adapters.js';
 import type { SetupProposal } from './onboarding.js';
-import type { MainGuardReadiness } from './main-guard.js';
 import type { LoopCodeReading } from './repository-setup.js';
 import { mergerNotRequired } from './model/setup-checklist.js';
 
@@ -33,8 +32,7 @@ export interface ReadinessFacts {
   server?: { url: string; reachable: boolean; role?: string; github?: boolean; githubPermissions?: Record<string, string>; failure?: string;
     /** The server's App-permission preflight (GY-52), when it has run: authoritative over the raw permission map. */
     appPermissions?: { verifiedAt: string | null; missing: { permission: string; required: string; granted?: string | null }[]; attention: string[] } | null;
-    /** The main guard as the server reports it (GY-1335); absent from a server older than it. */
-    mainGuard?: MainGuardReadiness | null } | null;
+  } | null;
   setup?: { proposal: string | null; appliedAt: string | null; githubApp: { appId: number; slug: string } | null; drift: string[]; unreadable: string[];
     /** GY-1859: what the host's loop and executor units run against this CLI's code; absent from an older reader. */
     loopCode?: LoopCodeReading | null } | null;

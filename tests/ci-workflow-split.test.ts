@@ -4,7 +4,6 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isReleaseCandidateTest, listTestFiles, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
-import { commitVerdict } from '../src/main-guard.js';
 import { policySchema } from '../src/model/policy.js';
 import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -189,7 +188,7 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   for (const id of [...jobs.keys(), ...soakJobs.keys()]) assert.ok(!required.includes(id), `${id} is not a required check`);
 });
 
-test('unit:ci-bubblewrap-install-resilient — the shards install bubblewrap with bounded, retried apt calls that fall back to other mirrors, and an install that fails every attempt concludes the shard timed out, which the main guard reruns and never reverts', () => {
+test('unit:ci-bubblewrap-install-resilient — the shards install bubblewrap with bounded, retried apt calls that fall back to other mirrors, and an install that fails every attempt concludes the shard timed out', () => {
   const shard = jobsOf(read(ciPath)).get('test-shard')!;
   const start = shard.text.indexOf('      - name: Install bubblewrap'), end = shard.text.indexOf('\n      - ', start + 1);
   assert.ok(start >= 0 && end > start, 'test-shard installs bubblewrap');
@@ -217,17 +216,4 @@ test('unit:ci-bubblewrap-install-resilient — the shards install bubblewrap wit
   assert.match(hold, /::error title=Infrastructure failure, not a test failure::/);
   assert.ok(Number(hold.match(/^ +sleep (\d+)$/m)?.[1]) > shard.timeout! * 60, 'it waits past the job timeout');
 
-  // The guard's classification of such a run: the shard timed out, the aggregate test check failed
-  // because of it, so main is a cancelled run to rerun, not a culprit to revert.
-  const ci = [15368], required = ['test', 'typecheck'];
-  const checks = [
-    { name: 'typecheck', result: 'success', appId: 15368, id: 1 },
-    { name: 'test shard 1', result: 'success', appId: 15368, id: 2 },
-    { name: 'test shard 2', result: 'timed_out', appId: 15368, id: 3 },
-    { name: 'test-browser', result: 'success', appId: 15368, id: 4 },
-    { name: 'test', result: 'failure', appId: 15368, id: 5 },
-  ];
-  assert.deepEqual(commitVerdict(checks, required, ci), { verdict: 'cancelled', failing: ['test'], checkRun: 3 });
-  // A step that failed the shard outright is a failing test, which is why the step never fails on its own.
-  assert.deepEqual(commitVerdict(checks.map(check => check.id === 3 ? { ...check, result: 'failure' } : check), required, ci), { verdict: 'fail', failing: ['test'] });
 });

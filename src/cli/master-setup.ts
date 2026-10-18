@@ -3,7 +3,6 @@ import { reviewerBindingHealth } from '../reviewer.js';
 import { loopSupervision, loopSupervisionAttention, type LoopSupervisorEvidence, type LoopSupervisorHost } from '../supervisor.js';
 import { readDaemonState } from '../master-daemon.js';
 import { detectLoopSupervisorUnit } from '../daemon/upgrade.js';
-import type { MainGuardReadiness } from '../main-guard.js';
 import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -43,7 +42,7 @@ export async function loopSupervisorEvidence(root: string, master: MasterConfig,
   return { unit, reexecuted: state?.upgrade?.last?.self === true };
 }
 
-export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost, coordinator?: { mainGuard?: MainGuardReadiness | null } | null,
+export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost,
   evidence: (root: string, master: MasterConfig) => Promise<LoopSupervisorEvidence | null> = loopSupervisorEvidence) {
   // What the loop's own setup step last did (GY-1416), from this process or the file it keeps.
   const selfProvisioned = await lastLoopSelfProvision(root);
@@ -52,7 +51,6 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   // The cursor is read only when this vantage could not reach the user manager.
   const supervisorAttention = loopSupervisionAttention(supervisor, supervisor.unreachable ? await evidence(root, master).catch(() => null) : null);
   const herdrWorkspace = await herdrWorkspaceHealth(master);
-  const mainGuard = coordinator?.mainGuard ?? null, revertApprover = mainGuard?.attention ?? null;
   // The loop's own setup step: a failed run, and (GY-1692, GY-1691) the release filing credential it keeps current, which only a host
   // holding no admin credential leaves to the administrator — named here, never in a park. Both belong to the setup section too.
   const filing = selfProvisioned?.releaseFiling;
@@ -61,13 +59,12 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   const filingItem: AttentionItem | null = filing?.state === 'unavailable' ? { subject: 'setup', text: `The release filing credential cannot be issued from this host: ${filing.detail}`, ...humanOwner('issuing credentials to people', filing.next ?? releaseFilingSetupNext) }
     : filing?.state === 'failed' ? { subject: 'setup', text: `The loop's master setup --apply left the release filing credential failed (${selfProvisioned!.at}; the failed run is retried from ten minutes on, backing off): ${filing.detail}`, ...agentOwner('master', setupApplyNext) }
     : filing?.state === 'planned' ? { subject: 'setup', text: `The loop's master setup --apply left the release filing credential planned: ${filing.detail}`, ...agentOwner('master', setupApplyNext) } : null;
-  const setup = { reviewer, supervisor, herdrWorkspace, mainGuard, selfProvision: selfProvisioned,
-    attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : []), ...(revertApprover ? [revertApprover] : []), ...(selfProvisionFailed ? [selfProvisionFailed] : []), ...(filingItem ? [filingItem.text] : [])] };
+  const setup = { reviewer, supervisor, herdrWorkspace, selfProvision: selfProvisioned,
+    attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : []), ...(selfProvisionFailed ? [selfProvisionFailed] : []), ...(filingItem ? [filingItem.text] : [])] };
   // An unsupervised loop stays stopped; each supervisor state names its own repair.
   const attention: AttentionItem[] = supervisorAttention.map(item => ({ subject: 'setup', text: item.text, ...agentOwner('master', item.next) }));
   for (const text of reviewer.attention) attention.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (herdrWorkspace.exists === false) attention.push({ subject: 'setup', text: herdrWorkspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
-  if (revertApprover) attention.push({ subject: 'setup', text: revertApprover, ...agentOwner('master', setupApplyNext) });
   if (selfProvisionFailed) attention.push({ subject: 'setup', text: selfProvisionFailed, ...agentOwner('master', setupApplyNext) });
   if (filingItem) attention.push(filingItem);
   if (!master.browser) attention.push({ subject: 'setup', text: browserProfileMissing, ...humanOwner('issuing credentials to people', browserProfileNext(master.cliPath)) });

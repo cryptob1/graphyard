@@ -7,7 +7,6 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { mergeWriterIdle, mergeWriterReads, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { shadowIdle, shadowReads } from '../src/daemon/cycle-shadow.js';
 import { runMergeTrial, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
@@ -20,10 +19,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-2010 AC-3: in control-plane mode a submitted head present in the shared object store
- * progresses through the merge writer when origin holds only the base branch. Pull-request-era
- * shadow probes that fetched the worker assignment branch fail with missing-remote-ref and must
- * not hold merge-writer admission; the fixed shadow fetches only the base, and the writer still
- * launches its exact-candidate trial.
+ * progresses through the merge writer when origin holds only the base branch. The pull-request-era
+ * shadow gate fetched the worker assignment branch, which fails with missing-remote-ref; it is gone
+ * (AC-5), so nothing in the cycle fetches a worker ref or arms a stall that holds merge-writer
+ * admission, and the writer still launches its exact-candidate trial.
  */
 
 const start = Date.parse('2030-05-01T00:00:00Z');
@@ -85,18 +84,18 @@ async function submittedItem(): Promise<Work> {
   return engine.execute(worker, 'submit', w.id, completionBody(['1', '--head', head], () => head), randomUUID());
 }
 
-function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => number; mergeWriter: MergeWriterReads | null; shadow: ReturnType<typeof shadowReads> | null }) {
+function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => number; mergeWriter: MergeWriterReads | null }) {
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: await world.work(), now: iso(world.now()) }),
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(world.now()), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: world.shadow, mergeWriter: world.mergeWriter,
+    github: githubDouble, merge: githubDouble, mergeWriter: world.mergeWriter,
   } as unknown as DaemonEffects;
 }
 
-test('integration:control-plane-local-head-trial — a head present only in the shared object store progresses through the merge writer when origin has no worker assignment branch; the pull-request-era shadow fetch of that branch fails with missing-remote-ref, the fixed shadow fetches only the base and cannot hold admission, and the writer launches its exact-candidate trial', async () => {
+test('integration:control-plane-local-head-trial — a head present only in the shared object store progresses through the merge writer when origin has no worker assignment branch; the pull-request-era shadow fetch of that branch fails with missing-remote-ref, the loop runs no such fetch and no stall holds admission, and the writer launches its exact-candidate trial', async () => {
   // Regression: the pull-request-era shadow probe fetched the worker assignment branch from origin.
   assert.throws(() => execFileSync('git', ['-C', checkout, 'fetch', '--no-tags', 'origin', 'main', branch], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }),
     (error: Error & { stderr?: string }) => /couldn'?t find remote ref|fatal:/.test(`${error.message}\n${error.stderr ?? ''}`),
@@ -108,12 +107,11 @@ test('integration:control-plane-local-head-trial — a head present only in the 
   assert.ok(git(checkout, 'cat-file', '-t', head) === 'commit', 'the head is in the shared object store');
 
   const fetches: string[][] = [];
-  const shadowRun: ChildRun = async (command, args, options) => {
-    if (command === 'git' && args[2] === 'fetch') { fetches.push([...args]); return ''; }
+  const trials: Parameters<typeof runMergeTrial>[0][] = [];
+  const writerRun: ChildRun = (command, args, options) => {
+    if (command === 'git' && args.includes('fetch')) fetches.push([...args]);
     return defaultChildRun(command, args, options);
   };
-  const trials: Parameters<typeof runMergeTrial>[0][] = [];
-  const writerRun: ChildRun = (command, args, options) => defaultChildRun(command, args, options);
   const trial = async (given: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => {
     const input = { ...given, proofFiles: [...given.proofFiles, ...(await given.discoverProofFiles?.({}) ?? [])] };
     trials.push(input);
@@ -125,31 +123,25 @@ test('integration:control-plane-local-head-trial — a head present only in the 
     base: worktreeBase, merger: async () => 'control-plane', trial,
     record: async (_work, event) => { records.push({ kind: event.kind }); return {}; },
   });
-  const shadow = shadowReads(fixtureConfig, checkout, shadowRun, {
-    base: worktreeBase, record: async () => {}, trial: async () => ({ build: 'pass', tests: { passed: 0, failed: [], files: 0 }, durationMs: 1, logTail: 'ok' }),
-  });
-
-  // Fixed shadow fetch: only the base, never the unpublished worker assignment branch.
-  await shadow.fetch();
-  assert.deepEqual(fetches, [['-C', checkout, 'fetch', '--no-tags', 'origin', 'main']], 'shadow fetches only the base branch');
-  assert.ok(!fetches.some(args => args.includes(branch)), 'shadow never names the worker assignment branch');
 
   // The real writer step launches its trial of the local head while origin still holds no worker ref.
   const state: DaemonState = emptyDaemonState(config);
   const now = () => start;
   const document = async () => (await store.workDocument(w.id))!;
-  const effects = effectsFor({ work: async () => [await document()], now, mergeWriter: reads, shadow });
+  const effects = effectsFor({ work: async () => [await document()], now, mergeWriter: reads });
   await runCycle(config, state, effects, now);
   assert.equal(state.mergeWriter.inFlight?.head, head, 'the merge writer admitted the local head and started its merge');
   assert.equal(state.mergeWriter.inFlight?.key, w.key);
   await mergeWriterIdle(state);
-  await shadowIdle(state);
   await runCycle(config, state, effects, now);
   assert.ok(trials.length >= 1, 'the writer launched its exact-candidate trial');
   assert.equal(trials[0]!.key, w.key);
   assert.ok(trials[0]!.proofs.includes('unit:app-works'), 'the trial retains the candidate\'s proof gates');
   assert.ok(records.some(entry => entry.kind === 'intent' || entry.kind === 'trial'), `the writer recorded trial progress: ${JSON.stringify(records)}`);
-  // Shadow ran in the same cycles and still never fetched the unpublished worker ref.
-  assert.ok(fetches.every(args => !args.includes(branch)), 'shadow probes cannot hold merge-writer admission by fetching an unpublished worker ref');
+  // No step of either cycle fetched the unpublished worker ref, and no stall stands to hold the writer's admission.
+  assert.ok(fetches.every(args => !args.some(arg => arg.includes(branch))), `no fetch names the worker assignment branch: ${JSON.stringify(fetches)}`);
+  assert.deepEqual(Object.values(state.stepStalls).filter(run => run.stalledAt), [], 'no stall holds merge-writer admission');
+  const steps = state.metrics.flatMap(metric => metric.timings?.steps.map(entry => entry.step) ?? []);
+  assert.ok(steps.includes('merge writer') && !steps.includes('shadow gate'), `the loop runs the writer's trial and no shadow trial: ${steps.join(', ')}`);
   assert.equal(git(origin, 'for-each-ref', '--format=%(refname)', 'refs/heads').trim(), 'refs/heads/main', 'origin still holds only the base branch');
 });

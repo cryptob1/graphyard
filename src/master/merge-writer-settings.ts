@@ -1,31 +1,9 @@
-// Concern: the merge writer's `run.shadowGate` (GY-1522), `run.mergeWriter` (GY-1524) and `run.candidates` (GY-1526) settings and the defaults they resolve to.
+// Concern: the merge writer's `run.mergeWriter` (GY-1524) and `run.candidates` (GY-1526) settings and the defaults they resolve to.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { configHome } from '../install/secrets.js';
 import { maxCandidateChanges } from '../project-applications.js';
-
-/** How long one trial (build plus the affected tests) may run before it is killed; a timeout is no verdict and is retried later (cycle-shadow.ts). */
-export const defaultShadowTimeoutMinutes = 20;
-/** The longest trial an install may ask for: two hours already dwarfs the pipeline's p90 target, and one trial runs at a time. */
-export const maxShadowTimeoutMinutes = 120;
-
-/**
- * `run.shadowGate` in .graphyard/master.json: the shadow gate trial-merges every submitted head
- * onto main beside GitHub's gate and records the verdict; it writes nothing. Unset, it runs (github
- * mode is the only mode) with `defaultShadowTimeoutMinutes`.
- */
-export const shadowGateSettingsSchema = z.object({
-  enabled: z.boolean().optional(),
-  timeoutMinutes: z.number().int().min(1).max(maxShadowTimeoutMinutes).optional(),
-}).strict();
-export type ShadowGateSettings = z.infer<typeof shadowGateSettingsSchema>;
-
-/** The settings with their defaults applied. */
-export const shadowGateSettings = (run: { shadowGate?: ShadowGateSettings }) => ({
-  enabled: run.shadowGate?.enabled ?? true,
-  timeoutMinutes: run.shadowGate?.timeoutMinutes ?? defaultShadowTimeoutMinutes,
-});
 
 // ---- The merge executor's settings (GY-1524) -------------------------------------------------------
 
@@ -33,16 +11,22 @@ export const shadowGateSettings = (run: { shadowGate?: ShadowGateSettings }) => 
 export const defaultMergeWriterRetrials = 3;
 /** The most re-trials an install may ask for: every one is a full build and test run on a fresh merge commit. */
 export const maxMergeWriterRetrials = 10;
+/** How long one trial (build plus the affected tests) may run before it is killed; a timeout is no verdict and is retried later. */
+export const defaultTrialTimeoutMinutes = 20;
+/** The longest trial an install may ask for: two hours already dwarfs the pipeline's p90 target, and one trial runs at a time. */
+export const maxTrialTimeoutMinutes = 120;
 /** The install's deploy key by default: `<config home>/<install>/deploy-key` (`~/.config/graphyard`, or GRAPHYARD_CONFIG_HOME), the one credential the push child sees. */
 export const defaultDeployKeyFile = (installId: string, home?: string) => join(home === undefined ? configHome() : join(home, '.config', 'graphyard'), installId, 'deploy-key');
 
 /**
  * `run.mergeWriter` in .graphyard/master.json: the control-plane merge executor's deploy key and
- * its re-trial bound. Unset, the key is the install's default and the bound `defaultMergeWriterRetrials`.
+ * its re-trial bound and trial time limit. Unset, the key is the install's default, the bound
+ * `defaultMergeWriterRetrials` and the limit `defaultTrialTimeoutMinutes`.
  */
 export const mergeWriterSettingsSchema = z.object({
   deployKeyFile: z.string().trim().min(1).max(1000).optional(),
   retrials: z.number().int().min(0).max(maxMergeWriterRetrials).optional(),
+  trialTimeoutMinutes: z.number().int().min(1).max(maxTrialTimeoutMinutes).optional(),
 }).strict();
 export type MergeWriterSettings = z.infer<typeof mergeWriterSettingsSchema>;
 
@@ -53,6 +37,7 @@ const expandHome = (path: string, home: string) => path === '~' ? home : path.st
 export const mergeWriterSettings = (run: { mergeWriter?: MergeWriterSettings }, installId: string, home?: string) => ({
   deployKeyFile: expandHome(run.mergeWriter?.deployKeyFile ?? defaultDeployKeyFile(installId, home), home ?? homedir()),
   retrials: run.mergeWriter?.retrials ?? defaultMergeWriterRetrials,
+  trialTimeoutMinutes: run.mergeWriter?.trialTimeoutMinutes ?? defaultTrialTimeoutMinutes,
 });
 
 // ---- The loop-driven candidate cut (GY-1526) ------------------------------------------------------

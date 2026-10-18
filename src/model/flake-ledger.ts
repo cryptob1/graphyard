@@ -10,7 +10,6 @@
 import { z } from 'zod';
 import type { Work } from './work.js';
 import type {} from '../merge-queue.js';
-import type {} from '../main-guard.js';
 import type {} from './merge-ledger.js';
 import { proofTestFile } from './scope-companions.js';
 
@@ -75,8 +74,6 @@ export function flakeSources(work: readonly Work[]): FlakeSource[] {
     const pr = item.submission?.pr ?? null, proofs = itemProofs(item);
     for (const rerun of item.checkReruns ?? []) if (rerun.state === 'passed')
       sources.push({ check: rerun.check, sha: rerun.sha, pr, source: 'pr-rerun', failedRunId: rerun.failedRunId, at: rerun.resolvedAt ?? rerun.at, proofs });
-    for (const flake of item.mainGuardFlakes ?? []) if (flake.failedRunId !== null)
-      sources.push({ check: flake.check, sha: flake.mergeSha, pr, source: 'main-rerun', failedRunId: flake.failedRunId, at: flake.at, proofs });
   }
   return sources;
 }

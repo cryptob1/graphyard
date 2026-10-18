@@ -26,7 +26,6 @@ export const baseFailureRetireMs = 24 * 3_600_000;
 export const trialCheck = 'trial';
 // Keyed by the failing set, not the tip: a head held again on a newer tip with the same tests names the item already filed.
 const trialKey = (item: Pick<Work, 'id'>, tests: readonly string[]) => `trial:${item.id}:${createHash('sha256').update(tests.join('\n')).digest('hex').slice(0, 16)}`;
-const mainGuardKey = (mergeSha: string, check: string) => `main-guard:${mergeSha}:${check}`;
 /** Whether a failing test is one of the item's criterion proofs: such a failure is never set aside (GY-1834). */
 export const ownProofTest = (item: Pick<Work, 'criteria'>, test: string) => {
   const proof = leadingProof(test);
@@ -51,18 +50,8 @@ function recordedBaseFailures(state: Cycle['state'], work: readonly Work[], stam
       state.baseFailures[key] ??= { test: (held.tests.length ? held.tests : held.files).join(', ').slice(0, 500), check: trialCheck, baseSha: held.tip, jobId: null, url: null, raisedAt: stamp,
         blocks: [{ key: item.key, id: item.id, sha: ledger!.head!, jobId: null, url: null }], item: null, cleared: null };
     }
-    for (const revert of item.mainGuardReverts ?? []) {
-      if (revert.state !== 'abandoned' || revert.cause !== 'base-failure' || !revert.baseFailure || revert.baseFailure.cleared || revert.baseFailure.coveredBy) continue;
-      for (const shared of revert.baseFailure.shared) {
-        if (!shared.tests.length) continue;
-        const key = mainGuardKey(revert.mergeSha, shared.check);
-        live.add(key);
-        state.baseFailures[key] ??= { test: shared.tests.join(', ').slice(0, 500), check: shared.check, baseSha: revert.mergeSha, jobId: shared.run, url: null, raisedAt: stamp,
-          blocks: [{ key: item.key, id: item.id, sha: revert.mergeSha, jobId: shared.revertRun, url: null }], item: null, cleared: null };
-      }
-    }
   }
-  // A recorded failure its item no longer shows is over: nothing of it is rerun or refreshed, the writer and the guard judge afresh.
+  // A recorded failure its item no longer shows is over: nothing of it is rerun or refreshed, the writer judges afresh; an old cursor's main-guard: records clear the same way.
   for (const key of Object.keys(state.baseFailures)) if ((key.startsWith('trial:') || key.startsWith('main-guard:')) && !live.has(key)) delete state.baseFailures[key];
 }
 

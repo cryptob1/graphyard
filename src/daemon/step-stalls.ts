@@ -703,7 +703,7 @@ export function stallRemedyRunner(config: () => MasterConfig, state: () => Daemo
  * writer's `admit` answers false, so it starts no new merge while the window stands (a settled
  * flight is still recorded, replays and owed reworks still run); its `merger` read, made before
  * admission every cycle, is held as an effect call. Every other effect call — a top-level port,
- * or a method of a structured port (`shadow.record`, `mainWatch.*`, `promotion.*`, …), named
+ * or a method of a structured port (`mergeWriter.record`, `mainWatch.*`, `promotion.*`, …), named
  * `port.method` — is watched per invocation: its failure is noted with the resource its first
  * argument names (`noteCallFailure`, `callResource`), and once a stall holds that invocation, a
  * call of it inside the window answers the hold — thrown, or rejected when it failed as a promise —

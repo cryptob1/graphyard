@@ -8,7 +8,6 @@ import type { DaemonEffects } from '../src/daemon/effects.js';
 import type { FlakeLedgerStore } from '../src/flake-ledger.js';
 import type { FlakeLedger } from '../src/model/flake-ledger.js';
 import { proofTestFile } from '../src/model/scope-companions.js';
-import { mainFailedRerunLimit } from '../src/main-guard.js';
 import { checkRerunLimit } from '../src/merge-queue.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -158,7 +157,6 @@ test('unit:flake-ledger-never-relaxes-gates — a log naming no test, or a test 
   // The ledger only reads: no item, rerun or revert changes, and the single reruns stand.
   assert.deepEqual(work, before);
   assert.deepEqual(fake.reruns, []);
-  assert.equal(mainFailedRerunLimit, 1);
   assert.equal(checkRerunLimit, 20);
   // A log that cannot be read is retried, then recorded under its check so it is not read forever.
   const unreadable = fakeOf([rerun(1, 801, sha(1), hour)], { 801: new Error('log expired') }), kept = memoryStore();

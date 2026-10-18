@@ -14,7 +14,6 @@ import { closeWork } from '../close.js';
 import { recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 import { recordDecomposition } from '../../decomposition.js';
-import { recordShadowVerdict } from '../shadow-verdict.js';
 import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
@@ -115,14 +114,6 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id]) {
       await refuseLead(context, id, 'closed-question');
       return judgeClosedQuestion(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
-    },
-  },
-  // The shadow merge gate's verdict for a head (GY-1522): an observation recorded by the loop's coordinator identity only.
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/shadow-verdict$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'shadow-verdict');
-      return recordShadowVerdict(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // Review by risk in control-plane mode (GY-1525): the coordinator registers each reviewer launch

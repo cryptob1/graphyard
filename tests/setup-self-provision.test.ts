@@ -8,7 +8,6 @@ import { fingerprint } from '../src/install/secrets.js';
 import type { Transport } from '../src/install/transport.js';
 import { loopProvisionDelay, loopSelfProvision, masterSetup, setupApplyNext, setupAuditFile, setupHealth } from '../src/cli/master-setup.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { mainGuardReadiness } from '../src/main-guard.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -197,7 +196,7 @@ test('unit:setup-attention-owner — a corrupt self-provision status file reads 
     await mkdir(join(root, '.graphyard'), { recursive: true });
     await writeFile(join(root, '.graphyard', 'setup-self-provision.json'), '{"at":"2026-10-07T0');
     const host = { platform: 'linux' as NodeJS.Platform, temporaryDirectories: [] as string[], home: root, run: () => '' };
-    assert.equal((await setupHealth(root, master, host, null, async () => null)).setup.selfProvision, null);
+    assert.equal((await setupHealth(root, master, host, async () => null)).setup.selfProvision, null);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
@@ -208,12 +207,7 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
       repository: 'owner/attention', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-attention', autoMerge: true, mergeMethod: 'merge', workers: [],
       browser: { profile: 'Default' } }) as MasterConfig;
     const host = { platform: 'linux' as NodeJS.Platform, temporaryDirectories: [] as string[], home: root, run: () => '' };
-    const { setup, attention } = await setupHealth(root, master, host, { mainGuard: mainGuardReadiness({ github: true, required: ['test'], revertApprover: null }) }, async () => null);
-    const item = attention.find(entry => /revert approver is missing/.test(entry.text))!;
-    assert.ok(item, JSON.stringify(attention));
-    assert.deepEqual([item.subject, item.role, item.human, item.humanOnly], ['setup', 'master', false, null], 'owned by the master, never the human');
-    assert.ok(item.next.startsWith('graphyard master setup --apply'), item.next);
-    assert.equal(item.next, setupApplyNext);
+    const { setup, attention } = await setupHealth(root, master, host, async () => null);
     assert.equal(attention.some(entry => entry.human && /revert approver|variable/i.test(entry.text)), false, 'no human item for a derivable variable');
     assert.equal(setup.selfProvision, null, 'a status read runs nothing');
 
@@ -227,7 +221,7 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
     const done = { at: '2026-10-07T05:00:00.000Z', outcome: 'set GRAPHYARD_REVERT_APPROVER_APP_ID', failed: false };
     assert.deepEqual(await loopSelfProvision(root, master, { now: now + 60_000, setup: setupStub }), done);
     assert.deepEqual(runs, [true], 'not again within the hour');
-    assert.deepEqual((await setupHealth(root, master, host, null, async () => null)).setup.selfProvision, done, 'the setup section reports what the loop did');
+    assert.deepEqual((await setupHealth(root, master, host, async () => null)).setup.selfProvision, done, 'the setup section reports what the loop did');
     await loopSelfProvision(root, master, { now: now + 3_600_000, setup: setupStub });
     assert.deepEqual(runs, [true, true], 'and again after it');
     await new Promise(resolve => setTimeout(resolve, 20));
@@ -239,7 +233,7 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
     await assert.rejects(loopSelfProvision(root, master, { now: now + 7_260_000, setup: failing }), /setup self-provision failed: railway is not logged in/);
     const kept = JSON.parse(await readFile(join(root, '.graphyard', 'setup-self-provision.json'), 'utf8'));
     assert.deepEqual([kept.failed, kept.outcome], [true, 'failed: railway is not logged in']);
-    const failedItem = (await setupHealth(root, master, host, null, async () => null)).attention.find(entry => /master setup --apply failed/.test(entry.text));
+    const failedItem = (await setupHealth(root, master, host, async () => null)).attention.find(entry => /master setup --apply failed/.test(entry.text));
     assert.deepEqual([failedItem?.role, failedItem?.human], ['master', false], 'the failure is the master\'s attention');
     assert.equal((await loopSelfProvision(root, master, { now: now + 7_260_000, setup: failing })).failed, true, 'reported once, not retried at once');
     assert.equal(runs.length, 3);
@@ -438,7 +432,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1691 (GY-1692
       await loopSelfProvision(join(root, step.state), master, { now: now + 600_000, setup: setupStub });
       assert.equal(stubRuns.length, step.state === 'failed' ? 2 : 1, step.state === 'failed' ? 'a failed filing step is retried ten minutes on' : 'an unavailable step waits the hour');
       await new Promise(resolve => setTimeout(resolve, 20));
-      const health = await setupHealth(join(root, step.state), master, host, null, async () => null);
+      const health = await setupHealth(join(root, step.state), master, host, async () => null);
       const item = health.attention.find(entry => text.test(entry.text))!;
       assert.ok(item, `${step.state} is attention: ${JSON.stringify(health.attention)}`);
       assert.deepEqual([item.human, item.role, item.next], [expectHuman, expectHuman ? 'human' : 'master', expectHuman ? step.next : setupApplyNext]);

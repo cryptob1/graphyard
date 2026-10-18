@@ -34,7 +34,7 @@ export async function runDoctor(context: CliContext) {
   if (live && ['admin', 'reader'].includes(live.actor?.role)) { try { definitions = (await api('validation/definitions')).definitions; } catch { definitions = null; } }
   const readiness = readinessChecklist(profile, {
     repository: discovered.repository ?? null,
-    server: { url: base, reachable: !!live, role: live?.actor?.role, github: !!live?.github, githubPermissions: live?.githubPermissions ?? {}, appPermissions, mainGuard: live?.mainGuard ?? null, failure },
+    server: { url: base, reachable: !!live, role: live?.actor?.role, github: !!live?.github, githubPermissions: live?.githubPermissions ?? {}, appPermissions, failure },
     setup: 'error' in setup ? { proposal: null, appliedAt: null, githubApp: null, drift: [], unreadable: [String(setup.error)] } : { ...setup, unreadable: setup.unreadable.filter((entry): entry is string => typeof entry === 'string') },
     proposal: stored?.proposal ?? null,
     validation: definitions ? summarizeDefinitions(definitions) : null,

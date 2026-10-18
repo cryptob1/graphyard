@@ -188,7 +188,6 @@ export const allowlist: Record<string, AllowlistEntry> = {
     door: 'under the github merger GitHub merges the acceptance pull request, so its branch must be on the remote before one opens, and no merge writer runs; the writer pushes only a leased merge onto the base tip, never a review branch' },
   'src/daemon/blocker-probes.ts': { subcommands: ['ls-remote', 'push'], runs: 'the loop\'s blocker probes: the confined credential script (`/bin/sh -c`) and the base-tip read', credential: 'whatever credential the confined worker holds — the probe exists to test it; the base-tip read uses the coordinator checkout\'s own', door: 'the confined credential and outage probes exist to test whatever credential the confined worker itself holds against the remote — run through the merge writer they would test the writer\'s credential and pass exactly where the next attempt fails; the base-tip read answers the outside-scope-test-failure probe at diagnosis time, when the plane, the writer or GitHub is itself the fault under test, so it cannot wait on a merge-writer queue' },
   'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)', door: 'it is the merge writer: its base fetch and leased push are the door itself' },
-  'src/daemon/cycle-shadow.ts': { subcommands: ['fetch'], runs: 'the loop\'s shadow-gate reads', credential: 'the coordinator checkout\'s own git credential', door: 'the shadow gate trials a submitted head already in the coordinator object store (GY-2010: it fetches only the base, never an unpublished worker assignment branch), and runs while the writer is busy with another merge' },
   'src/daemon/deployment.ts': { subcommands: ['fetch'], runs: 'the loop\'s deployment observation and promotion reads (base tip and rc tags)', credential: 'the coordinator checkout\'s own git credential', door: 'deployment observation must read the base tip and rc/* records fresh every cycle, including while the merge writer is stalled or disabled (github delivery mode runs none), and it writes nothing' },
   'src/daemon/held-cli.ts': { subcommands: ['clone'], runs: 'the loop pinning a held CLI snapshot', credential: 'none: a --shared clone of the checkout\'s own object store', door: 'a --shared clone of the checkout\'s own object store: it never reaches the remote, so there is no network call to move' },
   'src/daemon/release-ports.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s async release and promotion ports (ledger sync, leased push, the replay\'s guard)', credential: 'the merge writer\'s deploy key alone (deployKeySshCommand, pushEnvironment)', door: 'the release, promotion and revert steps run outside the merge queue (one candidate per release, not one merge per item), so they reach the remote beside the writer with its deploy key alone rather than through its queue' },
@@ -237,7 +236,6 @@ export const baseline = [
   'src/daemon/acceptance.ts',
   'src/daemon/blocker-probes.ts',
   'src/daemon/cycle-merge-writer.ts',
-  'src/daemon/cycle-shadow.ts',
   'src/daemon/deployment.ts',
   'src/daemon/held-cli.ts',
   'src/daemon/release-ports.ts',
@@ -262,7 +260,7 @@ export const baseline = [
  */
 export const releaseCluster = [
   'src/release-candidate.ts', 'src/release-project.ts', 'src/daemon/release-ports.ts', 'src/daemon/deployment.ts', 'src/daemon/step-stalls.ts',
-  'src/daemon/upgrade.ts', 'src/master/branch-release.ts', 'src/daemon/cycle-merge-writer.ts', 'src/daemon/cycle-shadow.ts', 'src/merge-writer/executor.ts',
+  'src/daemon/upgrade.ts', 'src/master/branch-release.ts', 'src/daemon/cycle-merge-writer.ts', 'src/merge-writer/executor.ts',
 ];
 
 const spoken = (subcommands: string[]) => subcommands.length <= 1 ? subcommands.join('') : `${subcommands.slice(0, -1).join(', ')} and ${subcommands[subcommands.length - 1]}`;
