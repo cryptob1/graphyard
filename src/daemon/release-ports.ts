@@ -8,7 +8,7 @@ import type { Work } from '../model/work.js';
 import type { Goal } from '../model/goal.js';
 import { pendingAtCut } from '../release-pending.js';
 import { installIdFor } from '../install/types.js';
-import { candidateSettings, mergeWriterSettings, shadowGateSettings } from '../master/merge-writer-settings.js';
+import { candidateSettings, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { parseVerificationMap, type VerificationMap } from '../model/verification-maps.js';
 import { contractFile, loadContract, parseContract } from '../e2e/case.js';
 import { installServesDeliveries, type E2eReport } from '../e2e/runner.js';
@@ -183,7 +183,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
   const environment = options.environment ?? process.env;
   const uatUrl = environment[localReleaseVariables.uatUrl], productionUrl = environment[localReleaseVariables.productionUrl], uatStatic = environment[localReleaseVariables.uatStatic];
   if (!uatUrl && !uatStatic) return null;
-  const settings = candidateSettings(config.run), writer = mergeWriterSettings(config.run, installIdFor(config.repository)), shadow = shadowGateSettings(config.run);
+  const settings = candidateSettings(config.run), writer = mergeWriterSettings(config.run, installIdFor(config.repository));
   // GY-1848: the candidate repository's own release failure-action policy (revert by default), read
   // from the coordinator checkout's graphyard.json, never from the plane's deployment variable.
   const release = checkoutRepositoryPolicy(root).release;
@@ -224,7 +224,7 @@ export function localReleasePorts(config: Pick<MasterConfig, 'baseBranch' | 'run
       }
     },
     trial: options.trial ?? (async (revertSha, files) => {
-      const trial = await runMergeTrial({ root, base: options.base, mergeSha: revertSha, changedFiles: files, proofs: [], proofFiles: [], timeoutMs: shadow.timeoutMinutes * 60_000, key: 'candidate-revert', run, environment });
+      const trial = await runMergeTrial({ root, base: options.base, mergeSha: revertSha, changedFiles: files, proofs: [], proofFiles: [], timeoutMs: trialTimeoutMinutes * 60_000, key: 'candidate-revert', run, environment });
       return { build: trial.build, tests: trial.tests, durationMs: trial.durationMs };
     }),
     push: async (revertSha, baseTip) => {

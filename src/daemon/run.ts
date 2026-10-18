@@ -27,7 +27,6 @@ import { divergedHead } from '../cli/checkout-restore-act.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
-import { shadowGateSummary } from './cycle-shadow.js';
 import { mergeWriterSummary } from './cycle-merge-writer.js';
 import { wakeMasterForStalls } from './cycle-master.js';
 import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
@@ -72,8 +71,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     deployment: state.deployment,
     // The main watch (GY-1519): unknown commits on main, the newest, and whether promotion is frozen on one.
     mainWatch: mainWatchSummary(state.mainWatch),
-    // The shadow merge gate's report (GY-1522): outcome counts, trial p50/p90 and the newest disagreements.
-    shadowGate: shadowGateSummary(state.shadow),
     // The control-plane merge executor (GY-1524): the heads queued oldest first, the merge in flight, the last delivery and the newest refusals.
     mergeWriter: mergeWriterSummary(state.mergeWriter),
     // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).
