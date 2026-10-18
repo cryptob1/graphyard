@@ -582,7 +582,7 @@ export function reviewRoundSection(sha: string, history?: ReviewHistory, rounds?
   return (history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch --no-write-fetch-head origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
       + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '')
     + (rounds?.capped || history.changesRequested >= cap ? `${rounds?.capped ? `This is review round ${rounds.round} of this item, past its cap of ${cap} rounds` : `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision`}, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. `
-      + 'Name each blocking finding — an acceptance criterion not met, wrong behaviour, or a security defect — on its own line starting BLOCKING: in the body of REQUEST_CHANGES, and mention every other finding briefly as a nit; a change request with no BLOCKING: line is withdrawn by Graphyard and the head reviewed again, with nothing filed, and one with a blocking finding is escalated to an independent approver rather than reworked. ' : '')
+      + 'Name each blocking finding — a real defect a user or operator would hit with this change, a criterion not met, a leaked secret, or lost or corrupted data, and nothing else — on its own line starting BLOCKING: in the body of REQUEST_CHANGES, and mention every other finding briefly as a nit; a change request with no BLOCKING: line is withdrawn by Graphyard and the head reviewed again, with nothing filed, and one with a blocking finding is escalated to an independent approver rather than reworked. ' : '')
     + (history.withdrawn ? `A previous approval of this head, review ${history.withdrawn.reviewId}, was withdrawn by Graphyard because its Resolved, Follow-up and Overridden threads lines did not account for listed review thread${history.withdrawn.threads.length === 1 ? '' : 's'} ${history.withdrawn.threads.join(' ')}: a thread described only in prose, or named by an ID that is neither its thread ID nor one of its listed comment IDs, is not accounted for. `
       + `Name each of ${history.withdrawn.threads.length === 1 ? 'that thread' : 'those threads'} by its thread ID on exactly one of those closing lines. ` : '');
 }
@@ -633,13 +633,14 @@ export const repeatingPaths = loopRepeatingPaths;
 export { touchesRepeatingPath };
 /**
  * The question the review asks of a change to a repeating path: what it does across many cycles,
- * heads and items, and that the soak suites (`tests/soak-*.test.ts`) cover any repeating behaviour it adds. Files
- * unknown (no observation of this head), the question is asked conditionally.
+ * heads and items, and whether that behaviour stays bounded — asked, never required: the review
+ * must not demand new soak-suite coverage of a repeating change (GY-2000). Files unknown (no
+ * observation of this head), the question is asked conditionally.
  */
 export function repetitionReviewSection(files?: readonly string[] | null) {
   if (files && !touchesRepeatingPath(files)) return '';
   const question = 'ask what it does when repeated across many cycles, heads and items: one follow-up per approval becomes 170 for 40 parents, one refresh per merge becomes one per merge for every open candidate, one session per decision stays open unless something closes it. '
-    + 'Any new behaviour that repeats per cycle, per head or per item must be covered by the soak suites (tests/soak-*.test.ts), which run the real loop over simulated days and assert the system invariants (docs/master-agent.md#system-invariants); a change that adds one without that coverage is a BLOCKING finding. ';
+    + 'Ask whether that repeated behaviour stays bounded; never require new soak-suite coverage of it — lacking tests/soak-*.test.ts coverage is at most a Nit. ';
   return files ? `This change touches ${files.filter(file => touchesRepeatingPath([file])).slice(0, 5).join(', ')}, which run on every loop cycle: ${question}`
     : `If this change touches ${repeatingPaths.join(', ')}, which run on every loop cycle, ${question}`;
 }
@@ -740,6 +741,8 @@ export type ReviewCriterion = { id: string; text: string; proofs?: readonly stri
  * of AGENTS.md, so agents build the simplest thing that meets the criteria instead of machinery.
  */
 export const simplicityParagraph = 'Keep it simple. Build the simplest thing that meets the criteria and gives users a good experience. Do not over-engineer: no defensive layers, extra gates, permission checks or tests for hypothetical cases. Prefer deleting code to adding it. Agents are capable: do not build process around corner cases. ';
+/** The blocking standard (GY-2000): the only findings a review may hold a head with, stated beside the simplicity paragraph in both review prompts; anything else is at most a Nit. */
+export const blockingStandardSection = 'A BLOCKING finding must name a real defect a user or operator would hit with this change, a criterion that is not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. ';
 export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
   const declared = (criteria ?? []).filter(criterion => criterion.proofs && declaredPostDeploy({ proofs: criterion.proofs })).map(criterion => criterion.id);
   if (!declared.length) return '';
@@ -767,6 +770,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + postDeployReviewSection(criteria)
     + findingClassificationSection()
     + simplicityParagraph
+    + blockingStandardSection
     + (fresh ? freshReadSection(fresh, binding.sha) : '')
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
@@ -799,7 +803,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
     : `Review head ${plane.head} against base ${plane.baseTip} under policy revision ${binding.policyRevision}, for work item ${binding.key}: the control plane observed it from the shared object store, and there is no pull request. `;
   const outcome = plane.postMerge
-    ? 'Name each defect worth a fix on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
+    ? 'Name each finding that meets the blocking standard on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
     : '';
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
     + `Read the change with: git diff ${plane.baseTip} ${plane.head} (both commits are in this session's object store; git show --stat ${plane.head} lists its files). `
@@ -809,6 +813,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     + criteriaRuleSection(binding.key, plane.head, criteria)
     + postDeployReviewSection(criteria)
     + controlPlaneFindingSection
+    + blockingStandardSection
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
     + (research ? researchReviewSection(research) : '')
