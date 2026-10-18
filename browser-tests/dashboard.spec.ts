@@ -901,6 +901,33 @@ test('legacy abbreviated SHAs and invalid candidate references never become link
   await expect(page.locator('.work-row .status-line')).toBeVisible();
 });
 
+test('the Tests panel lists each criterion proof with its result from the merge trial, or not run yet without one (GY-2091)', async ({ page }) => {
+  const sha40 = 'e'.repeat(40);
+  const trial = { key: 'GY-1', state: 'intent', head: work.candidate!.sha, baseTip: 'd'.repeat(40), mergeSha: sha40, risk: null, intentAt: '2026-01-01T00:00:00Z', pushedAt: null, observedTip: null, refusal: null, events: 2,
+    trial: { head: work.candidate!.sha, mergeSha: sha40, proofs: { 'unit:a': { executed: 2, failed: 0 }, 'integration:b': { executed: 1, failed: 1 } }, build: 'pass', testFiles: 12 } };
+  const item = (ledger: object | null) => ({ ...work, criteria: [{ id: 'AC-1', text: 'The tests pass', proofs: ['unit:a', 'integration:b'] }], mergeLedger: ledger });
+  await fixture(page);
+  await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [item(trial)], now: '2026-01-01T00:00:00Z' } }));
+  await login(page);
+  await cardSelect(page).click();
+  const panel = itemPage(page).locator('section[aria-label="Tests"]');
+  await expect(panel.getByText(/Merge trial of eeeeeeee: build passed · 12 test files ran/)).toBeVisible();
+  await expect(panel.getByText('1 of 2 passed on the current head')).toBeVisible();
+  await expect(panel.locator('[data-case="a"]')).toContainText('✓ passed unit:a');
+  await expect(panel.locator('[data-case="a"]')).toContainText('2 executed in the merge trial');
+  await expect(panel.locator('[data-case="b"]')).toContainText('× failed integration:b');
+  await expect(panel.locator('[data-case="b"]')).toContainText('1 executed in the merge trial · 1 failed');
+  // Without a trial of the head nothing has judged the proofs yet.
+  await page.getByRole('button', { name: 'Sign out' }).click();
+  await page.route('**/api/work-snapshot', route => route.fulfill({ json: { work: [item(null)], now: '2026-01-01T00:00:00Z' } }));
+  await login(page);
+  await cardSelect(page).click();
+  const waiting = itemPage(page).locator('section[aria-label="Tests"]');
+  await expect(waiting.locator('[data-case="a"]')).toContainText('○ not run yet unit:a');
+  await expect(waiting.locator('[data-case="b"]')).toContainText('○ not run yet integration:b');
+  await expect(waiting.getByText(/Merge trial of/)).toHaveCount(0);
+});
+
 test('proof authority shows the live grant set, its source, and unproducible required proof', async ({ page }) => {
   await fixture(page); await login(page);
   await openPage(page, 'Settings', 'Proof authority');

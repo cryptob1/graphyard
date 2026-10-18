@@ -55,29 +55,58 @@ function dashboard(work: Work[]): Dashboard {
     setError: noop, signOut: noop } as unknown as Dashboard;
 }
 
-test('unit:test-case-repository-ui — a work item page lists the end-to-end cases linked to its pull request with their result on the current head', () => {
+test('unit:test-case-repository-ui — a work item page lists the tests linked to its pull request with their result on the current head', () => {
   const item = linkedItem();
   const html = renderToStaticMarkup(createElement(TestCasesView, { item, registry, now: new Date(NOW) }));
   const row = (id: string) => text(new RegExp(`<li data-case="${id}">([\\s\\S]*?)</li>`).exec(html)![1]);
-  assert.match(text(html), /Test cases 1 of 5 passed on the current head/);
+  assert.match(text(html), /Tests 1 of 5 passed on the current head/);
   assert.match(row('checkout-pays'), /✓ passed e2e:checkout-pays Checkout takes payment · AC-1 · v1 in staging/);
   assert.match(row('checkout-pays'), /4 executed \/ 0 skipped · github-actions run 4242 attempt 2 · e2e-producer/);
   assert.match(row('refund-issued'), /× failed e2e:refund-issued Refunds are issued/);
   assert.match(row('receipt-mailed'), /◌ skipped e2e:receipt-mailed/, 'a skipped run is its own state, never a pass');
-  assert.match(row('login-works'), /○ not run on this head e2e:login-works · AC-2/, 'a pass on an older head is not a result on this one');
-  assert.match(row('search-finds'), /○ not run on this head/, 'a builder\'s own assertion is never a result');
+  assert.match(row('login-works'), /○ not run yet e2e:login-works · AC-2/, 'a pass on an older head is not a result on this one');
+  assert.match(row('search-finds'), /○ not run yet/, 'a builder\'s own assertion is never a result');
   // A registered case whose test file the pull request changes is listed apart, and never as required.
   assert.match(text(html), /Touched by this pull request · not required e2e: cart-totals Cart totals add up · changes tests\/e2e\/cart-totals\.spec\.ts/);
   // Without a pull request there is no head to report on.
   const unsubmitted = { ...item, candidate: null, observation: null };
   assert.match(text(renderToStaticMarkup(createElement(TestCasesView, { item: unsubmitted, registry: null, now: new Date(NOW) }))), /0 of 5 passed on no head yet.*○ no pull request yet e2e:checkout-pays/);
-  // An item with no end-to-end case shows no section at all.
-  const plain = { ...item, criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], observation: { ...item.observation!, files: [] } };
-  assert.equal(renderToStaticMarkup(createElement(TestCasesView, { item: plain, registry, now: new Date(NOW) })), '');
   // On the page itself it sits between Pull request and Activity.
   const page = renderToStaticMarkup(createElement(WorkDetails, { ...dashboard([item]), item }));
-  const order = ['aria-label="Pull request"', 'aria-label="Test cases"', 'aria-label="Activity"'].map(label => page.indexOf(label));
+  const order = ['aria-label="Pull request"', 'aria-label="Tests"', 'aria-label="Activity"'].map(label => page.indexOf(label));
   assert.ok(order.every(index => index > 0) && order[0] < order[1] && order[1] < order[2], `section order ${order}`);
+});
+
+// GY-2091: a `unit:`/`integration:` proof's result is the merge writer's trial of the current head.
+const trialledItem = (): Work => {
+  const base0 = (fixtureWork() as any[]).map(live)[0] as Work;
+  return { ...base0, id: 'gy-2091-probe', key: 'GY-2091', stage: 'review', implementers: ['builder'], workspaces: [], lease: null, lastAssignment: undefined,
+    criteria: [{ id: 'AC-1', text: 'Proven by tests', proofs: ['unit:a', 'integration:b'] }], scenarioRequirements: [], candidate: { sha: head, baseSha: base, pr: 2091, branch: 'graphyard/gy-2091-1', author: 'builder' }, policyRevision: 1,
+    mergeLedger: { key: 'GY-2091', state: 'intent', head, baseTip: base, mergeSha: 'd'.repeat(40), risk: null, intentAt: iso(-600_000), pushedAt: null, observedTip: null, refusal: null, events: 2,
+      trial: { head, mergeSha: 'd'.repeat(40), proofs: { 'unit:a': { executed: 2, failed: 0 }, 'integration:b': { executed: 1, failed: 1 } }, build: 'pass', testFiles: 12 } } as Work['mergeLedger'],
+    observation: { ...(base0.observation ?? {}), candidate: { sha: head, baseSha: base, pr: 2091, branch: 'graphyard/gy-2091-1', author: 'builder' }, files: [] } as Work['observation'] };
+};
+
+test('integration:item-tests-panel — a Tests panel lists every criterion proof with its result from the merge trial of the head, or not run yet without one', () => {
+  const html = renderToStaticMarkup(createElement(TestCasesView, { item: trialledItem(), registry: null, now: new Date(NOW) }));
+  const row = (id: string) => text(new RegExp(`<li data-case="${id}">([\\s\\S]*?)</li>`).exec(html)![1]);
+  assert.match(text(html), /Tests 1 of 2 passed on the current head/);
+  assert.match(text(html), /Merge trial of dddddddd ?: build passed · 12 test files ran/);
+  assert.match(row('a'), /✓ passed unit:a · AC-1/);
+  assert.match(row('a'), /2 executed in the merge trial/);
+  assert.match(row('b'), /× failed integration:b · AC-1/);
+  assert.match(row('b'), /1 executed in the merge trial · 1 failed/);
+  // A trial of an older head is no result on this one; without a trial every proof is still owed.
+  const older = trialledItem(); older.mergeLedger!.trial!.head = old;
+  const waiting = renderToStaticMarkup(createElement(TestCasesView, { item: older, registry: null, now: new Date(NOW) }));
+  assert.doesNotMatch(waiting, /Merge trial of/);
+  assert.match(text(waiting), /0 of 2 passed on the current head.*○ not run yet unit:a.*○ not run yet integration:b/);
+  const untried = { ...trialledItem(), mergeLedger: null } as Work;
+  assert.match(text(renderToStaticMarkup(createElement(TestCasesView, { item: untried, registry: null, now: new Date(NOW) }))), /○ not run yet unit:a · AC-1.*○ not run yet integration:b · AC-1/);
+  // A trial that counted none of a proof's cases has judged nothing yet.
+  const countedNone = trialledItem(); countedNone.mergeLedger!.trial!.proofs['integration:b'] = { executed: 0, failed: 0 };
+  const none = renderToStaticMarkup(createElement(TestCasesView, { item: countedNone, registry: null, now: new Date(NOW) }));
+  assert.match(text(new RegExp(`<li data-case="b">([\\s\\S]*?)</li>`).exec(none)![1]), /○ not run yet integration:b · AC-1 0 executed in the merge trial/);
 });
 
 const at = (seq: number, result: ScenarioRun['result'], sha = head, extra: Partial<ScenarioRun> = {}): ScenarioRun => ({ seq, scenarioId: 'checkout-pays', proof: 'e2e:checkout-pays', result, scenarioRevision: 1, environment: 'staging', executed: 4, skipped: result === 'skipped' ? 1 : 0,

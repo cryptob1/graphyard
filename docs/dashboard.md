@@ -17,7 +17,7 @@ Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent
 
 ## Workers
 
-**Workers** (sidebar, beside Shipped and Insights; `web/pages/index.tsx`): a row is one [session handle](master-agent-sessions.md#session-handles) from the item, not from Herdr. A running handle unobserved over **15 minutes** by default (`sessionStaleThresholdMs`) reads *not seen for <time since that observation>*, never as running, and isn't counted open; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) ends a dead handle.
+**Workers**: a row is one [session handle](master-agent-sessions.md#session-handles) from the item, not from Herdr. A running handle unobserved over **15 minutes** by default (`sessionStaleThresholdMs`) reads *not seen for <time since that observation>*, not running, not open; the loop's [session report](master-agent.md#session-liveness-is-reconciled-not-trusted) ends a dead handle.
 
 **Copy local**: `herdr agent attach w1V:pJD`; **Copy remote** (`herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>` per `herdr --help`; attachment isn't forwarded: focus, then attach): `herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`.
 
@@ -27,7 +27,7 @@ Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent
 
 ## The status sentence
 
-**Build, Validate, Test, Review, Prove, Merge, Deploy**; done items headline their production state: *Merged, awaiting deployment*, *Deployed, awaiting verification*, *Production verified*, *Deployed with a failure*; *Live* once served. Item page: **What is left**, **Requirements**, **Pull request** (**Merge danger**), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker).
+**Build, Validate, Test, Review, Prove, Merge, Deploy**; done items headline their production state: *Merged, awaiting deployment*, *Deployed, awaiting verification*, *Production verified*, *Deployed with a failure*; *Live* once served. Item page: **What is left**, **Requirements**, **Pull request** (**Merge danger**), **Tests** (each criterion proof's result: merge trial, evidence, *not run yet*), **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker).
 
 ## Insights
 

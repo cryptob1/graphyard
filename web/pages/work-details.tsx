@@ -67,8 +67,9 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
  * section answers one question, in this order: What is left (one plain line per unmet
  * requirement, grouped by step, naming who clears it; gate reasons only through `plainReason`),
  * Requirements (one line per criterion with its met or pending mark, the full text on expand),
- * Pull request (link, commit, changed files, checks, review), Test cases (the e2e cases linked to
- * the pull request, with their result on its head, GY-162) and Activity (the latest events, the
+ * Pull request (link, commit, changed files, checks, review), Tests (every test proof the
+ * criteria name with its result on the head — `unit:`/`integration:` from the merge trial,
+ * `e2e:` from the evidence, GY-162/GY-2091) and Activity (the latest events, the
  * full history on expand). Everything technical — gate internals, sessions and their attach
  * commands, review provider, next action and executors, agent requests, evidence — is in one
  * collapsed "Technical details" section, in the control plane's own vocabulary, and policy
