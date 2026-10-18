@@ -21,6 +21,7 @@ import { piRunner } from '../runner/pi.js';
 import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
 import { ChildProcessError, type ChildRun } from '../child-runner.js';
+import { simplicityParagraph } from '../reviewer.js';
 import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
 import { detailChanged } from './decisions.js';
@@ -150,6 +151,7 @@ export function acceptancePrompt(config: { repository: string }, goal: Goal, exi
     lastRefusal: goal.refusal ? { by: goal.refusal.by, reason: goal.refusal.reason } : null, existingOutcomes: existing.outcomes };
   return `You are the Graphyard acceptance role for ${config.repository}: the customer's advocate. Turn the goal below into what its users must be able to do, before any code is written. `
     + 'This session is read-only: never edit, commit, push, claim or decide anything, and never ask anyone anything. '
+    + simplicityParagraph
     + `Read ${caseDirectory}/ and ${contractFile} in this checkout for the case format and the outcomes already declared. `
     + `Then call the ${acceptanceTool} tool exactly once with goal "${goal.key}" and outcomes: each outcome a new id (lower-case letters, digits, ., _ and -), a plain-language title a customer would say, `
     + 'the criteria they would check it by, and exactly one case proving it — a case in the e2e/cases format whose id is new, with required true, target "uat", and http or browser steps that check what the customer sees, not how it is built. '
