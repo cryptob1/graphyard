@@ -225,6 +225,19 @@ img.mark{width:26px;height:26px}
 .human-request{border:1px solid color-mix(in srgb,var(--needs-you) 45%,var(--bg));border-radius:var(--radius);padding:var(--space-4);background:var(--surface)}
 .human-request textarea{margin:var(--space-2) 0}
 .human-request h3{margin-bottom:var(--space-2)}.human-steps{margin:0 0 var(--space-2);padding-left:var(--space-4);font-size:13px;line-height:1.6}.human-why{margin:0 0 var(--space-2);font-size:13px}.human-kind{margin-bottom:var(--space-2)}.agent-details{margin-top:var(--space-3)}.agent-details dl{font-size:11px;color:var(--text-2);overflow-wrap:anywhere}.agent-details dt{font-weight:600;margin-top:var(--space-2)}.agent-details dd{margin:0}
+.item-details-fold>summary{cursor:pointer;font-weight:600;font-size:var(--type-item)}.item-description{white-space:pre-wrap;font-size:var(--type-body);line-height:1.6}.item-title-full{margin:0;font-size:var(--type-small)}
+
+/* Goal picture page (GY-2011): summary, outcomes, SVG flowchart with Play. */
+.goal-page{display:flex;flex-direction:column;gap:var(--space-5);max-width:720px}
+.goal-head{display:flex;flex-direction:column;gap:var(--space-2)}.goal-head h1{margin:0;font-size:26px;font-weight:600;letter-spacing:-.4px;line-height:1.3}
+.goal-summary p{margin:0;font-size:var(--type-sentence);line-height:1.55}
+.outcome-cards{list-style:none;margin:0;padding:0;display:grid;gap:var(--space-3);grid-template-columns:repeat(auto-fill,minmax(180px,1fr))}
+.outcome-cards li{padding:var(--space-3);border:1px solid var(--border);border-radius:var(--radius);background:var(--bg)}.outcome-cards strong{display:block;margin-bottom:var(--space-2)}.outcome-cards p{margin:0;font-size:var(--type-small);color:var(--text-2)}
+.flow-toolbar{display:flex;align-items:center;justify-content:space-between;gap:var(--space-3)}.play-plan{min-height:36px;padding:0 var(--space-4);border-radius:var(--radius);background:var(--accent);color:var(--on-accent);font-weight:600;border:0;cursor:pointer}.play-plan:disabled{opacity:.6;cursor:default}
+.flow-caption{margin:0;font-size:var(--type-body);min-height:1.5em}.plan-flow{display:block;max-width:100%;height:auto;color:var(--text-2)}.plan-arrow{stroke:currentColor;stroke-width:2}
+.plan-box{cursor:pointer}.plan-box.lit rect{stroke:var(--text);stroke-width:3}.plan-box text{fill:var(--bg);font-size:13px}.plan-box .plan-box-key{font-family:var(--font-mono);font-size:12px}
+.plan-box.state-todo rect,.swatch.state-todo{fill:var(--text-2);background:var(--text-2)}.plan-box.state-doing rect,.swatch.state-doing{fill:var(--moving);background:var(--moving)}.plan-box.state-checking rect,.swatch.state-checking{fill:var(--needs-you);background:var(--needs-you)}.plan-box.state-done rect,.swatch.state-done{fill:var(--shipped);background:var(--shipped)}
+.flow-legend{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:var(--space-3);font-size:var(--type-small)}.flow-legend .swatch{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:middle}
 
 /* Insights: headline numbers, the Flow panel, the charts, one Show details toggle (GY-168). */
 .insight-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--space-4)}
