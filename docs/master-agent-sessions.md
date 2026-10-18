@@ -43,7 +43,7 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 #### The start bound reads the pane
 
-**Ready**: Herdr active without prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line (`the claude runtime never started within 60 s (command still echoing)`), never Herdr's own `agent_not_found`; retrying `Automatic producer launch for GY-N refused 1 time(s)`.
+**Ready**: Herdr active without prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`), never Herdr's own `agent_not_found`; retrying `Automatic producer launch for GY-N refused 1 time(s)`.
 
 **Approvers**: replaced panes' bounds run from first sight; failed relaunches adopt a started same-name approver, or on `agent_name_taken` a listed holder, else end its session and pane, retry once.
 
@@ -53,7 +53,7 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 Reviewers/producers are `awaiting acknowledgement` until 30s active (`counts.dispatchAwaiting`), re-prompted once quiet past `run.acknowledgementSeconds` (90); resultless is **`never started`**: relaunched ≤3 times (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-**Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision, listed threads; control-plane `mode`, `verdictToken`, re-review `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Control-plane launches register, post as reviewer App identity `SLUG[bot]`. Verdicts post once, only via `graphyard review post --event APPROVE|REQUEST_CHANGES|COMMENT` (body stdin). Refused: missing binding, wrong `GRAPHYARD_REVIEW`, moved head, UNKNOWN `mergeable` past 2min, unlisted thread, approval leaving listed threads unclassified. Re-reviews name the earlier head, its diff, its findings; the body answers each `Earlier: … — FIXED|NOT FIXED`; a `BLOCKING` on `PATH:LINE` no hunk since `previousHead` changes refuses to `Nit:` (earlier path, `AC-N` excepted).
+**Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision, listed threads; control-plane `mode`, `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Control-plane posts as App `SLUG[bot]`. Verdicts post once via `graphyard review post --event APPROVE|REQUEST_CHANGES|COMMENT` (body stdin). Refused: missing binding, wrong `GRAPHYARD_REVIEW`, moved head, UNKNOWN `mergeable` past 2min, unlisted thread, approval leaving threads unclassified. Re-reviews get the earlier diff, findings, answering each `Earlier: … — FIXED|NOT FIXED`; `BLOCKING` on `PATH:LINE` unchanged since `previousHead` refuses; use `Nit:` (earlier paths, `AC-N` excepted).
 
 **Self-review**: before `complete`, workers run `graphyard review self GY-N` — the reviewer's standard for their diff.
 
@@ -65,4 +65,4 @@ Ended sessions' panes close; ≤12 more per cycle, never a standing attempt's: a
 
 ### The dispatcher's own state
 
-Dispatcher bounds its state where it composes it, marking each cut with an ellipsis; schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (no reviewer or producer session launches for any item); `graphyard master restart` repairs it. A session exiting **at launch** is classified by `herdr pane read`: a **provider limit notice** fails over like a mid-session exhaustion; others refused with the pane's last words, retried.
+Dispatcher bounds its own state where it composes it, marking each cut with an ellipsis; schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (no reviewer or producer session launches for any item); `graphyard master restart` repairs it. A session exiting **at launch** is classified by `herdr pane read`: a **provider limit notice** fails over like a mid-session exhaustion; others refused with the pane's last words, retried.
