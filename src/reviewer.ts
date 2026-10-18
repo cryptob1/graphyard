@@ -17,7 +17,7 @@ import { underTestRunner } from './supervisor.js';
 import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type SandboxExec } from './worker-sandbox.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { clientErrorStatus, retryStopAttention } from './retry-stop.js';
-import { defaultReviewRoundCap, pastReviewCap, reviewRoundCapOf, reviewRoundStatus, type ReviewRoundStatus } from './review-cap.js';
+import { defaultReviewRoundCap, findingLocation, pastReviewCap, reviewRoundCapOf, reviewRoundStatus, type ReviewRoundStatus } from './review-cap.js';
 import { writeReviewBinding } from './review-post.js';
 import { criteriaRuleSection, followUpFilingKey, listedThreadAliases, listedThreadLimit, readUnresolvedThreads, resolveFollowUpThreads, resolveNamedThreads, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
@@ -139,6 +139,8 @@ export const reviewRecordSchema = z.object({
   criteriaOnly: z.literal(true).optional(),
   /** The review history the launch prompt was built from (GY-167, reviewHistory): the head last reviewed, and the changes-requested rounds before this one. */
   reviewRound: z.object({ previousHead: sha40.optional(), changesRequested: z.number().int().nonnegative(),
+    /** The findings verbatim of the change request the prompt deltas from (GY-1988), when the item's observation — not the ledger, which keeps no body — holds that round: the re-review opens with one Earlier: line per finding. */
+    earlierFindings: z.array(z.string().min(1).max(300)).max(10).optional(),
     /** The approval of this head that Graphyard last withdrew for leaving listed threads unaccounted, and those threads (GY-959). */
     withdrawn: z.object({ reviewId: z.number().int().positive(), threads: z.array(z.string().min(1).max(200)).min(1).max(listedThreadLimit) }).strict().optional() }).strict().optional(),
   /** This approval's mechanical-fix plan (GY-971, mechanical-findings.ts): read once, while its head is the candidate. */
@@ -557,7 +559,7 @@ export type ReviewHistory = NonNullable<ReviewRecord['reviewRound']>;
  * record keeps the count its own launch started from, so the count survives the ledger reaping
  * older records: it is the larger of the verdicts still on record and the newest carried count.
  */
-export function reviewHistory(records: ReviewRecord[], binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'policyRevision'>, reviewer: string): ReviewHistory {
+export function reviewHistory(records: ReviewRecord[], binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'policyRevision'>, reviewer: string, earlier?: { head: string; findings: readonly string[] } | null): ReviewHistory {
   const own = (record: ReviewRecord) => record.key === binding.key && record.pr === binding.pr && !!record.verdict && record.verdict.reviewer.toLowerCase() === reviewer.toLowerCase();
   const reviewed = records.filter(record => own(record) && record.sha !== binding.sha)
     .sort((a, b) => (Date.parse(a.verdict!.submittedAt) || 0) - (Date.parse(b.verdict!.submittedAt) || 0));
@@ -565,22 +567,47 @@ export function reviewHistory(records: ReviewRecord[], binding: Pick<ReviewBindi
   const requested = (record: ReviewRecord) => own(record) && record.verdict!.state === 'CHANGES_REQUESTED';
   const recorded = new Set(round.filter(requested).map(record => record.verdict!.reviewId)).size;
   const carried = Math.max(0, ...round.filter(record => record.reviewRound).map(record => record.reviewRound!.changesRequested + (requested(record) ? 1 : 0)));
-  const previousHead = reviewed.at(-1)?.sha;
+  const ledgerHead = reviewed.at(-1)?.sha, previousHead = ledgerHead ?? earlier?.head;
+  // The findings ride only with the observation's round (GY-1988): a ledger verdict keeps no body, so its head deltas without them.
+  const earlierFindings = previousHead && earlier && earlier.head === previousHead && earlier.findings.length
+    ? earlier.findings.slice(0, 10).map(finding => finding.slice(0, 300)) : undefined;
   // The latest approval of this very head that Graphyard withdrew as incomplete: the relaunch is told why (GY-959).
   const incomplete = records.filter(record => record.key === binding.key && record.pr === binding.pr && record.sha === binding.sha && record.verdict?.state === 'DISMISSED' && record.unaccounted?.length)
     .sort((a, b) => (Date.parse(a.verdict!.submittedAt) || 0) - (Date.parse(b.verdict!.submittedAt) || 0)).at(-1);
-  return { ...(previousHead ? { previousHead } : {}), changesRequested: Math.max(recorded, carried),
+  return { ...(previousHead ? { previousHead } : {}), ...(earlierFindings ? { earlierFindings } : {}), changesRequested: Math.max(recorded, carried),
     ...(incomplete ? { withdrawn: { reviewId: incomplete.verdict!.reviewId, threads: incomplete.unaccounted! } } : {}) };
 }
 
-/** The prompt's review-round section: the delta since the head last reviewed, and the cap once three rounds requested changes (GY-167). */
-/** `rounds` is the item's own review round against the configured cap (GY-1118); past it the cap applies whatever this pull request's history holds. */
+/**
+ * The earlier round an item's own observation holds (GY-1988): the newest CHANGES_REQUESTED review of an
+ * earlier head, its head and its blocking findings verbatim. A control-plane verdict is recorded on the
+ * observation (server/review-verdict.ts), never on the review ledger by pull-request number, so this is
+ * where a re-review's delta comes from when the ledger has no record of the round — and the only place
+ * its findings exist at all.
+ */
+export function earlierChangeRequest(observation: Work['observation'], sha: string): { head: string; findings: readonly string[] } | null {
+  const requested = (observation?.reviews ?? []).filter(review => review.state === 'CHANGES_REQUESTED' && /^[0-9a-f]{40}$/.test(review.sha) && review.sha !== sha)
+    .sort((a, b) => (Date.parse(a.submittedAt ?? '') || 0) - (Date.parse(b.submittedAt ?? '') || 0));
+  const earlier = requested.at(-1);
+  return earlier ? { head: earlier.sha, findings: earlier.blocking ?? [] } : null;
+}
+
+/**
+ * The prompt's review-round section: the delta since the head last reviewed, and the cap once three rounds requested changes (GY-167).
+ * `rounds` is the item's own review round against the configured cap (GY-1118); past it the cap applies whatever this pull request's history holds.
+ * When the history carries the earlier round's findings (GY-1988, the item's observation), the delta names them and asks one Earlier: line per finding;
+ * a new finding on code unchanged since that head is a Nit. Without findings — round one, or the ledger's head-only history — the text is unchanged.
+ */
 export function reviewRoundSection(sha: string, history?: ReviewHistory, rounds?: ReviewRoundStatus) {
   if (!history && !rounds?.capped) return '';
   history ??= { changesRequested: 0 };
   const cap = rounds?.cap ?? reviewRoundCap;
-  return (history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch --no-write-fetch-head origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
-      + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '')
+  const delta = history.previousHead && history.earlierFindings?.length
+    ? `You already reviewed an earlier head of this item, ${history.previousHead}: this round judges only what changed since then. Read the change with git diff ${history.previousHead} ${sha}. Your earlier round named these findings, verbatim: ${history.earlierFindings.map(finding => `- ${finding}`).join(' ')} `
+      + `Start the review body with one line per earlier finding, exactly "Earlier: <finding> — FIXED" when this head fixes it or "Earlier: <finding> — NOT FIXED" when it does not. Judge only lines that changed since ${history.previousHead}: a new finding on code unchanged since ${history.previousHead} goes on a "Nit: PATH:LINE — FINDING" line — an advisory note kept with the verdict body and in project memory, not a change request and not a new item. `
+    : history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch --no-write-fetch-head origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
+      + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '';
+  return delta
     + (rounds?.capped || history.changesRequested >= cap ? `${rounds?.capped ? `This is review round ${rounds.round} of this item, past its cap of ${cap} rounds` : `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision`}, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. `
       + 'Name each blocking finding — an acceptance criterion not met, wrong behaviour, or a security defect — on its own line starting BLOCKING: in the body of REQUEST_CHANGES, and mention every other finding briefly as a nit; a change request with no BLOCKING: line is withdrawn by Graphyard and the head reviewed again, with nothing filed, and one with a blocking finding is escalated to an independent approver rather than reworked. ' : '')
     + (history.withdrawn ? `A previous approval of this head, review ${history.withdrawn.reviewId}, was withdrawn by Graphyard because its Resolved, Follow-up and Overridden threads lines did not account for listed review thread${history.withdrawn.threads.length === 1 ? '' : 's'} ${history.withdrawn.threads.join(' ')}: a thread described only in prose, or named by an ID that is neither its thread ID nor one of its listed comment IDs, is not accounted for. `
@@ -1138,8 +1165,10 @@ export async function launchReview(root: string, work: Work, profileName: string
     const sessions = profileSessions(profile, [...agents, ...reserved], ledger.reviews);
     if (!sessions.free) return { refusal: new Error(profileAtLimit('Reviewer', profile, sessions)) };
     const requestedAt = now().toISOString();
-    // Read before this launch's own record joins the ledger: the rounds before this one.
-    const reviewRound = reviewHistory(ledger.reviews, binding, reviewerIdentity);
+    // Read before this launch's own record joins the ledger: the rounds before this one. A control-plane
+    // re-review takes its earlier round from the item's own observation (GY-1988): its verdicts are
+    // recorded there, never on the ledger by pull-request number, and only there do its findings live.
+    const reviewRound = reviewHistory(ledger.reviews, binding, reviewerIdentity, plane && !postMerge ? earlierChangeRequest(work.observation, binding.sha) : null);
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound,
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}), ...(freshRead ? { freshRead: { ...freshRead, judged: undefined } } : {}),
@@ -1201,7 +1230,10 @@ export async function launchReview(root: string, work: Work, profileName: string
       try {
         await writeReviewBinding(sessionDirectory, { repository: config.repository, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, criteriaOnly: true,
           ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }),
-          ...(plane ? { mode: 'control-plane' as const, head: binding.sha, baseTip: binding.baseSha, verdictToken: verdictToken! } : {}) });
+          ...(plane ? { mode: 'control-plane' as const, head: binding.sha, baseTip: binding.baseSha, verdictToken: verdictToken!,
+            // A control-plane re-review (GY-1988): the head it deltas from, and the paths its earlier findings named, so review post can judge a BLOCKING: line against the hunks changed since that head.
+            ...(plane && !postMerge && reservation.record.reviewRound?.previousHead ? { previousHead: reservation.record.reviewRound.previousHead,
+              ...(earlierBindingPaths(reservation.record.reviewRound.earlierFindings).length ? { earlierPaths: earlierBindingPaths(reservation.record.reviewRound.earlierFindings) } : {}) } : {}) } : {}) });
       } catch (error) { await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
       // The control plane registers the launch before the session starts (GY-1525): the reviewer
       // principal, head, base tip and token hash. A launch it refuses starts nothing.
@@ -1272,6 +1304,10 @@ export async function launchReview(root: string, work: Work, profileName: string
 
 /** What a control-plane launch registers with the control plane (server/review-verdict.ts `reviewLaunchBodySchema`). */
 export interface ControlPlaneLaunchInput { reviewer: string; head: string; baseTip: string; tokenHash: string; expiresAt: string; postMerge: boolean }
+/** The paths the earlier round's findings named (GY-1988), de-duplicated and bounded, for the session's binding. */
+function earlierBindingPaths(findings: readonly string[] | undefined): string[] {
+  return [...new Set((findings ?? []).map(finding => findingLocation(finding)?.path).filter((path): path is string => !!path))].slice(0, 10);
+}
 /** The default registration: `POST /api/work/:id/review-launch` with the loop's coordinator credential, keyed on the launch so a retry replays. */
 function registerControlPlaneLaunch(config: Pick<MasterConfig, 'url' | 'credentialFile'>) {
   return async (work: Work, launch: ControlPlaneLaunchInput): Promise<{ launch: string }> => {

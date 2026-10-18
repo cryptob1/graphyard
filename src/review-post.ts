@@ -11,6 +11,7 @@ import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ChildRun } from './child-runner.js';
+import { blockingFindings, findingLocation } from './review-cap.js';
 import { canonicalThreadIds, listedThreadLimit, parseFollowUpThreads, parseOverriddenThreads, parseResolvedThreads, threadAliasLimit, unaccountedThreads } from './review-threads.js';
 
 /** The file, in the session's GH_CONFIG_DIR, that binds a reviewer session to its launch. */
@@ -35,9 +36,12 @@ export const reviewBindingSchema = z.object({
   mode: z.enum(reviewBindingModes).optional(),
   /** Control-plane mode: the head and base tip the session judges (the item's candidate, or a delivered merge commit and its first parent) and the one-time verdict token. */
   head: sha.optional(), baseTip: sha.optional(), verdictToken: verdictTokenSchema.optional(),
+  /** A control-plane re-review (GY-1988): the earlier head this round deltas from, and the paths its findings named — the session's own launch context for the unchanged-code check. */
+  previousHead: sha.optional(), earlierPaths: z.array(z.string().min(1).max(1000)).max(10).optional(),
 }).strict().refine(binding => !(binding.threadReadFailure && binding.threadsListed), 'A binding records either the listed threads or the failed read, never both')
   .refine(binding => binding.mode !== 'control-plane' || (!!binding.head && !!binding.baseTip && !!binding.verdictToken), 'A control-plane binding carries head, baseTip and verdictToken')
-  .refine(binding => binding.mode === 'control-plane' || (binding.head === undefined && binding.baseTip === undefined && binding.verdictToken === undefined), 'Only a control-plane binding carries head, baseTip or verdictToken');
+  .refine(binding => binding.mode === 'control-plane' || (binding.head === undefined && binding.baseTip === undefined && binding.verdictToken === undefined), 'Only a control-plane binding carries head, baseTip or verdictToken')
+  .refine(binding => binding.mode === 'control-plane' || (binding.previousHead === undefined && binding.earlierPaths === undefined), 'Only a control-plane binding carries previousHead or earlierPaths');
 export type ReviewPostBinding = z.infer<typeof reviewBindingSchema>;
 
 /** Written once, private, before the session's runtime starts; a launch that cannot write it starts nothing. */
@@ -87,6 +91,36 @@ export function threadLineRefusals(event: ReviewEvent, body: string, binding: Pi
   return refusals;
 }
 
+/** The hunks the new head changes, by file, read from `git diff -U0 PREVIOUS HEAD`: each file's new-side [first line, last line] ranges. */
+export function changedHunks(diff: string): Map<string, Array<[number, number]>> {
+  const hunks = new Map<string, Array<[number, number]>>();
+  let path: string | null = null;
+  for (const line of diff.split('\n')) {
+    const file = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line);
+    if (file) { path = file[2]!; continue; }
+    const hunk = path ? /^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/.exec(line) : null;
+    if (!hunk) continue;
+    const start = Number(hunk[1]), count = hunk[2] === undefined ? 1 : Number(hunk[2]);
+    if (count > 0) hunks.set(path!, [...(hunks.get(path!) ?? []), [start, start + count - 1]]);
+  }
+  return hunks;
+}
+
+/**
+ * The BLOCKING findings a re-review may not request changes for (GY-1988): each naming a PATH:LINE no hunk
+ * of the diff since the earlier head changes, on a path no earlier finding named, with no acceptance
+ * criterion named. A finding re-raising an earlier round's path, naming a changed line, or citing an
+ * unmet AC-N stands; anything else on unchanged code belongs on a Nit: line.
+ */
+export function unchangedCodeFindings(body: string, binding: Pick<ReviewPostBinding, 'previousHead' | 'earlierPaths'>, diff: string): string[] {
+  const hunks = changedHunks(diff), earlier = new Set(binding.earlierPaths ?? []);
+  return blockingFindings(body).filter(finding => {
+    const location = findingLocation(finding);
+    if (!location || /\bAC-\d+\b/.test(finding) || earlier.has(location.path)) return false;
+    return !(hunks.get(location.path) ?? []).some(([first, last]) => location.line >= first && location.line <= last);
+  });
+}
+
 /** A correct invocation for this session, printed after every refusal. */
 export function reviewPostExample(cliPath: string, event: ReviewEvent, binding?: Pick<ReviewPostBinding, 'threadsListed'> | null) {
   const listed = binding?.threadsListed ?? [];
@@ -129,6 +163,15 @@ export async function postReview(input: { event: string | undefined; body: strin
   // Control-plane mode (GY-1525): the verdict goes to the API as the launch's one-time token, bound
   // to the registered head; nothing here runs gh, and the server judges the rest.
   if (bound.mode === 'control-plane') {
+    // A re-review (GY-1988) judges only what changed since the previous head: a BLOCKING: line on
+    // code no hunk since that head changes, on a path no earlier finding named, naming no unmet
+    // criterion, is refused — it belongs on a Nit: line, which stays advisory.
+    if (event === 'REQUEST_CHANGES' && bound.previousHead) {
+      let diff: string | null;
+      try { diff = String(await dependencies.run('git', ['diff', '-U0', bound.previousHead, bound.head!])); } catch { diff = null; }
+      const unchanged = diff === null ? [] : unchangedCodeFindings(body, bound, diff);
+      if (unchanged.length) refuse(`${unchanged.map(finding => `"${finding}"`).join('; ')} name${unchanged.length === 1 ? 's' : ''} code unchanged since the earlier head ${bound.previousHead} this round deltas from, and no earlier finding named ${unchanged.length === 1 ? 'its path' : 'their paths'}; this round judges only what changed: move it to a "Nit: PATH:LINE — FINDING" line, or name the acceptance criterion (AC-N) it leaves unmet`);
+    }
     const base = input.environment.GRAPHYARD_URL;
     if (!base) refuse('GRAPHYARD_URL is unset; a control-plane reviewer session is launched with the control plane\'s address');
     const post = dependencies.fetch ?? fetch;
