@@ -257,6 +257,9 @@ export const baseline = [
 /**
  * GY-1941: the release and promotion cluster. Each file either left the allowlist and the baseline
  * (its calls moved behind the merge writer) or keeps its entry with `door`, the reason it cannot.
+ * GY-2035: src/master/branch-release.ts left both lists — its rework-workspace fetch and its
+ * GY-1753 recovery push stay deleted (GY-2017's registered-head start keeps them out), so no
+ * process but the merge writer touches a worker branch.
  */
 export const releaseCluster = [
   'src/release-candidate.ts', 'src/release-project.ts', 'src/daemon/release-ports.ts', 'src/daemon/deployment.ts', 'src/daemon/step-stalls.ts',
