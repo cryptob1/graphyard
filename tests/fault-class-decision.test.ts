@@ -1569,3 +1569,39 @@ test('manual:fault-class-decision — every ledger write a flight makes is attem
     assert.equal(mergeWriterStallAttention(writer, at), null, `${steps[index]!.kind}: the stall waits for a writer with no attempt alive`);
   }
 });
+
+test('integration:owed-decision-writer-flight-replay — the 09:32:04Z shape stays quiet across a full serial queue drain', () => {
+  const state = emptyDaemonState(config()), bound = mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 });
+  const decided = (at: string, works: Work[], writer: MergeWriterSummary) => {
+    const { reported, counted } = observedFaults(works, at, writer);
+    trackFaults(state.faults, counted, at);
+    return { reported, counted };
+  };
+  let queue = writer2053(gy2053Pass).queue, cursor = Date.parse(gy2053Settled);
+  // The drain: each flight settles, the writer starts the next head the same cycle, and every
+  // observation between — retrial after retrial, the queue emptying — stays quiet in the class.
+  for (const key of Object.keys(gy2053Heads)) {
+    const head = gy2053Heads[key]!, failed = key === 'GY-2011', settleAt = cursor + (failed ? Date.parse(gy2053Settled) - Date.parse(gy2053Flight) : 21 * 60_000);
+    const settleIso = new Date(settleAt).toISOString(), remaining = queue.slice(1), next = remaining[0] ?? null;
+    const writer: MergeWriterSummary = { queue: remaining,
+      inFlight: next ? { key: next.key, id: next.id, head: next.head, startedAt: settleIso } : null,
+      lastMergeAt: settleIso,
+      refusals: [{ key, head: head.toLowerCase(), reason: failed ? 'trial failed: tests tests/item-page-structure.test.ts' : 'base moved 3 times', at: settleIso }],
+      reworks: failed ? [{ key, id: `work-${key}`, head: head.toLowerCase(), reason: 'trial failed: tests tests/item-page-structure.test.ts', refusedAt: settleIso, attempts: 1, lastError: null }] : [],
+      progress: { at: settleIso, what: mergeWriterModule.attemptProgressLine({ key }, failed
+        ? { kind: 'refused', head, reason: 'trial failed: tests tests/item-page-structure.test.ts' } as never
+        : { kind: 'reconciled', mergeSha: '9'.repeat(40), observedTip: gy2053Base } as never) },
+      motionBoundMs: bound };
+    const works = queued2053(new Date(Date.parse(gy2053Pass) - 38 * 60_000).toISOString()).filter(item => remaining.some(entry => entry.key === item.key));
+    assert.deepEqual(decided(settleIso, works, writer).counted.map(fault => fault.kind), [], `${key} settled: the writer's next flight is movement, and nothing is owed`);
+    for (let step = 1; step <= 3; step++) {
+      const at = settleAt + step * 5 * 60_000;
+      const retried: MergeWriterSummary = { ...writer, progress: { at: new Date(at).toISOString(), what: mergeWriterModule.attemptProgressLine({ key: next?.key ?? key }, { kind: 'intent', head: next?.head ?? head, baseTip: gy2053Base, mergeSha: 'd'.repeat(40), risk: 'low', at: new Date(at).toISOString() } as never) } };
+      assert.deepEqual(decided(new Date(at).toISOString(), works, retried).counted.map(fault => fault.kind), [], `${key}'s flight, +${step * 5}m: the retrial's intent is movement`);
+    }
+    queue = remaining; cursor = settleAt;
+  }
+  assert.deepEqual(queue, [], 'the serial queue drained, one head at a time');
+  // The whole replay filed not one decision instance: the writer's own flight was never a judgment.
+  assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'decision'), []);
+});
