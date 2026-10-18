@@ -23,6 +23,7 @@ import { unauthorizedMergeViolation } from './merge-queue.js';
 import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
 import { githubFromEnv } from './github.js';
+import { recordedMergerMode } from './merger-mode.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -139,7 +140,8 @@ const commands = {
     preserved: z.object({ path: z.string().min(1).max(1000), head: z.string().regex(/^[0-9a-f]{40}$/i), branchTip: z.string().regex(/^[0-9a-f]{40}$/i), op: z.enum(['rebase', 'merge', 'cherry-pick']).nullable(), refs: z.string().max(20000), diff: z.string().max(100000), at: z.iso.datetime() }).strict().optional() }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
-  // GY-1523: exactly one of `pr` (accepted only where GitHub observed it) or `head` (the control plane's own observation).
+  // GY-1523: exactly one of `pr` (GitHub is the merge writer) or `head` (the control plane is); the
+  // transaction reads the recorded merger and refuses the other.
   submit: z.object({ epoch, pr: z.number().int().positive().optional(), head: sha.optional(), documentation: z.string().trim().min(1).max(1000).optional() }).strict()
     .superRefine((data, ctx) => { if ((data.pr === undefined) === (data.head === undefined)) ctx.addIssue({ code: 'custom', message: 'A submission names exactly one of pr (a pull request number) or head (a 40-hex commit)' }); }),
   // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
@@ -1013,11 +1015,6 @@ export class Engine {
    * directory); null means no checkout, and every head submission is refused as unreadable.
    */
   gitRunner: GitRunner | null | undefined = undefined;
-  /**
-   * Reads a retained pull request's live reviews (GY-1978). Left undefined, the deployment's GitHub
-   * App (from the environment) reads them; null means none is read and recorded reviews are kept.
-   */
-  pullReviewReader: ((pr: number) => Promise<Pick<Observation, 'reviews' | 'reviewIds' | 'dismissedReviewIds'>>) | null | undefined = undefined;
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
   /**
@@ -1126,7 +1123,8 @@ export class Engine {
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    // Without a GitHub App there is nothing to read, and the transaction refuses the pull request.
+    // While the control plane is the merge writer the transaction refuses a pull request (GY-1523): GitHub is not asked about it.
+    if ((await recordedMergerMode(this.store.leasePool)).merger === 'control-plane') return null;
     // The landing check reads each open submitted peer's observation scope, which a projection leaves
     // out (GY-1042): those peers are read whole. This read holds no coordination lock.
     const all = await withWhole(this.store.leasePool, await lockedWork(this.store.leasePool, [id]), peer => peer.stage !== 'done' && !!peer.submission && !!peer.candidate);
@@ -1140,12 +1138,14 @@ export class Engine {
   /**
    * GY-1523: the control plane's own observation of a head submitted with `complete --head`, read
    * from the shared object store before the transaction, as GitHub is read for a pull request.
-   * Receipt first, so a replayed `complete` runs no git. The candidate's change number is
+   * Receipt first, so a replayed `complete` runs no git; nothing is read while GitHub is the merge
+   * writer, since the transaction refuses the head then. The candidate's change number is
    * allocated inside the transaction, which binds it to this observation.
    */
   private async observeSubmittedHead(actor: Principal, id: string | null, data: { epoch: number; head: string }, key: string): Promise<Observation | null> {
     if (!id) return null;
     if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
+    if ((await recordedMergerMode(this.store.leasePool)).merger !== 'control-plane') return null;
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     const work = (await lockedWork(this.store.leasePool, [id])).find(w => w.id === id || w.key === id);
     const workspace = work?.workspaces.find(w => w.epoch === data.epoch);
@@ -1168,23 +1168,12 @@ export class Engine {
       branch: work.candidate.branch,
       author: work.candidate.author,
     });
-    const recorded = work.observation?.reviews ?? [];
-    observation.reviews = [...recorded];
-    observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
-    // A pull request submitted before the cutover (no change number allocated for it) keeps its
-    // GitHub review path: its live reviews replace the recorded GitHub ones, so an approval posted
-    // after submission passes the review gate; control-plane verdicts are kept beside them.
-    const pr = work.submission?.pr;
-    if (pr && !(await this.store.pool.query('SELECT 1 FROM change_numbers WHERE work_id=$1 AND number=$2', [work.id, pr])).rowCount) {
-      if (this.pullReviewReader === undefined) { const github = await githubFromEnv(); this.pullReviewReader = github ? number => github.pullReviews(number) : null; }
-      // An unreadable pull request keeps what was recorded: the head is still observed and handed on.
-      const live = this.pullReviewReader ? await this.pullReviewReader(pr).catch(() => null) : null;
-      if (live) {
-        const kept = recorded.filter(r => r.source === 'control-plane');
-        observation.reviews = [...kept, ...(live.reviews ?? [])];
-        observation.reviewIds = [...kept.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0), ...(live.reviewIds ?? [])];
-        observation.dismissedReviewIds = live.dismissedReviewIds;
-      }
+    if (work.observation?.reviews) {
+      observation.reviews = [...work.observation.reviews];
+      observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
+    } else {
+      observation.reviews = [];
+      observation.reviewIds = [];
     }
     if (work.candidate.pr) observation.candidate.pr = work.candidate.pr;
     return observation;
@@ -1561,6 +1550,9 @@ export class Engine {
         demand(!work.prAdoption || work.prAdoption.pr === data.pr, `${work.key} already adopted pull request #${work.prAdoption?.pr}; one binding stands per item`, 409);
         // The binding names this repository, so the number and head mean one pull request.
         demand(!!this.repository, 'The control plane has no repository configured; adoption binds a pull request of one repository', 503);
+        // A GitHub pull request can never complete while the control plane is the merge writer, so
+        // the binding would strand the item: the writer is switched first, never adopted around.
+        demand((await recordedMergerMode(db)).merger !== 'control-plane', `This install's merge writer is the control plane, so no GitHub pull request can complete here; switch the writer with graphyard master merger before adopting`, 409);
         // The live read ran outside this transaction; without it the head cannot be verified, so nothing binds.
         demand(adoption, `Pull request #${data.pr} could not be read from ${this.repository}; adoption binds a live head and is refused unreadable`, 503);
         demand(adoption!.state === 'open', closedPullRefusal(data.pr), 409);
@@ -2045,16 +2037,19 @@ export class Engine {
         demand(workspace, 'Register the assignment workspace first');
         // A submission ends the run of blockers the loop cleared in a row (GY-1008).
         if (work.blockerProbe) work.blockerProbe = { ...work.blockerProbe, clears: 0 };
-        // GY-1523: the control plane is the only merge writer, so a submission is a head it observed
-        // (`complete --head`). A pull request (an attempt launched before the cutover) is still
-        // recorded; the observation job then reads its head from the shared object store, which
-        // hands it to the merge writer.
+        // GY-1523: the recorded merger decides, inside this transaction, which form a submission
+        // takes. A head is accepted only while the control plane is the merge writer; a pull request
+        // only while GitHub is. The mode read before the transaction chose what was observed, so a
+        // head whose observation is missing (the merger flipped between the two reads) is refused.
+        const merger = (await recordedMergerMode(db)).merger;
+        if (data.head !== undefined) demand(merger === 'control-plane', `A head is submitted only while the control plane is the merge writer; this install's merger is ${merger}, so push the branch and complete ${work.key} ${data.epoch} with its pull request number, or switch the writer with graphyard master merger`, 409);
+        else demand(merger !== 'control-plane', `A pull request is submitted only while GitHub is the merge writer; this install's merger is ${merger}, so complete ${work.key} ${data.epoch} --head instead`, 409);
         let observed = observation, number: number;
         if (data.head !== undefined) {
           // GY-1849: an adoption binds its pull request's own number, and that binding outlives a later
           // switch of the merge writer: a head would complete it as a newly allocated change instead.
-          demand(!work.prAdoption, `${work.key} adopted pull request #${work.prAdoption?.pr} and completes only as that pull request, never as a head: complete ${work.key} ${data.epoch} ${work.prAdoption?.pr}`, 409);
-          demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane; complete ${work.key} ${data.epoch} --head again`, 409);
+          demand(!work.prAdoption, `${work.key} adopted pull request #${work.prAdoption?.pr} and completes only as that pull request, never as a head; switch the writer back to github with graphyard master merger, then complete ${work.key} ${data.epoch} ${work.prAdoption?.pr}`, 409);
+          demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane (the merger changed while it was read); complete ${work.key} ${data.epoch} --head again`, 409);
           // One change number per (item, head), allocated under the item lock this transaction holds:
           // the candidate, the submission and the number commit together, and a retried or repeated
           // submission of the same head reads the same number back.
@@ -2077,8 +2072,8 @@ export class Engine {
           if (work.prAdoption && observed!.candidate.sha !== work.prAdoption.head)
             demand(false, `${work.key} adopted pull request #${work.prAdoption.pr} at head ${work.prAdoption.head.slice(0, 12)}, but its live head is ${observed!.candidate.sha.slice(0, 12)}; adopt naming the live head, then complete again`, 409);
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
-          // GY-1528: a control-plane observation is refused nothing on plannedFiles (regressionRefusals answers none for it).
-          const regressions = regressionRefusals(work, observed, all);
+          // GY-1528: under the control-plane merger the submit refuses nothing on plannedFiles.
+          const regressions = merger === 'control-plane' ? [] : regressionRefusals(work, observed, all);
           demand(!regressions.length, `Submission refused for ${work.key}: ${regressions.join('; ')}`);
           // Checks registered by approved retro artefacts (GY-970) run against the observed candidate.
           const retroChecks = retroCheckRefusals(work, observed, await readAppliedRetroChecks(db));
@@ -2709,8 +2704,8 @@ export class Engine {
     // The observation job only exists for an item with a candidate to observe; waking it for one
     // without a submission would schedule a read of nothing.
     // `prioritized` claims the job ahead of the polled backlog, as a webhook wake is (GY-1099).
-    // A control-plane candidate is observed here; any other (a pull request GitHub observed) wakes its job, which reads it from the checkout.
-    if (wake && before!.observation?.source === 'control-plane' && before!.submission && before!.candidate) {
+    const merger = (await recordedMergerMode(this.store.leasePool)).merger;
+    if (wake && (merger === 'control-plane' || before!.observation?.source === 'control-plane') && before!.submission && before!.candidate) {
       try {
         const observation = await this.observeControlPlaneCandidate(before!);
         if (observation) {

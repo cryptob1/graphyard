@@ -128,7 +128,7 @@ function loop(docker?: Docker) {
     if (answer.status !== 200) throw new Error(`${answer.status}: ${answer.body.error}`);
     return answer.body;
   };
-  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'control-plane', environment, itemPreviews: { docker } }), advisory: undefined };
+  const reads = { ...mergeWriterReads(config, repo, defaultChildRun, { base, record, merger: async () => 'github', environment, itemPreviews: { docker } }), advisory: undefined };
   return { step: async (ids: string[]) => {
     const work = await Promise.all(ids.map(read));
     await mergeWriterStep({ state, effects: { mergeWriter: reads, persist: async () => {} }, now: Date.now, snapshot: { work }, performed: [] } as unknown as Cycle);

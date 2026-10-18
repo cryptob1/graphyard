@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { GitHub, LANDABLE_CHECK, CHECK_NAME, processJob } from '../src/github.js';
+import { applyProtection, protectionPlan, requiredStatusChecks, conversationPayload } from '../src/protection.js';
 import type { Evidence, Observation, Work } from '../src/model.js';
 // Time-bomb allowance (GY-1694): the 2026-09-30T12:00Z at/now stamp the work, evidence and observation fixtures the GitHub harness reads; the one new Date() is the fake pool's clock for processJob, which judges the moved head.
 
@@ -136,6 +137,54 @@ test('manual:review-followups-triaged GY-1050.2: when PR head or base moves duri
   await assert.rejects(async () => {
     await github.publishLandable(work, [work]);
   }, /PR changed before the landability check was published/);
+});
+
+test('manual:review-followups-triaged GY-1050.3: applyProtection reconciles graphyard/landable and handles missing checks via PUT (Finding 14)', async () => {
+  const config = { repository: 'owner/repo', baseBranch: 'main', githubAppId: APP };
+  const open = [item()];
+
+  let currentProtection: any = {
+    required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: APP }] },
+    enforce_admins: { enabled: true },
+    allow_force_pushes: { enabled: false },
+    allow_deletions: { enabled: false },
+    required_conversation_resolution: { enabled: false },
+    required_pull_request_reviews: { required_approving_review_count: 1, dismiss_stale_reviews: true, require_last_push_approval: true },
+  };
+
+  const writes: { method: string; path: string; body: any }[] = [];
+  const run = (_cmd: string, args: string[], input?: string) => {
+    const path = args.find(a => a.startsWith('repos/'))!;
+    if (args.includes('--method')) {
+      const method = args[args.indexOf('--method') + 1];
+      const body = JSON.parse(input ?? '{}');
+      writes.push({ method, path, body });
+      if (path.endsWith('/protection/required_status_checks')) {
+        currentProtection.required_status_checks = body;
+      }
+      if (method === 'PUT' && path.endsWith('/protection')) {
+        currentProtection = { ...currentProtection, ...body };
+      }
+      return '{}';
+    }
+    if (path.endsWith('/protection')) return JSON.stringify(currentProtection);
+    if (path.includes('/rules/branches/')) return 'null';
+    if (path.includes('/rulesets')) return '[]';
+    if (path === 'repos/owner/repo') return JSON.stringify({ owner: { type: 'Organization' }, allow_auto_merge: false });
+    throw new Error(`Unexpected: ${args.join(' ')}`);
+  };
+
+  const applied = await applyProtection(config, open, run);
+  assert.equal(applied.consistent, true);
+
+  const checksWrite = writes.find(w => w.path.endsWith('/protection/required_status_checks'));
+  assert.ok(checksWrite, 'PATCHes required_status_checks to add graphyard/landable');
+  assert.deepEqual(checksWrite.body, { strict: false, checks: [{ context: CHECK_NAME, app_id: APP }, { context: LANDABLE_CHECK, app_id: APP }] });
+
+  // When required_status_checks is null, conversationPayload constructs the checks block
+  const fullPayload = conversationPayload({ ...currentProtection, required_status_checks: null }, { requiredApprovals: 1, dismissStaleReviews: true, requireLastPushApproval: true, mode: 'agent' }, APP);
+  assert.ok(fullPayload.required_status_checks, 'creates required_status_checks block');
+  assert.deepEqual(fullPayload.required_status_checks.checks, [{ context: LANDABLE_CHECK, app_id: APP }]);
 });
 
 test('manual:review-followups-triaged GY-1050.4: each follow-up 1..25 from GY-887 review is addressed in code or declined with recorded reason (AC-1)', () => {

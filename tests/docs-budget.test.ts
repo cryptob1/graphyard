@@ -76,20 +76,20 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1774: every step calling an approver, a decision or a session keeps the decisions step's budget and per-call bound; a slow call is carried, never holds the cycle.
   ['docs/master-agent-reference.md', /Steps calling an approver, decision or session budget two-fifths of the interval \(30s floor\), each call 10s or what's left; a slower one is carried \(`waiting`, no fault\), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none/],
   ['docs/master-agent-reference.md', /one `decision\.\*` ledger read names moved items, an unmoved history is kept unread/],
-  // GY-1518: the delivery redesign page keeps the single merger and the one rule.
-  ['docs/delivery-redesign.md', /The control plane is every install's only merge writer: nothing sets another/],
+  // GY-1518: the delivery redesign page keeps the merger setting's two values and the one rule.
+  ['docs/delivery-redesign.md', /`github` \(legacy, .*\) or `control-plane` \(default\)/],
   ['docs/delivery-redesign.md', /Only Graphyard writes to main/],
   // GY-1536 AC-4: the general E2E step kinds, declared secrets and the env file, with one example of each kind.
   ['docs/validation.md', /`command`: `run` in the checkout with `TARGET_URL`.*`{"kind":"command","run":"npx playwright test"}`/],
   ['docs/validation.md', /`agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS\|FAIL - reason`.*"goal":"Win tic-tac-toe"/],
   ['docs/validation.md', /`secrets: \["NAME"\]` from `~\/\.config\/graphyard\/INSTALL\/e2e-secrets\.TARGET\.env` \(0600, uncommitted\) as variables and `\{\{secret:NAME\}\}`, redacted/],
   // GY-1526 AC-6: the loop-driven cut and the related-item revert of control-plane mode.
-  ['docs/delivery.md', /The loop cuts \(`run\.candidates\.everyMerges` 5, `idleMinutes` 15\), validates, promotes and verifies .*no workflow.*a failed required E2E case reverts the newest candidate item a matching verification map covers \(`candidateReverts`; reopened\); a main-watch freeze holds all/],
+  ['docs/delivery.md', /Under a `control-plane` merger the loop cuts \(`run\.candidates\.everyMerges` 5, `idleMinutes` 15\), validates, promotes and verifies .*no workflow.*a failed required E2E case reverts the newest candidate item a matching verification map covers \(`candidateReverts`; reopened\); a main-watch freeze holds all/],
   // GY-1848: the repository's release failure-action keys and their defaults.
   ['docs/delivery.md', /`release\.onFailure` `hold` \(default `revert`\) names each failing case, step and would-be target or `no map matched`, reverting\/reopening nothing; `release\.revertUnmatched: false` holds an unmatched failure instead of the newest item/],
   // GY-1555 AC-6: setup-from-zero's control-plane merger subsection; steps 5 and 7 fold into step 4, where doctor's fixes point.
-  ['docs/setup-from-zero.md', /### Control-plane merger\n\n`up` creates an ed25519 deploy key and registers it read-write on OWNER\/REPO .*no App, no branch protection/],
-  ['docs/setup-from-zero.md', /## 4\. Register the GitHub App\n\n.*Reviewer and revert-approver Apps: /],
+  ['docs/setup-from-zero.md', /### Control-plane merger\n\n`up --merger control-plane` creates an ed25519 deploy key, registers it read-write on OWNER\/REPO .*no App, no branch protection/],
+  ['docs/setup-from-zero.md', /## 4\. Register the GitHub App\n\n.*Reviewer and revert-approver Apps: .*Branch protection: /],
   // GY-1523 AC-8: the head form of submit, its CLI and the change number it allocates.
   ['docs/protocol/work-commands.md', /`\{"epoch":1,"head":SHA\}` \(`complete GY-N EPOCH --head \[SHA\]`.*allocates one change number per head into `candidate\.pr`\/`submission\.pr`/],
   // GY-1529 AC-5: the Coordinator recovery section names its symptoms, the recover command and how promotion resumes.

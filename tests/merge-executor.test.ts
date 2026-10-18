@@ -20,10 +20,12 @@ import { mergeLedgerRefusals, pushRefusal, trialRefusal, type Principal, type Wo
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
+import { MergerSettings } from '../src/merger-mode.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { completionBody } from '../src/cli/complete.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 // GY-1524: the control-plane merge executor — one serial queue, intent before push, the trial on the
 // exact merged tree, the deploy-key push leased on the tested tip, and the reconcile of what a crash left open.
@@ -299,11 +301,15 @@ function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => nu
   } as unknown as DaemonEffects;
 }
 /** Reads over fake ports, switched by `merger`. */
-const fakeReads = (ports: MergePorts, merger: () => Promise<'control-plane'>): MergeWriterReads => ({ ...ports, merger });
+const fakeReads = (ports: MergePorts, merger: () => Promise<'github' | 'control-plane'>): MergeWriterReads => ({ ...ports, merger });
 
-test('unit:merge-writer-step-off-in-github-mode — the step runs right after the merge step and does nothing without its reads; under control-plane it reconciles open intents, reports the queue and merges one head beside the cycle, then requests the rework a failed trial grounds; the merger is read afresh before every merge decision, so a switch to github stops the next merge', async () => {
+test('unit:merge-writer-step-off-in-github-mode — the step runs right after the merge step and does nothing while the recorded merger is github (no git, no push, an emptied queue) or without its reads; under control-plane it reconciles open intents, reports the queue and merges one head beside the cycle, then requests the rework a failed trial grounds; the merger is read afresh before every merge decision, so a switch to github stops the next merge', async () => {
   const work = [submitted(2, 5), submitted(1, 30)], now = () => start;
-  const { metrics } = await runCycle(config, emptyDaemonState(config), effectsFor({ work: () => [], now, mergeWriter: null }), now);
+  const off = fakePorts();
+  const state = emptyDaemonState(config);
+  state.mergeWriter.queue = [{ key: 'GY-9', id: 'w9', head: sha('h'), submittedAt: iso(start), waitingMs: 1 }];
+  const { metrics } = await runCycle(config, state, effectsFor({ work: () => work, now, mergeWriter: fakeReads(off.ports, async () => 'github') }), now);
+  assert.deepEqual([off.calls, state.mergeWriter.queue, state.mergeWriter.inFlight], [[], [], null], 'under the github merger the step reads nothing and merges nothing');
   const steps = (metrics.timings?.steps ?? []).map(step => step.step);
   assert.ok(steps.indexOf('merge writer') > steps.indexOf('merges') && steps.indexOf('merge writer') < steps.indexOf('shadow gate'), `the step runs right after the merge step: ${steps.join(', ')}`);
   const bare = emptyDaemonState(config);
@@ -354,6 +360,18 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   const movedEffects = effectsFor({ work: () => work, now, mergeWriter: fakeReads(moved.ports, async () => 'control-plane'), decide: async (target, action, reason, input) => { decided.push({ key: target.key, action, reason, input }); return { id: randomUUID() }; } });
   await runCycle(config, requeued, movedEffects, now); await mergeWriterIdle(requeued); await runCycle(config, requeued, movedEffects, now);
   assert.deepEqual([decided, requeued.mergeWriter.refusals[0]?.reason], [[], baseMovedReason(4)]);
+  // The recorded merger is read afresh for every merge decision: switched to github while a merge is in flight, the next cycle records that merge, empties the queue and starts no other.
+  const switching = fakePorts();
+  let merger: 'github' | 'control-plane' = 'control-plane';
+  const switched = emptyDaemonState(config);
+  const switchingEffects = effectsFor({ work: () => switching.world(work), now, mergeWriter: fakeReads(switching.ports, async () => merger) });
+  await runCycle(config, switched, switchingEffects, now);
+  assert.equal(inFlightKey(switched), 'GY-1');
+  await mergeWriterIdle(switched);
+  merger = 'github';
+  const afterSwitch = await runCycle(config, switched, switchingEffects, now);
+  assert.ok(afterSwitch.actions.some(action => action.state === 'done' && /^Merged GY-1 head/.test(action.detail)), 'the merge already in flight is recorded');
+  assert.deepEqual([switched.mergeWriter.queue, switched.mergeWriter.inFlight, switching.events.filter(event => event.kind === 'intent').length], [[], null, 1], 'no merge of GY-2 starts under the github merger, whatever the cycle before read');
 });
 
 test('integration:executor-trial-failure-rework-no-approver — a rework request the plane fails is kept on state.mergeWriter.reworks and asked for again every cycle until the server confirms it, exactly once; one the snapshot shows applied (the item reworked, on a new head or done) is settled without a request; without the decision effects it waits, naming the command', async () => {
@@ -417,9 +435,13 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   const git = recordingRun(() => `${tip}\n`);
   const credentialFile = join(await temporaryDirectory('merge-writer-credential'), 'coordinator.token');
   await writeFile(credentialFile, `${'c'.repeat(48)}\n`, { mode: 0o600 });
-  const wired = daemonEffects('/coordinator', { ...config, credentialFile }, { snapshot: async () => ({ work: [], now: iso(start) }), mutate: async (path, data, key) => { posted.push({ path, data, key }); return {}; }, run: git.run, fetcher: (async () => { throw new Error('the merger is never read from the plane'); }) as typeof fetch });
+  let recordedMerger: 'github' | 'control-plane' = 'control-plane', modeReads = 0;
+  const wired = daemonEffects('/coordinator', { ...config, credentialFile }, { snapshot: async () => ({ work: [], now: iso(start) }), mutate: async (path, data, key) => { posted.push({ path, data, key }); return {}; }, run: git.run, fetcher: (async () => { modeReads++; return new Response(JSON.stringify({ mergeWriter: { merger: recordedMerger } }), { status: 200 }); }) as typeof fetch });
   assert.ok(wired.mergeWriter, 'the loop wires the merge writer reads');
-  assert.equal(await wired.mergeWriter!.merger(), 'control-plane', 'the control plane is the only merge writer');
+  assert.equal(await wired.mergeWriter!.merger(), 'control-plane');
+  recordedMerger = 'github';
+  assert.equal(await wired.mergeWriter!.merger(), 'github', 'the recorded merger is read from the plane for every decision, never served from a cache');
+  assert.equal(modeReads, 2);
   const event: MergeRecordEvent = { kind: 'pushed', mergeSha: sha('merge1'), pushedAt: iso(start) };
   await wired.mergeWriter!.record(item({ id: 'w1', key: 'GY-1' }), event);
   assert.deepEqual(posted, [{ path: 'work/w1/merge-record', data: event, key: mergeRecordKey({ id: 'w1' }, event) }]);
@@ -473,12 +495,13 @@ before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1524;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-executor-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_executor_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+  await new MergerSettings(store).change(admin, { merger: 'control-plane', reason: 'the executor is under test' }, randomUUID());
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 

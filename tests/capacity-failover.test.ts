@@ -29,6 +29,7 @@ import HumanRequestsPage from '../web/pages/human-requests.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09-20/09-30 instants are the explicit now handed to detectExhaustion, parseResetTime and outputReadDue, which judge parsed resets against it; Date.now() builds relative resets.
 
 // GY-89: mid-session exhaustion and human-only waits must not stall an item or a fleet. A
@@ -159,14 +160,14 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }, ove
   return { effects, calls, now, cycle: (state: DaemonState) => runCycle(config, state, effects, now) };
 }
 /** Each test reads a graph of its own: what an earlier test left open would be dispatched by this one's loop. */
-const fresh = async () => { await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE'); };
+const fresh = async () => { await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE'); await recordLegacyMerger(store); };
 const kinds = (state: DaemonState, kind: string) => Object.entries(state.actions).filter(([, action]) => action.kind === kind).map(([key, action]) => ({ key, ...action }));
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_CAPACITY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 44);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('capacity-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('capacity_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/capacity_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/capacity_test`); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

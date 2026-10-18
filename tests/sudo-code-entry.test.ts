@@ -301,8 +301,8 @@ function appDrivePage(clock: { t: number }, grantAt: number) {
   };
   return page;
 }
-// The App flows are up's GitHub App path (a request with no merger); a bare up is control-plane and drives no App.
-const upRequest = async (...extra: string[]) => ({ ...(await import('../src/up.js')).upRequestFromArgs(['--repo', 'acme/shop', '--agent', ...extra]), merger: undefined });
+// GY-1833: the App flows are the legacy --merger github path; a bare up is control-plane and drives no App.
+const upRequest = async (...extra: string[]) => (await import('../src/up.js')).upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--merger', 'github', ...extra]);
 
 test('unit:sudo-wait-matches-up — the drive waits at Confirm access as long as up does, past 600 s, and a rerun resumes the pending confirmation without a new handoff', async () => {
   const { recordedAppDriver, upWaitMs, upRequestFromArgs, readPendingSudo, rememberPendingSudo } = await import('../src/up.js');
@@ -406,19 +406,19 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   const { drive } = recordedAppDriver(await temporaryDirectory('sudo-import-route'), await upRequest(), { profile: 'Default' }, () => appDrivePage(clock, 30_000), timing);
   assert.deepEqual(await drive(LOCAL, sentence => { handed.push(sentence); }), { state: 'done' });
   const handedRoute = handed[0].split('\n').at(-1)!;
-  assert.match(handedRoute, IMPORT_ROUTE(' --provider compose --agent'), 'the handoff ends with the route that needs no live moment');
+  assert.match(handedRoute, IMPORT_ROUTE(' --provider compose --agent --merger github'), 'the handoff ends with the route that needs no live moment');
   const routed = upRequestFromArgs(routeUp(handedRoute));
   assert.deepEqual({ repository: routed.repository, provider: routed.provider, agent: routed.agent, reuseApps: routed.reuseApps }, { repository: 'acme/shop', provider: 'compose', agent: true, reuseApps: ['SLUG', 'REVIEWER_SLUG'] }, 'the route runs as written, reusing both Apps');
   // The route and the rerun carry every option the operator set up with, not only the provider and --agent.
   const custom: string[] = [];
-  const options = ['--provider', 'hetzner', '--master', 'codex', '--goal', 'goals/first game.md', '--ssh-host', 'build.example.com', '--ssh-user', 'ops', '--confirm-price', '4.51', '--wait', '45', '--reuse-app', 'acme-graphyard'];
+  const options = ['--provider', 'hetzner', '--reviewer', 'codex', '--master', 'codex', '--goal', 'goals/first game.md', '--ssh-host', 'build.example.com', '--ssh-user', 'ops', '--confirm-price', '4.51', '--wait', '45', '--reuse-app', 'acme-graphyard'];
   const customRequest = await upRequest(...options);
   const customDrive = recordedAppDriver(await temporaryDirectory('sudo-import-options'), customRequest, { profile: 'Default' }, () => appDrivePage(clock, clock.t + 30_000), timing);
   assert.deepEqual(await customDrive.drive(LOCAL, sentence => { custom.push(sentence); }), { state: 'done' });
   const words = (command: string) => command.match(/'[^']*'|\S+/g)!.map(word => word.replace(/^'(.*)'$/, '$1'));
   const carried = upRequestFromArgs(words(custom[0].split('\n').at(-1)!.match(/`graphyard up ([^`]+)`/)![1]));
   const { reuseApps: _reuse, ...expected } = customRequest;
-  assert.deepEqual({ ...carried, reuseApps: undefined, merger: undefined }, { ...expected, reuseApps: undefined, merger: undefined }, 'a non-default --master, --goal, SSH, price and wait survive the route');
+  assert.deepEqual({ ...carried, reuseApps: undefined }, { ...expected, reuseApps: undefined }, 'a non-default --reviewer, --master, --goal, SSH, price and wait survive the route');
   assert.deepEqual(carried.reuseApps, ['SLUG', 'REVIEWER_SLUG'], 'the route names its own --reuse-app per App');
 
   // An App set up exactly as the route says passes --reuse-app's preflight for its role: the permissions
@@ -467,7 +467,7 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
 
   // --no-wait: the drive meets Confirm access, up ends the install it drives and exits 3 with the route.
   const root = await temporaryDirectory('sudo-no-wait');
-  const request = { ...upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--no-wait', '--browser-profile', 'Default']), merger: undefined };
+  const request = upRequestFromArgs(['--repo', 'acme/shop', '--agent', '--merger', 'github', '--no-wait', '--browser-profile', 'Default']);
   assert.equal(request.noWait, true);
   const runClock = { t: 0 };
   const noWait = recordedAppDriver(root, request, { profile: 'Default' }, () => appDrivePage(runClock, Infinity), { now: () => new Date(runClock.t), sleep: async ms => { runClock.t += ms; } });
@@ -488,7 +488,7 @@ test('unit:sudo-offers-import-route — the handoff and the local setup page off
   });
   assert.equal(result.exitCode, 3, 'waiting on a person, resumable');
   assert.match(result.next, /--no-wait does not wait for it/);
-  assert.match(result.next, IMPORT_ROUTE(' --provider compose --agent --browser-profile Default'), 'the next step is the App-import route, with the options up was run with');
+  assert.match(result.next, IMPORT_ROUTE(' --provider compose --agent --merger github --browser-profile Default'), 'the next step is the App-import route, with the options up was run with');
   assert.ok(aborted, 'the install serving the App page was ended');
   assert.equal(installEnv?.GRAPHYARD_APP_WAIT_MS, '1260000', "the App page is served up's wait plus a minute, outliving the drive");
   assert.equal(result.handoffs.length, 1);

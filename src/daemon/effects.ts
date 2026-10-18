@@ -66,6 +66,7 @@ import { shadowReads, shadowVerdictBody, shadowVerdictKey, type ShadowReads } fr
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import { localReleasePorts } from './release-ports.js';
 import { revertRecordKey } from '../release-revert.js';
+import { readMergeWriter } from '../master/dispatch.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import type { ReadingEffects } from './reading-effect.js';

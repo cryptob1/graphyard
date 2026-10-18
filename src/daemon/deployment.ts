@@ -479,10 +479,10 @@ export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
   };
 }
 
-/** The mode the drive runs in: control-plane once the loop wires its merger read; without one (a test's reads) the drive runs as before. */
-export async function promotionMode(reads: Pick<PromotionReads, 'merger'>): Promise<MergerMode | null> {
-  if (!reads.merger) return null;
-  try { return await reads.merger(); } catch { return 'control-plane'; }
+/** The mode the drive runs in: control-plane only when the merger reads so; an unreadable merger is github's, as it is for an older server. */
+export async function promotionMode(reads: Pick<PromotionReads, 'merger'>): Promise<MergerMode> {
+  if (!reads.merger) return 'github';
+  try { return await reads.merger(); } catch { return 'github'; }
 }
 
 /**

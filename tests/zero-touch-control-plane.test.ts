@@ -29,7 +29,7 @@ import type { UpDependencies, UpEvent } from '../src/up.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-1554 (child of GY-1527): `graphyard up --agent --goal FILE` with no
+ * GY-1554 (child of GY-1527): `graphyard up --agent --goal FILE --merger control-plane` with no
  * human anywhere. The control plane is real (Postgres, the HTTP server, the engine reading heads
  * from a git checkout of a bare origin, no GitHub App configured); the host's installer, the
  * agent runtimes and the build/test trial are stubbed. The acceptance and planner roles — real
@@ -108,7 +108,7 @@ function stubRuntime(respond: (options: RunOptions<unknown>) => unknown, runs: s
   } };
 }
 
-/** The host `up` runs on: installer, agent accounts and loop are simulated; the goal reaches the real plane. */
+/** The host `up` runs on: installer, agent accounts and loop are simulated; the goal and the merger setting reach the real plane. */
 function host(checkoutDir: string, events: UpEvent[]) {
   const calls: string[][] = [], ghCalls: string[][] = [], deployKeys: string[] = [];
   let installed = false, accounts = false, loop = false, clock = 0;
@@ -126,12 +126,16 @@ function host(checkoutDir: string, events: UpEvent[]) {
       const real = await request(operatorAgent, 'status');
       return { ...real, github: real.github, appPermissions: { missing: [] }, reviewerApps: [],
         fleet: accounts ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] } : { roles: [], accounts: [] },
-        setup: { loop } } as any;
+        setup: { protection: 'off', loop } } as any;
     },
     publishOnboarding: async () => null,
     onboardingMerged: async () => true,
     installDirectory: () => installDir,
     ensureDeployKey: async (dir, repo) => { deployKeys.push(`${dir}:${repo}`); return join(dir, 'deploy-key'); },
+    setMerger: async (adminToken, requestId) => {
+      const response = await fetch(`${url}/api/merger`, { method: 'POST', headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify({ merger: 'control-plane', reason: 'graphyard up --merger control-plane' }) });
+      if (response.status !== 200) throw new Error(`POST /api/merger refused (${response.status}): ${await response.text()}`);
+    },
     gh: async args => {
       ghCalls.push(args);
       if (args[0] === 'repo' && args[1] === 'view') return { code: 0, stdout: '{"name":"project"}' };
@@ -151,7 +155,7 @@ function host(checkoutDir: string, events: UpEvent[]) {
   return { deps, calls, ghCalls, deployKeys };
 }
 
-test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare origin and a real control plane reaches a merged first planned item through the merge writer with no human step: no prompt, handoff, browser or App approval, the goal planned and released by stubbed acceptance and planner runtimes, the stub worker\'s commit merged onto the bare origin by the deploy-key push', { timeout: 180_000 }, async (t: TestContext) => {
+test('unit:zero-touch-control-plane — up --agent --goal FILE --merger control-plane against a bare origin and a real control plane reaches a merged first planned item through the merge writer with no human step: no prompt, handoff, browser or App approval, the goal planned and released by stubbed acceptance and planner runtimes, the stub worker\'s commit merged onto the bare origin by the deploy-key push', { timeout: 180_000 }, async (t: TestContext) => {
   clearDrafts(); clearPlans();
   const { runUp, upRequestFromArgs } = await import('../src/up.js');
 
@@ -160,7 +164,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   await writeFile(join(directory, 'goal.md'), 'Customers can be greeted by name when they open the application.\n');
   const events: UpEvent[] = [];
   const world = host(directory, events);
-  const result = await runUp(upRequestFromArgs(['--repo', repository, '--provider', 'compose', '--agent', '--goal', 'goal.md']), world.deps);
+  const result = await runUp(upRequestFromArgs(['--repo', repository, '--provider', 'compose', '--agent', '--merger', 'control-plane', '--goal', 'goal.md']), world.deps);
   assert.equal(result.exitCode, 0, result.next);
   assert.equal(result.prompts, 0, 'up never waited on a person');
   assert.deepEqual(result.handoffs, [], 'no browser or device handoff');
@@ -171,7 +175,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   assert.equal(world.deployKeys.length, 1);
   const status = await request(operatorAgent, 'status');
   assert.equal(status.github, false, 'the plane runs with no GitHub App');
-  assert.equal(status.mergeWriter.merger, 'control-plane', 'the control plane is the merge writer');
+  assert.equal(status.mergeWriter.merger, 'control-plane', 'the plane records the control plane as the merge writer');
   assert.ok(result.goal, 'the goal was submitted');
   const key = result.goal!;
 
@@ -190,7 +194,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   const trial = async (input: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => ({ build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) });
   const deployKeyFile = join(directory, 'install-dir', 'deploy-key');
   const record: MergePorts['record'] = async (work, event) => request(coordinator, `work/${work.id}/merge-record`, event, mergeRecordKey(work, event));
-  const recordedMerger = async () => (await request(coordinator, 'status')).mergeWriter.merger as 'control-plane';
+  const recordedMerger = async () => (await request(coordinator, 'status')).mergeWriter.merger as 'github' | 'control-plane';
   const reads = mergeWriterReads(config, checkout, run, { base: worktreeBase, record, merger: recordedMerger, trial });
   const acceptance: AcceptanceEffects = {
     ...acceptanceEffects(config, checkout, { run, fetcher: fetch, asCoordinator: path => request(coordinator, path), asOperatorAgent: (_method, path, body, key) => request(operatorAgent, path, body, key), merger: recordedMerger, writer: reads }),

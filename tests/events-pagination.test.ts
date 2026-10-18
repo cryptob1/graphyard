@@ -14,6 +14,7 @@ import type { Principal, Work } from '../src/model.js';
 import { eventHistoryLimits, routineEventKinds } from '../src/events-history.js';
 import { reconstructTimeline, type LedgerEntry } from '../src/pipeline-speed.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
@@ -31,7 +32,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('events'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_events');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_events`);
-  await store.init();
+  await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project');
   http = server(engine, [{ ...operator, token: tokens.operator }, { ...worker, token: tokens.worker }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

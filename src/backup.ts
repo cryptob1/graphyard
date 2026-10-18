@@ -4,7 +4,7 @@ import type pg from 'pg';
 import { advisoryLocks, ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
 import { releaseInfo, schemaVersion } from './release.js';
 import { retryDeadlocks } from './store/migration-locks.js';
-import { mergerDefaultPin } from './store/tables/merger-default.js';
+import { mergerDefaultPin, mergerDefaultRederive } from './store/tables/merger-default.js';
 
 /**
  * A logical, versioned backup of the whole coordination ledger, taken from one consistent
@@ -147,6 +147,9 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
       if (!/^(?:public\.)?[a-z_]+_seq$/.test(sequence.name)) throw new Error(`Backup names an unexpected sequence ${sequence.name}`);
       await db.query(`SELECT setval($1, $2, $3)`, [sequence.name, Math.max(sequence.value, 1), sequence.called]);
     }
+    // GY-1833: a backup older than the merger pin carries no marker, which the empty target decided as
+    // unpinned; decided again over the restored ledger (after its sequences, since a pin appends an event), a legacy install keeps github.
+    if (!backup.tables.some(table => table.name === mergerDefaultPin.name)) await db.query(mergerDefaultRederive);
     await db.query('COMMIT');
   };
   try {

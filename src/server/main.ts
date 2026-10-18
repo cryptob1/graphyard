@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from '../store.js';
 import { Engine } from '../engine.js';
 import { demand, parseReviewerApps } from '../model.js';
-import { githubFromEnv, installationFingerprint, type AppPermissionReport, type GitHub } from '../github.js';
+import { githubFromEnv, installationFingerprint, processJob, type AppPermissionReport, type GitHub } from '../github.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
@@ -23,6 +23,7 @@ import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
 import { processControlPlaneJob } from './control-plane-observation.js';
+import { recordedMergerMode } from '../merger-mode.js';
 
 /** Overrides for tests that start the process entry in-process; the deployment reads PORT and HOST. */
 export interface MainOptions { port?: number; host?: string }
@@ -145,7 +146,7 @@ export async function main(options: MainOptions = {}) {
     // The observation workers run beside the tick, never in it: a queue of due jobs is drained at
     // the concurrency the installation sets, whatever the rest of the tick is doing (GY-492). The
     // recorded merger picks each claim's backend: the checkout while the control plane merges, else GitHub (GY-1675).
-    observing = startObservationWorkers(engine, capacity.concurrency);
+    observing = startObservationWorkers(engine, github, capacity.concurrency);
     console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
     // The intervention window is scanned once a minute beside the tick for retro drafts (patterns are reported in master status, never filed as items),
     // never in it (GY-1381): its ledger read held the whole tick on 2026-09-23. On unless
@@ -248,16 +249,28 @@ export const observationConcurrency = (poolMax = defaultDatabasePoolSize) => obs
  * observation; workers that keep claiming while jobs are due are what drains a backlog and keeps
  * the head observed at its twenty-second cadence.
  *
- * Every head is observed from the checkout (the control plane is the only merge writer), and GitHub
- * is not asked.
+ * The backend is the recorded merger's, read before every claim, never the GitHub client's presence
+ * (GY-1675): while the control plane merges, heads are observed from the checkout and GitHub is not
+ * asked — an App-bound install switched with `master merger control-plane` submits allocated change
+ * numbers no pull request answers to; while GitHub merges, the client observes, and without one
+ * nothing is claimed. Before a GitHub claim a worker takes a slot from the shared pace
+ * (`GitHub.paceObservation`, GY-567) and waits when there is none, so all of them together spend the
+ * budget above the merge-path reserve evenly until its reset; the slot is returned with what the
+ * job actually charged.
  */
-export async function observationWorkers(engine: Engine, concurrency: number, stopped: () => boolean = () => false, idleMs = 1000): Promise<void> {
+export async function observationWorkers(engine: Engine, github: GitHub | null, concurrency: number, stopped: () => boolean = () => false, idleMs = 1000): Promise<void> {
   const idle = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
   const worker = async () => {
     while (!stopped()) {
-      let claimed = false;
-      try { claimed = await processControlPlaneJob(engine); }
+      const local = await recordedMergerMode(engine.store.pool).then(setting => setting.merger === 'control-plane', error => { console.error('observation worker could not read the merger', error instanceof Error ? error.message : 'unknown'); return null; });
+      if (local === null || (!local && !github)) { await idle(idleMs); continue; }
+      const slot = local ? undefined : github!.paceObservation?.();
+      if (slot && !slot.settle) { await idle(Math.min(slot.wait, idleMs * 5)); continue; }
+      let claimed = false, charged: number | undefined;
+      try { claimed = local ? await processControlPlaneJob(engine) : await processJob(engine, github!, cost => { charged = cost; }); }
       catch (error) { console.error('observation worker job failed', error instanceof Error ? error.message : 'unknown'); }
+      // An unclaimed slot charged nothing; a job that failed before its cost was known keeps its estimate.
+      finally { slot?.settle(claimed ? charged : 0, Date.now()); }
       if (!claimed) await idle(idleMs);
     }
   };
@@ -265,9 +278,9 @@ export async function observationWorkers(engine: Engine, concurrency: number, st
 }
 
 /** Start the observation workers for the process's lifetime; `stop` resolves once each has finished its current job. */
-export function startObservationWorkers(engine: Engine, concurrency = observationConcurrency(engine.store.pool.options.max)) {
+export function startObservationWorkers(engine: Engine, github: GitHub | null, concurrency = observationConcurrency(engine.store.pool.options.max)) {
   let stopped = false;
-  const done = observationWorkers(engine, concurrency, () => stopped)
+  const done = observationWorkers(engine, github, concurrency, () => stopped)
     .catch(error => console.error('observation workers stopped', error instanceof Error ? error.message : 'unknown'));
   return { concurrency, stop: () => { stopped = true; return done; } };
 }

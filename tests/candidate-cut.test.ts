@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { assessCut, assessExactCut, cutDue, type CutCommit } from '../src/daemon/candidate-cut.js';
 import { candidateSettings, candidateSettingsSchema, defaultCandidateEveryMerges, defaultCandidateIdleMinutes } from '../src/master/merge-writer-settings.js';
 import { masterRunSchema } from '../src/master/profiles.js';
-import { noLocalPortsReason, promotionCycle, promotionFrozenReason, promotionMode, promotionReads, type PromotionLedger, type PromotionReads } from '../src/daemon/deployment.js';
+import { noLocalPortsReason, promotionCycle, promotionFrozenReason, promotionMode, promotionReads, promotionWorkflow, type PromotionLedger, type PromotionReads } from '../src/daemon/deployment.js';
 import { localPromotionCycle, localPromotionIdle, runLocalCandidate, settleLocalPromotion, type LocalCandidate, type LocalReleasePorts, type LocalValidation } from '../src/daemon/promotion-local.js';
 import { lastJson, localValidateArguments, readCaseTags, readVerificationMaps } from '../src/daemon/release-ports.js';
 import { promotionStateSchema, type PromotionState } from '../src/daemon/state.js';
@@ -105,7 +105,7 @@ function fakeLocal(options: { validation?: LocalValidation; cut?: Awaited<Return
   };
   return { local, calls, due };
 }
-function stubReads(ledger: PromotionLedger, local: LocalReleasePorts | null, merger: 'control-plane' | (() => Promise<'control-plane'>) = 'control-plane') {
+function stubReads(ledger: PromotionLedger, local: LocalReleasePorts | null, merger: 'github' | 'control-plane' | (() => Promise<'github' | 'control-plane'>) = 'control-plane') {
   const state = { ledger, dispatches: 0, runsRead: 0 };
   const reads: PromotionReads = { ledger: async () => state.ledger, runs: async () => { state.runsRead++; return []; }, dispatch: async () => { state.dispatches++; },
     merger: typeof merger === 'function' ? merger : async () => merger, local };
@@ -185,12 +185,12 @@ test('unit:promotion-local-ports — under a control-plane merger promotionCycle
   assert.deepEqual(none.calls, []); assert.match(result.state.reason!, /Production runs the base branch tip; nothing to cut or promote/);
   const off = await promotionCycle(null, stubReads(ledger(), none.local).reads, { now: start, everyMinutes: 0 });
   assert.deepEqual(none.calls, []); assert.match(off.state.reason!, /Promotion by the loop is off/);
-  // Control-plane mode with no local ports names what the environment must set; a merger read that fails is still the control plane.
+  // Control-plane mode with no local ports names what the environment must set; a merger that cannot be read runs github mode.
   const unwired = stubReads(ledger(), null);
   result = await cycle(null, unwired.reads, start);
   assert.equal(result.state.reason, noLocalPortsReason); assert.equal(unwired.state.dispatches, 0);
-  assert.equal(await promotionMode({ merger: async () => { throw new Error('HTTP 503'); } }), 'control-plane');
-  assert.equal(await promotionMode({}), null);
+  assert.equal(await promotionMode({ merger: async () => { throw new Error('HTTP 503'); } }), 'github');
+  assert.equal(await promotionMode({}), 'github');
   // runLocalCandidate on its own: a promotion production has not picked up yet says so, and a refused promotion names the refusal.
   const slow = fakeLocal({ served: PROMOTED });
   assert.match((await runLocalCandidate(slow.local, candidate, false)).detail, /to production, which still serves [0-9a-f]{12}; the deployment observation confirms it when it lands/);
@@ -245,7 +245,7 @@ test('unit:candidate-freeze-honoured — with state.mainWatch.frozen set the loc
   assert.deepEqual(unseen.calls, []); assert.match(waiting.state.reason!, /The main watch has not classified the base branch tip [0-9a-f]{12} yet; the cut waits for its verdict/);
 });
 
-test('unit:promotion-github-snapshot — the control-plane merger runs the local ports and never gh, with or without the workflow file', async () => {
+test('unit:promotion-github-snapshot — under a github merger (or none) the dispatch is unchanged: the runs are read and `gh workflow run release-candidate.yml --repo R --ref BASE -f promote=true` is run, and the local ports never are', async () => {
   const calls: { command: string; args: string[] }[] = [];
   const run = (command: string, args: string[]) => {
     calls.push({ command, args });
@@ -259,6 +259,25 @@ test('unit:promotion-github-snapshot — the control-plane merger runs the local
   };
   const config = { repository: 'owner/repo', baseBranch: 'main', run: { intervalSeconds: 20 } } as unknown as MasterConfig;
   const local = fakeLocal();
+  // Snapshot of the dispatch call, exactly as GY-1488 left it, with the local ports present but a github merger.
+  const reads = promotionReads(config, '/repo', run, true, false, { merger: async () => 'github', local: local.local })!;
+  const result = await promotionCycle(null, reads, { now: start, everyMinutes: 10, intervalMs: 20_000 });
+  assert.equal(result.dispatched, true, result.state.reason ?? '');
+  assert.deepEqual(calls.filter(call => call.command === 'gh').map(call => call.args), [
+    ['run', 'list', '--repo', 'owner/repo', '--workflow', promotionWorkflow, '--limit', '50', '--json', 'status,createdAt,event,headSha'],
+    ['workflow', 'run', 'release-candidate.yml', '--repo', 'owner/repo', '--ref', 'main', '-f', 'promote=true'],
+  ]);
+  assert.deepEqual(local.calls, [], 'the local ports are not touched in github mode');
+  assert.match(result.state.reason!, /^Dispatched release-candidate\.yml with promote=true to carry [0-9a-f]{12} to production$/);
+  // Without a merger read at all the drive is github's, as it was before GY-1526.
+  const legacy = promotionReads(config, '/repo', run, true, false)!;
+  assert.equal(legacy.merger, undefined); assert.equal(legacy.local, undefined);
+  const before = calls.length;
+  await promotionCycle(null, legacy, { now: start, everyMinutes: 10, intervalMs: 20_000 });
+  assert.ok(calls.slice(before).some(call => call.command === 'gh' && call.args[0] === 'workflow'), 'the legacy reads dispatch the workflow');
+  // Without the workflow file github mode has nothing to dispatch; control-plane mode needs only the local ports.
+  assert.equal(promotionReads(config, '/repo', run, false, false), null);
+  assert.equal(promotionReads(config, '/repo', run, false, false, { local: null }), null);
   assert.ok(promotionReads(config, '/repo', run, false, false, { merger: async () => 'control-plane', local: local.local }), 'the local ports stand without the workflow');
   // Under a control-plane merger the same reads run the local ports and never gh.
   const controlPlane = promotionReads(config, '/repo', run, true, false, { merger: async () => 'control-plane', local: local.local })!;

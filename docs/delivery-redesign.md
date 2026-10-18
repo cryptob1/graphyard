@@ -22,16 +22,16 @@ Removed: GitHub Apps, branch protection, required checks, PR approval, the merge
 
 Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinned commit.
 
-## The merger
+## The merger setting
 
-The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read (`/api/status` `mergeWriter`). Launches get no push credential or keyring proxy; no GitHub branch protection, ruleset or auto-merge is used. Setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`; AGENTS.md: `--head SHA`. A pull-request candidate is observed from the shared object store and queued for the writer.
+`merger` selects the mode per install, `github` (legacy, upgrades keep it) or `control-plane` (default): an admin-only ledger event, never read from graphyard.json. `graphyard master merger [MODE --reason TEXT]`, `/api/status` `mergeWriter`, `GET`/`POST /api/merger` (admin, `reason`, `Idempotency-Key`). Under `control-plane` launches get no push credential or keyring proxy; an unreadable merger refuses launch. Setup and `doctor` pass `github-app`, `reviewer-app` and `branch-protection` as `not required (merger: control-plane)`; AGENTS.md: `--head SHA`.
 
 `POST /api/work/:id/merge-record` (coordinator, `Idempotency-Key`) records each step; `pushed`/`reconciled` name the open intent's merge commit, `reconciled` one main holds, else 409.
 
 ## Rollout
 
-1. **Shadow mode**: trials beside the GitHub gate, nothing written; `shadowGate` counts agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending; p50/p90; newest ten disagreements.
-2. **Switch** `control-plane`: done, for every install.
+1. **Shadow mode**: trials beside the GitHub gate, nothing written; `shadowGate` counts agree-pass, agree-fail, shadow-only-fail, shadow-missed, pending; p50/p90; newest ten disagreements. Switch criterion: two weeks with no shadow-passed head reverted by the main guard and every shadow-only failure explained. `POST /api/merger` `control-plane` refuses while any shadow disagreement stands unexplained.
+2. **Switch** `control-plane`.
 3. **Run the Snake pilot.**
 4. **After a week**, delete the github-mode gate code.
 

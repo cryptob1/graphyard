@@ -24,6 +24,7 @@ import { groupOf } from '../web/groups.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { masterConfigSchema } from '../src/master/profiles.js';
+import { recordLegacyMerger } from './helpers/legacy-merger.js';
 // Time-bomb allowance (GY-1694): the 2026-09/10 instants are calendar fixtures judged on the `to`, deliveryNow or now each case hands in; Date.now() drives only the database-backed cases, whose facts and windows are relative to it.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -43,7 +44,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('flow'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_flow');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_flow`);
-  await store.init();
+  await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, 'owner/project');
   http = server(engine, [{ ...operator, token: tokens.operator }, { ...worker, token: tokens.worker }, { ...coordinator, token: tokens.coordinator }, { ...producer, token: tokens.producer }, { ...reader, token: tokens.reader }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

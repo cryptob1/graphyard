@@ -245,17 +245,14 @@ test('unit:up-writes-profiles — up\'s accounts step runs the profile write mas
   assert.ok(!held.completed.includes('accounts'), 'the accounts step did not complete');
 });
 
-test('unit:up-writes-profiles — supervised setup (up --local) launches the control-plane reviewer, so a worker profile alone does not turn its account lines green', async () => {
+test('unit:up-writes-profiles — supervised setup (up --local) launches no reviewer, so a worker profile alone turns its account line green', async () => {
   const { runUp } = await import('../src/up.js');
   const checkout = await temporaryDirectory('up-writes-profiles-local');
   const world = upWorld(checkout, [], { workers: 1, reviewers: 0 });
-  const held = await runUp(request({ provider: 'local', waitMs: 20 }), world.deps);
+  const result = await runUp(request({ provider: 'local' }), world.deps);
   assert.ok(world.calls.some(args => args.join(' ') === 'master environments --apply'), 'the accounts step runs the profile write');
-  assert.equal(held.checklist.find(item => item.id === 'account:reviewer')?.done, false, held.next);
-  assert.ok(!held.completed.includes('accounts'), 'the accounts step waits for a reviewer profile');
-  const both = await temporaryDirectory('up-writes-profiles-local-both');
-  const result = await runUp(request({ provider: 'local' }), upWorld(both, [], { workers: 1, reviewers: 1 }).deps);
-  assert.ok(result.completed.includes('accounts'), result.next);
+  assert.equal(result.checklist.find(item => item.id === 'account:worker')?.done, true, result.next);
+  assert.ok(result.completed.includes('accounts'), 'the accounts step completes without a reviewer profile');
 });
 
 test('unit:up-writes-profiles — a resumed run whose profile write fails stops naming it, rather than passing the account lines unchecked', async () => {

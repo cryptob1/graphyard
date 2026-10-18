@@ -16,6 +16,7 @@ import { confinedMaster, operationsCommand, postDeployChecksCommand } from './ma
 import { checkoutRestoreServeFlag } from './checkout-restore-release.js';
 import { serveCheckoutRestoreAct } from './checkout-restore-serve.js';
 import { loopCommand } from './master/loop.js';
+import { mergerCommand } from './merger.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export const masterCommands = defineCommands([
@@ -38,14 +39,17 @@ export const masterCommands = defineCommands([
       '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate as the',
       '                                open request\'s next attempt; master run does this on its own,',
       '                                so it is the recovery path for a request nothing else answers',
+      '  master merger [github|control-plane --reason TEXT]',
+      '                                Show the merger setting and history; set it (admin credential)',
       '  master setup [--apply] [--provider P --service NAME --link-dir DIR]',
       '                                Plan, or set, each deployment variable derived from credentials',
       '                                saved on this host that the deployment lacks (the revert approver',
       '                                from the reviewer App); secrets piped, audited by fingerprint',
+      '  master protection [--apply]   Reconcile branch protection with every open review policy',
       '  master tip-cleanup [--apply]  Delete the speculative-tip refs the removed merge queue left',
       '  master browser FLOW [--dry-run]',
       "                                Perform GitHub administration through the operator's browser",
-      '                                profile: app-permissions or installation-accept;',
+      '                                profile: app-permissions, installation-accept, or protection;',
       '                                recorded, API-verified, audited',
       '  master browser capture [--dry-run]',
       '                                Open the sudo-protected App permissions page and keep each',
@@ -125,7 +129,7 @@ export const masterCommands = defineCommands([
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
       // A confined master's `restart` and `executors` are operations' loop requests (GY-1658), not acts on the host's systemd and pids it cannot reach.
-      const concerns = (id === 'restart' || id === 'executors') && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand];
+      const concerns = (id === 'restart' || id === 'executors') && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand, mergerCommand];
       for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },

@@ -12,7 +12,8 @@ import { Engine } from '../../src/engine.js';
 import { server } from '../../src/server.js';
 import { type Principal, deploySmokeProof } from '../../src/model.js';
 import { type MasterConfig, type WorkerProfile, atomicPrivateWrite, dispatchWork, loadMasterConfig, masterConfigSchema, setupMaster } from '../../src/master.js';
-import { type CredentialMinter, readAccountStartFailures, workerLaunchStatus } from '../../src/master/dispatch.js';
+import { type CredentialMinter, MergeWriterUnreadError, readAccountStartFailures, workerLaunchStatus } from '../../src/master/dispatch.js';
+import type { MergerMode } from '../../src/merger-mode.js';
 import { paneSweepLimit } from '../../src/daemon/cycle-reclaim.js';
 import { plannedFilesMax } from '../../src/model/scope.js';
 import { type RunOptions, type RunResult, type Runner } from '../../src/runner/types.js';
@@ -20,6 +21,7 @@ import { temporaryDirectory } from './temp-dirs.js';
 import { expandTypedCommand } from './launch-shell.js';
 import { type BlockerClass } from '../../src/model/blocker-class.js';
 import { SimulatedHerdr, clock, clockSql, hour, minute } from './soak-world.js';
+import { recordLegacyMerger } from './legacy-merger.js';
 
 /**
  * The soak's control planes and the scenario every suite stages (GY-404, split per concern by
@@ -229,10 +231,23 @@ export class FailoverWorld {
   private panes = 0;
   /** The launcher's own start clock: its waits at the start bound pass here, not on the day's. */
   now = clock.now();
-  /** GY-1523: every push credential the real launcher minted; none, since the control plane is the merge writer. */
+  /** GY-1523: how many times the real launcher read the merger — one per dispatch, before it claims, and never otherwise. */
+  reads = 0;
+  /** GY-1523: every push credential the real launcher minted; none under the control-plane merger. */
   minted: { key: string; epoch: number }[] = [];
-  constructor(private broken: Set<string>) {}
+  /**
+   * `merger` is what the day's control plane records as its merge writer, answered to every read;
+   * `unreadable` holds the ordinals (from 1) of the reads the plane fails with a 503 instead, as a
+   * status read meets while the plane restarts.
+   */
+  constructor(private broken: Set<string>, readonly merger: MergerMode = 'github', private readonly unreadable: Set<number> = new Set()) {}
   healthyEverywhere() { this.broken.clear(); }
+  /** The launcher's merger read (DispatchOptions.readMergeWriter): counted, and refused on the scheduled ordinals exactly as readMergeWriter refuses a 503. */
+  readMergeWriter = async (config: MasterConfig): Promise<MergerMode> => {
+    this.reads += 1;
+    if (this.unreadable.has(this.reads)) throw new MergeWriterUnreadError(`${config.url}/api/status`, 'HTTP 503');
+    return this.merger;
+  };
   /** The launcher's push-credential minter: records the attempt it minted for and makes the credential home, as the real minter does. */
   mint: CredentialMinter = async (_root, input) => { this.minted.push({ key: input.key, epoch: input.epoch }); await mkdir(input.directory, { recursive: true }); };
   wait = (ms: number) => { this.now += ms; };
@@ -451,7 +466,7 @@ export async function controlPlane(database: string) {
   await setup.query('UPDATE simulated_clock SET offset_ms=$1', [clock.offsetMs]);
   await setup.query(`ALTER DATABASE ${database} SET search_path = public, pg_catalog`);
   await setup.end();
-  store = new Store(connection); await store.init();
+  store = new Store(connection); await store.init(); await recordLegacyMerger(store);
   engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
   engine.principals = everyone; engine.reviewerApps = reviewerApps; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);

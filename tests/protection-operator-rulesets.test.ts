@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { applyOperatorRulesetAdd, rulesetBody, rulesetDigest, rulesetGovernsBranch, type GhAnswer } from '../src/protection.js';
+import { applyOperatorRulesetAdd, applyProtection, protectionPlan, readProtection, restoreRulesetSnapshot, retireOperatorRulesetCheck, rulesetBody, rulesetDigest, rulesetGovernsBranch, type GhAnswer } from '../src/protection.js';
 import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall } from '../src/install/index.js';
 import { installDirectory } from '../src/install/secrets.js';
 import type { Work } from '../src/model.js';
@@ -101,6 +101,176 @@ function fakeGitHub(rulesets: any[] = [mainRuleset(), stagingRuleset(), signingR
 const snapshotsDirectory = () => temporaryDirectory('ruleset-snapshots');
 const run = (name: string, appId: number, conclusion = 'success', id = 1) => ({ id, name, status: 'completed', conclusion, app: { id: appId } });
 
+test('unit:protection-reads-operator-rulesets — a classic 404 is no classic protection; the plan names every governing ruleset in full and proposes no classic write', async () => {
+  const github = fakeGitHub();
+  const current = readProtection(config, github.run);
+  const plan: any = protectionPlan(current, config, [work], undefined, []);
+  assert.equal(plan.governance, 'operator-ruleset');
+  assert.match(plan.classicProtection, /none \(GitHub answered 404 Branch not protected\)/);
+  // Every active ruleset whose conditions include main, as full documents; staging's ruleset does not govern main.
+  assert.deepEqual(plan.operatorRulesets.map((ruleset: any) => ruleset.id), [22322922, 22322930]);
+  assert.deepEqual(plan.operatorRulesets[0], { id: 22322922, name: 'main', source: 'Repository owner/project', enforcement: 'active',
+    requiredStatusChecks: [{ context: 'ci', integrationId: CI }, { context: 'work-context', integrationId: CI }, { context: 'guard', integrationId: CI }],
+    strict: true, conditions: { ref_name: { include: ['~DEFAULT_BRANCH'], exclude: [] } }, bypassActors: [] });
+  assert.deepEqual(plan.operatorRulesets[1].requiredStatusChecks, []);
+  assert.ok(Array.isArray(plan.effectiveRules) && plan.effectiveRules.some((rule: any) => rule.type === 'required_status_checks' && rule.ruleset_id === 22322922), 'the branch\'s effective rules are read');
+  assert.deepEqual(plan.target, { id: 22322922, name: 'main' });
+  assert.deepEqual(plan.changes, [
+    `operator ruleset 22322922 (main) required check Graphyard / merge: missing to required from App ${APP}`,
+    `operator ruleset 22322922 (main) required check graphyard/landable: missing to required from App ${APP}`]);
+  assert.deepEqual(plan.blockers, []);
+  assert.ok(!plan.changes.some((change: string) => /classic|review|conversation|queue|auto_merge/.test(change)), 'no classic protection, review, queue or auto-merge change is proposed');
+  assert.ok(plan.advisories.some((advisory: string) => /strict/.test(advisory)), 'the operator\'s strict policy is named and left as it is');
+  assert.deepEqual(github.state.writes, [], 'planning writes nothing');
+
+  // Any other non-2xx classic answer still refuses, naming it.
+  const forbidden = fakeGitHub();
+  forbidden.state.classicAnswer = { stdout: '', stderr: 'gh: Must have admin rights to Repository. (HTTP 403)', code: 1 };
+  assert.throws(() => readProtection(config, forbidden.run), /HTTP 403/);
+  // With no classic protection, an unread rulesets listing refuses instead of reading as no rulesets.
+  const unlisted = fakeGitHub();
+  const listingFails = (_command: string, args: string[], input?: string) => { if (args.some(arg => arg.includes('/rulesets?'))) throw Object.assign(new Error('gh: Server Error (HTTP 500)'), { stderr: 'gh: Server Error (HTTP 500)' }); return unlisted.run(_command, args, input); };
+  assert.throws(() => readProtection(config, listingFails), /no classic protection, and GitHub did not answer its rulesets listing \(gh: Server Error \(HTTP 500\)\)/);
+  // A ruleset document that cannot be read refuses, naming it.
+  const unreadable = fakeGitHub();
+  const documentFails = (_command: string, args: string[], input?: string) => args.includes('repos/owner/project/rulesets/22322930') ? (() => { throw Object.assign(new Error('gh: Server Error (HTTP 500)'), { stderr: 'gh: Server Error (HTTP 500)' }); })() : unreadable.run(_command, args, input);
+  assert.throws(() => readProtection(config, documentFails), /GitHub did not answer ruleset 22322930 of owner\/project/);
+  // With an operator ruleset governing main, a failed effective-rules read refuses, naming GitHub's answer.
+  const noRules = fakeGitHub();
+  const rulesFail = (_command: string, args: string[], input?: string) => args.includes('repos/owner/project/rules/branches/main') ? (() => { throw Object.assign(new Error('gh: Forbidden (HTTP 403)'), { stderr: 'gh: Forbidden (HTTP 403)' }); })() : noRules.run(_command, args, input);
+  assert.throws(() => readProtection(config, rulesFail), /Operator ruleset\(s\) 22322922 \(main\), 22322930 \(signed commits\) govern owner\/project@main, and GitHub did not answer its effective rules \(gh: Forbidden \(HTTP 403\)\)/);
+  // A failed repository read leaves ~DEFAULT_BRANCH unresolved, so it refuses rather than planning the classic path.
+  const noRepository = fakeGitHub();
+  const repositoryFails = (_command: string, args: string[], input?: string) => args.includes('repos/owner/project') ? (() => { throw Object.assign(new Error('gh: Server Error (HTTP 500)'), { stderr: 'gh: Server Error (HTTP 500)' }); })() : noRepository.run(_command, args, input);
+  assert.throws(() => readProtection(config, repositoryFails), /GitHub did not answer the repository owner\/project \(gh: Server Error \(HTTP 500\)\), so whether operator ruleset\(s\) 22322922 \(main\), which target ~DEFAULT_BRANCH, govern main is unknown/);
+  // The async read the writes and the installer use agrees.
+  const { readOperatorRulesets } = await import('../src/protection.js');
+  assert.deepEqual((await readOperatorRulesets(github.gh, REPOSITORY, 'main')).rulesets.map(ruleset => ruleset.id), [22322922, 22322930]);
+  const failing = fakeGitHub();
+  const failingGh = async (args: string[]) => args.some(arg => arg.includes('/rulesets?')) ? { stdout: '', stderr: 'gh: Server Error (HTTP 500)', code: 1 } : failing.gh(args);
+  await assert.rejects(readOperatorRulesets(failingGh, REPOSITORY, 'main'), /GitHub did not answer page 1 of the rulesets of owner\/project/);
+  // An inherited organization ruleset governs main as much as a repository one: it is listed, named
+  // with its source, and, when it is the one requiring checks, refused by name, never sent down the classic path.
+  const inheritedOnly = fakeGitHub([organizationRuleset()]);
+  const inheritedPlan: any = protectionPlan(readProtection(config, inheritedOnly.run), config, [work], undefined, []);
+  assert.equal(inheritedPlan.governance, 'operator-ruleset');
+  assert.deepEqual(inheritedPlan.operatorRulesets.map((ruleset: any) => [ruleset.id, ruleset.source]), [[5001, 'Organization owner']]);
+  assert.match(inheritedPlan.refusal, /Operator ruleset 5001 \(org checks\), which requires status checks on main, is inherited from Organization owner; Graphyard writes rulesets only through the repository's own endpoint and never falls back to classic protection/);
+  await assert.rejects(applyProtection(config, [work], inheritedOnly.run, [], { snapshots: '/nonexistent', now: 1 }), /is inherited from Organization owner/);
+  await assert.rejects(applyOperatorRulesetAdd(inheritedOnly.gh, { ...config, snapshots: '/nonexistent', now: 1 }), /is inherited from Organization owner/);
+  assert.deepEqual(inheritedOnly.state.writes, [], 'neither classic protection nor the inherited ruleset is written');
+  // Beside a repository ruleset requiring checks, an inherited one requiring checks too is a second candidate.
+  const inheritedBeside = fakeGitHub([mainRuleset(), organizationRuleset()]);
+  assert.match((protectionPlan(readProtection(config, inheritedBeside.run), config, [work], undefined, []) as any).refusal, /Several operator rulesets require status checks on main: 22322922 \(main\), 5001 \(org checks\)/);
+  // An inherited ruleset requiring no checks governs too, and the repository's own ruleset stays the target.
+  const inheritedSigning = fakeGitHub([mainRuleset(), { ...signingRuleset(), id: 5002, source_type: 'Organization', source: 'owner' }]);
+  const besidePlan: any = protectionPlan(readProtection(config, inheritedSigning.run), config, [work], undefined, []);
+  assert.deepEqual(besidePlan.operatorRulesets.map((ruleset: any) => ruleset.id), [22322922, 5002]); assert.deepEqual(besidePlan.target, { id: 22322922, name: 'main' });
+
+  // fnmatch character sets target the base as GitHub matches them: inclusion, negation and exclusion.
+  const governs = (include: string[], exclude: string[] = [], branch = 'release-1') => rulesetGovernsBranch({ target: 'branch', enforcement: 'active', conditions: { ref_name: { include, exclude } } }, branch, 'main');
+  assert.equal(governs(['refs/heads/release-[0-9]']), true);
+  assert.equal(governs(['refs/heads/release-[0-9]'], [], 'release-a'), false);
+  assert.equal(governs(['refs/heads/release-[!0-9]']), false);
+  assert.equal(governs(['refs/heads/release-[^a-z]']), true);
+  assert.equal(governs(['refs/heads/release-[abc1]']), true);
+  assert.equal(governs(['refs/heads/release-*'], ['refs/heads/release-[1-3]']), false);
+  assert.equal(governs(['refs/heads/release-*'], ['refs/heads/release-[4-9]']), true);
+  assert.equal(governs(['refs/heads/release-[0-9'], [], 'release-[0-9'), true, 'an unclosed bracket is a literal');
+  // `**/` spans zero or more directories, as GitHub's File::FNM_PATHNAME matching does.
+  assert.equal(governs(['refs/heads/qa/**/*'], [], 'qa/foo'), true, '`**/` matches zero directories');
+  assert.equal(governs(['refs/heads/qa/**/*'], [], 'qa/a/b/foo'), true);
+  assert.equal(governs(['refs/heads/qa/**/*'], [], 'qa'), false);
+  assert.equal(governs(['refs/heads/**/release-1']), true);
+  assert.equal(governs(['refs/heads/*'], ['refs/heads/**/*']), false, 'an excluding `**/*` excludes a top-level base');
+  // A base governed only through a character set reads as operator-governed, so no classic write is proposed or made.
+  const charset = fakeGitHub([{ ...mainRuleset(), conditions: { ref_name: { include: ['refs/heads/m[a-z]in'], exclude: ['refs/heads/[!m]*'] } } }]);
+  const charsetPlan: any = protectionPlan(readProtection(config, charset.run), config, [work], undefined, []);
+  assert.equal(charsetPlan.governance, 'operator-ruleset'); assert.deepEqual(charsetPlan.target, { id: 22322922, name: 'main' });
+  const charsetSnapshots = await snapshotsDirectory();
+  try { await applyProtection(config, [work], charset.run, [], { snapshots: charsetSnapshots, now: 1 }); } finally { await rm(charsetSnapshots, { recursive: true, force: true }); }
+  assert.deepEqual(charset.state.writes.map(write => write.path), ['PUT repos/owner/project/rulesets/22322922'], 'only the ruleset is written, never classic protection');
+
+  // A classic-protected branch with no operator ruleset plans exactly as before.
+  const classic = fakeGitHub([stagingRuleset()]);
+  classic.state.classic = { required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: APP }, { context: 'graphyard/landable', app_id: APP }] }, enforce_admins: { enabled: true },
+    required_pull_request_reviews: { required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true } };
+  const classicPlan: any = protectionPlan(readProtection(config, classic.run), config, [work], undefined, []);
+  assert.equal(classicPlan.governance, undefined);
+  assert.equal(classicPlan.landableCheck, true);
+});
+
+test('unit:protection-adds-graphyard-checks-to-operator-ruleset — --apply adds exactly the two App-bound checks to the one ruleset requiring checks, after a snapshot, and writes nothing the second time', async () => {
+  const github = fakeGitHub(), snapshots = await snapshotsDirectory();
+  try {
+    const before = mainRuleset();
+    const applied: any = await applyProtection(config, [work], github.run, [], { snapshots, now: 1_000 });
+    assert.equal(applied.applied, true); assert.equal(applied.consistent, true); assert.equal(applied.ruleset, 22322922);
+    // One write: the PUT of main's ruleset, equal to its document with only the two entries added.
+    assert.deepEqual(github.state.writes.map(write => write.path), ['PUT repos/owner/project/rulesets/22322922']);
+    const expected = rulesetBody(before);
+    expected.rules = expected.rules.map((rule: any) => rule.type === 'required_status_checks' ? { ...rule, parameters: { ...rule.parameters, required_status_checks: [...rule.parameters.required_status_checks, ...GRAPHYARD] } } : rule);
+    assert.deepEqual(github.state.writes[0].body, expected);
+    assert.equal(github.state.writes[0].body.rules.find((rule: any) => rule.type === 'required_status_checks').parameters.strict_required_status_checks_policy, true, 'strict stays as the operator set it');
+    // The unrelated and the non-base rulesets are unchanged and never read for writing.
+    assert.deepEqual(github.state.rulesets.get(22322921), stagingRuleset());
+    assert.deepEqual(github.state.rulesets.get(22322930), signingRuleset());
+    for (const id of [22322921, 22322930]) assert.ok(!github.state.writes.some(write => write.path.endsWith(`/${id}`)));
+    // The snapshot holds the fresh full GET document and its digest.
+    const files = await readdir(snapshots);
+    assert.equal(files.length, 1); assert.match(files[0], /^ruleset-22322922-/);
+    const snapshot = JSON.parse(await readFile(join(snapshots, files[0]), 'utf8'));
+    assert.deepEqual(snapshot.document, before); assert.equal(snapshot.digest, rulesetDigest(before)); assert.equal(snapshot.rulesetId, 22322922);
+    assert.equal(applied.snapshot, join(snapshots, files[0]));
+
+    // Twice: nothing is written the second time.
+    const again: any = await applyProtection(config, [work], github.run, [], { snapshots, now: 2_000 });
+    assert.equal(again.applied, false); assert.equal(github.state.writes.length, 1); assert.equal((await readdir(snapshots)).length, 1);
+    assert.match(again.result, /already requires Graphyard \/ merge and graphyard\/landable from App 1234; nothing was written/);
+
+    // Zero or several qualifying rulesets refuse, naming each candidate, and write nothing.
+    const none = fakeGitHub([signingRuleset(), stagingRuleset()]);
+    await assert.rejects(applyProtection(config, [work], none.run, [], { snapshots, now: 3_000 }), /No operator ruleset governing main requires status checks \(governing: 22322930 \(signed commits\)\)/);
+    const several = fakeGitHub([mainRuleset(), { ...stagingRuleset(), id: 22322923, name: 'main extra', conditions: { ref_name: { include: ['refs/heads/main'], exclude: [] } } }]);
+    await assert.rejects(applyOperatorRulesetAdd(several.gh, { ...config, snapshots, now: 3_000 }), /Several operator rulesets require status checks on main: 22322922 \(main\), 22322923 \(main extra\)/);
+    assert.deepEqual([...none.state.writes, ...several.state.writes], []);
+
+    // Before the App has published Graphyard / merge on main, --apply refuses rather than require a check that never comes.
+    const fresh = fakeGitHub();
+    fresh.state.baseRuns = [{ id: 1, name: 'ci', status: 'completed', conclusion: 'success', app: { id: CI } }];
+    await assert.rejects(applyProtection(config, [work], fresh.run, [], { snapshots, now: 4_000 }), /App 1234 has not yet published Graphyard \/ merge on main or on the head of any of its 30 most recently updated pull requests, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
+    assert.deepEqual(fresh.state.writes, []);
+    // A run from another App on a pull request's head is not the App's publication either.
+    fresh.state.runs = [run('Graphyard / merge', 999, 'success', 2)];
+    await assert.rejects(applyOperatorRulesetAdd(fresh.gh, { ...config, snapshots, now: 4_100 }), /App 1234 has not yet published Graphyard \/ merge on main or on the head of any/);
+    assert.deepEqual(fresh.state.writes, []);
+    // Graphyard publishes its merge check on pull-request heads, not on the base tip: one there suffices.
+    fresh.state.runs = [run('Graphyard / merge', APP, 'failure', 3)];
+    const viaPull: any = await applyOperatorRulesetAdd(fresh.gh, { ...config, snapshots, now: 4_200 });
+    assert.equal(viaPull.applied, true);
+    assert.deepEqual(fresh.puts().map(write => write.path), ['PUT repos/owner/project/rulesets/22322922']);
+    // The App's own install-verification check is not Graphyard / merge: with only that published, the add still refuses.
+    const verifiedOnly = fakeGitHub();
+    verifiedOnly.state.baseRuns = [{ id: 2, name: 'Graphyard / install verification', status: 'completed', conclusion: 'neutral', app: { id: APP } }];
+    await assert.rejects(applyProtection(config, [work], verifiedOnly.run, [], { snapshots, now: 4_500 }), /App 1234 has not yet published Graphyard \/ merge on main or on the head of any of its 30 most recently updated pull requests, so requiring it in operator ruleset 22322922 \(main\) would block every pull request; nothing was written/);
+    assert.deepEqual(verifiedOnly.state.writes, []);
+    assert.deepEqual(verifiedOnly.state.rulesets.get(22322922), mainRuleset());
+
+    // Another governing ruleset that comes to require checks after discovery makes the target no longer
+    // unique: every governing ruleset is read again just before the write, and the write refuses.
+    const raced = fakeGitHub();
+    let signingReads = 0;
+    const racedGh = async (args: string[], options: { input?: string } = {}) => {
+      if (args.includes('repos/owner/project/rulesets/22322930') && signingReads++ === 1) {
+        raced.state.rulesets.set(22322930, { ...signingRuleset(), rules: [...signingRuleset().rules, { type: 'required_status_checks', parameters: { strict_required_status_checks_policy: false, required_status_checks: [{ context: 'sign-ci', integration_id: CI }] } }] });
+      }
+      return raced.gh(args, options);
+    };
+    await assert.rejects(applyOperatorRulesetAdd(racedGh, { ...config, snapshots, now: 5_000 }), /changed after they were read: Several operator rulesets require status checks on main: 22322922 \(main\), 22322930 \(signed commits\).*; nothing was written/);
+    assert.deepEqual(raced.state.writes, []);
+  } finally { await rm(snapshots, { recursive: true, force: true }); }
+});
+
 test('unit:protection-ruleset-write-verifies-and-rolls-back — a re-read that differs from the snapshot plus the two entries puts the snapshot back and verifies its digest', async () => {
   const snapshots = await snapshotsDirectory();
   try {
@@ -152,6 +322,123 @@ test('unit:protection-ruleset-write-verifies-and-rolls-back — a re-read that d
     const partial = fakeGitHub([{ ...mainRuleset(), bypass_actors: undefined }]);
     await assert.rejects(applyOperatorRulesetAdd(partial.gh, { ...config, snapshots, now: 4_000 }), /without its bypass actors, conditions or rules/);
     assert.deepEqual(partial.state.writes, []);
+  } finally { await rm(snapshots, { recursive: true, force: true }); }
+});
+
+test('unit:protection-retires-only-proven-check — --retire removes one named non-Graphyard check only once both Graphyard checks stand and every staying check succeeded on the proof head', async () => {
+  const snapshots = await snapshotsDirectory();
+  try {
+    const github = fakeGitHub();
+    const retire = (check: string, now: number) => retireOperatorRulesetCheck(github.gh, { ...config, snapshots, now, check: { context: check.split('@')[0], integration_id: Number(check.split('@')[1]) }, proof: 42 });
+    // Before Graphyard's checks are required, nothing may be retired.
+    await assert.rejects(retire(`guard@${CI}`, 1), /does not yet require Graphyard \/ merge and graphyard\/landable from App 1234/);
+    await applyOperatorRulesetAdd(github.gh, { ...config, snapshots, now: 2 });
+    const writes = github.state.writes.length;
+    // Graphyard's own checks are never retired.
+    await assert.rejects(retire(`Graphyard / merge@${APP}`, 3), /Graphyard \/ merge is one of Graphyard's own checks/);
+    // A check the ruleset does not require is refused.
+    await assert.rejects(retire(`lint@${CI}`, 3), /does not require lint@15368/);
+    // Every staying check, and both Graphyard checks, must read success on the proof's exact head.
+    github.state.runs = [run('ci', CI, 'success', 1), run('work-context', CI, 'success', 2), run('Graphyard / merge', APP, 'success', 3)];
+    await assert.rejects(retire(`guard@${CI}`, 3), /graphyard\/landable@1234 has no run/);
+    github.state.runs.push(run('graphyard/landable', 999, 'success', 4));
+    await assert.rejects(retire(`guard@${CI}`, 3), /graphyard\/landable@1234 has no run/, 'a run from another App is not the Graphyard check');
+    github.state.runs.push(run('graphyard/landable', APP, 'success', 5), run('ci', CI, 'failure', 6));
+    await assert.rejects(retire(`guard@${CI}`, 3), /ci@15368 reads completed\/failure/, 'the latest run decides');
+    github.state.runs.push(run('ci', CI, 'success', 7));
+    github.state.movesHead = true; github.state.pullReads = 0;
+    await assert.rejects(retire(`guard@${CI}`, 3), /head moved/);
+    github.state.movesHead = false;
+    assert.equal(github.state.writes.length, writes, 'no refusal wrote anything');
+
+    // The write binds to the fresh document: a check the operator adds after discovery must be proven too.
+    const original = structuredClone(github.state.rulesets.get(22322922));
+    const amend = (change: (checks: any[]) => any[]) => {
+      let armed = true;
+      const gh = async (args: string[], options: { input?: string } = {}) => {
+        if (armed && args.includes('repos/owner/project/pulls/42')) {
+          armed = false;
+          const ruleset = github.state.rulesets.get(22322922);
+          ruleset.rules = ruleset.rules.map((rule: any) => rule.type === 'required_status_checks' ? { ...rule, parameters: { ...rule.parameters, required_status_checks: change(rule.parameters.required_status_checks) } } : rule);
+        }
+        return github.gh(args, options);
+      };
+      return retireOperatorRulesetCheck(gh, { ...config, snapshots, now: 4, check: { context: 'guard', integration_id: CI }, proof: 42 });
+    };
+    await assert.rejects(amend(checks => [...checks, { context: 'lint', integration_id: CI }]), /the latest run of lint@15368 has no run/);
+    github.state.rulesets.set(22322922, structuredClone(original));
+    await assert.rejects(amend(checks => checks.filter(check => check.context !== 'graphyard/landable')), /does not yet require graphyard\/landable from App 1234/);
+    github.state.rulesets.set(22322922, structuredClone(original));
+    assert.equal(github.state.writes.length, writes, 'a document changed before the write is never written');
+
+    // The effective rules after the write must lack exactly the retired entry, or the snapshot goes back.
+    const kept = async (args: string[], options: { input?: string } = {}) => {
+      const answer = await github.gh(args, options);
+      return args.includes('repos/owner/project/rules/branches/main') && github.puts().length === writes + 1 ? { ...answer, stdout: JSON.stringify(JSON.parse(answer.stdout).map((rule: any) => rule.type === 'required_status_checks' ? { ...rule, parameters: { ...rule.parameters, required_status_checks: [...rule.parameters.required_status_checks, { context: 'guard', integration_id: CI }] } } : rule)) } : answer;
+    };
+    await assert.rejects(retireOperatorRulesetCheck(kept, { ...config, snapshots, now: 5, check: { context: 'guard', integration_id: CI }, proof: 42 }), /guard@15368 removed: .*; rolled ruleset 22322922 back .* equal to the snapshot's/);
+    assert.deepEqual(rulesetBody(github.state.rulesets.get(22322922)), rulesetBody(original));
+    github.state.writes.length = writes;
+
+    const retired: any = await retire(`guard@${CI}`, 6);
+    assert.equal(retired.retired, `guard@${CI}`); assert.deepEqual(retired.proof, { pullRequest: 42, head: SHA });
+    const written = github.state.writes.slice(writes);
+    assert.deepEqual(written.map(write => write.path), ['PUT repos/owner/project/rulesets/22322922']);
+    assert.deepEqual(written[0].body.rules.find((rule: any) => rule.type === 'required_status_checks').parameters.required_status_checks,
+      [{ context: 'ci', integration_id: CI }, { context: 'work-context', integration_id: CI }, ...GRAPHYARD]);
+    assert.deepEqual(written[0].body.rules.filter((rule: any) => rule.type !== 'required_status_checks'), mainRuleset().rules.filter(rule => rule.type !== 'required_status_checks'));
+    assert.ok(existsSync(retired.snapshot));
+    assert.deepEqual(github.state.rulesets.get(22322921), stagingRuleset());
+    assert.ok(!github.state.writes.some(write => write.path.includes('/protection')), 'classic protection is never touched');
+
+    // A staying check any source may satisfy (integration_id null) is proven by a successful commit status of its context.
+    const legacy = mainRuleset();
+    (legacy.rules[3] as any).parameters.required_status_checks.push({ context: 'legacy', integration_id: null });
+    const statusGitHub = fakeGitHub([legacy, stagingRuleset(), signingRuleset()]);
+    await applyOperatorRulesetAdd(statusGitHub.gh, { ...config, snapshots, now: 7 });
+    statusGitHub.state.runs = [run('ci', CI, 'success', 1), run('work-context', CI, 'success', 2), run('Graphyard / merge', APP, 'success', 3), run('graphyard/landable', APP, 'success', 4)];
+    const retireGuard = (now: number) => retireOperatorRulesetCheck(statusGitHub.gh, { ...config, snapshots, now, check: { context: 'guard', integration_id: CI }, proof: 42 });
+    await assert.rejects(retireGuard(8), /legacy@any has no run or commit status/);
+    statusGitHub.state.statuses = [{ context: 'legacy', state: 'failure' }];
+    await assert.rejects(retireGuard(8), /legacy@any has commit status failure/);
+    statusGitHub.state.statuses = [{ context: 'legacy', state: 'success' }];
+    statusGitHub.state.runs.push(run('legacy', CI, 'failure', 5));
+    await assert.rejects(retireGuard(8), /legacy@any reads completed\/failure/, 'a failing run of the same context still refuses beside a successful status');
+    statusGitHub.state.runs.pop();
+    // A status never satisfies a check bound to an App.
+    statusGitHub.state.runs = statusGitHub.state.runs.filter(entry => entry.name !== 'ci');
+    statusGitHub.state.statuses.push({ context: 'ci', state: 'success' });
+    await assert.rejects(retireGuard(8), /ci@15368 has no run/);
+    statusGitHub.state.runs.push(run('ci', CI, 'success', 6));
+    const statusRetired: any = await retireGuard(9);
+    assert.equal(statusRetired.retired, `guard@${CI}`);
+  } finally { await rm(snapshots, { recursive: true, force: true }); }
+});
+
+test('unit:protection-restores-ruleset-snapshot — --restore puts a saved snapshot back to its ruleset and verifies the digest', async () => {
+  const snapshots = await snapshotsDirectory();
+  try {
+    const github = fakeGitHub();
+    const added: any = await applyOperatorRulesetAdd(github.gh, { ...config, snapshots, now: 1 });
+    assert.notEqual(rulesetDigest(github.state.rulesets.get(22322922)), rulesetDigest(mainRuleset()));
+    const restored = await restoreRulesetSnapshot(github.gh, config, added.snapshot);
+    assert.deepEqual(restored, { restored: true, verified: true, ruleset: 22322922, snapshot: added.snapshot, digest: rulesetDigest(mainRuleset()) });
+    assert.deepEqual(rulesetBody(github.state.rulesets.get(22322922)), rulesetBody(mainRuleset()));
+    assert.deepEqual(github.state.writes.map(write => write.path), ['PUT repos/owner/project/rulesets/22322922', 'PUT repos/owner/project/rulesets/22322922']);
+    assert.deepEqual(github.state.rulesets.get(22322921), stagingRuleset());
+
+    // A snapshot edited after it was taken, or one for another repository, refuses before writing.
+    const text = await readFile(added.snapshot, 'utf8');
+    const tampered = join(snapshots, 'tampered.json'), foreign = join(snapshots, 'foreign.json');
+    await writeFile(tampered, text.replace('"strict_required_status_checks_policy": true', '"strict_required_status_checks_policy": false'));
+    await writeFile(foreign, JSON.stringify({ ...JSON.parse(text), repository: 'other/project' }));
+    const writes = github.state.writes.length;
+    await assert.rejects(restoreRulesetSnapshot(github.gh, config, tampered), /does not match its own digest/);
+    await assert.rejects(restoreRulesetSnapshot(github.gh, config, foreign), /is for other\/project, not owner\/project/);
+    assert.equal(github.state.writes.length, writes);
+    // A restore GitHub does not store faithfully is reported, not claimed.
+    github.state.onPut = (_id, body) => ({ ...body, enforcement: 'disabled' });
+    await assert.rejects(restoreRulesetSnapshot(github.gh, config, added.snapshot), /reads back digest [0-9a-f]{64}, not the snapshot's/);
   } finally { await rm(snapshots, { recursive: true, force: true }); }
 });
 

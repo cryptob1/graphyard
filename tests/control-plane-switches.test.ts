@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { regressionRefusals, landingRegressions } from '../src/regression-guard.js';
 import { restoreAndReport, restoreOffLine } from '../src/cli/sync-restore.js';
-import { sessionHarnessPlan, workerHarnessPlan } from '../src/master/harness.js';
+import { scopeGuardHook, sessionHarnessPlan, workerHarnessPlan } from '../src/master/harness.js';
 import { controlPlaneMerger, scopeStep } from '../src/daemon/cycle-scope.js';
 import { evaluateLandability, landabilityRefusals } from '../src/model/landability.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
@@ -83,23 +83,36 @@ test('unit:scope-switches-control-plane — under the control-plane merger regre
   assert.deepEqual([decided, settled.size, budget.breaches, cycle.performed], [[], 0, [], []]);
 });
 
-test('unit:scope-switches-github-snapshot — a candidate GitHub observed keeps the plannedFiles refusal, and a loop wired without merge writer reads keeps its scope step', async () => {
+test('unit:scope-switches-github-snapshot — under the github merger each switch behaves exactly as before: the plannedFiles refusal, the scope-guard hook, and a scope step that is not switched off by an absent, github or unreadable merger', async () => {
   const outside = item(null, ['src/app.ts', 'src/other.ts']);
   const refusals = regressionRefusals(outside, outside.observation!, []);
   assert.equal(refusals.length, 2);
   assert.equal(refusals[0], 'Candidate changes 1 file outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-1, restore each file from origin/<base>, and push again');
   assert.match(refusals[1], /^Out-of-scope regression: src\/other\.ts: /);
-  // No merge writer reads keep the scope step running.
-  assert.equal(await controlPlaneMerger({ state: emptyDaemonState(config), effects: { mergeWriter: null } } as unknown as Cycle), false);
+  const workerInput = { cliPath: '/bin/graphyard', branch: 'graphyard/gy-1-1', baseBranch: 'main', credentialHome: '/creds', key: 'GY-1', epoch: 1 };
+  const hook = scopeGuardHook('/bin/graphyard', 'GY-1', 1);
+  for (const mergeWriter of [undefined, 'github' as const]) {
+    assert.deepEqual(workerHarnessPlan({ ...workerInput, mergeWriter }).hooks, [hook]);
+    assert.deepEqual(sessionHarnessPlan({ ...workerInput, mergeWriter, role: 'worker', kind: 'claude', repository: 'owner/project', credentialDirectories: ['/creds/a'] }).hooks, [hook]);
+  }
+  // No merge writer reads, a github merger, or a failed read after a github one keep the scope step running.
+  const state = emptyDaemonState(config);
+  let read: () => Promise<string> = async () => 'github';
+  const cycleOf = (mergeWriter: unknown) => ({ state, effects: { mergeWriter } }) as unknown as Cycle;
+  const reads = { merger: () => read() };
+  assert.equal(await controlPlaneMerger(cycleOf(null)), false);
+  assert.equal(await controlPlaneMerger(cycleOf(reads)), false);
+  read = async () => { throw new Error('status unreadable'); };
+  assert.equal(await controlPlaneMerger(cycleOf(reads)), false, 'a failed read keeps the github mode last read');
 });
 
-test('unit:scope-switches-control-plane — a failed merger read never re-enables the scope actions: it reads as the control plane', async () => {
+test('unit:scope-switches-control-plane — a failed merger read never re-enables the scope actions under the control plane: it keeps the mode last read, and with none read yet it fails closed', async () => {
   let read: () => Promise<string> = async () => 'control-plane';
   const reads = { merger: () => read() };
   const known = { state: emptyDaemonState(config), effects: { mergeWriter: reads } } as unknown as Cycle;
   assert.equal(await controlPlaneMerger(known), true);
   read = async () => { throw new Error('status unreadable'); };
-  assert.equal(await controlPlaneMerger(known), true, 'a failed read is the control plane');
+  assert.equal(await controlPlaneMerger(known), true, 'the control-plane mode last read stands');
   const fresh = { state: emptyDaemonState(config), effects: { mergeWriter: reads } } as unknown as Cycle;
   assert.equal(await controlPlaneMerger(fresh), true, 'nothing read yet: the scope actions are off');
   // The scope step itself: a failed read decides nothing and records nothing.

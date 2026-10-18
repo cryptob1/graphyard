@@ -243,10 +243,10 @@ test('integration:environment-failure-attributed — a sync that fails on a read
     workspaces: [{ epoch: 1, host: 'h', path: fixture.worktree, branch: 'graphyard/gy-1-1' }], observation: null, submission: null, blocker: null };
   const blocked: any[] = [];
   const server = await fakeServer(() => item, blocked);
-  // The merge refused as the Codex sandbox refused `git fetch` on GY-80 and GY-100 (sync fetches nothing now).
+  // `git fetch` refused exactly as the Codex sandbox refused it on GY-80 and GY-100.
   const shim = join(fixture.root, 'bin'); await mkdir(shim);
   const realGit = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-  await writeFile(join(shim, 'git'), `#!/bin/sh\nfor a do if [ "$a" = merge ]; then echo "error: cannot open '${fixture.gitDir}/MERGE_HEAD': Read-only file system" >&2; exit 255; fi; done\nexec ${realGit} "$@"\n`, { mode: 0o755 });
+  await writeFile(join(shim, 'git'), `#!/bin/sh\nfor a do if [ "$a" = fetch ]; then echo "error: cannot open '${fixture.gitDir}/FETCH_HEAD': Read-only file system" >&2; exit 255; fi; done\nexec ${realGit} "$@"\n`, { mode: 0o755 });
   const sync = (env: NodeJS.ProcessEnv) => exec(process.execPath, [launcher, 'sync', 'GY-1'], { cwd: fixture.worktree, env }).then(result => ({ code: 0, stderr: result.stderr }), (error: any) => ({ code: error.code as number, stderr: `${error.stderr}` }));
   try {
     const result = await sync({ ...server.env, PATH: `${shim}${delimiter}${server.env.PATH}` });
@@ -254,7 +254,7 @@ test('integration:environment-failure-attributed — a sync that fails on a read
     assert.equal(blocked.length, 1, result.stderr);
     assert.equal(blocked[0].epoch, 1);
     assert.match(blocked[0].reason, /^Environment, not the item: the codex sandbox cannot write /);
-    assert.ok(blocked[0].reason.includes(`${fixture.gitDir}/MERGE_HEAD`), blocked[0].reason);
+    assert.ok(blocked[0].reason.includes(`${fixture.gitDir}/FETCH_HEAD`), blocked[0].reason);
     assert.match(blocked[0].reason, /required command 'sync GY-1' failed: .*Read-only file system/);
     assert.match(result.stderr, /Recorded as the blocker on GY-1/);
     // The item presents as the environment, with the launcher's fix, not as a bare gate refusal.
@@ -262,7 +262,7 @@ test('integration:environment-failure-attributed — a sync that fails on a read
     assert.ok(environmentBlocked(blocked[0].reason));
     // The loop re-checks the path (GY-1008), and while its probe fails the fix is the launcher's grant.
     assert.equal(owner.role, 'control plane');
-    assert.match(owner.next, new RegExp(`grant ${fixture.gitDir.replaceAll('/', '\\/')}\\/MERGE_HEAD to the worker's sandbox`));
+    assert.match(owner.next, new RegExp(`grant ${fixture.gitDir.replaceAll('/', '\\/')}\\/FETCH_HEAD to the worker's sandbox`));
     assert.doesNotMatch(owner.next, /^Clear the cause/);
 
     // A real permission refusal on the admin directory, without the shim, is attributed the same way.

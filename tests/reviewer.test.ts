@@ -12,6 +12,7 @@ import { buildMasterStatus, dispatchWork, loadMasterConfig, masterHarness, revie
 import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { harnessDecision, LaunchRefusedError, launchPlan, masterHarnessPlan, nonInteractiveLaunch, writeHarnessPermissions } from '../src/harness.js';
+import { applyProtection, protectionPlan, requiredReviewProtection } from '../src/protection.js';
 import { assertReviewCandidate, bindReviewer, launchReview, mintReviewerToken, observeReviewVerdict, readReviewLedger, reconcileReviews, reviewPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { nativeReviewRequired, type Work } from '../src/model.js';
 import { parseResolvedThreads, readUnresolvedThreads } from '../src/review-threads.js';
@@ -387,7 +388,104 @@ test('master harness rules cover the master loop and grant no merge path or cred
   } finally { await cleanup(); }
 });
 
-test('the master CLI installs its harness rules and reports status against a live snapshot', async () => {
+test('branch protection reconciles to the review policy of every open item and refuses a mix', () => {
+  const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
+  const native = work(), agent = work({ id: 'agent', key: 'GY-43', policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
+  const codex = work({ id: 'codex', key: 'GY-45', policy: { checks: ['test'], review: true, reviewProvider: 'codex' } as any });
+  const current = (reviews: any) => ({ required_pull_request_reviews: reviews, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
+  assert.equal(requiredReviewProtection([native]).protection.requiredApprovals, 1);
+  // Every provider nativeReviewRequired rejects lands on the zero-approval side, so the model and the branch never disagree.
+  for (const item of [agent, codex]) {
+    assert.equal(nativeReviewRequired(item.policy), false);
+    assert.equal(requiredReviewProtection([item]).protection.mode, 'agent');
+    assert.equal(requiredReviewProtection([item]).protection.requiredApprovals, 0);
+  }
+  const gated = requiredReviewProtection([agent, codex]);
+  assert.equal(gated.protection.requiredApprovals, 0, 'agent and codex items agree with each other');
+  assert.deepEqual(gated.items, { github: [], codex: ['GY-45'], agent: ['GY-43'] });
+  assert.equal(requiredReviewProtection([native, work({ id: 'done', key: 'GY-9', stage: 'done', policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any })]).protection.mode, 'native');
+  assert.equal(requiredReviewProtection([native, work({ id: 'unreviewed', key: 'GY-10', policy: { checks: ['test'], review: false, reviewProvider: 'agent' } as any })]).protection.mode, 'native');
+  for (const other of [agent, codex]) {
+    assert.throws(() => requiredReviewProtection([native, other]), new RegExp(`GY-42.*${other.key}|${other.key}.*GY-42`, 's'));
+    assert.throws(() => requiredReviewProtection([native, other]), /one review provider/);
+    assert.throws(() => requiredReviewProtection([other, native]), /GY-42 require a native GitHub approval/);
+  }
+  assert.throws(() => requiredReviewProtection([native, agent]), /GY-43 \(agent\) require the native approval count to be zero/);
+  const switching = protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [agent]);
+  assert.equal(switching.mode, 'agent'); assert.equal(switching.consistent, false); assert.deepEqual(switching.items.agent, ['GY-43']); assert.deepEqual(switching.items.github, []);
+  assert.ok(switching.changes.some(change => change.startsWith('required_approving_review_count 1 to 0')));
+  assert.ok(switching.changes.some(change => change.startsWith('require_last_push_approval true to false')));
+  assert.equal(protectionPlan(current({ required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true }), config, [agent]).consistent, true, 'an agent-review branch at zero approvals is left alone');
+  assert.equal(protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [native]).consistent, true);
+  assert.throws(() => protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [native, agent]), /one review provider/);
+  const unprotected = protectionPlan({ required_status_checks: { strict: true, checks: [] }, enforce_admins: { enabled: false } }, config, [native]);
+  assert.equal(unprotected.blockers.length, 3); assert.match(unprotected.refusal!, /Graphyard requires it off/); assert.match(unprotected.refusal!, /Graphyard \/ merge/);
+  assert.match(protectionPlan(current({ required_approving_review_count: 1, require_code_owner_reviews: true, require_last_push_approval: true, dismiss_stale_reviews: true }), config, [native]).refusal!, /CODEOWNERS/);
+  assert.equal(protectionPlan(current({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }), { ...config, githubAppId: 4321 }, [native]).blockers.length, 1);
+});
+
+test('applying protection changes only the review subresource and verifies the result', async () => {
+  const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
+  const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
+  const codex = work({ id: 'codex', key: 'GY-45', policy: { checks: ['test'], review: true, reviewProvider: 'codex' } as any });
+  let reviews = { required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true };
+  const calls: { args: string[]; input?: string }[] = [];
+  const run = (_command: string, args: string[], input?: string) => {
+    calls.push({ args, input });
+    if (args.includes('PATCH')) { reviews = { ...reviews, ...JSON.parse(input!) }; return '{}'; }
+    return JSON.stringify({ required_pull_request_reviews: reviews, required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } });
+  };
+  const applied = await applyProtection(config, [agent], run);
+  assert.equal(applied.applied, true); assert.equal(applied.consistent, true); assert.equal(reviews.required_approving_review_count, 0);
+  const patch = calls.find(call => call.args.includes('PATCH'))!;
+  assert.match(patch.args[3], /protection\/required_pull_request_reviews$/, 'only the review subresource is patched');
+  assert.equal(JSON.parse(patch.input!).required_approving_review_count, 0);
+  assert.equal((await applyProtection(config, [agent], run)).applied, false, 'a matching branch is left alone');
+  assert.equal((await applyProtection(config, [agent, codex], run)).applied, false, 'codex items share the agent-review protection');
+  await assert.rejects(applyProtection(config, [agent, work({ id: 'native', key: 'GY-44' })], run), /one review provider/);
+  await assert.rejects(applyProtection(config, [codex, work({ id: 'native', key: 'GY-44' })], run), /one review provider/);
+  assert.equal(reviews.required_approving_review_count, 0, 'a refused mix changes nothing');
+  const stubborn = (_command: string, args: string[], input?: string) => args.includes('PATCH') ? '{}' : run(_command, args, input);
+  await assert.rejects(applyProtection(config, [work({ id: 'native', key: 'GY-44' })], stubborn), /did not report the reconciled protection/);
+});
+
+test('unit:protection-no-conversation-resolution — master protection plans conversation resolution off and applies it with one PUT that keeps every other setting', async () => {
+  const config = { repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 };
+  const agent = work({ policy: { checks: ['test'], review: true, reviewProvider: 'agent' } as any });
+  let protection: any = { required_pull_request_reviews: { required_approving_review_count: 0, require_last_push_approval: false, dismiss_stale_reviews: true, dismissal_restrictions: { users: [{ login: 'lead' }], teams: [], apps: [] },
+    bypass_pull_request_allowances: { users: [{ login: 'release-bot' }], teams: [{ slug: 'maintainers' }], apps: [{ slug: 'graphyard-control' }] } },
+    required_status_checks: { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true },
+    allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false }, required_linear_history: { enabled: true }, required_conversation_resolution: { enabled: true } };
+  const plan = protectionPlan(protection, config, [agent]);
+  assert.deepEqual(plan.changes, ['required_conversation_resolution true to false'], 'the reviews already match; conversation resolution is the one change');
+  assert.equal(plan.desired.requireConversationResolution, false); assert.equal(plan.current.requireConversationResolution, true);
+  assert.equal(plan.consistent, false);
+  const calls: { args: string[]; input?: string }[] = [];
+  const run = (_command: string, args: string[], input?: string) => {
+    calls.push({ args, input });
+    if (args.includes('PUT')) {
+      const body = JSON.parse(input!);
+      protection = { ...protection, required_conversation_resolution: { enabled: body.required_conversation_resolution },
+        required_pull_request_reviews: { ...protection.required_pull_request_reviews, ...body.required_pull_request_reviews } };
+      return '{}';
+    }
+    if (args.includes('PATCH')) throw new Error('no PATCH is needed');
+    return JSON.stringify(protection);
+  };
+  const applied = await applyProtection(config, [agent], run);
+  assert.equal(applied.applied, true); assert.equal(applied.consistent, true);
+  const put = calls.find(call => call.args.includes('PUT'))!;
+  assert.match(put.args[3], /repos\/owner\/project\/branches\/main\/protection$/);
+  const body = JSON.parse(put.input!);
+  assert.equal(body.required_conversation_resolution, false);
+  assert.deepEqual(body.required_status_checks, { strict: false, checks: [{ context: 'test', app_id: 15368 }, { context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, 'the App-bound check and strict-off stay as observed');
+  assert.equal(body.enforce_admins, true); assert.equal(body.required_linear_history, true); assert.equal(body.allow_force_pushes, false); assert.equal(body.allow_deletions, false);
+  assert.deepEqual(body.required_pull_request_reviews, { required_approving_review_count: 0, dismiss_stale_reviews: true, require_code_owner_reviews: false, require_last_push_approval: false, dismissal_restrictions: { users: ['lead'], teams: [], apps: [] },
+    bypass_pull_request_allowances: { users: ['release-bot'], teams: ['maintainers'], apps: ['graphyard-control'] } }, 'dismissal restrictions and pull request bypass allowances are kept, by login and slug');
+  assert.equal((await applyProtection(config, [agent], run)).applied, false, 'a branch without the requirement is left alone');
+});
+
+test('the master CLI installs its harness rules and reconciles protection against a live snapshot', async () => {
   const root = await repository(), credentialDirectory = await temporaryDirectory('cli-master'), binary = join(credentialDirectory, 'bin');
   // Real timestamps: an item with every gate passed now waits on GitHub (GY-1235), and status
   // dates that wait from when the item entered its stage.
@@ -403,6 +501,14 @@ test('the master CLI installs its harness rules and reports status against a liv
   const url = `http://127.0.0.1:${(server.address() as any).port}`;
   try {
     await mkdir(binary, { recursive: true });
+    const state = join(credentialDirectory, 'protection.json');
+    await writeFile(state, JSON.stringify({ required_approving_review_count: 1, require_last_push_approval: true, dismiss_stale_reviews: true }));
+    await writeFile(join(binary, 'gh'), `#!/usr/bin/env node
+const { readFileSync, writeFileSync } = require('node:fs');
+const args = process.argv.slice(2), state = ${JSON.stringify(state)};
+if (args.includes('PATCH')) { writeFileSync(state, JSON.stringify({ ...JSON.parse(readFileSync(state, 'utf8')), ...JSON.parse(readFileSync(0, 'utf8')) })); console.log('{}'); process.exit(0); }
+console.log(JSON.stringify({ required_pull_request_reviews: JSON.parse(readFileSync(state, 'utf8')), required_status_checks: { strict: false, checks: [{ context: 'Graphyard / merge', app_id: 1234 }, { context: 'graphyard/landable', app_id: 1234 }] }, enforce_admins: { enabled: true }, allow_force_pushes: { enabled: false }, allow_deletions: { enabled: false } }));
+`, { mode: 0o755 });
     const environment: NodeJS.ProcessEnv = { ...process.env, PATH: `${binary}:${process.env.PATH}`, GRAPHYARD_CONFIG_HOME: credentialDirectory };
     for (const name of Object.keys(environment)) if (name.startsWith('GRAPHYARD_') && name !== 'GRAPHYARD_CONFIG_HOME') delete environment[name];
     const cli = async (args: string[], input?: string) => {
@@ -414,6 +520,13 @@ test('the master CLI installs its harness rules and reports status against a liv
     const harness = JSON.parse(await cli(['master', 'harness', 'claude', '--apply']));
     assert.equal(harness.applied, true);
     assert.ok(JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8')).permissions.allow.some((rule: string) => rule.includes('master:*')));
+    assert.ok(JSON.parse(await readFile(join(root, '.claude/settings.local.json'), 'utf8')).permissions.allow.includes('Bash(gh api repos/owner/project/branches/main/protection*)'), 'the harness names the managed branch from master configuration');
+    const plan = JSON.parse(await cli(['master', 'protection']));
+    assert.equal(plan.mode, 'agent'); assert.equal(plan.consistent, false); assert.deepEqual(plan.items.agent, ['GY-42']); assert.equal(plan.apply, false);
+    assert.equal(JSON.parse(await readFile(state, 'utf8')).required_approving_review_count, 1, 'a plan changes nothing');
+    const applied = JSON.parse(await cli(['master', 'protection', '--apply']));
+    assert.equal(applied.applied, true); assert.equal(applied.consistent, true);
+    assert.equal(JSON.parse(await readFile(state, 'utf8')).required_approving_review_count, 0);
     const status = JSON.parse(await cli(['master', 'status']));
     assert.equal(status.reviewer, null); assert.deepEqual(status.reviews, { pending: [], completed: [] }); assert.equal(status.counts.reviewsPending, 0);
     await assert.rejects(cli(['master', 'review', 'GY-99']), /Unknown work item|herdr/i);
@@ -426,7 +539,7 @@ test('the master CLI installs its harness rules and reports status against a liv
 test('the reviewer path is documented end to end in the install runbook and guides', async () => {
   const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
   const [masterAgent, github, onboarding, help] = await Promise.all([readMasterGuide(), read('docs/github.md'), read('docs/onboarding.md'), read('src/cli/master.ts')]);
-  for (const command of ['master reviewer setup', 'master reviewer add', 'master review GY-N', 'master harness']) {
+  for (const command of ['master reviewer setup', 'master reviewer add', 'master review GY-N', 'master protection', 'master harness']) {
     assert.ok(help.includes(command), `${command} must appear in CLI help`);
     assert.ok(masterAgent.includes(command), `docs/master-agent.md must document ${command}`);
   }
