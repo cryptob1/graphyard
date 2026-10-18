@@ -79,14 +79,19 @@ export async function localDirectory(root: string) {
 
 export interface ScanInput { files: string[]; contents: Record<string, string> }
 
-const scanExcluded = new Set(['.git', '.graphyard', 'node_modules', 'dist', 'build', 'coverage', 'vendor', 'venv', '.venv', '__pycache__', 'test-results', 'playwright-report']);
+// `.claude` is the Claude runtime's own state in a checkout, never project content: its working
+// copies under `.claude/worktrees`, its lock files and its local settings. One checkout held 10,409
+// entries beneath it (GY-2007), which alone exhausted the scan's file bound and refused every
+// derived setup. Nothing the scan reads (scanInteresting) can live there, so skipping the whole
+// directory keeps discovery bounded without hiding any input it could use.
+const scanExcluded = new Set(['.git', '.graphyard', '.claude', 'node_modules', 'dist', 'build', 'coverage', 'vendor', 'venv', '.venv', '__pycache__', 'test-results', 'playwright-report']);
 const scanInteresting: RegExp[] = [
   /^package\.json$/, /^pyproject\.toml$/, /^requirements(?:-dev)?\.txt$/, /^setup\.(?:py|cfg)$/, /^Pipfile$/, /^tox\.ini$/,
   /^Dockerfile(?:\.[^/]*)?$/, /^(?:docker-)?compose\.ya?ml$/, /^railway\.(?:json|toml)$/, /^vercel\.json$/, /^fly\.toml$/, /^netlify\.toml$/,
   /^\.nojekyll$/, /^CNAME$/, /^index\.html$/, /^\.env\.example$/, /^pytest\.ini$/, /^conftest\.py$/,
   /^\.github\/workflows\/[^/]+\.ya?ml$/, /^graphyard\.json$/, /^e2e\/cases\/[^/]+\.json$/,
 ];
-const scanLimits = { files: 5000, depth: 6, bytes: 262_144 };
+export const scanLimits = { files: 5000, depth: 6, bytes: 262_144 };
 
 /** Read-only bounded walk that keeps only paths and whitelisted manifest/config text. Never executes repository code. */
 export async function collectScanInput(root: string): Promise<ScanInput> {
