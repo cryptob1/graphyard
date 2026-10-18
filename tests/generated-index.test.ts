@@ -129,7 +129,7 @@ test('integration:generated-index-no-conflict — two branches that each add a p
     assert.equal(result.output.merged, true); assert.equal(result.output.ok, true);
     assert.deepEqual(result.output.regenerated, ['docs/README.md']);
     assert.deepEqual(result.output.generated, ['docs/protocol.md', 'docs/README.md']);
-    assert.deepEqual(result.output.files.map((entry: any) => [entry.path, entry.kind]), [['docs/README.md', 'generated'], ['docs/quickstart.md', 'in-scope']], 'the regenerated index is generated, not an out-of-scope rewrite');
+    assert.equal(result.output.refused, undefined, 'the merge alone is judged; the regenerated index is never weighed against plannedFiles');
     assert.equal(git(branch, 'status', '--porcelain'), '', 'the merge is committed');
     assert.equal(git(branch, 'rev-list', '--merges', '--count', 'HEAD'), '1');
     const index = await readFile(join(branch, 'docs/README.md'), 'utf8');
@@ -176,7 +176,7 @@ test('integration:generated-index-no-conflict — sync regenerates the managed A
     const second = await sync(branch, server.env);
     assert.equal(second.code, 0, JSON.stringify(second.output)); assert.equal(second.output.merged, true); assert.equal(second.output.ok, true);
     assert.equal(git(branch, 'status', '--porcelain'), ''); assert.equal(git(branch, 'rev-list', '--merges', '--count', 'HEAD'), '1');
-    assert.deepEqual(second.output.files.map((entry: any) => [entry.path, entry.kind]), [['AGENTS.md', 'in-scope'], ['docs/start.md', 'in-scope']]);
+    assert.equal(second.output.refused, undefined, 'the merge alone is judged; nothing is classified against plannedFiles');
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 

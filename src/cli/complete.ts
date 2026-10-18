@@ -99,10 +99,8 @@ export const completeCommand: CliCommand = {
   scope: 'work',
   help: [
     '  complete GY-N EPOCH PR        Submit implementation and end the lease; gates decide',
-    '                                completion. Refused when the PR reverts, deletes or',
-    '                                rewrites files outside plannedFiles relative to the base.',
-    '                                Reports what graphyard verify ran on HEAD and its outcome.',
-    '                                Refused while GitHub requests are paused, it waits for the',
+    '                                completion. Reports what graphyard verify ran on HEAD and its',
+    "                                outcome. Refused while GitHub requests are paused, it waits for the",
     '                                named reset and submits again (bounded)',
     '                                --no-docs STATEMENT states the change alters no documented',
     '                                behaviour, instead of a docs diff (the reviewer checks it)',
