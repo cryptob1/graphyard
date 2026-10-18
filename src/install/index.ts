@@ -517,20 +517,25 @@ export function detectedBaseBranch(remoteBranches: string): 'master' | null {
 }
 /**
  * What a compose install mounts for the server to read submitted heads from (GY-1675): the checkout at
- * `/repo`, and, when the checkout is a linked worktree or a submodule, whose `.git` is a file naming a
- * directory outside it, that Git directory's common directory at its own host path too, so git inside
- * the container follows the pointer to the object store and refs. Mounting the worktree alone left
- * `/repo/.git` pointing at a path the container does not have. A checkout with no `.git` mounts nothing.
+ * `/repo`. Run from a linked worktree, that is the main checkout the worktree belongs to (the parent of
+ * the common Git directory), never the worktree itself: a worker's worktree is reclaimed with its
+ * attempt, and a server whose /repo was reclaimed could observe no submitted head (GY-2054). A checkout
+ * whose `.git` is a file naming a directory outside it that is not a linked worktree of a checkout (a
+ * submodule) mounts that Git directory's common directory at its own host path too, so git inside the
+ * container follows the pointer to the object store and refs. A checkout with no `.git` mounts nothing.
  */
 export function composeCheckoutMounts(root: string): { repoCheckout: string | null; repoGitDir: string | null } {
   const dotGit = resolve(root, '.git');
   if (!existsSync(dotGit)) return { repoCheckout: null, repoGitDir: null };
   if (statSync(dotGit).isDirectory()) return { repoCheckout: root, repoGitDir: null };
   let common: string;
-  try { common = execFileSync('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); }
+  try { common = resolve(execFileSync('git', ['-C', root, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()); }
   catch (error: any) { throw new Error(`${root} is a linked worktree whose main repository could not be read (${error?.message ?? 'git rev-parse failed'}); run the compose install from a checkout whose Git directory is reachable`); }
+  // A linked worktree's common directory is its main checkout's own .git directory.
+  const main = resolve(common, '..');
+  if (resolve(main, '.git') === common && existsSync(common) && statSync(common).isDirectory()) return { repoCheckout: main, repoGitDir: null };
   // A worktree's own gitdir lives under the common directory's worktrees/, so that one mount covers both.
-  return { repoCheckout: root, repoGitDir: resolve(common) };
+  return { repoCheckout: root, repoGitDir: common };
 }
 
 export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & RestoreProtectionChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
@@ -2222,16 +2227,27 @@ export async function applyRosterChange(session: InstallSession, record: Install
   }
   const admin = principalOfRole(roster, 'admin');
   const target = `${record.url.replace(/\/$/, '')}/api/principals`;
-  let readback: { url: string; principal: { id: string; role: string; sessionKind: string | null; grants: string[] } | null; principals: number } | null = null;
+  const read = async (url: string) => {
+    const response = await deps.fetch(url, { headers: { Authorization: `Bearer ${session.tokens.get(admin.id)}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
+    return response?.ok ? await response.json().catch(() => null) : null;
+  };
+  const proofs = change.entry?.proofs ?? [];
+  let readback: { url: string; principal: { id: string; role: string; sessionKind: string | null; grants: string[] } | null; principals: number; proofAuthority?: string[] } | null = null;
   for (let attempt = 0; attempt < 40 && !readback; attempt++) {
-    const response = await deps.fetch(target, { headers: { Authorization: `Bearer ${session.tokens.get(admin.id)}` }, signal: AbortSignal.timeout(15_000) }).catch(() => null);
-    const served = response?.ok ? (await response.json().catch(() => null))?.principals : null;
+    const served = (await read(target))?.principals;
     const listed = Array.isArray(served) ? served.find((principal: { id: string }) => principal.id === change.id) : undefined;
-    if (Array.isArray(served) && (change.entry ? listed && servedAs(listed, change.entry) : !listed)) readback = { url: target, principal: listed ? { id: listed.id, role: listed.role, sessionKind: listed.sessionKind ?? null, grants: listed.grants ?? [] } : null, principals: served.length };
+    // GY-1998: --proof counts as restored only once the grant record Graphyard authorizes from holds every pattern.
+    // The server seeds a producer's record once and never re-seeds it, so a revoked pattern stays revoked: a record
+    // that lacks a requested pattern is refused with the explicit grant that restores it, never reported as restored.
+    const authority = proofs.length && listed ? ((await read(`${record.url.replace(/\/$/, '')}/api/proof-grants`))?.authorities ?? [])
+      .find((entry: { principalId: string; source: string }) => entry.principalId === change.id && entry.source === 'grant') : undefined;
+    const missing = authority ? proofs.filter(pattern => !(authority.patterns ?? []).includes(pattern)) : [];
+    if (missing.length) throw new Error(`${change.id} is served with its roster entry, but its recorded proof grant holds ${authority.patterns?.join(', ') || 'no pattern'}, not ${missing.join(', ')}: Graphyard seeds a producer's grant once and never re-seeds it from GRAPHYARD_PRINCIPALS, so a revoked pattern stays revoked. To restore it, run graphyard grants grant ${change.id} ${missing.join(',')} REASON, then rerun this command: it changes nothing and reads the grant back`);
+    if (Array.isArray(served) && (change.entry ? listed && servedAs(listed, change.entry) && (!proofs.length || authority) : !listed)) readback = { url: target, principal: listed ? { id: listed.id, role: listed.role, sessionKind: listed.sessionKind ?? null, grants: listed.grants ?? [] } : null, principals: served.length, ...(authority ? { proofAuthority: authority.patterns } : {}) };
     else await deps.wait(3000);
   }
-  if (!readback) throw new Error(`${target} still ${change.entry ? `does not list ${change.id} as ${change.entry.role} with grants ${(change.entry.grants ?? []).join(', ') || 'none'}` : `lists ${change.id}`} after two minutes; the redeploy may still be in progress. Rerun the same command: it changes nothing and reads the roster back again`);
-  return vault.scrub({ action: change.entry ? 'add' as const : 'remove' as const, repository: record.repository, installDirectory: session.directory, principal: change.entry ? { id: change.entry.id, role: change.entry.role, sessionKind: change.entry.sessionKind ?? null, grants: change.entry.grants ?? [] } : { id: change.id }, changed: change.changed, deployment, readback,
+  if (!readback) throw new Error(`${target} still ${change.entry ? `does not list ${change.id} as ${change.entry.role} with grants ${(change.entry.grants ?? []).join(', ') || 'none'}${change.entry.proofs?.length ? ` and proofs ${change.entry.proofs.join(', ')}` : ''}` : `lists ${change.id}`} after two minutes; the redeploy may still be in progress. Rerun the same command: it changes nothing and reads the roster back again`);
+  return vault.scrub({ action: change.entry ? 'add' as const : 'remove' as const, repository: record.repository, installDirectory: session.directory, principal: change.entry ? { id: change.entry.id, role: change.entry.role, sessionKind: change.entry.sessionKind ?? null, grants: change.entry.grants ?? [], ...(change.entry.proofs?.length ? { proofs: change.entry.proofs } : {}) } : { id: change.id }, changed: change.changed, deployment, readback,
     ...(change.entry && !context.host ? { tokenFile: tokenFile(session.directory, change.entry.id) } : {}) });
 }
 

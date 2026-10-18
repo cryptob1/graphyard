@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { parseEnv } from 'node:util';
 import { execFileSync } from 'node:child_process';
 import { applyInstall, buildPlan, coreEnv, prepareInstall } from '../src/install/index.js';
@@ -263,19 +263,27 @@ test('the multi-line App private key is written beside the bundle and mounted, n
   } finally { await fixture.cleanup(); }
 });
 
-test('a compose install run from a linked worktree mounts the worktree at /repo and its common Git directory at its own host path, so /repo/.git resolves inside the container (GY-1675)', async () => {
+test('unit:compose-mount-main-checkout-from-worktree — a compose install run from a linked worktree mounts the main checkout the worktree belongs to at /repo, never the worktree a rework reclaims, and its plan lists that mount (GY-2054)', async () => {
+  const { composeCheckoutMounts } = await import('../src/install/index.js');
   const main = await temporaryRepository();
   execFileSync('git', ['-C', main, 'commit', '-q', '--allow-empty', '-m', 'base'], { env: { ...process.env, GIT_AUTHOR_NAME: 'T', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 'T', GIT_COMMITTER_EMAIL: 't@example.com' } });
   const worktree = join(main, '.graphyard', 'worktrees', 'GY-1-1');
   execFileSync('git', ['-C', main, 'worktree', 'add', '-q', worktree]);
   await writeFile(join(worktree, 'package.json'), await readFile(join(main, 'package.json')));
-  const common = execFileSync('git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim();
+  const checkout = resolve(execFileSync('git', ['-C', worktree, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim(), '..');
   assert.ok((await stat(join(worktree, '.git'))).isFile(), 'a linked worktree keeps its .git as a pointer file');
+  assert.deepEqual(composeCheckoutMounts(worktree), { repoCheckout: checkout, repoGitDir: null }, 'the main checkout holds the common .git itself, so nothing else is mounted');
   const fixture = await harness({ provider: 'compose', root: worktree });
   try {
+    const plan = await buildPlan(await prepareInstall(fixture.root, inputsFor('compose'), fixture.deps, 'plan'));
+    const app = plan.actions.find(action => action.id === 'provider.provision.app')!;
+    assert.ok(app.title.endsWith(`, with ${checkout} mounted at /repo`), app.title);
+    assert.ok(!app.title.includes(worktree), 'the plan names no linked-worktree path');
     await apply(fixture, 'compose');
+    const compose = bundle(fixture, 'compose.yaml')!.content;
     const escape = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`"${escape(worktree)}:/repo", "${escape(common)}:${escape(common)}"\\]`), 'the common Git directory is mounted beside the checkout');
+    assert.match(compose, new RegExp(`"${escape(checkout)}:/repo"\\]`), 'the main checkout is mounted at /repo');
+    assert.ok(!compose.includes(worktree), 'no linked-worktree path is mounted');
     assert.ok(parseEnv(bundle(fixture, 'server.env')!.content).GRAPHYARD_REPOSITORY_ROOT === '/repo');
   } finally { await fixture.cleanup(); await rm(main, { recursive: true, force: true }); }
 });
