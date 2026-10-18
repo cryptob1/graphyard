@@ -57,14 +57,12 @@ export function readyOwner(work: Work, gate: Gate): string | undefined {
  * Every unmet requirement, one plain line each, grouped by step. The current step comes first —
  * its lines are the refusal of that step's own gate (Test before Review, unlike the evaluation
  * order), or, before the hand-in, whatever holds the build — then every later step in the order a
- * pull request travels. Merged work held at Deploy is left with what the release lacks; work closed
- * without merging has nothing left.
+ * pull request travels. Merged work, and work closed without merging, has nothing left.
  */
 export function whatIsLeft(work: Work, now: number, release: ReleaseView = noRelease): LeftGroup[] {
   if (isClosed(work)) return [];
   const steps = prSteps(work, now, release);
   if (!steps.current) return [];
-  if (steps.current === 'deploy') return [{ step: 'deploy', label: stepLabel.deploy, who: steps.who, lines: [`${steps.detail.replace(/^./, c => c.toUpperCase())}.`], current: true }];
   const unmet = work.gates.filter(gate => !gate.passed);
   const own = steps.current !== 'build' ? work.gates.find(gate => gate.name === stepGate[steps.current!] && !gate.passed) : undefined;
   const failing = own ?? unmet[0];

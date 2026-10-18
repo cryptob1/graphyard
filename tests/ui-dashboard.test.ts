@@ -30,7 +30,7 @@ import TopBar from '../web/components/top-bar.js';
 import WorkCard from '../web/components/work-card.js';
 import WorkersPage, { roleWords, shortShas } from '../web/pages/workers.js';
 import { CandidateSha } from '../web/candidate.js';
-import { computeFlow, coveredWindow, deliveredAt, flowDrilldown, gateFactStep, productionHold, releaseObservedAt, servedAt, stepEntries, stepMoves } from '../src/flow-analytics.js';
+import { computeFlow, coveredWindow, deliveredAt, flowDrilldown, flowSteps, gateFactStep, productionHold, releaseObservedAt, servedAt, stepEntries, stepMoves } from '../src/flow-analytics.js';
 
 // GY-161: the dashboard, rendered over the board fixture the browser suite also serves
 // (browser-tests/ui-board.ts): an item parked on a human-only decision, one blocked, items building,
@@ -277,7 +277,7 @@ test('unit:ui-browser-screenshots — the browser suite captures every page at d
   for (const file of ['dashboard.spec.ts', 'flow-analytics.spec.ts', 'attribution.spec.ts', 'screenshots.spec.ts']) assert.ok(existsSync(new URL(`browser-tests/${file}`, root)), file);
 });
 
-test('unit:ui-pr-steps — every moving item shows the seven steps from its gates, done, current and pending, with the current step in plain words naming what it waits on', () => {
+test('unit:ui-pr-steps — every moving item shows the six steps from its gates, ending at merge, done, current and pending, with the current step in plain words naming what it waits on', () => {
   const work = board();
   const withReasons = (item: Work, reasons: Record<string, string[]>) => ({ ...item, gates: item.gates.map(gate => reasons[gate.name] ? { ...gate, passed: reasons[gate.name].length === 0, reasons: reasons[gate.name] } : gate) }) as Work;
   const handedIn = find('GY-22', work);
@@ -312,21 +312,26 @@ test('unit:ui-pr-steps — every moving item shows the seven steps from its gate
   for (const [name, item, current, label, who] of cases) {
     const steps = prSteps(item, NOW, trusted);
     assert.deepEqual(steps.steps.map(step => step.id), [...stepIds], name);
-    assert.deepEqual(steps.steps.map(step => step.label), ['Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge', 'Deploy']);
+    assert.deepEqual(steps.steps.map(step => step.label), ['Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge']);
     assert.equal(steps.current, current, name); assert.equal(steps.label, label, name); assert.equal(steps.who, who, name);
     const at = stepIds.indexOf(current as any);
     assert.equal(steps.steps.filter(step => step.state === 'current').length, 1, `${name}: one current step`);
     for (const step of steps.steps.slice(0, at)) assert.equal(step.state, 'done', `${name}: ${step.id} before the current step is done`);
-    assert.equal(steps.steps[stepIds.length - 1].state, current === 'deploy' ? 'current' : 'pending', `${name}: deploy`);
+    assert.equal(steps.steps.at(-1)!.id, 'merge', `${name}: the steps end at merge`);
   }
-  // A merged item has every step done, whatever its smoke policy (GY-1981: the steps end at merge).
-  assert.ok(prSteps(find('GY-18', work), NOW).steps.every(step => step.state === 'done'));
-  assert.equal(prSteps({ ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, NOW).current, null);
+  // A merged item has every step done, the last one Merge, whatever its smoke policy and without any deployment observation (GY-1981).
+  for (const merged of [find('GY-18', work), { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work]) {
+    const steps = prSteps(merged, NOW);
+    assert.equal(steps.current, null);
+    assert.deepEqual(steps.steps.map(step => step.id), [...stepIds]);
+    assert.equal(steps.steps.at(-1)!.id, 'merge');
+    assert.ok(steps.steps.every(step => step.state === 'done'));
+  }
   // The Work page row, the phone card (the same element, laid out as a card) and the item page draw the same steps.
   for (const key of ['GY-14', 'GY-15', 'GY-16', 'GY-21', 'GY-22']) {
     const steps = prSteps(find(key, work), NOW);
     const row = markup(createElement(WorkCard, { item: find(key, work), now: NOW, onOpen: noop }));
-    assert.equal((row.match(/data-step="/g) ?? []).length, 7, `${key} row shows seven steps`);
+    assert.equal((row.match(/data-step="/g) ?? []).length, 6, `${key} row shows six steps`);
     assert.match(row, new RegExp(`data-step="${steps.current}" data-state="current"`));
     assert.ok(row.includes(steps.label), `${key} row labels the current step`);
     const detail = firstScreen(itemPage(key));
@@ -349,7 +354,7 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
     { workKey: 'GY-19', observedAt: new Date(NOW - hour).toISOString(), detail: 'review to review' },
   ];
   const transitions = transitionsFromRows(rows);
-  assert.deepEqual(transitions.map(t => `${t.key}:${t.from}>${t.to}`), ['GY-15:null>build', 'GY-15:build>test', 'GY-16:test>prove', 'GY-16:prove>build', 'GY-16:build>validate', 'GY-18:merge>deploy']);
+  assert.deepEqual(transitions.map(t => `${t.key}:${t.from}>${t.to}`), ['GY-15:null>build', 'GY-15:build>test', 'GY-16:test>prove', 'GY-16:prove>build', 'GY-16:build>validate', 'GY-18:merge>null']);
   const frames = replayFrames(transitions, NOW);
   // Every frame is one recorded transition inside the last 24 hours, in order; nothing is invented.
   const inWindow = transitions.filter(t => Date.parse(t.at) > NOW - 24 * hour);
@@ -362,7 +367,8 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   const at = (t: number) => Object.fromEntries([...positionsAt(frames, t)].map(([key, value]) => [key, `${value.step}${value.rework ? '!' : ''}`]));
   assert.deepEqual(at(0.2), { 'GY-15': 'test' });
   assert.deepEqual(at((24 - 7) / 24), { 'GY-15': 'test', 'GY-16': 'build!' });
-  assert.deepEqual(at(1), { 'GY-15': 'test', 'GY-16': 'validate', 'GY-18': 'deploy' });
+  // A merge leaves the flow: the steps end at Merge (GY-1981).
+  assert.deepEqual(at(1), { 'GY-15': 'test', 'GY-16': 'validate' });
   // The recorded moves are read from the control plane's own gate facts by the same rule the Now
   // view uses: replaying the board's whole recorded history leaves every item in the flow at
   // exactly the step prSteps shows — GY-22, refused by both CI and review, at Test, not Review.
@@ -381,7 +387,7 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   // Time per step is measured over those same moves: Validate and Deploy get their own time, and
   // Deploy's is none, since a merge leaves the flow.
   const report = boardApi('analytics/flow?window=7') as { stepDwell: { step: string; n: number; medianMs: number | null }[] };
-  assert.deepEqual(report.stepDwell.map(entry => entry.step), [...stepIds]);
+  assert.deepEqual(report.stepDwell.map(entry => entry.step), [...flowSteps]);
   const deploy = report.stepDwell.find(entry => entry.step === 'deploy')!;
   assert.ok(deploy.n >= 2); assert.equal(deploy.medianMs, 0);
   const since = new Date(NOW - 3 * hour).toISOString();
@@ -691,7 +697,7 @@ test('unit:ui-insights-real-items — Insights builds its flow and 24-hour repla
   const api = flowApi(work);
   let report: any, rows: any;
   assert.doesNotThrow(() => { report = api('analytics/flow?window=7'); rows = api(`analytics/flow/drilldown?window=7&metric=steps&key=${encodeURIComponent(new Date(NOW - 24 * hour).toISOString())}`); });
-  assert.deepEqual(report.stepDwell.map((entry: any) => entry.step), [...stepIds]);
+  assert.deepEqual(report.stepDwell.map((entry: any) => entry.step), [...flowSteps]);
   assert.ok(Array.isArray(report.throughput) && Array.isArray(rows.rows));
   // The page's own reader, fed by that API, returns the report and replay frames built only from those rows.
   const flow = await readFlow(async (path: string) => api(path), NOW);

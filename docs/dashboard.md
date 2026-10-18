@@ -27,7 +27,7 @@ Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent
 
 ## The status sentence
 
-**Build, Validate, Test, Review, Prove, Merge, Deploy**; done items are *Delivered* at merge (steps end at Merge); *Live* once served. Item page leads with `summary`, state, **What is left**, folded **Details** (description, criteria), **Pull request** (**Merge danger**), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker). `/goals/KEY`: summary, outcomes, Todo/Doing/Checking/Done flowchart, **Play**.
+**Build, Validate, Test, Review, Prove, Merge**; done items are *Delivered* at merge; *Live* once served. Item page leads with `summary`, state, **What is left**, folded **Details** (description, criteria), **Pull request** (**Merge danger**), **Test cases**, **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker). `/goals/KEY`: summary, outcomes, Todo/Doing/Checking/Done flowchart, **Play**.
 
 ## Insights
 

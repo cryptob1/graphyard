@@ -8,23 +8,23 @@ import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
 
 /**
- * The seven pull-request steps every moving item shows (GY-161): Build, Validate, Test, Review,
- * Prove, Merge, Deploy. Each step after Build reads one gate the control plane evaluates
+ * The six pull-request steps every moving item shows (GY-161): Build, Validate, Test, Review,
+ * Prove, Merge. Each step after Build reads one gate the control plane evaluates
  * (ready, build, review, test, acceptance, merge): Validate is the build gate once the work is
  * handed in, Test the CI checks, Review the approval, Prove the acceptance criteria and Merge the
- * merge gate; Deploy is the delivery after the merge. A step whose gate passed is done, the first
+ * merge gate; the steps end at the merge (GY-1981). A step whose gate passed is done, the first
  * step (in the order a pull request travels) whose gate refuses is current, and the rest are
  * pending. The dashboard adds nothing the gates do not say; it only names the step in plain words
  * and says what it waits on and who acts next — as a role, never a worker's code name.
  */
-export const stepIds = ['build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
+export const stepIds = ['build', 'validate', 'test', 'review', 'prove', 'merge'] as const;
 export type StepId = typeof stepIds[number];
 /** One recorded move of an item between steps, as the Insights Flow replay (web/flow-replay.ts) plays it. */
 export interface StepTransition { key: string; from: StepId | null; to: StepId | null; at: string }
 export type StepState = 'done' | 'current' | 'pending';
-export const stepLabel: Record<StepId, string> = { build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge', deploy: 'Deploy' };
+export const stepLabel: Record<StepId, string> = { build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge' };
 /** The verb the live label starts with: "Testing · 3 of 5 checks done". */
-export const stepVerb: Record<StepId, string> = { build: 'Building', validate: 'Validating', test: 'Testing', review: 'Reviewing', prove: 'Proving', merge: 'Merging', deploy: 'Deploying' };
+export const stepVerb: Record<StepId, string> = { build: 'Building', validate: 'Validating', test: 'Testing', review: 'Reviewing', prove: 'Proving', merge: 'Merging' };
 /** The gate each step after Build reads. */
 export const stepGate: Partial<Record<StepId, string>> = { validate: 'build', test: 'test', review: 'review', prove: 'acceptance', merge: 'merge' };
 /** The control plane's gate evaluation order (src/model evaluate). */
@@ -158,12 +158,11 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       const stuck = reasons.map(reason => plainReason(reason, 'merge')).find(plain => plain.stuck);
       return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
     }
-    case 'deploy': return { detail: 'merged', who: 'Nobody — it has merged' };
   }
 }
 
 /**
- * The seven steps for one item. Before the work is handed in only Build can be current. After
+ * The six steps for one item. Before the work is handed in only Build can be current. After
  * it, each step's own gate decides done, and the first step whose gate refuses is current; when
  * every gate passes the item is merging. A merged item has every step done — reading "Live" where
  * production was observed serving it. Work closed without merging has no step at all.
@@ -188,8 +187,8 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
   }
   const byName = new Map(work.gates.map(gate => [gate.name, gate]));
   // A gate the item does not carry has nothing to refuse, so its step reads done.
-  const passed = (id: StepId) => id === 'build' || (id !== 'merge' && id !== 'deploy' && byName.get(stepGate[id]!)?.passed !== false);
-  const current = stepIds.find(id => id !== 'deploy' && !passed(id)) ?? 'merge';
+  const passed = (id: StepId) => id === 'build' || (id !== 'merge' && byName.get(stepGate[id]!)?.passed !== false);
+  const current = stepIds.find(id => !passed(id)) ?? 'merge';
   const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now, release);
   const steps = make(id => id === current ? 'current' : passed(id) ? 'done' : 'pending', current, detail, who);
   // A Review or Prove step passed by carry reads as carried, with its ground (GY-330).
@@ -208,7 +207,7 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
  * recorded move when that move put it at the step it is at now. Before the moves are read, or
  * while the record is a moment behind the gates, the item's own record gives the step's start:
  * Build keeps the builder's clock (`statusSince`: the claim, or the send-back, which is when
- * Build restarted), Validate starts at the hand-in, Deploy at the merge, and a later step at the
+ * Build restarted), Validate starts at the hand-in, and a later step at the
  * latest move the item recorded (`statusSince`).
  */
 export function stepSince(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): string {
@@ -218,7 +217,6 @@ export function stepSince(work: Work, now: number, moves?: readonly StepTransiti
   const at = (value: string | null | undefined) => value && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now ? Date.parse(value) : null;
   const latest = (moves ?? []).filter(move => move.key === work.key && at(move.at) !== null).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1);
   if (latest?.to === current) return latest.at;
-  if (current === 'deploy') return work.delivery?.mergedAt ?? work.observation?.mergedAt ?? own;
   if (current === 'validate') {
     const pipeline = (work as Work & { pipeline?: PipelineTimeline }).pipeline;
     const handedIn = at(pipeline?.resubmittedAt ?? pipeline?.submittedAt);

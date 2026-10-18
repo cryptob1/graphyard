@@ -76,7 +76,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   assert.ok(technical > 0, 'the page has a Technical details section');
   const above = html.slice(0, technical);
 
-  // The order: the summary (status sentence, who acts next, the seven-step tracker), then the four sections, then the technical detail.
+  // The order: the summary (status sentence, who acts next, the six-step tracker), then the four sections, then the technical detail.
   const order = ['class="status-sentence', 'Who acts next:', 'class="steps-detail', 'aria-label="What is left"', 'aria-label="Requirements"', 'aria-label="Pull request"', 'aria-label="Activity"', 'aria-label="Technical details"'].map(needle => html.indexOf(needle));
   assert.ok(order.every(index => index >= 0), `every section is rendered: ${order}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'summary, What is left, Requirements, Pull request, Activity, Technical details');
