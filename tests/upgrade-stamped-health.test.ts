@@ -15,7 +15,7 @@ import { judge } from '../scripts/upgrade-from-stable.mjs';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const previousVersion = '2026.10.18.1', version = '2026.10.18.2';
-const databasePort = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1977;
+const databasePort = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 38;
 const repositoryRoot = new URL('..', import.meta.url).pathname;
 let database: EmbeddedPostgres;
 let databaseUrl: string;
@@ -44,6 +44,7 @@ async function cliCheckout() {
   let modules = repositoryRoot;
   while (!existsSync(join(modules, 'node_modules'))) modules = dirname(modules);
   await symlink(join(modules, 'node_modules'), join(root, 'node_modules'));
+  await writeFile(join(root, '.git/info/exclude'), 'node_modules\n');
   git('tag', previousVersion);
   const previous = git('rev-parse', 'HEAD');
   git('commit', '--quiet', '--allow-empty', '-m', 'candidate');
@@ -168,6 +169,11 @@ test('unit:upgrade-serves-stamped-release — graphyard upgrade of an installed 
 
   const plan = composeAdapter.plan({ image: `${imageRepository}:${version}`, sourceRoot: cliRoot, workdir: '/w', port: 4310 } as unknown as AdapterContext, { database: false, app: false } as AdapterObservation);
   assert.match(plan.find(action => action.id === 'provider.image')?.command ?? '', new RegExp(`--build-arg GRAPHYARD_VERSION=${version.replaceAll('.', '\\.')} --build-arg GRAPHYARD_BUILD_REVISION=${candidate} --tag `));
+
+  // A tracked modification is not the candidate's bytes, so the build claims no release for it.
+  await writeFile(join(cliRoot, 'README.md'), 'modified\n');
+  const dirtyPlan = composeAdapter.plan({ image: `${imageRepository}:${version}`, sourceRoot: cliRoot, workdir: '/w', port: 4310 } as unknown as AdapterContext, { database: false, app: false } as AdapterObservation);
+  assert.doesNotMatch(dirtyPlan.find(action => action.id === 'provider.image')?.command ?? '', /--build-arg/);
 });
 
 test('unit:upgrade-gate-still-refuses-wrong-health — health-reports-candidate fails an upgrade whose /healthz does not report the candidate\'s version and commit, and promote still needs the gate', async () => {

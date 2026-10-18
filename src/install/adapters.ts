@@ -345,8 +345,10 @@ export async function composePort(ctx: AdapterContext): Promise<PreflightItem> {
  * The stamp a locally built image carries: the source checkout's release and commit. Without it
  * the Dockerfile's `0.0.0-dev`/`unknown` defaults win and /healthz reports `unreleased unknown`,
  * as the upgrade gate's compose install did after `graphyard upgrade` rebuilt its image (GY-1977).
+ * A checkout with changes HEAD does not hold gets no stamp: its bytes are not HEAD's release.
  */
-export function imageBuildArgs(sourceRoot: string) {
+export function imageBuildArgs(sourceRoot: string, dirty = sourceTreeDirty) {
+  if (dirty(sourceRoot)) return [];
   const release = checkoutRelease(sourceRoot, process.env.GRAPHYARD_BUILD_REVISION || 'unknown');
   return ['--build-arg', `GRAPHYARD_VERSION=${release.version}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${release.revision}`];
 }
