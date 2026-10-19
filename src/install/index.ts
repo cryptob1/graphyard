@@ -46,6 +46,7 @@ export interface InstallDependencies {
   ssh?: (host: string, user?: string) => Transport;
   fetch?: typeof fetch;
   configHome?: string;
+  /** Where the image builds from (GY-2168, `--source-root`): the deployed commit's checkout; default the checkout this process's own code was loaded from. */
   sourceRoot?: string;
   /** The commit a Railway upload stamps as GRAPHYARD_BUILD_SHA; read from sourceRoot's checkout when absent. */
   sourceCommit?: string | null;
@@ -143,6 +144,7 @@ export function installRequestFromArgs(args: string[]) {
     'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
     'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
     'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
+    'source-root': { type: 'string' },
     'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
     target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
     'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' }, 'profiles-only': { type: 'boolean' }, 'fresh-cursor': { type: 'boolean' },
@@ -203,7 +205,13 @@ export function installRequestFromArgs(args: string[]) {
  * An installation with no installer-created worker was applied with --observe-only. The record keeps
  * no Railway workspace, so an account in several workspaces names it again with `workspace`.
  */
-export function redeployArguments(record: InstallRecord, image: string, workspace: string | null = null) {
+/**
+ * `sourceRoot` (GY-2168) names the checkout the image builds from, instead of the running CLI's
+ * own code root: a redeploy the loop or `graphyard upgrade` starts may load a held snapshot at
+ * another commit, and the image it builds must hold the deployed commit's tree, stamped with that
+ * commit, so `/healthz?strict` reports the deployed commit after the step.
+ */
+export function redeployArguments(record: InstallRecord, image: string, workspace: string | null = null, sourceRoot: string | null = null) {
   if (workspace && record.provider !== 'railway') throw new Error(`--workspace names a Railway installation's workspace; ${record.repository} is installed on ${record.provider}`);
   const host = record.deployment;
   const installer = record.principals.filter(principal => principal.source !== 'principal');
@@ -213,7 +221,8 @@ export function redeployArguments(record: InstallRecord, image: string, workspac
   return ['--repo', record.repository, ...(record.selfContained ? ['--target', record.provider === 'hetzner' ? 'hetzner' : 'host'] : ['--provider', record.provider]),
     '--base-branch', record.baseBranch, ...(record.service ? ['--server-name', record.service] : []), ...(record.domain ? ['--domain', record.domain] : []),
     ...(host?.sshHost ? ['--ssh-host', host.sshHost, '--ssh-user', host.sshUser] : []), ...(host?.port ? ['--port', String(host.port)] : []),
-    ...(host?.local ? ['--local'] : []), ...(workspace ? ['--workspace', workspace] : []), '--review-policy', record.reviewPolicy, ...mode, '--image', image, '--apply'];
+    ...(host?.local ? ['--local'] : []), ...(workspace ? ['--workspace', workspace] : []), '--review-policy', record.reviewPolicy, ...mode, '--image', image,
+    ...(sourceRoot ? ['--source-root', shellWord(sourceRoot)] : []), '--apply'];
 }
 
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {

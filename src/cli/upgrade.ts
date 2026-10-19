@@ -55,7 +55,10 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
     throw new Error(`Refusing ${target.version}: its schema generation ${target.schema} is older than the database's (${databaseSchema}); that release would refuse this database. Upgrade to a release at generation ${databaseSchema} or newer`);
   const image = inputs.image ?? `${imageRepository}:${target.version}`;
   // The install preview runs first, so the redeploy prints what it changes before it applies it.
-  const install = inputs.install && redeployArguments(inputs.install, image, inputs.workspace);
+  // GY-2168: the redeploy builds the image from this checkout — the one the checkout step moved to
+  // the target (or deployTip moved to the deployed commit) — never from whatever root the running
+  // CLI's own code was loaded from, which a held pin may hold at another commit.
+  const install = inputs.install && redeployArguments(inputs.install, image, inputs.workspace, inputs.cliRoot);
   const redeploy = install ? `${cli(cliRoot, 'install', ...install.slice(0, -1), '--plan')} && ${cli(cliRoot, 'install', ...install)}` : `no install record for this repository: redeploy ${image} by hand`;
   const url = inputs.url ? ['--url', inputs.url] : [];
   const steps: UpgradeStep[] = [
