@@ -310,6 +310,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
     },
+    get withdrawReview() {
+      // GY-2078: a change request is withdrawn in the control plane's own review record; no GitHub request is made.
+      return (work: Work, reviewId: number, message: string) =>
+        mutate(`work/${work.id}/review-withdraw`, { reviewId, reason: message.slice(0, 7000) }, randomUUID()).then(() => {});
+    },
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
         // An unrepresentable widening is refused before it is posted (GY-630): answeringWidening

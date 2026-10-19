@@ -2,9 +2,9 @@
 // touches anything, and the pass an install managing another project runs instead: the managed
 // repository's base branch may be fetched and checked out only where the checkout belongs to it.
 import { realpathSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
-import { shortCommit } from './held-cli.js';
+import { heldCliSnapshots, shortCommit } from './held-cli.js';
 import type { DaemonState } from './state.js';
 import { touchStanding } from './state-cursor.js';
 import { detailChanged } from './decisions.js';
@@ -56,6 +56,14 @@ export const isExternalUpgradeRefusal = (reason: string) => reason.startsWith(ex
  */
 export async function managesOwnCheckout(codeRoot: string, managedRoot: string, run: ChildRun): Promise<boolean | null> {
   if (codeRoot === managedRoot) return true;
+  // GY-2169: a held snapshot under the managed root's .graphyard/held-cli is the managed checkout's
+  // own clone, cut from it by the pin (holdCliAt) and run by a loop restarted onto it — the checkout
+  // the installed configuration's cliPath names when the pin stands. The snapshot is a repository
+  // of its own that shares no common dir with the managed root and holds no origin, so judging the
+  // snapshot directory itself read the install as another project, lifted the pin and rolled the
+  // loop back onto the release production serves. The checkout the snapshot was cut from judges.
+  const cut = relative(heldCliSnapshots(managedRoot), codeRoot).split(sep)[0];
+  if (!!cut && cut !== '..' && !isAbsolute(cut)) return true;
   // A definitive "absent" — git exits 128 for no repository, 2 for no such remote — reads as '',
   // judged on its own terms; any other failed read reads as null, unknown.
   const read = async (root: string, args: string[], absent: readonly number[]): Promise<string | null> => {

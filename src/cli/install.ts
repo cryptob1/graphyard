@@ -125,6 +125,7 @@ export const installCommands = defineCommands([
       '          [--plan|--apply] [--domain HOST] [--workers N]',
       '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]',
       '          [--ssh-key NAME] [--port N] [--workspace NAME-OR-ID] [--image REF]',
+      '          [--source-root DIR]',
       '          [--create-environments] [--herdr-rebind | --no-herdr]',
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
@@ -150,6 +151,9 @@ export const installCommands = defineCommands([
       const { values, request: inputs } = installRequestFromArgs(context.rest);
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
+        // GY-2168: a redeploy names the checkout the deployed commit's tree stands in; without the
+        // flag the session builds from the checkout this command's own code was loaded from.
+        ...(values['source-root'] ? { sourceRoot: resolve(values['source-root']) } : {}),
       }, values.apply ? 'apply' : 'plan');
       if (values.logs) return console.log(await session.adapter.logs(session.context));
       if (values['herdr-only']) { const result = await installHerdrOnly(session); context.print(result); if (!result.herdr) process.exitCode = 1; return; }

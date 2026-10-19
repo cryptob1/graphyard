@@ -31,7 +31,7 @@ CI proofs publish via one principal (`manual:*`, `e2e:*` refused); its posted ru
 
 A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy `production` shows no attention. The serving commit comes from Railway's API or the configured deployment endpoint (GitHub deployments are not read). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses observations `run.deploymentReuseMinutes` (15; `0` every cycle).
 
-Self-upgrades [deploy](delivery.md#release-candidates) the tip first; `.graphyard/held-cli.json` pins `bin/graphyard.mjs` and loops to a dirty checkout's snapshot.
+Self-upgrades [deploy](delivery.md#release-candidates) the tip first; `.graphyard/held-cli.json` pins `bin/graphyard.mjs` and loops to a dirty checkout's snapshot. An install the upgrade cannot redeploy (no compose/local ports) never moves the CLI past the commit production serves — the alignment target falls back to that commit until the server reports a newer one — so no claim straddles releases with `CLI commit X and server commit Y differ`.
 
 Observing a release reports post-deploy checks it does not yet see; nothing is filed. The loop records throughput, judging the serving release over trailing 72h merges less operator-touched and grant-refused superseded idle charged from window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release on an owner item, requesting its unchanged-budget decision.
 

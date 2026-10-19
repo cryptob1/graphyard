@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,11 +8,14 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { emptyDaemonState, type DaemonState } from '../src/master-daemon.js';
 import { performSelfUpgrade, type DeployPorts, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /** The new exports, imported in each test so a reverted source fails the case, not the file (graphyard verify's exercise). */
 const upgrade = () => import('../src/daemon/upgrade.js') as Promise<Record<string, any>>;
+const cliUpgrade = () => import('../src/cli/upgrade.js') as Promise<Record<string, any>>;
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
+import { checkoutRelease } from '../src/release.js';
+import { installIdFor } from '../src/install/types.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1982: the loop deploys each new base tip between cycles through fake deploy, health and
@@ -176,6 +180,59 @@ test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that 
   assert.equal(fleet.self, 1);
   assert.notEqual(state.upgrade.stalled?.cause, 'release-lagged', 'no restart is held for a served-release observation');
   assert.equal(state.actions['upgrade:held'], undefined);
+});
+
+/** A real Git checkout whose HEAD stands detached at `commit`: the tree a deploy builds from. */
+async function checkoutAt(label: string): Promise<{ root: string; commit: string }> {
+  const root = await temporaryDirectory(label);
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=gate', '-c', 'user.email=gate@example.invalid', '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' }).trim();
+  git('init', '--quiet');
+  git('commit', '--quiet', '--allow-empty', '-m', 'previous');
+  const previous = git('rev-parse', 'HEAD');
+  git('commit', '--quiet', '--allow-empty', '-m', 'deployed');
+  const commit = git('rev-parse', 'HEAD');
+  git('checkout', '--quiet', '--detach', previous);
+  git('checkout', '--quiet', '--detach', commit);
+  return { root, commit };
+}
+
+test('unit:continuous-deploy-builds-target-commit — the continuous deploy\u2019s redeploy builds the image from the deployed commit\u2019s tree and stamps it with that commit, so /healthz?strict reports the deployed commit after the step, whatever commit the loop\u2019s own code root holds', async () => {
+  const { deployPorts } = await cliUpgrade();
+  const { root: cliRoot, commit: deployed } = await checkoutAt('continuous-deploy-builds');
+  const repoRoot = await temporaryDirectory('continuous-deploy-repo');
+  const record = { version: 1, installId: 'continuous-deploy-fixture', repository: 'continuous-deploy/fixture', provider: 'compose', baseBranch: 'main',
+    deployment: { sshHost: null, sshUser: 'root', local: false, port: 4311, image: 'graphyard-local:continuous-deploy-fixture' },
+    principals: [], createdAt: 'fixture', updatedAt: 'fixture' };
+  const configHome = await temporaryDirectory('continuous-deploy-config');
+  await mkdir(join(configHome, installIdFor('continuous-deploy/fixture')), { recursive: true });
+  await writeFile(join(configHome, installIdFor('continuous-deploy/fixture'), 'install.json'), JSON.stringify(record), { mode: 0o600 });
+  const withoutConfigHome = process.env.GRAPHYARD_CONFIG_HOME;
+  process.env.GRAPHYARD_CONFIG_HOME = configHome;
+  try {
+    // The loop's own code root holds another commit (a held snapshot the launcher redirects to):
+    // the redeploy the deploy runs must not depend on it, only on the checkout deployTip moved.
+    const withoutCheckoutRoot = process.env.GRAPHYARD_CHECKOUT_ROOT;
+    process.env.GRAPHYARD_CHECKOUT_ROOT = (await checkoutAt('continuous-deploy-loop')).root;
+    try {
+      const calls: { command: string; args: string[]; cwd: string | undefined }[] = [];
+      const run = async (command: string, args: string[], options?: { cwd?: string }) => { calls.push({ command, args, cwd: options?.cwd }); return ''; };
+      const ports = await deployPorts({ cliRoot, repoRoot, repository: 'continuous-deploy/fixture', url: 'http://127.0.0.1:4311', run });
+      assert.ok(typeof ports === 'object', `deployPorts refused: ${ports}`);
+      await ports.deploy(deployed);
+      // One sh per step: npm ci installs the deployed tree's dependencies in the checkout the
+      // deploy moved; the redeploy runs the checked-out CLI from the repository root, its preview
+      // and apply halves both naming that checkout as the build source.
+      const install = `node "${join(cliRoot, 'bin/graphyard.mjs')}" install --repo continuous-deploy/fixture --provider compose --base-branch main --port 4311 --review-policy github --observe-only --image graphyard-local:continuous-deploy-fixture`;
+      assert.deepEqual(calls.map(call => call.command), ['sh', 'sh']);
+      assert.deepEqual(calls.map(call => call.cwd), [cliRoot, repoRoot]);
+      assert.equal(calls[0].args[1], `npm ci --prefix "${cliRoot}"`);
+      assert.equal(calls[1].args[1], `${install} --source-root ${cliRoot} --plan && ${install} --source-root ${cliRoot} --apply`);
+      // The build source is the deployed commit's tree, so the image stamps that commit and
+      // /healthz?strict reports it after the step.
+      assert.equal(execFileSync('git', ['-C', cliRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), deployed);
+      assert.equal(checkoutRelease(cliRoot).version, `unreleased ${deployed.slice(0, 12)}`);
+    } finally { if (withoutCheckoutRoot === undefined) delete process.env.GRAPHYARD_CHECKOUT_ROOT; else process.env.GRAPHYARD_CHECKOUT_ROOT = withoutCheckoutRoot; }
+  } finally { if (withoutConfigHome === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = withoutConfigHome; }
 });
 
 /** A compose install record under a temp config home, the install `deployPorts` reads its identity and image from. */
