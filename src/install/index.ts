@@ -9,7 +9,6 @@ import { parseArgs } from 'node:util';
 import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
 import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentation.js';
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
-import { deploymentAdapters, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, hetznerAddress, publishedPort, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
 import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostDeployKeyFile, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
 import { githubCli, type GitHubCli } from './github.js';
@@ -117,7 +116,7 @@ export function installRequestFromArgs(args: string[]) {
     'source-root': { type: 'string' },
     'server-type': { type: 'string' }, location: { type: 'string' }, port: { type: 'string' }, logs: { type: 'boolean' },
     target: { type: 'string' }, local: { type: 'boolean' }, migrate: { type: 'boolean' }, 'max-monthly': { type: 'string' }, 'confirm-price': { type: 'string' },
-    'create-environments': { type: 'boolean' }, 'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' }, 'profiles-only': { type: 'boolean' }, 'fresh-cursor': { type: 'boolean' },
+    'herdr-rebind': { type: 'boolean' }, 'no-herdr': { type: 'boolean' }, 'herdr-instance': { type: 'boolean' }, 'herdr-only': { type: 'boolean' }, 'profiles-only': { type: 'boolean' }, 'fresh-cursor': { type: 'boolean' },
     'observe-only': { type: 'boolean' },
   }, allowPositionals: false });
   if ([values['herdr-rebind'], values['no-herdr'], values['herdr-instance']].filter(Boolean).length > 1) throw new Error('Choose one of --herdr-rebind, --no-herdr or --herdr-instance');
@@ -159,7 +158,6 @@ export function installRequestFromArgs(args: string[]) {
     ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}),
     ...(values['server-name'] ? { serverName: values['server-name'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
     ...(values['server-type'] ? { serverType: values['server-type'] } : {}), ...(values.location ? { location: values.location } : {}),
-    ...(values['create-environments'] ? { createEnvironments: true } : {}),
     ...(values['observe-only'] ? { observeOnly: true, herdr: 'skip' as const } : {}) };
   return { values, request };
 }
@@ -194,7 +192,7 @@ export function redeployArguments(record: InstallRecord, image: string, workspac
 
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {
   const given = (name: string) => Array.isArray(values[name]) ? (values[name] as string[]).length > 0 : !!values[name];
-  return [...['workers', 'producer-proof', 'create-environments', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only', 'profiles-only'].filter(given).map(name => `--${name}`),
+  return [...['workers', 'producer-proof', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only', 'profiles-only'].filter(given).map(name => `--${name}`),
     ...(values.target || provider === 'host' ? ['--target'] : []),
     // The local provider runs the control plane as a systemd user unit on this machine, a supervisor unit observation-only never installs.
     ...(provider === 'local' ? ['--provider local'] : [])];
@@ -231,10 +229,9 @@ export interface InstallSession {
   repositoryPolicy?: { assignment: ReturnType<typeof repositoryPolicyAssignment> | null; error: string | null };
   /**
    * The repository's delivery model (GY-1102): the reviewed policy graphyard.json commits, or the
-   * one a scan would propose when none is committed yet (`committed` false), with the adapter that
-   * deploys its UAT and production environments.
+   * one a scan would propose when none is committed yet (`committed` false).
    */
-  delivery: { policy: DeliveryPolicy; committed: boolean; adapter: DeploymentAdapter; context: DeploymentContext; merger?: InstallRecord['merger'] };
+  delivery: { policy: DeliveryPolicy; committed: boolean; merger?: InstallRecord['merger'] };
 }
 
 /**
@@ -316,7 +313,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
   if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose|local, or --target host|hetzner');
   // Observation-only (GY-1846) registers no deploy key and leaves Herdr untouched, whoever builds the request.
   if (rawInputs.observeOnly) {
-    if (provider === 'host' || provider === 'local' || rawInputs.selfContained || rawInputs.migrate || rawInputs.createEnvironments) throw new Error('--observe-only deploys only the control plane and installs no supervisor unit: it cannot install a self-contained host or the local provider\'s systemd unit, migrate, or create environments');
+    if (provider === 'host' || provider === 'local' || rawInputs.selfContained || rawInputs.migrate) throw new Error('--observe-only deploys only the control plane and installs no supervisor unit: it cannot install a self-contained host or the local provider\'s systemd unit, or migrate');
     rawInputs = { ...rawInputs, herdr: 'skip' };
   }
   // A self-contained install puts the whole of Graphyard on one machine: an existing one (host) or
@@ -415,11 +412,6 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
   }
   const materialized = tokens.size === principals.length && !!context.databasePassword;
   const adapter = dependencies.adapter ?? (selfContained ? selfContainedAdapter(provider === 'host' ? existingMachineAdapter : adapterFor(provider)) : adapterFor(provider));
-  const deployment: DeploymentContext = {
-    repository: inputs.repository, installId, baseBranch: inputs.baseBranch, policy: delivery.policy,
-    railwayDir: `${directory}/release-railway`, workspace: inputs.workspace ?? null, transport,
-    created: record?.release?.created ?? [], createEnvironments: !!inputs.createEnvironments,
-  };
   // Only a reviewed, committed split reaches branch protection; until `init --scan --apply` records
   // one, protection keeps the checks discovery proposes. An explicit --required-check always wins.
   const requiredChecks = inputs.requiredChecks?.length ? inputs.requiredChecks
@@ -427,7 +419,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
     mode, materialized, generatedFiles, repositoryPolicy,
-    delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment, merger },
+    delivery: { ...delivery, merger },
     reviewPolicy, requiredChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
     deps: { fetch: dependencies.fetch ?? fetch, now: dependencies.now ?? Date.now, wait: dependencies.wait ?? ((ms: number) => new Promise(accept => setTimeout(accept, ms))), log: dependencies.log ?? (() => {}), ...dependencies },
@@ -696,9 +688,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const preflight = await adapter.preflight(context);
   const gh = githubCli(context.transport);
   const observeOnly = !!session.inputs.observeOnly;
-  const candidateModel = session.delivery.policy.mode === 'release-candidate';
-  // gh registers the deploy key and creates a candidate model's release wiring; observe-only still
-  // refuses a signed-out caller (GY-1862). Every one needs only the `repo` scope.
+  // gh registers the deploy key; observe-only still refuses a signed-out caller (GY-1862). It needs
+  // only the `repo` scope.
   preflight.push(githubCliPreflight(context.provider, await gh(['auth', 'status'], { allowFailure: true }), session.inputs.repository));
   // The master loop runs from this checkout and its unit refuses a temporary directory: say so
   // before anything is created (GY-1457). A host install runs its loop on the host instead. The
@@ -711,7 +702,6 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
   // Deploying the generic default over a declaration that does not parse would silently weaken every gate.
   if (session.repositoryPolicy?.error) preflight.push({ name: 'Repository policy', ok: false, detail: session.repositoryPolicy.error, fix: `Correct the risk, review and e2e sections of ${repositoryConfigFile} (docs/delivery.md), then rerun` });
-  if (candidateModel) preflight.push(...await session.delivery.adapter.preflight(session.delivery.context));
   // Herdr's graphyard plugin, read before anything is planned around it: one already bound to
   // another server is repointed only with --herdr-rebind (GY-1413).
   const herdr = context.host ? null : await observeHerdr(session);
@@ -754,16 +744,6 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   actions.push({ id: 'verify.health', target: 'graphyard', state: 'update', title: 'Verify GET /healthz returns {"ok":true}' });
   actions.push(deployKeyAction(session));
 
-  // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
-  // production resource the deployment adapter would create, cost-bearing ones marked human.
-  if (candidateModel) {
-    const wiring = wiringActions(session.delivery.context);
-    const environments = session.delivery.adapter.plan(session.delivery.context);
-    if (observeOnly) actions.push(...wiring.map(action => action.state === 'satisfied' ? action : held(action, action.id === 'release.branches' ? 'missing release refs are not created' : 'missing GitHub environments are not created')),
-      ...environments.map(action => action.state === 'satisfied' ? action : held(action, `the ${session.delivery.policy.deploy.adapter} product deployment adapter does not run`)));
-    else actions.push(...wiring, ...environments);
-  }
-
   actions.push({ id: 'verify.status', target: 'graphyard', state: 'update', title: 'Verify authenticated GET /api/status reports the admin actor and the managed repository' });
   if (!host && observeOnly) actions.push(
     held({ id: 'local.workers', target: 'local', title: 'Generate worker principals and their credentials' }, 'no worker principal is installed'),
@@ -798,8 +778,7 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     domain: context.domain, url: observation.url ?? record?.url ?? null, existing, secretsRedacted: true,
     preflight, principals: session.principals, actions, drift,
     humanSteps: [...CORE_HUMAN_STEPS,
-      ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : []),
-      ...(candidateModel ? ['Approve any UAT or production resource the plan marks as costing money before rerunning with --apply --create-environments; without that flag none is created.'] : [])],
+      ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : [])],
     ...(host ? { host: hostPlan(context) } : {}),
     ...(context.provider === 'hetzner' ? { price: quotedPrice(context) } : {}),
     delivery: deliverySummary(session), ...(observeOnly ? { observeOnly: true } : {}),
@@ -1094,16 +1073,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const deployKey = observeOnly || context.host ? null : await ensure(session.directory, session.inputs.repository, gh);
   if (deployKey) log(`Deploy key ${deployKey} is registered read-write on ${session.inputs.repository} for the merge writer`);
 
-  // The adapter's environments: paid ones only with --create-environments, every other one left
-  // pending with its exact command, beside the free wiring the operator runs once.
   const release: InstallSummary['release'] = { mode: session.delivery.policy.mode, adapter: session.delivery.policy.deploy.adapter, created: [], pending: [] };
-  if (release.mode === 'release-candidate' && !observeOnly) {
-    const provisioned = await session.delivery.adapter.provision(session.delivery.context, { createPaid: !!session.inputs.createEnvironments });
-    release.created.push(...provisioned.created);
-    release.pending = [...wiringActions(session.delivery.context), ...provisioned.pending].map(action => ({ id: action.id, ...(action.command ? { command: action.command } : {}), ...(action.human ? { human: action.human } : {}) }));
-  }
-  const releaseCreated = [...new Set([...(record.release?.created ?? []), ...release.created.filter(id => !id.startsWith('release.branches') && !id.startsWith('release.github'))])];
-  record = { ...record, release: { adapter: release.adapter, created: releaseCreated } };
 
   const status = await authenticatedStatus(session, url);
   const fleet = context.host && 'installFleet' in adapter
@@ -1177,7 +1147,6 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     serverName: value('server-name', inputs.serverName), serverType: value('server-type', inputs.serverType), location: value('location', inputs.location),
     local: flag('local', inputs.local), migrate: flag('migrate', inputs.migrate),
     maxMonthly: value('max-monthly', inputs.maxMonthly), confirmPrice: value('confirm-price', inputs.confirmPrice),
-    createEnvironments: flag('create-environments', inputs.createEnvironments),
     herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : inputs.herdr === 'instance' ? ['--herdr-instance'] : [],
   };
   return ['graphyard', 'install', ...Object.values(flags).flat(), ...flag('observe-only', inputs.observeOnly), ...flag('fresh-cursor', inputs.freshCursor), '--apply'].join(' ');

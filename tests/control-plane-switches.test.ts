@@ -16,7 +16,7 @@ import { advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterInFlight, merge
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
-import { advisoryTests, preMergeTestFiles } from '../scripts/ci-tests.mjs';
+import { advisoryTests, listTestFiles } from '../scripts/ci-tests.mjs';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { Observation, Work } from '../src/model/work.js';
 
@@ -167,9 +167,9 @@ test('unit:advisory-tests-selection — scripts/ci-tests.mjs exports the advisor
   const affected = cli('affected', 'package.json');
   assert.match(affected[0]!, /^full: /);
   for (const advisory of advisoryTests) assert.ok(!affected.includes(advisory), `${advisory} is not in the trial's selection`);
-  assert.equal(affected.length - 1, preMergeTestFiles().length - advisoryTests.length, 'everything else in the full selection still runs');
+  assert.equal(affected.length - 1, listTestFiles().length - advisoryTests.length, 'everything else in the full selection still runs');
   assert.deepEqual(cli('advisory'), [`advisory: ${advisoryTests.length} advisory budget test file(s)`, ...advisoryTests]);
-  for (const advisory of advisoryTests) assert.ok(preMergeTestFiles().includes(advisory), `${advisory} stays in github's pre-merge selection`);
+  for (const advisory of advisoryTests) assert.ok(listTestFiles().includes(advisory), `${advisory} stays in github's pre-merge selection`);
 });
 
 test('integration:advisory-failure-files-nothing — after the merge writer delivers a head the loop runs the advisory tests once on its merge commit, and a failing one files no work item and prints one log line; nothing is reverted', async () => {

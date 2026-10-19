@@ -35,9 +35,7 @@ const STATEMENTS: [string, RegExp][] = [
   ['step 1: head submission under a lease', /^1\. .*[Hh]ead submission under a lease.*`complete GY-N EPOCH --head SHA`.*lease ends in the same transaction/m],
   ['step 2: a serial merge writer trial-merges and runs build and fast tests on the merged tree', /^2\. .*serial merge writer.*trial-merges.*build and fast tests on the merged tree/m],
   ['step 2: intent is recorded before a deploy-key push leased on the tested tip', /^2\. .*records merge intent, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip/m],
-  ['step 3: candidates every ~10 merges or 15 quiet minutes', /^3\. .*every ~10 merges or 15 quiet minutes/m],
-  ['step 3: the exact tested commit is promoted', /^3\. .*exact tested commit is promoted/m],
-  ['step 3: related-item revert on E2E failure', /^3\. .*On E2E failure.*newest item related to the failing cases.*reverted/m],
+  ['step 3: the loop deploys each new main, runs its E2E cases and rolls a failing deploy back (GY-1983)', /^3\. \*\*Each new main is deployed by the loop\*\*.*E2E cases run, and a failing deploy is rolled back/m],
   ['step 4: one independent reviewer per item, blocking only for sensitive diffs', /^4\. .*One independent reviewer per item.*Sensitive diffs.*blocking review before step 2; the rest a non-blocking review after merge/m],
   ['the single merger', /The control plane is every install's only merge writer: nothing sets another, and old `policy\.merger\.set` events are never read/],
   ['the switch is done', /\*\*Switch\*\* `control-plane`: done, for every install/],
@@ -79,7 +77,7 @@ test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under
  * less the GitHub App, pull-request push and queue-ref commands GY-2010 deleted with docs/github.md.
  */
 const NAMED_BEFORE_TRIM = [
-  '`release status`', '`release GY-N EPOCH`', '`init --scan`', '`install --plan`', '`graphyard delivery sweep`', '`graphyard delivery`', '`graphyard doctor`',
+  '`release GY-N EPOCH`', '`init --scan`', '`install --plan`', '`graphyard delivery sweep`', '`graphyard delivery`', '`graphyard doctor`',
   '`POST /api/delivery/lease`', '`POST /api/delivery/build`', '`POST /api/delivery/release`', '`POST /api/delivery/approve`', '`POST /api/delivery/observe`', '`POST /api/delivery/notify`',
   '`POST /api/validation/result`',
 ];

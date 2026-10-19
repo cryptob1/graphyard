@@ -1,9 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { candidateTagPrefix, contractPendingCases, gitIn, readRecords, servedRevision, type ReleaseCandidate } from '../release-candidate.js';
 import { contractFile, describeStep, loadCases, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
 import { checkoutRepositoryPolicy, repositoryPolicy, type RepositoryPolicy } from '../model/repository-policy.js';
 import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type ProcessRunner, type StepRecord } from './steps.js';
@@ -129,6 +127,15 @@ export const cancelledRun = 'cancelled';
 /** `fetcher` with `signal` added to every request, beside the request's own. */
 const cancellable = (fetcher: typeof fetch, signal: AbortSignal): typeof fetch =>
   (input, init) => fetcher(input, { ...init, signal: init?.signal ? AbortSignal.any([init.signal, signal]) : signal });
+
+/** The commit a deployment's /healthz body reports serving: `commit`, else `revision` when it is a full SHA. */
+const servedRevision = (health: any): string | null => {
+  for (const value of [health?.commit, health?.revision]) {
+    const sha = typeof value === 'string' ? value.toLowerCase() : '';
+    if (/^[0-9a-f]{40}$/.test(sha)) return sha;
+  }
+  return null;
+};
 
 /** The commit the target's /healthz reports serving, or null when it reports none in time. */
 async function readServed(url: string, fetcher: typeof fetch, timeoutMs: number) {
@@ -498,8 +505,8 @@ export const failureDetail = (report: E2eReport, pendingCases: readonly string[]
 };
 
 /**
- * The `e2e` suite of `release validate` (GY-1351): every case targeted at `uat` against the UAT
- * deployment with the UAT principal's token, in id order. A release run retries a failing case once
+ * The release `e2e` suite (GY-1351): every case targeted at `uat` against a deployment with its
+ * principal's token, in id order. A release run retries a failing case once
  * (a pass on the retry is flaky, never passed) and stops at the first required case that fails, so
  * the cases after it are unrun. Only the release verdict's blocking cases — required cases that
  * failed or were flaky — fail the suite; optional cases run and are recorded but never fail it
@@ -516,9 +523,9 @@ export const releaseRetries = 1;
 export const releaseWaitBudgetSeconds = 1800;
 /** The shared wait deadline of a release run starting at `start` (ms). */
 export const releaseWaitUntil = (start: number) => start + releaseWaitBudgetSeconds * 1000;
-/** Whether a case's steps exercise the install's delivery surface — the candidates, delivery and production routes whose expectations only an install that delivers changes can satisfy (GY-1938). */
+/** Whether a case's steps exercise the install's delivery surface — the delivery and production routes whose expectations only an install that delivers changes can satisfy (GY-1938). */
 export const exercisesDelivery = (definition: Pick<CaseFile['definition'], 'steps'>): boolean =>
-  definition.steps.some(step => step.kind === 'http' && (step.path.startsWith('/api/candidates') || step.path.startsWith('/api/delivery') || step.path.startsWith('/production/')));
+  definition.steps.some(step => step.kind === 'http' && (step.path.startsWith('/api/delivery') || step.path.startsWith('/production/')));
 /**
  * Whether the install at `url` can deliver a change at all (GY-1938), and whether it serves
  * application previews (GY-2217). A GitHub merger needs the repository wiring the install reports;
@@ -559,11 +566,10 @@ export const exercisesApplications = (definition: Pick<CaseFile['definition'], '
 /** The cases a run pends because the install it runs against declares no application previews (GY-2217): every case that exercises the applications' surface, required or not — the deploy's end-to-end step fails on optional cases too. */
 export const applicationSuspendedCases = (cases: readonly CaseFile[], previewsServed: boolean): string[] =>
   previewsServed ? [] : cases.filter(entry => exercisesApplications(entry.definition)).map(entry => entry.definition.id);
-/** The candidate record the checkout's ledger holds for `id`, or why it reads none (GY-1802): its pending outcomes ride the `rc/ID` tag the cut pushed, which a validation checkout carries with no plane credential. A read that fails names none, so the suite blocks exactly as before. */
-export const candidatePendingOutcomes = (root: string, id: string | undefined): readonly string[] | undefined => {
-  if (!id) return undefined;
-  try { return readRecords<ReleaseCandidate>(gitIn(root), candidateTagPrefix).find(entry => entry.id === id)?.pendingOutcomes; } catch { return undefined; }
-};
+/** GY-1802: the required case ids the contract binds only to outcomes in `pendingOutcomes` — the cases whose failure records as pending instead of blocking. */
+export const contractPendingCases = (contract: Pick<ReleaseContract, 'outcomes'> | null | undefined, pendingOutcomes: readonly string[] | undefined): string[] =>
+  !contract || !pendingOutcomes?.length ? [] : [...new Set(contract.outcomes.filter(outcome => pendingOutcomes.includes(outcome.id)).flatMap(outcome => outcome.cases))]
+    .filter(id => !contract.outcomes.some(outcome => !pendingOutcomes.includes(outcome.id) && outcome.cases.includes(id)));
 /** The checkout's release contract, or null when it has none or one that does not parse. */
 export const checkoutContract = async (root: string): Promise<ReleaseContract | null> => existsSync(join(root, contractFile)) ? await loadContract(root).catch(() => null) : null;
 export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number; root?: string; report?: (report: E2eReport) => void | Promise<void>;
@@ -650,36 +656,4 @@ export async function closeCreatedWork(report: E2eReport | null, url: string, to
     open.push(item);
   }
   return open;
-}
-
-/**
- * Run the e2e suite as a `release validate --suite` command, from the candidate's own checkout (or
- * `GRAPHYARD_E2E_ROOT`): `GRAPHYARD_UAT_URL` is the deployment the validation set and
- * `GRAPHYARD_UAT_TOKEN` the UAT principal the api and browser suites use. The suite's one-line
- * detail, naming each failing case and step, goes to the file `GRAPHYARD_SUITE_DETAIL` names, which
- * the command suite reads back as its detail, so the failed candidate's follow-up names them. Like
- * every suite command it never holds the release credential, so it only writes its report to
- * `GRAPHYARD_E2E_REPORT`; the workflow's next step records that report with `graphyard e2e record`.
- * The candidate's pending outcomes (GY-1802) it reads off the `rc/ID` record in its own checkout's
- * ledger, beside the contract, so a case whose outcome no delivered item serves yet fails as
- * pending, never blocking, without any credential beyond the checkout.
- */
-export async function runE2eSuite(env: NodeJS.ProcessEnv = process.env, root = env.GRAPHYARD_E2E_ROOT ?? process.cwd()) {
-  const detail = async (text: string) => { if (env.GRAPHYARD_SUITE_DETAIL) await writeFile(env.GRAPHYARD_SUITE_DETAIL, `${text}\n`); };
-  try {
-    const url = env.GRAPHYARD_UAT_URL, token = env.GRAPHYARD_UAT_TOKEN;
-    if (!url || !token) throw new Error('The e2e suite needs GRAPHYARD_UAT_URL and GRAPHYARD_UAT_TOKEN');
-    const contract = await checkoutContract(root);
-    const result = await e2eSuite(await loadCases(root), token, { root, contract, report: async report => {
-      console.log(summarize(report));
-      if (env.GRAPHYARD_E2E_REPORT) await writeFile(env.GRAPHYARD_E2E_REPORT, `${JSON.stringify(report, null, 2)}\n`);
-    } }).run(url, env.GRAPHYARD_CANDIDATE_ID ? { id: env.GRAPHYARD_CANDIDATE_ID, pendingOutcomes: candidatePendingOutcomes(root, env.GRAPHYARD_CANDIDATE_ID) } : null);
-    console.log(result.detail);
-    await detail(result.detail);
-    if (!result.passed) process.exitCode = 1;
-    return result;
-  } catch (error) {
-    await detail(`the e2e suite could not run: ${error instanceof Error ? error.message : String(error)}`);
-    throw error;
-  }
 }

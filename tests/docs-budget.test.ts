@@ -85,8 +85,6 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/validation.md', /`secrets: \["NAME"\]` from `~\/\.config\/graphyard\/INSTALL\/e2e-secrets\.TARGET\.env` \(0600, uncommitted\) as variables and `\{\{secret:NAME\}\}`, redacted/],
   // GY-1982: the loop deploys each new base tip and rolls a failed one back.
   ['docs/delivery.md', /\*\*The master loop deploys continuously\*\*.*`promotion\.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`/],
-  // GY-1848: the repository's release failure-action keys and their defaults.
-  ['docs/delivery.md', /`release\.onFailure` `hold` \(default `revert`\) names each failing case, step and would-be target or `no map matched`, reverting\/reopening nothing; `release\.revertUnmatched: false` holds an unmatched failure instead of the newest item/],
   // GY-1555 AC-6, GY-2010, GY-2172: setup-from-zero's control-plane merger subsection; the deploy key is the only GitHub step.
   ['docs/setup-from-zero.md', /### Control-plane merger\n\n`install --apply` \(and `up`\) creates an ed25519 deploy key and registers it read-write on OWNER\/REPO .*Nothing else is registered on the remote, and nothing asks for it/],
   // GY-2010: install's deploy-key step replaces the App confirmation.
@@ -104,7 +102,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/master-agent-reference.md', /`master browser app-permissions\|installation-accept\|capture` therefore refuse, naming the missing credential/],
   // GY-1784 AC-6 and GY-1828: the operations page states the worktree-disk reading's answered condition (out of reach over the plan, the pass's own removals included), its currency bound, the hard line and the recovery band.
   ['docs/operations.md', /`disk` attention under `run\.diskThresholdGb` is answered \(reported, faultless\) while the latest worktree-reclaim pass is ≤30 min old and out of reach \(nothing disposable now, no backlog or error, its removals included; no fault standing\); ≤ half the threshold, or ENOSPC\/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers/],
-  // GY-1690 AC-3 and GY-1729: the release-candidate section says the chart exercise forwards a free port it re-establishes, waits for the rollout, retries transient API failures and names the last line a failed job ends on.
+  // GY-1690 AC-3 and GY-1729: the delivery page says the chart exercise forwards a free port it re-establishes, waits for the rollout, retries transient API failures and names the last line a failed job ends on.
   ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures \(empty reply, reset, stall, non-2xx, bodiless 2xx\), else ending `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
   // GY-1855 AC-2, reworded by GY-1980: an uncleared stall wakes the master session once per run and files nothing; the status listing stays.
   ['docs/master-agent-reference.md', /an unbound \[stall\]\(operations\.md#master-coordination-loop\) wakes the master session once per run at three failing cycles \(bound: remedy refused, unverified or failing at six\); `master status` lists each stall's signature, count, remedy, owner, filing nothing/],

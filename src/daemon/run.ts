@@ -67,7 +67,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // The cycle's usual wall time, p50 and p95 over the last 30 minutes (GY-616).
     cycleTime: cycleTimes(state.metrics, now),
     deployment: state.deployment,
-    // The main watch (GY-1519): unknown commits on main, the newest, and whether promotion is frozen on one.
+    // The main watch (GY-1519): unknown commits on main, and the newest.
     mainWatch: mainWatchSummary(state.mainWatch),
     // The control-plane merge executor (GY-1524): the heads queued oldest first, the merge in flight, the last delivery and the newest refusals.
     mergeWriter: mergeWriterSummary(state.mergeWriter),

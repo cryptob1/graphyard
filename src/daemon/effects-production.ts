@@ -2,9 +2,7 @@
 import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync } from 'node:fs';
 import { worktreeReclaimPass } from './worktree-reclaim.js';
-import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { DecisionSituation } from '../model/approval.js';
@@ -14,7 +12,6 @@ import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, disposableWorktrees, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
-import { servingStage } from '../release-pending.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -40,11 +37,9 @@ import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
 import { currentBaseTree } from '../cli/planned-files-intent.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
-import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
+import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
+import { mainWatchReads, type MainWatchReads } from './main-watch.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
-import { exactCandidatePorts, localReleasePorts } from './release-ports.js';
-import { revertRecordKey } from '../release-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { readingEffects } from './reading-effect.js';
@@ -115,7 +110,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const config = current();
     const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(timeoutMs) });
     const result = await response.json();
-    // The status travels with the refusal: promotion reads a 404 from a server without the import route as no hold (GY-1860).
+    // The status travels with the refusal, so a caller can tell a 404 from any other refusal.
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
     return result;
   };
@@ -325,18 +320,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
-    // GY-1526: under a control-plane merger (read afresh each cycle, as the merge step reads it) the drive runs candidates through the local ports — the release functions in this checkout, pushes through the deploy key, the revert recorded as the coordinator — and dispatches no workflow; the ports are null while the environment names no UAT.
-    get promotion() { const config = current(); return promotionReads(config, root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow)), undefined, { merger: recordedMerger, local: localReleasePorts(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, revertRecordKey(work, event)),
-      file: async (item, requestId) => ((await mutate('work', item, requestId)) as Work).key,
-      plane: { goals: async () => (await asCoordinator('goals?open=1')).goals, stage: async key => servingStage((await asCoordinator(`work/${encodeURIComponent(key)}`)) as Work | undefined), read: path => asCoordinator(path),
-        // GY-1874: sealing a released hold is a write the coordinator credential cannot make: the loop
-        // seals through its operator-agent identity (an admin or an operator agent seals), when one is
-        // provisioned; without it the promotion keeps its read alone.
-        ...(config.operatorAgent ? { seal: (path: string, data: unknown) => asOperatorAgent('POST', path, data) } : {}),
-        // GY-1904: the loop cuts the plane's exact candidates and records their verdicts as the coordinator.
-        candidates: exactCandidatePorts(mutate, path => asCoordinator(path)) } }) }); },
-    // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
-    get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
+    // GY-1519: the watch reads history from this checkout and its policy from the control plane.
+    get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch') }); },
     // GY-1524: the executor merges in this checkout's object store, pushes with the install's deploy key alone, records each step as the coordinator under one key per (step, commits), and acts only while the recorded merger is control-plane (read before every merge decision).
     get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger, hold: recordedHold }); },
     publishProductionEnvironment: async () => {
@@ -359,7 +344,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator), ...readingEffects(current, mutate, asCoordinator, { root, run }), // GY-1779: the loop's own post-deploy readings
+    ...throughputEffects(root, current, run, asCoordinator), ...readingEffects(current, mutate, asCoordinator), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
     readWork: async work => await asCoordinator(`work/${encodeURIComponent(work.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),

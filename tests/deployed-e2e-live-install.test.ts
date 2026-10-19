@@ -24,11 +24,11 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const sha = 'a'.repeat(40);
 
 type Item = { id: string; key: string; title: string; stage: string; closure?: { kind: string; reason: string }; preview?: unknown; delivery?: unknown };
-type Install = { url: string; server: Server; status: unknown; items: Item[]; candidates: number };
+type Install = { url: string; server: Server; status: unknown; items: Item[] };
 
 /** A fake install configured like the live one: a control-plane merger, the repository wired, no UAT, and no declared applications. */
 async function fakeInstall(options: { projectDelivery?: unknown } = {}): Promise<Install> {
-  const install: Install = { url: '', server: undefined!, status: null, items: [], candidates: 0 };
+  const install: Install = { url: '', server: undefined!, status: null, items: [] };
   install.status = {
     github: null,
     project: { delivery: options.projectDelivery ?? { mode: 'local', previews: 'local', candidateMaxChanges: 5, productionVerification: true, applications: [], cases: {}, source: 'environment' } },
@@ -62,9 +62,6 @@ async function fakeInstall(options: { projectDelivery?: unknown } = {}): Promise
       item.stage = 'done';
       return send(item);
     }
-    if (path === '/api/candidates' && request.method === 'POST') return send({ id: `cand-${++install.candidates}` });
-    const candidate = /^\/api\/candidates\/([^/]+)$/.exec(path);
-    if (candidate && request.method === 'GET') return send({ id: candidate[1], members: [], sourceSha: null, validation: { result: 'fail', cases: [], failed: [] } });
     if (path === '/production/redeploy' || path === '/api/delivery/sweep') return send({});
     return send({ reason: 'not found' }, 404);
   });
@@ -77,8 +74,7 @@ const closeInstall = (install: Install) => new Promise<void>(done => install.ser
 
 /** The cases the live deploy ran that decide this fix, selected out of the checkout's own case files. */
 const decidingCases = (cases: readonly CaseFile[]) => cases.filter(entry =>
-  ['create-work-item', 'candidate-batches-five', 'candidate-gates-promotion', 'production-exact-verification',
-    'preview-isolation-cleanup', 'preview-serves-change', 'previews-for-declared-apps'].includes(entry.definition.id));
+  ['create-work-item', 'preview-isolation-cleanup', 'preview-serves-change', 'previews-for-declared-apps'].includes(entry.definition.id));
 
 const pendingCasesOf = (report: E2eReport) => [...report.suspendedDeliveries?.cases ?? [], ...report.suspendedPreviews?.cases ?? []].sort();
 
@@ -98,8 +94,8 @@ test('unit:deployed-e2e-passes-on-control-plane-install — against an install l
     assert.ok(ran, 'the run reported its cases');
     const passed = ran.cases.filter(outcome => outcome.verdict === 'passed').map(outcome => outcome.id);
     assert.deepEqual(passed, ['create-work-item'], 'the case this install serves passes');
-    // The release-candidate cases pend because the install promotes through no UAT; the preview-tagged cases pend because it declares no applications.
-    assert.deepEqual(pendingCasesOf(ran), ['candidate-batches-five', 'candidate-gates-promotion', 'preview-isolation-cleanup', 'preview-serves-change', 'previews-for-declared-apps', 'production-exact-verification']);
+    // The preview-tagged cases pend because the install declares no applications.
+    assert.deepEqual(pendingCasesOf(ran), ['preview-isolation-cleanup', 'preview-serves-change', 'previews-for-declared-apps']);
     for (const outcome of ran.cases.filter(entry => pendingCasesOf(ran).includes(entry.id))) {
       assert.equal(outcome.verdict, 'failed', `${outcome.id} ran and failed its unservable wait`);
       assert.equal(outcome.pending, true, `${outcome.id} is reported pending, not failing the deploy`);
