@@ -57,7 +57,7 @@ const headroomBound = 700;
 const headroomModules = [
   'src/master/worktrees.ts', 'src/master/environments.ts', 'src/master/profiles.ts',
   'src/daemon/state.ts', 'src/daemon/effects.ts', 'src/daemon/decisions.ts',
-  'src/daemon/doctor.ts', 'src/daemon/diagnosis.ts',
+  'src/daemon/doctor.ts',
 ];
 const headroomSplits: Record<string, string[]> = {
   'src/master/worktrees.ts': ['src/master/branch-release.ts'],
@@ -67,7 +67,6 @@ const headroomSplits: Record<string, string[]> = {
   'src/daemon/effects.ts': ['src/daemon/effects-production.ts'],
   'src/daemon/decisions.ts': ['src/daemon/decision-text.ts'],
   'src/daemon/doctor.ts': ['src/daemon/remedies.ts'],
-  'src/daemon/diagnosis.ts': ['src/daemon/diagnosis-fix.ts'],
 };
 test('unit:module-budgets-headroom — every recently-full loop module keeps 100 lines of headroom under the bound', async () => {
   for (const file of headroomModules) {

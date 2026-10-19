@@ -63,12 +63,12 @@ const closureName = (closure: { kind: string; ref: string | null }) => `${closur
 /**
  * The judgement a recurring-fault item needs no session for (GY-1632): close it as covered by the
  * newest delivered item naming its class, when every instance its origin lists, and every instance the
- * loop has since linked to it, predates that item's landing: a recurrence after the landing linked to the
- * open item keeps it open, never suppressed by its closure. The linked instances are the retained ones
- * and the record's newest linked time per item (`faults.linked`), which outlasts their retention. Null
- * when it lists none, one postdates the landing, or no delivered item names the class.
+ * loop has linked to it, predates that item's landing: a recurrence after the landing linked to the
+ * open item keeps it open, never suppressed by its closure. (The links are the old record's; the loop
+ * links no instance any more, GY-2186.) Null when it lists none, one postdates the landing, or no
+ * delivered item names the class.
  */
-export function coveredByDelivery(work: Work, all: readonly Work[], faults: Partial<Pick<FaultRecord, 'instances' | 'linked'>> = {}): Extract<TriageJudgement, { outcome: 'close' }> | null {
+export function coveredByDelivery(work: Work, all: readonly Work[], faults: Partial<Pick<FaultRecord, 'instances'>> = {}): Extract<TriageJudgement, { outcome: 'close' }> | null {
   const faultClass = closesFaultClass(work), instances = work.origin?.faultClass?.instances ?? [];
   if (!faultClass || !instances.length) return null;
   const cover = deliveredFaultClassCover(all.filter(item => item.id !== work.id), faultClass);
@@ -77,11 +77,9 @@ export function coveredByDelivery(work: Work, all: readonly Work[], faults: Part
   return { outcome: 'close', ref: cover.item.key, reason: `Covered by ${cover.item.key}, delivered for the ${faultClass} fault class at ${landed}: every instance this item lists (${instances.length}, the latest first seen ${instances.map(entry => entry.at).sort().at(-1)}) predates that landing, so the delivered fix already answers them` };
 }
 
-/** Every instance the loop linked to `key`: the retained ones, and the record's newest linked time, which outlasts their retention. */
-const linkedTo = (key: string, faults: Partial<Pick<FaultRecord, 'instances' | 'linked'>>) => {
-  const latest = faults.linked?.[key];
-  return [...(faults.instances ?? []).filter(entry => entry.linkedTo === key), ...(latest ? [{ at: latest }] : [])];
-};
+/** Every instance the loop linked to `key`: the retained ones still carrying the link. */
+const linkedTo = (key: string, faults: Partial<Pick<FaultRecord, 'instances'>>) =>
+  [...(faults.instances ?? []).filter(entry => entry.linkedTo === key)];
 
 /**
  * The closure proposed for a recurring-fault item that a later link has overtaken (GY-1632): it names a delivered
@@ -89,7 +87,7 @@ const linkedTo = (key: string, faults: Partial<Pick<FaultRecord, 'instances' | '
  * approver was first seen after that item landed. Applying it would close the item over that recurrence, which no
  * later filing counts again, so the loop withdraws it. Null for any other item or proposal.
  */
-export function overtakenClosure(work: Work, all: readonly Work[], faults: Partial<Pick<FaultRecord, 'instances' | 'linked'>> = {}): { triageAt: string; reason: string } | null {
+export function overtakenClosure(work: Work, all: readonly Work[], faults: Partial<Pick<FaultRecord, 'instances'>> = {}): { triageAt: string; reason: string } | null {
   const triage = work.triage, closure = triage?.state === 'proposed' ? triageClosure(triage.judgement) : null;
   if (!closure?.ref || !closesFaultClass(work)) return null;
   const fixer = all.find(item => item.key === closure.ref), landing = fixer && isDelivered(fixer) ? landedAt(fixer) : null;
@@ -159,7 +157,7 @@ export interface TriageStepInput {
   /** Records the judgement on the item (POST work/ID/triage as the coordinator). */
   record: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>;
   /** The loop's fault record: an instance linked to an item after a delivered fix landed keeps it from closing as covered (GY-1632). */
-  faults?: Partial<Pick<FaultRecord, 'instances' | 'linked'>>;
+  faults?: Partial<Pick<FaultRecord, 'instances'>>;
   /** Withdraws a proposed closure a later link overtook (POST work/ID/triage with `withdraw`, GY-1632). */
   withdraw?: (work: Work, body: { triageAt: string; reason: string }) => Promise<unknown>;
   /** GY-1774: whether a record's rejection means the write is carried — still in flight past the loop's bound, not refused: the judgement stays owed and is recorded again next cycle, joining that write, and the item is not judged again. */
