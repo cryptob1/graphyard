@@ -3,7 +3,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, rm, symlink, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import { z } from 'zod';
 import { ChildProcessError, type ChildRun, defaultChildRun } from '../child-runner.js';
 import { atomicPrivateWrite, readCredentialFile } from '../master/config.js';
@@ -76,6 +76,38 @@ export const checkoutRestoreServeUsage = `master checkout-restore ${checkoutRest
 export const checkoutRestoreGrantTtlMs = 15 * 60_000;
 /** How often the loop's keep-alive is fed while the act runs, when the loop names no cadence of its own. */
 export const checkoutRestoreKeepAliveEveryMs = 30_000;
+/** How long the serve child has to begin the act — the grant consumed, which the entry does before it touches anything — before the loop ends it (GY-2437): well inside the client's checkoutRestoreWaitMs, so a serve that cannot start is refused within the window, never a silent hang. */
+export const checkoutRestoreServeStartupMs = 30_000;
+/** How long the base-branch fetch and the snapshot's shared clone may each take (GY-2437): the serve must reach its child inside the client's window, so every step before it is bounded. */
+export const checkoutRestoreServeFetchMs = 10_000, checkoutRestoreServeCloneMs = 10_000;
+/**
+ * The loader arguments the serve child inherits: the `--import` values this process itself booted
+ * with (bin/graphyard.mjs passes the tsx loader and, while a pin stands, the held snapshot's resolve
+ * hooks), each bare specifier resolved here, in the loop's own module graph — the chain that booted
+ * it. The child's working directory is the serve snapshot, where a bare specifier would resolve
+ * through the linked node_modules of the coordinator checkout, which a production install need not
+ * hold a loader in (GY-2437: the 08:01Z/08:36Z ERR_MODULE_NOT_FOUND records); a resolved URL or an
+ * absolute path never resolves again.
+ */
+export function serveChildImports(argv: readonly string[] = process.execArgv): string[] {
+  const imports: string[] = [];
+  for (let index = 0; index < argv.length; index++) {
+    if (argv[index] !== '--import') continue;
+    const value = argv[index + 1];
+    if (!value) continue;
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(value) || isAbsolute(value)) imports.push('--import', value);
+    else try { imports.push('--import', import.meta.resolve(value)); } catch { imports.push('--import', value); }
+  }
+  return imports;
+}
+/**
+ * The serve child (GY-2437): the snapshot's own CLI entry — `src/cli.ts`, not `bin/graphyard.mjs`,
+ * whose launcher re-resolves tsx through the snapshot's linked node_modules and crashed every serve
+ * on a checkout whose install lacks it — under the loader arguments the running loop itself booted
+ * with. Startup then depends on nothing but the snapshot's code and a loader the loop demonstrably
+ * holds, never on a resolution through the checkout's node_modules.
+ */
+export const serveEntry = (directory: string): { command: string; args: string[] } => ({ command: process.execPath, args: [...serveChildImports(), join(directory, 'src', 'cli.ts')] });
 
 /** A release the act may run from: the verified serving release, or the base branch's tip at origin. */
 export interface ServingRelease { commit: string; source: 'deployment' | 'origin' }
@@ -99,7 +131,7 @@ export async function servingReleases(root: string, inputs: ServingReleaseInputs
     else reasons.push(`the verified release ${short(served)} is missing from the checkout's object store`);
   } else reasons.push('no verified release is observed serving');
   const base = `refs/remotes/origin/${inputs.baseBranch}`;
-  try { await git(['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${inputs.baseBranch}:${base}`]); }
+  try { await run('git', ['-C', root, 'fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${inputs.baseBranch}:${base}`], { timeoutMs: checkoutRestoreServeFetchMs }); }
   catch (error) { reasons.push(`origin/${inputs.baseBranch} could not be fetched (${message(error).split('\n')[0]})`); }
   const tip = await holds(base);
   if (tip && !releases.some(release => release.commit === tip)) releases.push({ commit: tip, source: 'origin' });
@@ -117,7 +149,7 @@ export async function snapshotRelease(root: string, commit: string, run: ChildRu
   const directory = join(scratch, 'release');
   const dispose = () => rm(scratch, { recursive: true, force: true });
   try {
-    await run('git', ['clone', '-q', '--shared', '--no-checkout', root, directory]);
+    await run('git', ['clone', '-q', '--shared', '--no-checkout', root, directory], { timeoutMs: checkoutRestoreServeCloneMs });
     await run('git', ['-C', directory, 'checkout', '-q', '--detach', commit]);
     const modules = join(root, 'node_modules');
     if (existsSync(modules) && !existsSync(join(directory, 'node_modules'))) await symlink(modules, join(directory, 'node_modules'), 'dir');
@@ -237,6 +269,8 @@ export interface ReleaseRestoreDeps {
   env?: NodeJS.ProcessEnv;
   /** The supervisor's keep-alive, fed every `keepAliveEveryMs` (checkoutRestoreKeepAliveEveryMs) for as long as the act runs. */
   keepAlive?: () => Promise<void>; keepAliveEveryMs?: number;
+  /** How long the serve child has to begin the act (the grant consumed) before the loop ends it; the default is checkoutRestoreServeStartupMs (GY-2437). */
+  startupTimeoutMs?: number;
   /** The entry's freeze ledger (checkoutRestoreFreezeLedgerPath): the writers it stopped, continued by the loop once the entry has ended however it ended; `signal` and `state` as continueFrozenWriters takes them. */
   ledger?: { file: string } & Pick<WriterFreezeDeps, 'signal' | 'state'>;
   now?: () => number;
@@ -270,7 +304,7 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
       try {
         if (!releaseServes(snapshot.directory)) { reasons.push(`${named} predates the serve entry`); continue; }
         const served = `served from ${named}, a detached shared-clone snapshot of it`;
-        const entry = deps.command?.(snapshot.directory) ?? { command: process.execPath, args: [join(snapshot.directory, 'bin', 'graphyard.mjs')] };
+        const entry = deps.command?.(snapshot.directory) ?? serveEntry(snapshot.directory);
         const issued = now();
         // An old-HEAD handoff's entry advances the checkout onto the release it runs from, under its own freeze.
         const payload: CheckoutRestoreGrantPayload = { kind: checkoutRestoreGrantKind, root, reason, request: { id: request.id }, loop: { pid: deps.grant.pid }, ...(deps.handoff ? { handoff: { head: deps.handoff.head, advance: release.commit } } : {}), issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + checkoutRestoreGrantTtlMs).toISOString(), nonce: randomBytes(16).toString('hex') };
@@ -279,7 +313,11 @@ export function releasePinnedRestore(deps: ReleaseRestoreDeps): RestoreAct {
         let output = '', failure: unknown = null;
         try {
           output = String(await run(entry.command, [...entry.args, 'master', 'checkout-restore', checkoutRestoreServeFlag],
-            { cwd: snapshot.directory, timeoutMs: deps.timeoutMs ?? 10 * 60_000, env: { ...(deps.env ?? process.env), [checkoutRestoreGrantVariable]: deps.grant.file } }));
+            { cwd: snapshot.directory, timeoutMs: deps.timeoutMs ?? 10 * 60_000, env: { ...(deps.env ?? process.env), [checkoutRestoreGrantVariable]: deps.grant.file },
+              // GY-2437: a serve that has not begun acting — the grant consumed, which the entry does before
+              // it touches anything — by the startup bound is not going to: the loop ends it here, records
+              // the failure with what it said, and the client refuses within its own window.
+              started: () => !existsSync(deps.grant.file), startupTimeoutMs: deps.startupTimeoutMs ?? checkoutRestoreServeStartupMs }));
         } catch (error) { failure = error; }
         finally { await unlink(deps.grant.file).catch(() => {}); }
         // The entry has ended, however it ended: whatever its freeze ledger still names stopped is continued

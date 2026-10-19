@@ -27,6 +27,7 @@ import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
 import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
+import { deployInFlight } from './continuous-deploy.js';
 import { stallNeedsMaster, wakeMasterForStalls } from './cycle-master.js';
 import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
 import { detachRuns } from '../runner/registry.js';
@@ -550,6 +551,12 @@ export function coordinatorCheckoutGuard(deps: {
   const forward = new Map<string, string>();
   const headDrift = (checkout: CoordinatorCheckout) => {
     if (!checkout.commit || !expectedHead || checkout.commit === expectedHead || checkout.commit === runsSnapshot()) return null;
+    // GY-2344: the off-cycle deploy of a base tip holds the checkout at the tip it is deploying and
+    // rolls it back from there, and until the restart onto a deployed tip lands the checkout stands
+    // where the deploy left it — positions the cursor's promotion reading names. The deploy's own
+    // moves are never the drift this refuses.
+    const flight = deployInFlight();
+    if ((flight && (checkout.commit === flight.tip || checkout.commit === flight.from)) || checkout.commit === deps.state().promotion?.promotedSha) return null;
     const from = expectedHead.slice(0, 12), to = checkout.commit.slice(0, 12), unrecovered = forward.get(checkout.commit);
     return unrecovered
       ? `the master loop cannot recover onto the coordinator checkout at ${checkout.root} by itself: its HEAD moved from ${from} forward to ${to}, merged code, while the loop was running, and ${unrecovered}. It keeps running the code it loaded; leave the checkout at ${to} and restart the loop onto its own HEAD (systemctl --user restart graphyard-master). ${checkoutRestoreDriftRemedy}`

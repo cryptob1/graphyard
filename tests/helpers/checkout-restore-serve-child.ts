@@ -45,6 +45,8 @@ const grantFile = process.env[checkoutRestoreGrantVariable] ?? null;
 const grant = (() => { try { return grantFile ? JSON.parse(fs.readFileSync(grantFile, 'utf8')) : null; } catch { return null; } })();
 const write = (outcome: unknown) => writeFileSync(record, JSON.stringify({
   entry: process.argv[1], args: process.argv.slice(2), snapshot, sent, outcome,
+  // The serve child's own boot, as the release's CLI entry saw it (GY-2437): the loader imports it was handed and the entry it ran.
+  launcher: process.env.GRAPHYARD_TEST_LAUNCHER ? JSON.parse(process.env.GRAPHYARD_TEST_LAUNCHER) as { execArgv: string[]; argv: string[] } : null,
   grant: { file: grantFile, content: grant, consumed: grantFile ? !existsSync(grantFile) : null },
   pid: process.pid, ppid: process.ppid, frozenAt, thawedAt, headAtThaw, statusAtThaw, holdMs,
   snapshotHead: snapshot ? git('rev-parse', 'HEAD') : null, snapshotBranch: snapshot ? git('symbolic-ref', '-q', 'HEAD') : null,

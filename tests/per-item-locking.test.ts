@@ -292,8 +292,16 @@ test('unit:reconcile-uncontended-under-load 30 items reconciled beside lease ren
   const observed = await Promise.all(fleet.slice(15).map(submittedItem));
   engine.resetReconcileView();
   await engine.reconcile();
-  const ticksBefore = engine.reconcileTicks.length, ticks: number[] = [], failures: string[] = [];
-  const until = performance.now() + 20_000;
+  // Judge exactly this window's ticks: the engine keeps only the last 20, past tests' included, and
+  // the ticks of a longer window beside those earlier ones would push this window's own out of the ring.
+  engine.reconcileTicks.length = 0;
+  const ticks: number[] = [], failures: string[] = [];
+  // The window gives the 2 s cadence room to absorb slow ticks: the loop re-ticks every 2 s only
+  // while a tick takes under 2 s, so on a starved runner ticks of 2-3 s — inside the 5000 ms bound
+  // this test exists to check — eat the window directly, and 20 s dropped the count under 8 on a
+  // run whose every tick passed the bound (GY-2488). Thirty seconds keeps production's rates and
+  // holds the count, with every per-tick assertion applied to each of its ~15 ticks.
+  const until = performance.now() + 30_000;
   const loop = async (everyMs: number, run: () => Promise<unknown>, what: string) => {
     await sleep(Math.random() * everyMs);
     while (performance.now() < until) {
@@ -323,7 +331,7 @@ test('unit:reconcile-uncontended-under-load 30 items reconciled beside lease ren
       loop(2_000, async () => { const started = performance.now(); await engine.reconcile(); ticks.push(performance.now() - started); }, 'tick'),
     ]);
   } finally { queryLatencyMs = 0; engine.reconcileFullEvaluationMs = fullEvery; }
-  const recorded = engine.reconcileTicks.slice(ticksBefore);
+  const recorded = [...engine.reconcileTicks];
   assert.deepEqual(failures, [], 'every renewal, observation, snapshot read and tick succeeded');
   assert.ok(ticks.length >= 8, `the server ticked ${ticks.length} times`);
   assert.ok(recorded.every(tick => tick.candidates >= 30), 'every tick reconciled the 30 items');
