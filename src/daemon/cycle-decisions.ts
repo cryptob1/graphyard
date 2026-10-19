@@ -16,7 +16,6 @@ import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../merge-queue.js'; import { docsSyncRoute } from './docs-sync-route.js';
-import { throughputDecisionAdopts, throughputRoutineDecision } from './cycle-delivery.js';
 import { createApproverSupervisor } from './cycle-approvers.js'; import { boundWakes, observationWakes, retireDepartedWakes } from './cycle-wakes.js';
 import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, recordCarried, stepCallCarried } from './step-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
@@ -128,8 +127,8 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s attest decision ${refusedAttest.id} for ${String(decision.input?.proof)} on this head was already refused by ${refusedAttest.refusal?.approver ?? 'its approver'}; nothing to request, and ${item.key} returns to a worker on that refusal`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
-      // One requirements at a time. GY-1701/GY-1702: adopt a covering revision; else wait (GY-1687/GY-1630).
-      if (standing && decision.action === 'requirements' && !standing.input?.answers && !throughputDecisionAdopts(standing.input, decision, item)) {
+      // One requirements at a time. GY-1701/GY-1702: adopt a covering revision; else wait (GY-1687).
+      if (standing && decision.action === 'requirements' && !standing.input?.answers) {
         const cover = coveringScopeAdoptWatch(item, standing, decision, stamp);
         if (cover) {
           state.approvals[key] = cover;
@@ -445,7 +444,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const scope = scopeRoutineDecision(scoped, clock, findingsJudged(scoped)) ?? blockerScopeDecision(scoped);
     if (scope) item = scoped;
     const refused = refusedByWork.get(item.key) ?? [];
-    let decision = scope ?? (effects.decide && effects.approver ? throughputRoutineDecision(item, state.actions) : null) ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted, mechanical, refused); // GY-1630: the throughput owner's standing needs-decision is the loop's to request
+    let decision = scope ?? routineDecision(item, config, clock, assessment, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);
     if (!decision) {
       // Still called for, only not attestable this cycle: its request is not one the item moved past.
       const called = neededDecision(item, config, cycle.baseFailed.get(item.id), exhausted, mechanical, refused);

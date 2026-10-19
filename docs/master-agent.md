@@ -25,9 +25,9 @@ The control plane reconciles session liveness, not the master's manual duty. Swe
 
 Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0). Thresholds: `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts` enforce.
 
-## Research and diagnosis
+## Recurrence and re-requests
 
-`Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician (`run.diagnostician`; none for parks); fix `plannedFiles` as `master create`; `stale`/`withdrawn` decisions, stale backlog releases re-request ≤3×, then `decision-stale`; refused `create` 409/400 is `fix-item`.
+The loop files no work item: a recurring class past its threshold, a failing base test, a flake, an advisory failure, docs headroom and a throughput needs-decision are each one `master status` attention line. `stale`/`withdrawn` decisions, stale backlog releases re-request ≤3×, then `decision-stale`; refused `create` 409/400 is `fix-item`.
 
 ## Machine-filed backlog
 

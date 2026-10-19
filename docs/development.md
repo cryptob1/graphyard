@@ -23,7 +23,7 @@ A merge trial whose failing tests fail on the base tip too: no rework; the write
 
 ## Documentation
 
-`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (16,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page: page over cap fails CI; total within 3% of budget fails any change adding words (compared with its base); loop then files one trim item.
+`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-never-conflict) exempts them from the regression guard. README.md and `docs/` keep `graphyard.json`'s `wordBudget` (16,000 words, 1,200 per page; `tests/docs-budget.test.ts`), one topic per page: page over cap fails CI; total within 3% of budget fails any change adding words (compared with its base); the attention line asks the master to trim.
 
 ### Documentation that rarely conflicts
 

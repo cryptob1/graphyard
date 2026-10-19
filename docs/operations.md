@@ -16,7 +16,7 @@
   - A failed producer-runnable manual proof returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
 - **Merge refused**: wait or repair, never bypass; the gate quotes the merge writer's ledger ([main](delivery.md#main)): not yet trialled or pushed is its motion; a failed trial returns the head to a worker; a failure the base tip shares is held, never reworked; `base moved N times` stays queued for a later trial. **Merged outside**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **Smoke failed**: [delivered](operations-reference.md#delivered-with-a-failed-smoke-proof).
 - **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff in one 30-second lock budget, each attempt waiting ≤3 s per lock so live writes never queue longer.
-- **Diagnosis `waiting`**: [provider quota](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
+- **Recurring fault**: one [attention line](master-agent.md#recurrence-and-re-requests). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
 
 ## Recovery recipes
 

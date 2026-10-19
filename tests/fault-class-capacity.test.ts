@@ -17,15 +17,9 @@ import {
 } from '../src/master.js';
 import {
   classified,
-  deliveredClassCover,
   deliveredFaultClassCover,
-  doctorCoverNote,
-  doctorFaultClassSuppressReason,
-  faultClassIsCovered,
   faultClassOf,
-  faultClassPolicyDefaults,
   recurringClasses,
-  standingFaultClassCover,
   trackFaults,
   type FaultInstance,
   type FaultRecord,
@@ -507,10 +501,11 @@ test('manual:fault-class-capacity — genuine starvation at candidate limit of 2
   assert.equal(opened[0].kind, 'concurrency-starved');
 });
 
-// ---- GY-1711: doctor filing gate shares the GY-1632 delivered-cover rule ----------------------
+// ---- GY-1711's cover gate is retired with the filings (GY-2186) -------------------------------
 //
-// GY-1710 restated capacity after GY-1708 landed: the doctor's open-item-only dedup let it through.
-// These unit proofs pin the shared cover helpers and dedupDoctorFiles against that shape.
+// The loop files no item for a recurring class, so no standing cover suppresses a doctor filing and
+// no delivered cover gates one; what survives is dedupDoctorFiles' same-payload dedup, and the
+// deliveredFaultClassCover read triage closes previously filed fault-class items against.
 
 const gy1711Now = Date.parse('2030-06-15T12:00:00.000Z');
 const gy1711Iso = (offsetMs: number) => new Date(gy1711Now + offsetMs).toISOString();
@@ -539,43 +534,12 @@ const capacityFiling = (): DoctorFile => ({
   criteria: [{ id: 'AC-1', text: 'Mid-attempt exhaustion redispatches within bounds', proofs: ['unit:capacity'] }],
 });
 
-test('unit:doctor-delivered-cover-dedup — a doctor re-offer of GY-1710\'s shape is recorded covered and never submitted once a delivered class item stands for every pre-landing instance', () => {
-  // Landing at -118 minutes relative to detection; every listed instance (and the empty ledger) predates it.
-  const gy1708 = deliveredCapacity('GY-1708', -118 * 60_000);
-  assert.equal(isDelivered(gy1708), true);
-  const preLanding = [
-    capacityInstance('approver|claude-c|pre', -200 * 60_000),
-    capacityInstance('worker|claude-c|pre', -150 * 60_000),
-  ];
-  assert.equal(faultClassIsCovered([gy1708], 'capacity', preLanding, gy1711Now, faultClassPolicyDefaults), true,
-    'delivered cover + pre-landing instances: covered under GY-1632');
-  assert.equal(faultClassIsCovered([gy1708], 'capacity', [], gy1711Now, faultClassPolicyDefaults), true,
-    'empty ledger (GY-1710\'s live shape): vacuous predate still covered');
-  const deduped = dedupDoctorFiles([capacityFiling()], [gy1708], preLanding, gy1711Now, faultClassPolicyDefaults);
-  assert.deepEqual(deduped.map(entry => entry.covered), [true], 'dedupDoctorFiles records the class covered');
-  assert.equal(deliveredClassCover([gy1708], 'capacity', preLanding)?.key, 'GY-1708');
-  // An open class item still covers the same way as before.
-  const open = { ...gy1708, key: 'GY-1710', id: 'id-GY-1710', stage: 'backlog', delivery: undefined } as Work;
-  assert.equal(faultClassIsCovered([open], 'capacity', preLanding, gy1711Now, faultClassPolicyDefaults), true);
-});
-
-test('unit:postlanding-instance-files-afresh — an instance first seen after the delivered cover\'s landing is not covered, so the class files when the recurrence sweep would', () => {
-  const gy1708 = deliveredCapacity('GY-1708', -60 * 60_000);
-  const below = [capacityInstance('capacity|post|1', -10 * 60_000), capacityInstance('capacity|post|2', -5 * 60_000)];
-  assert.equal(faultClassIsCovered([gy1708], 'capacity', below, gy1711Now, faultClassPolicyDefaults), true,
-    'one or two post-landing instances stay suppressed: the loop\'s default threshold is 3');
-  assert.deepEqual(dedupDoctorFiles([capacityFiling()], [gy1708], below, gy1711Now, faultClassPolicyDefaults).map(entry => entry.covered), [true],
-    'dedupDoctorFiles keeps the class covered until the recurrence threshold');
-  assert.equal(recurringClasses(below, [gy1708], faultClassPolicyDefaults, gy1711Now).find(entry => entry.faultClass === 'capacity')!.file, false,
-    'the loop\'s own sweep would not file below threshold either');
-  const after = [...below, capacityInstance('capacity|post|3', -1 * 60_000)];
-  assert.equal(faultClassIsCovered([gy1708], 'capacity', after, gy1711Now, faultClassPolicyDefaults), false,
-    'at the default threshold the delivered cover no longer suppresses filing');
-  assert.deepEqual(dedupDoctorFiles([capacityFiling()], [gy1708], after, gy1711Now, faultClassPolicyDefaults).map(entry => entry.covered), [false],
-    'dedupDoctorFiles lets the class through so the doctor files it');
-  const recurrence = recurringClasses(after, [gy1708], faultClassPolicyDefaults, gy1711Now).find(entry => entry.faultClass === 'capacity')!;
-  assert.equal(recurrence.file, true, 'the loop\'s own recurrence sweep files at the same moment');
-  assert.equal(recurrence.item, null);
+test('unit:doctor-delivered-cover-dedup — a doctor filing deduplicates only within one payload now', () => {
+  const filing = capacityFiling();
+  const deduped = dedupDoctorFiles([filing, { ...filing }, { ...filing, faultClass: 'capacity' }]);
+  assert.deepEqual(deduped.map(entry => entry.covered), [false, true, true], 'the first capacity filing of a run files; the repeats are covered by it');
+  const mixed = dedupDoctorFiles([capacityFiling(), { ...capacityFiling(), faultClass: 'proof' }]);
+  assert.deepEqual(mixed.map(entry => entry.covered), [false, false], 'another class is its own filing');
 });
 
 test('unit:delivered-cover-through-duplicate-ref — GY-1710 closed duplicate-of GY-1708 resolves the capacity cover through the answers set', () => {
@@ -587,42 +551,9 @@ test('unit:delivered-cover-through-duplicate-ref — GY-1710 closed duplicate-of
     closure: { kind: 'duplicate', ref: 'GY-1708', reason: 'duplicate of the landed capacity fix', by: 'master', at: gy1711Iso(-5 * 60_000), from: 'backlog' },
   } as Work;
   assert.equal(deliveredFaultClassCover([gy1710, gy1708], 'capacity')?.item.key, 'GY-1708',
-    'deliveredFaultClassCover follows the duplicate ref to the delivered answer');
-  // The answer set still names GY-1708 as the class's delivered cover item after the duplicate closure.
-  assert.equal(deliveredFaultClassCover([gy1710, gy1708], 'capacity')?.item.key, 'GY-1708');
-  const preOnly = [capacityInstance('capacity|pre|1', -200 * 60_000)];
-  assert.equal(deliveredClassCover([gy1710, gy1708], 'capacity', preOnly)?.key, 'GY-1708');
-  assert.equal(faultClassIsCovered([gy1710, gy1708], 'capacity', preOnly, gy1711Now, faultClassPolicyDefaults), true);
-});
-
-test('unit:doctor-standing-diagnosed-cover — a closed recurring item whose diagnostician fix is still open covers the class the same way the recurrence sweep does', () => {
-  // Recurring GY-R closed duplicate-of open fix GY-F: fix has no class origin (diagnostician shape).
-  const fix = {
-    ...deliveredCapacity('GY-F', -30 * 60_000),
-    stage: 'build', delivery: undefined, origin: undefined,
-  } as Work;
-  const recurring = {
-    ...deliveredCapacity('GY-R', -50 * 60_000),
-    stage: 'done', delivery: undefined,
-    closure: { kind: 'duplicate', ref: 'GY-F', reason: 'answered by the diagnostician fix', by: 'master', at: gy1711Iso(-25 * 60_000), from: 'backlog' },
-  } as Work;
-  // Unlinked instances while the diagnosed fix is open: the sweep links them to GY-R and does not file.
-  const unlinked = [
-    capacityInstance('capacity|new|1', -20 * 60_000),
-    capacityInstance('capacity|new|2', -10 * 60_000),
-    capacityInstance('capacity|new|3', -5 * 60_000),
-  ];
-  assert.equal(standingFaultClassCover([recurring, fix], 'capacity')?.key, 'GY-R');
-  assert.equal(faultClassIsCovered([recurring, fix], 'capacity', unlinked, gy1711Now, faultClassPolicyDefaults), true,
-    'standing diagnosed item covers even with a full window of unlinked instances');
-  assert.equal(doctorFaultClassSuppressReason([recurring, fix], 'capacity', unlinked, gy1711Now, faultClassPolicyDefaults), 'standing');
-  assert.match(doctorCoverNote([recurring, fix], 'capacity', unlinked, gy1711Now, faultClassPolicyDefaults), /diagnosed class item/);
-  assert.deepEqual(dedupDoctorFiles([capacityFiling()], [recurring, fix], unlinked, gy1711Now, faultClassPolicyDefaults).map(e => e.covered), [true]);
-  const sweep = recurringClasses(unlinked, [recurring, fix], faultClassPolicyDefaults, gy1711Now, standingFaultClassCover)
-    .find(entry => entry.faultClass === 'capacity')!;
-  assert.equal(sweep.file, false, 'the loop\'s own sweep does not file while the diagnosed fix is open');
-  assert.equal(sweep.item?.key, 'GY-R');
-  // After linkage, recent is empty and the doctor gate still covers via standing.
-  const linked = unlinked.map(entry => ({ ...entry, linkedTo: 'GY-R' }));
-  assert.equal(faultClassIsCovered([recurring, fix], 'capacity', linked, gy1711Now, faultClassPolicyDefaults), true);
+    'deliveredFaultClassCover follows the duplicate ref to the delivered answer, as triage reads it');
+  // The windowed count the attention reads is blind to covers: it counts what the record holds.
+  const instances = [capacityInstance('capacity|pre|1', -200 * 60_000), capacityInstance('capacity|post|2', -5 * 60_000)];
+  const recurrence = recurringClasses(instances, { threshold: 3, windowHours: 24 }, gy1711Now).find(entry => entry.faultClass === 'capacity')!;
+  assert.equal(recurrence.count, 2, 'both instances count in the window, whatever a delivered fix answers');
 });

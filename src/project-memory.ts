@@ -85,8 +85,7 @@ export async function syncProjectMemory(
   // 3. Update from recurring fault classes in daemon state
   if (options.state?.faults) {
     const policy = options.policy ?? faultClassPolicyDefaults;
-    const work = options.work ?? [];
-    const recurring = recurringClasses(options.state.faults.instances, work, policy, now);
+    const recurring = recurringClasses(options.state.faults.instances, policy, now);
     for (const item of recurring) {
       if (item.count >= policy.threshold) {
         recordPitfallInMemory(memory, {
