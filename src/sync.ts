@@ -80,7 +80,6 @@ export function regenerateManagedBlocks(conflicted: string, render: (text: strin
     return hasConflictMarkers(rendered) ? null : rendered;
   } catch { return null; }
 }
-export const managedServerUrl = (text: string) => text.match(/uses Graphyard at (\S+) for ownership/)?.[1] ?? null;
 
 /**
  * Which shipped work each remaining conflict comes from: the delivered items whose merge commit

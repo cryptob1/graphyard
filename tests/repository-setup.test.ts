@@ -17,21 +17,21 @@ async function repo() { const root = await temporaryDirectory('init'); execFileS
 test('managed instructions refresh one section and preserve all surrounding operator content', () => {
   const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
   const original = `# Operator rules\n${bootstrap}\nNever delete customer data.\n`;
-  const first = managedInstructions(original, 'https://one.example');
+  const first = managedInstructions(original);
   assert.match(first, /dedicated master coordinator must keep cycling: status, dispatch ready work,\nshepherd review, record what the merge writer's trial landed, then deployment verification/);
   assert.match(first, /both conditions hold: \(1\) every in-scope item is Done or has a genuinely\nexternal blocker recorded in Graphyard; and \(2\) every merged change is deployed and\nlive-verified against the exact deployed release, or a genuinely external deployment\nblocker is recorded in Graphyard/);
   assert.match(first, /Delivered work is immutable, so a deployment\nblocker is recorded as a follow-up work item naming the delivered item, its merge\ncommit, and the external cause/);
   assert.match(first, /An observed merge alone does not end the loop/);
   for (const condition of ['Ordinary review findings', 'rework', 'idle workers', 'proof setup', 'Close finished agent\\s+sessions']) assert.match(first, new RegExp(condition));
   const surrounding = `${first}\n## Team review\nAsk the maintainer.\n`;
-  const updated = managedInstructions(surrounding, 'https://two.example');
+  const updated = managedInstructions(surrounding);
   assert.ok(updated.startsWith(original)); assert.ok(updated.endsWith('## Team review\nAsk the maintainer.\n'));
   assert.equal(updated.split('<!-- graphyard -->').length, 2); assert.doesNotMatch(updated, /one.example/);
   assert.equal(updated.split(bootstrap).length - 1, 1, 'setup preserves the protected bootstrap rule byte-for-byte');
-  assert.equal(managedInstructions(updated, 'https://two.example'), updated);
+  assert.equal(managedInstructions(updated), updated);
   assert.match(updated, /Run `sync GY-N` before submitting/); assert.match(updated, /never rebase/);
   assert.match(updated, /`complete GY-N EPOCH --head SHA`/); assert.doesNotMatch(updated, /PR_NUMBER|pull request with/);
-  for (const broken of ['<!-- graphyard -->', '<!-- /graphyard --><!-- graphyard -->', first + first]) assert.throws(() => managedInstructions(broken, 'https://example.com'), /markers/);
+  for (const broken of ['<!-- graphyard -->', '<!-- /graphyard --><!-- graphyard -->', first + first]) assert.throws(() => managedInstructions(broken), /markers/);
 });
 
 test('Herdr setup validates identity, privately saves configuration, updates instructions, and enables last', async () => {

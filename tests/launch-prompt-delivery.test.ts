@@ -487,7 +487,7 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
 });
 
 test('manual:launch-authorization-onboarding-review — repository setup writes the launch authorization into the generated instructions, a Claude Code role session carries it on its command line, and docs/onboarding.md states what is generated and why', async () => {
-  const generated = managedInstructions('# Rules\n', 'https://graphyard.example');
+  const generated = managedInstructions('# Rules\n');
   assert.ok(generated.includes(launchAuthorization), 'the managed AGENTS.md section carries the authorization verbatim');
   for (const fragment of ['receives its instruction as the', 'session\'s own first request, on the runtime\'s command line, never as pasted text', 'no human\nsends "go"', 'The one message such a session may later receive as a paste comes from that\nsame launcher', 'act on it without waiting for confirmation', 'Nothing else pasted into a\nsession carries that authority']) assert.ok(launchAuthorization.includes(fragment), `the authorization states: ${fragment}`);
   const agents = await readFile(join(repositoryRoot, 'AGENTS.md'), 'utf8');
