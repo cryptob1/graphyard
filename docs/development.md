@@ -21,7 +21,7 @@ Worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates sh
 
 ### Base failures
 
-A merge trial whose failing tests fail on the base tip too: no rework; the writer holds the head (`base failure`), one attention entry, one P0 repair item per failing set; retried on the then tip after 30 min.
+A merge trial whose failing tests fail on the base tip too: no rework, no filed item; the writer holds the head (`base failure`) on one attention entry naming the test; retried on the then tip after 30 min.
 
 ## Documentation
 

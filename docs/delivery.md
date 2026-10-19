@@ -17,7 +17,7 @@ Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign]
 
 ### Main
 
-Main moves only by the merge writer's push of a trialled merge commit; the report-only main watch explains every commit. Base failures file P0.
+Main moves only by the merge writer's push of a trialled merge commit; the report-only main watch explains every commit. Base failures file nothing.
 
 ## Managed repositories
 
