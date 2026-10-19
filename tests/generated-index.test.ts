@@ -8,7 +8,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { classifyScope, regressionRefusals } from '../src/regression-guard.js';
 import { parseGeneratedFiles } from '../src/generated-files.js';
-import { attributeConflicts, hasConflictMarkers, managedServerUrl, parseGeneratedManifest, regenerateManagedBlocks } from '../src/sync.js';
+import { attributeConflicts, hasConflictMarkers, parseGeneratedManifest, regenerateManagedBlocks } from '../src/sync.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { withoutMasterInstructions } from '../src/master.js';
 import type { ScopeFile, Work } from '../src/model.js';
@@ -84,7 +84,7 @@ async function fixtureRepository() {
   for (const [path, [section, order, summary]] of Object.entries(pages)) await page(path, section, order, summary);
   execFileSync(process.execPath, ['scripts/check-docs.mjs', '--write'], { cwd: main });
   // The base carries a graphyard-master block an earlier master init wrote (before GY-1493), which sync's regeneration drops.
-  const agents = `${managedInstructions('# Fixture rules\n\nHand-written.\n', 'https://graphyard.example')}\n${legacyMasterBlock}\n`;
+  const agents = `${managedInstructions('# Fixture rules\n\nHand-written.\n')}\n${legacyMasterBlock}\n`;
   await writeFile(join(main, 'AGENTS.md'), agents);
   git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'base'); git(main, 'push', '-q', 'origin', 'main');
   execFileSync('git', ['clone', '-q', origin, branch], { stdio: 'ignore' }); git(branch, 'config', 'user.email', 't@example.com'); git(branch, 'config', 'user.name', 'T');
@@ -167,7 +167,7 @@ test('integration:generated-index-no-conflict — sync regenerates the managed A
     assert.match(first.output.next, /rerun sync GY-1/);
     const agents = await readFile(join(branch, 'AGENTS.md'), 'utf8');
     assert.ok(!hasConflictMarkers(agents)); assert.match(agents, /every 30 seconds/); assert.match(agents, /^# Fixture rules\n\nHand-written\./, 'the hand-written text around the blocks is kept');
-    assert.equal(agents, managedInstructions(agents, 'https://graphyard.example'), 'the worker block is exactly what the template renders');
+    assert.equal(agents, managedInstructions(agents), 'the worker block is exactly what the template renders');
     assert.ok(!agents.includes('<!-- graphyard-master -->') && !agents.includes('## Graphyard master agent'), 'the master block is dropped, not rendered again');
     assert.ok(hasConflictMarkers(await readFile(join(branch, 'docs/start.md'), 'utf8')), 'the worker still owns the real conflict');
     // The worker resolves the remaining conflict and reruns sync: it finishes the merge.
@@ -181,14 +181,12 @@ test('integration:generated-index-no-conflict — sync regenerates the managed A
 });
 
 test('integration:generated-index-no-conflict — the pure helpers behind sync: block regeneration refuses conflicts outside the blocks, and attribution falls back to every shipper', () => {
-  const url = 'https://graphyard.example';
-  const clean = managedInstructions('# Rules\n', url);
+  const clean = managedInstructions('# Rules\n');
   const inside = clean.replace('Renew ownership at least every 30 seconds', '<<<<<<< HEAD\nRenew ownership at least every 20 seconds\n=======\nRenew ownership at least every 45 seconds\n>>>>>>> origin/main');
-  assert.equal(regenerateManagedBlocks(inside, text => managedInstructions(text, url)), clean);
+  assert.equal(regenerateManagedBlocks(inside, text => managedInstructions(text)), clean);
   const outside = `<<<<<<< HEAD\n# Rules\n=======\n# Other rules\n>>>>>>> origin/main\n${clean.slice('# Rules\n'.length)}`;
-  assert.equal(regenerateManagedBlocks(outside, text => managedInstructions(text, url)), null, 'a conflict in the hand-written text is never resolved by the renderer');
-  assert.equal(regenerateManagedBlocks(`${clean}${clean}`, text => managedInstructions(text, url)), null, 'duplicated markers are malformed, not resolved');
-  assert.equal(managedServerUrl(clean), url); assert.equal(managedServerUrl('# nothing'), null);
+  assert.equal(regenerateManagedBlocks(outside, text => managedInstructions(text)), null, 'a conflict in the hand-written text is never resolved by the renderer');
+  assert.equal(regenerateManagedBlocks(`${clean}${clean}`, text => managedInstructions(text)), null, 'duplicated markers are malformed, not resolved');
   assert.ok(hasConflictMarkers('a\n=======\nb') && !hasConflictMarkers('a\n====\n<<<<<<<x'));
   const landed = (sha: string) => sha === 'l'.repeat(40);
   const all = [
@@ -205,9 +203,8 @@ test('integration:generated-index-no-conflict — the pure helpers behind sync: 
 
 test('integration:generated-index-no-conflict — AGENTS.md carries exactly the worker block this tree\'s template renders and no master block, so drift is caught here rather than by a committed diff in every PR', async () => {
   const agents = await readFile(join(repositoryRoot, 'AGENTS.md'), 'utf8');
-  const url = managedServerUrl(agents);
-  assert.ok(url, 'AGENTS.md names the Graphyard server its coordination block was rendered for');
-  assert.equal(managedInstructions(agents, url!), agents, 'the coordination block matches src/repository-setup.ts; run graphyard init --apply (or update the template) and commit');
+  assert.doesNotMatch(agents, /uses Graphyard at \S+ for ownership/, 'the committed block names no control-plane URL: the origin lives in ignored .graphyard/connection.json');
+  assert.equal(managedInstructions(agents), agents, 'the coordination block matches src/repository-setup.ts; run graphyard init --apply (or update the template) and commit');
   assert.ok(!agents.includes('graphyard-master -->'), 'AGENTS.md carries no graphyard-master block: the master reads its instructions from graphyard master guide');
   assert.equal(withoutMasterInstructions(agents), agents);
 });

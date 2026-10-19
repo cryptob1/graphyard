@@ -248,7 +248,7 @@ test('integration:lease-loss-backlog-settlement: standing lease-loss escalations
 });
 
 test('manual:lease-lifecycle-docs: the generated worker instructions say complete ends the lease and forbid heartbeating after submission', () => {
-  const block = managedInstructions('', 'https://graphyard.example');
+  const block = managedInstructions('');
   assert.match(block, /`complete GY-N EPOCH --head SHA`[^]*ends your lease in the same transaction/);
   assert.match(block, /do not heartbeat or edit after it/);
   assert.match(block, /the supervisor stops the session; that is the attempt ending, not lease\nloss/);
