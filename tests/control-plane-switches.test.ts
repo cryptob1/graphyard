@@ -12,7 +12,7 @@ import { evaluateLandability, landabilityRefusals } from '../src/model/landabili
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
 import { reworkWaitsForApprover, riskClassApprover, selfApprover } from '../src/server/lane-rework.js';
-import { advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
@@ -289,4 +289,22 @@ test('unit:merge-writer-waits-out-upgrade — the cycle in which a merge lands s
   await advisoryIdle(state);
   await mergeWriterStep(cycle());
   assert.equal((state.mergeWriter.inFlight as { key: string } | null)?.key, 'GY-2', 'the next cycle starts the next trial');
+});
+
+test('unit:upgrade-waits-for-trial — the merge writer reports a trial in flight until it settles, which the loop\'s self-upgrade waits for', async () => {
+  const passed = ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: true, reasons: [] }));
+  const work = [item('control-plane', ['src/app.ts'], { gates: passed, stageEnteredAt: iso(start - 60_000) })];
+  let release: () => void = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
+    trial: async () => { await held; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; },
+    push: async () => 'pushed', holds: async () => false, record: async () => {}, merger: async () => 'control-plane', advisory: async () => ({ build: 'pass', failed: [] }) } as unknown as MergeWriterReads;
+  const state = emptyDaemonState(config);
+  const cycle = { state, effects: { mergeWriter: reads, persist: async () => {}, fileFaultClass: async () => ({ key: 'GY-900' }) } as unknown as DaemonEffects, now: () => start, snapshot: { work, now: iso(start) }, performed: [] as any[] } as unknown as Cycle;
+  assert.equal(mergeWriterInFlight(state), false, 'nothing in flight before a trial starts');
+  await mergeWriterStep(cycle);
+  assert.equal(mergeWriterInFlight(state), true, 'the trial is in flight: an upgrade now would kill it');
+  release();
+  await mergeWriterIdle(state);
+  assert.equal(mergeWriterInFlight(state), false, 'once it settles the upgrade may run');
 });
