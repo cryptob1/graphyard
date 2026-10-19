@@ -51,9 +51,8 @@ export const statusRoutes = defineRoutes('status', [
       const visibleWork = operatorVisible(work);
       // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
       // on the read every client polls, so the Needs you page renders that table (GY-102).
-      // The production environment the master verifies deployments under, as it last published it
-      // (else this process's own setting), so the dashboard reads a release as live under the same
-      // name `master verify-deployment` and the flow report's production phase use.
+      // The production environment the master publishes (else this process's own setting), so the
+      // dashboard reads a release as live under the same name the flow report's production phase uses.
       const productionEnvironment = await resolvedProductionEnvironment(engine.store.pool);
       const humanOnly = openHumanOnly(await humanOnlySubjects(services, visibleWork), observedAt.getTime());
       // The GitHub request budget and the observation schedule spending it (GY-117): what is

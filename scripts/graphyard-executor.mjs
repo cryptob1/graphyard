@@ -9,8 +9,7 @@
 //
 // It reads this host's .graphyard/master.json for the launch profiles the dispatching actions
 // need and authenticates with the coordinator credential named there — the same credential
-// `master run` uses, and nothing broader; the one exception is verify-deployment's filing of a
-// post-deploy follow-up, which, like the loop's own filings, creates work as the operator agent. `--kinds` narrows what this executor claims; the
+// `master run` uses, and nothing broader. `--kinds` narrows what this executor claims; the
 // default is every kind it has a handler for. Two kinds can never be among them: `escalate` and
 // `request-rework` are judgments made in the step itself, and the process refuses to start with a
 // handler for either, which is what keeps a language model out of the loop rather than inside it.
@@ -156,36 +155,16 @@ class SlotUndeclared extends Error { constructor(message, exitCode) { super(mess
  * executor would claim every dispatch row and then report no agents at all, failing each one.
  */
 export function controlPlaneEffects(modules, context) {
-  const { master: m, daemon: d, reviewer: r, producer: pr, executor: x } = modules;
-  const { root, current, run, snapshot, mutate, read, log = line => console.error(line), clock = () => Date.now() } = context;
+  const { master: m, reviewer: r, producer: pr } = modules;
+  const { root, current, run, snapshot, mutate } = context;
   return {
     snapshot, mutate,
-    // GY-1831: the handlers' own diagnostics (an unreadable promotion state) go where this executor logs.
-    log,
     agents: async () => { const runtime = await m.observeHerdrAgents(run); return runtime.available ? runtime.agents : null; },
     workerCredentials: profiles => m.inspectWorkerCredentials(root, profiles),
     producerCredentials: profiles => m.inspectProducerCredentials(root, profiles),
     dispatchWorker: (work, profile, agents, snap) => m.dispatchWork(root, work, profile, agents, run, snap.work, undefined, undefined, undefined, snap.now, { agents: () => m.listHerdrAgents(run) }),
     launchReview: (work, review, agents, observedAt) => r.launchReview(root, work, current().run.reviewerProfile, agents, observedAt, { run, requestId: review.id }),
     launchProducer: (work, producerRequest, profile, agents, observedAt) => pr.launchProducer(root, work, producerRequest, profile, agents, observedAt, { run }),
-    observeDeployment: delivered => d.observeDeployment(current(), delivered, run, fetch, () => Date.now(), { root }),
-    // GY-1831: a verify-deployment failure that only says the running release does not carry the
-    // merge yet is a promotion wait while the loop's recorded promotion state has the merge in
-    // flight. GY-1966: the wait names the pipeline's newest demonstrated movement — its cursor's
-    // newest candidate, dispatch or promotion — so the row's unchanged run measures the stretch
-    // since the pipeline last moved, and a re-cut cycle longer than an hour no longer files. The
-    // predicate reads the promotion state the loop already records on its cursor, at the cadence
-    // the loop's own read windows set: this executor runs no fetch and no GitHub request of its
-    // own, and never touches the promotion ledger's pin. The state's own reason names the gates
-    // that stop every dispatch (promotion off, the main watch's freeze, a control-plane merger
-    // without ports), so a row only ever waits on a pipeline the loop is driving; anywhere else —
-    // an unreadable state included — the failure stands as it was, and the stall it earns is what
-    // it was. The clock measures the deployment handoff after a recorded promotion.
-    promotionWaitSuffix: async mergeSha => {
-      const config = current();
-      const state = await d.readDaemonState(root, config);
-      return d.promotionWaitSuffix(state.promotion ?? null, mergeSha, root, config.baseBranch, run, clock());
-    },
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
   };
 }

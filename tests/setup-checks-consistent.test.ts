@@ -34,12 +34,10 @@ async function repository(files: Record<string, string>) {
   return root;
 }
 
-test('unit:setup-checks-consistent — install preflight checks gh scopes per provider; compose needs no admin:repo_hook', () => {
+test('unit:setup-checks-consistent — install preflight needs gh scope repo on every provider and admin:repo_hook on none', () => {
   const compose = githubCliPreflight('compose', signedIn("'gist', 'read:org', 'repo'"), 'owner/scratch');
-  assert.equal(compose.ok, true); assert.match(compose.detail, /compose polls GitHub, so it needs no admin:repo_hook/);
-  const railway = githubCliPreflight('railway', signedIn("'gist', 'read:org', 'repo'"), 'owner/scratch');
-  assert.equal(railway.ok, false); assert.match(railway.detail, /lacks scope admin:repo_hook/); assert.equal(railway.fix, 'Run: gh auth refresh --scopes repo,admin:repo_hook');
-  assert.equal(githubCliPreflight('railway', signedIn("'admin:repo_hook', 'repo'"), 'owner/scratch').ok, true);
+  assert.equal(compose.ok, true); assert.match(compose.detail, /none needs admin:repo_hook/);
+  for (const provider of ['railway', 'docker-host', 'host', 'hetzner'] as const) assert.equal(githubCliPreflight(provider, signedIn("'gist', 'read:org', 'repo'"), 'owner/scratch').ok, true, provider);
   const noRepo = githubCliPreflight('compose', signedIn("'gist'"), 'owner/scratch');
   assert.equal(noRepo.ok, false); assert.match(noRepo.detail, /lacks scope repo/);
   const absent = githubCliPreflight('compose', { code: 1, stdout: '' }, 'owner/scratch');

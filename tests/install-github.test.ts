@@ -57,66 +57,29 @@ async function waitForUrl(announced: string[]) {
   throw new Error('the setup URL was never announced');
 }
 
-test('the installer writes the App credentials to the server, points the webhook at it, and detects CI identities', async () => {
+test('GY-2009: the installer writes no App credentials, points no webhook, and writes no branch protection', async () => {
   const fixture = await harness({ provider: 'railway' });
   try {
     const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway' }, fixture.deps);
     const summary = await applyInstall(session, await buildPlan(session));
-
-    const sent = new Map(fixture.transport.commands.filter(command => command.args.includes('--stdin')).map(command => [command.args.at(-1)!, command.input!]));
-    assert.equal(sent.get('GITHUB_PRIVATE_KEY'), appKey);
-    assert.equal(sent.get('GITHUB_WEBHOOK_SECRET'), WEBHOOK_SECRET);
-    const plain = fixture.commandLines().find(line => line.includes('GITHUB_APP_ID='))!;
-    assert.ok(plain.includes(`GITHUB_APP_ID=${GRAPHYARD_APP_ID}`));
-    assert.ok(plain.includes('GITHUB_INSTALLATION_ID=500'));
-    assert.ok(plain.includes(`GITHUB_CI_APP_IDS=${CI_APP_ID}`), 'CI App IDs were not detected from the base branch');
-
-    const patch = fixture.requests.find(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config'))!;
-    const body = JSON.parse(patch.body!);
-    assert.equal(body.url, `${summary.url}/api/github/webhook`);
-    assert.equal(body.secret, WEBHOOK_SECRET);
-    assert.equal(body.content_type, 'json');
-    assert.equal(body.insecure_ssl, '0');
-
-    // Protection is applied through the human's gh credential, not the App.
-    const put = fixture.transport.commands.find(command => command.args.includes('PUT') && command.args.some(argument => argument.includes('/protection')))!;
-    assert.ok(put, 'branch protection was not applied');
-    assert.equal(summary.protection.includes('admin enforcement'), true);
-    assert.match(summary.protection, /1 approving review/);
+    for (const name of ['GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_CI_APP_IDS']) {
+      assert.ok(!fixture.transport.commands.some(command => command.args.some(arg => arg === name || arg.startsWith(`${name}=`))), `${name} was set`);
+    }
+    assert.ok(!fixture.requests.some(request => request.url.endsWith('/app/hook/config')), 'no App webhook is configured');
+    assert.ok(!fixture.transport.commands.some(command => command.args.includes('PUT') && command.args.some(argument => argument.includes('/protection'))), 'no branch protection is written');
+    assert.equal(summary.github, null);
+    assert.match(summary.protection, /deploy key/i);
   } finally { await fixture.cleanup(); }
 });
 
-test('applying protection to a stricter branch raises what Graphyard needs without lowering what the repository already requires', async () => {
-  // The branch demands two approvals and is locked; the agent review policy demands none.
-  const current = { ...satisfiedProtection(null, 2), lock_branch: { enabled: true } };
-  const fixture = await harness({ provider: 'railway', protection: current });
-  try {
-    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway', reviewPolicy: 'agent' }, fixture.deps);
-    const plan = await buildPlan(session);
-    const action = plan.actions.find(item => item.id === 'github.protection')!;
-    assert.match(action.title, /2 approving review\(s\), the stricter count this branch already requires/);
-
-    const summary = await applyInstall(session, plan);
-    const put = fixture.transport.commands.find(command => command.args.includes('PUT') && command.args.some(argument => argument.includes('/protection')))!;
-    const payload = JSON.parse(put.input!);
-    assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 2, 'the installer lowered an existing review requirement');
-    assert.equal(payload.required_pull_request_reviews.require_last_push_approval, true);
-    assert.equal(payload.lock_branch, true, 'the installer unlocked a locked branch');
-    assert.equal(payload.enforce_admins, true);
-    assert.equal(payload.required_conversation_resolution, false, 'the review gate is the verdict; threads block nothing');
-    assert.match(summary.protection, /2 approving review/);
-  } finally { await fixture.cleanup(); }
-});
-
-test('a reviewer App is registered as a separate identity and can never be the control-plane App', async () => {
+test('the reviewer manifests stay separate identities, and install --reviewer registers no reviewer App (GY-2009)', async () => {
   const fixture = await harness({ provider: 'compose' });
   try {
-    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose', reviewer: 'claude' }, fixture.deps);
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose', reviewer: 'claude' }, { ...fixture.deps, githubApp: async () => { throw new Error('no App flow may run'); } });
     const plan = await buildPlan(session);
-    const action = plan.actions.find(item => item.id === 'github.reviewer')!;
-    assert.match(action.human!, /One additional browser confirmation/);
+    assert.ok(!plan.actions.some(item => item.id === 'github.reviewer' || item.id === 'github.app'));
     const summary = await applyInstall(session, plan);
-    assert.deepEqual(summary.reviewers, [{ name: 'claude', appId: GRAPHYARD_APP_ID + 1, botUserId: 900_001 }]);
+    assert.deepEqual(summary.reviewers, []);
 
     const manifest = reviewerAppManifest('claude', 'owner/project', 'https://graphyard.example.test', 'http://127.0.0.1:4311');
     const reviewerPermissions = manifest.default_permissions as Record<string, string>;
@@ -125,15 +88,6 @@ test('a reviewer App is registered as a separate identity and can never be the c
     assert.equal(manifest.default_permissions.contents, 'read');
     assert.equal(appManifest('owner/project', 'https://graphyard.example.test', 'http://127.0.0.1:4311').default_permissions.checks, 'write');
   } finally { await fixture.cleanup(); }
-
-  const collision = await harness({ provider: 'compose' });
-  try {
-    const session = await prepareInstall(collision.root, { repository: 'owner/project', provider: 'compose', reviewer: 'claude' }, {
-      ...collision.deps,
-      githubApp: async () => ({ appId: GRAPHYARD_APP_ID, slug: 'graphyard', installationId: 500, privateKey: appKey, webhookSecret: WEBHOOK_SECRET, botUserId: 900_001 }),
-    });
-    await assert.rejects(applyInstall(session, await buildPlan(session)), /reviewer App must be a different identity/);
-  } finally { await collision.cleanup(); }
 });
 
 test('CI detection ignores the control-plane App and the installer verification check', async () => {
@@ -151,55 +105,19 @@ test('CI detection ignores the control-plane App and the installer verification 
   } finally { await fixture.cleanup(); }
 });
 
-test('the saved App file holds the credentials and the plan never does', async () => {
+test('GY-2009: the plan carries no App values, and no App file is written in the install directory or the managed repository', async () => {
   const fixture = await harness({ provider: 'compose' });
   try {
-    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose' }, fixture.deps);
+    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose' }, { ...fixture.deps, githubApp: async () => { throw new Error('no App flow may run'); } });
     const plan = await buildPlan(session);
-    const values = plan.actions.find(action => action.id === 'github.env')!.values!;
-    assert.equal(values.find(value => value.name === 'GITHUB_PRIVATE_KEY')!.value, '[redacted]');
-    assert.equal(values.find(value => value.name === 'GITHUB_WEBHOOK_SECRET')!.value, '[redacted]');
-    assert.equal(values.find(value => value.name === 'GITHUB_APP_ID')!.value, '<from the App manifest flow>');
+    assert.ok(!plan.actions.some(action => action.id === 'github.env'));
     await applyInstall(session, plan);
     const record = JSON.parse(await readFile(`${session.directory}/install.json`, 'utf8'));
-    assert.equal(record.github.appId, GRAPHYARD_APP_ID);
-    assert.match(record.github.webhookFingerprint, /^[0-9a-f]{12}$/);
+    assert.ok(!record.github, 'no App is recorded');
     assert.ok(!JSON.stringify(record).includes(WEBHOOK_SECRET));
     assert.ok(!JSON.stringify(record).includes(appKey));
-  } finally { await fixture.cleanup(); }
-});
-
-test('the App registration credentials are stored under the install directory, never inside the managed repository', async () => {
-  const fixture = await harness({ provider: 'railway' });
-  const announced: string[] = [];
-  try {
-    // The real manifest flow, wired exactly as the CLI wires it, so the file the credentials
-    // reach is the one the installer chose — under the install directory, outside every
-    // Git checkout, per the runbook's hard rule.
-    const deps = {
-      ...fixture.deps,
-      githubApp: (request: { root: string; repository: string; origin: string; file: string; reviewer?: string }) => runManifestFlow(request.root, request.repository, request.origin, {
-        port: 0, poll: 5, reviewer: request.reviewer,
-        announce: message => announced.push(message),
-        dependencies: {
-          file: request.file,
-          convert: async () => ({ id: request.reviewer ? GRAPHYARD_APP_ID + 1 : GRAPHYARD_APP_ID, slug: request.reviewer ? `${request.reviewer}-app` : 'graphyard-owner-project', pem: appKey, webhook_secret: WEBHOOK_SECRET }),
-          verify: async () => {},
-          resolveBot: async () => ({ id: 900_001, type: 'Bot' }),
-        },
-      }),
-    };
-    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'railway', reviewer: 'claude' }, deps);
-    const applied = applyInstall(session, await buildPlan(session));
-    await driveSetup(announced, 0, 500);
-    await driveSetup(announced, 1, 501);
-    await applied;
-
-    assert.equal((await stat(`${session.directory}/github-app.json`)).mode & 0o777, 0o600);
-    assert.equal((await stat(`${session.directory}/github-reviewer-claude.json`)).mode & 0o777, 0o600);
-    await assert.rejects(stat(`${fixture.root}/.graphyard/github-app.json`), { code: 'ENOENT' }, 'the App private key was written inside the managed repository');
-    await assert.rejects(stat(`${fixture.root}/.graphyard/github-reviewer-claude.json`), { code: 'ENOENT' }, 'the reviewer App key was written inside the managed repository');
-    assert.ok(!announced.join('\n').includes(appKey) && !announced.join('\n').includes(WEBHOOK_SECRET));
+    await assert.rejects(stat(`${session.directory}/github-app.json`), { code: 'ENOENT' });
+    await assert.rejects(stat(`${fixture.root}/.graphyard/github-app.json`), { code: 'ENOENT' });
   } finally { await fixture.cleanup(); }
 });
 

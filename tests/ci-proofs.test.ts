@@ -242,29 +242,7 @@ test('integration:ci-proofs-workflow the publisher reads one report per download
   assert.equal(reports[0].report.proof, 'integration:claim-safety');
 });
 
-test('integration:ci-proofs-workflow the acceptance workflow plans, exercises and publishes with the secrets confined to protected jobs', async () => {
-  const workflow = await readFile(new URL('../.github/workflows/acceptance.yml', import.meta.url), 'utf8');
-  // Candidate pushes are planned from the default branch's definition; forks and non-candidate branches never are.
-  assert.match(workflow, /pull_request_target:\n\s+types: \[opened, reopened, synchronize\]\n\s+branches: \[main\]/);
-  assert.match(workflow, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository && startsWith\(github\.head_ref, 'graphyard\/'\)/);
-  assert.match(workflow, /permissions:\n  contents: read\n  actions: read\n/);
-  const jobs = Object.fromEntries([...workflow.matchAll(/^  ([a-z]+):\n([\s\S]*?)(?=^  [a-z]+:\n|(?![\s\S]))/gm)].map(match => [match[1], match[2]]));
-  assert.deepEqual(Object.keys(jobs), ['plan', 'exercise', 'publish']);
-  // Only the two protected jobs run in the reporting environment; the exercise job — the only one that builds or runs candidate code — holds no secret.
-  assert.match(jobs.plan, /environment: graphyard-reporting/); assert.match(jobs.publish, /environment: graphyard-reporting/);
-  assert.doesNotMatch(jobs.exercise, /environment:|secrets\./);
-  assert.match(jobs.exercise, /name: \$\{\{ matrix\.proof \}\}/);
-  assert.match(jobs.exercise, /include: \$\{\{ fromJSON\(needs\.plan\.outputs\.proofs\) \}\}/);
-  assert.match(jobs.exercise, /run-acceptance\.mjs candidate\.json graphyard-acceptance acceptance\.json/);
-  assert.match(jobs.exercise, /run-unit-acceptance\.mjs candidate\.json candidate acceptance\.json/);
-  assert.match(jobs.exercise, /cache: npm/); assert.match(jobs.exercise, /postgres-17-alpine\.tar/); assert.match(jobs.exercise, /cache-from: type=gha/);
-  assert.match(jobs.publish, /publish-acceptance\.mjs --candidate-run reports/);
-  assert.match(jobs.publish, /GRAPHYARD_CI_PRODUCER_TOKEN: \$\{\{ secrets\.GRAPHYARD_CI_PRODUCER_TOKEN \}\}/);
-  assert.match(jobs.plan, /GRAPHYARD_CI_PRODUCER_TOKEN: \$\{\{ secrets\.GRAPHYARD_CI_PRODUCER_TOKEN \}\}/);
-  // The workflow lint runs in required CI with a pinned, checksummed actionlint.
-  const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  assert.match(ci, /workflow-lint:/); assert.match(ci, /actionlint_1\.7\.12_linux_amd64\.tar\.gz/); assert.match(ci, /sha256sum --check/);
-});
+// GY-2009: the acceptance and CI workflows are gone, so nothing here reads them.
 
 test('the unit runner installs the candidate before the protected inventory lands and verifies it byte for byte before the run', async () => {
   // A candidate's install lifecycle scripts run during `npm ci`; the inventory must be copied after

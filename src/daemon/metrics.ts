@@ -1,5 +1,5 @@
 // Concern: measurement — stage percentiles, the scope-decision budget, actionable subjects and item latency.
-import { type Work, productionLatencyMs, postDeployMs, deliveryState, currentEvidence, deploySmokeRequired } from '../model.js';
+import { type Work, currentEvidence } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal, unplannedPaths } from '../model/scope.js';
 import { askIdentity, plannedFilesCovered } from '../model/scope-collapse.js';
 import { pendingBaseRefresh } from '../merge-queue.js';
@@ -253,10 +253,9 @@ export function scopeBudget(work: Work[], decisions: ScopeMeasurement[], now: nu
 }
 
 /**
- * Stage dwell for work still in flight, delivered lead time, and the post-deploy flow: time to the
- * observed deployment and time from merge to the smoke verdict, with failures counted. All of it
- * comes from the snapshot the cycle already read, so the measurement cannot disagree with the
- * state the cycle acted on.
+ * Stage dwell for work still in flight and delivered lead time (creation to merge: done = merged,
+ * GY-1981). Both come from the snapshot the cycle already read, so the measurement cannot disagree
+ * with the state the cycle acted on.
  */
 export function stageMetrics(work: Work[], now: number) {
   const stages: Record<string, ReturnType<typeof percentiles>> = {};
@@ -266,10 +265,7 @@ export function stageMetrics(work: Work[], now: number) {
   }
   const delivered = work.filter(item => item.stage === 'done' && item.delivery);
   const lead = percentiles(delivered.map(item => Date.parse(item.delivery!.mergedAt) - Date.parse(item.createdAt)).filter(value => Number.isFinite(value) && value >= 0));
-  const production = percentiles(delivered.map(item => productionLatencyMs(item)).filter((value): value is number => value !== null));
-  const postDeploy = percentiles(delivered.map(item => postDeployMs(item, now)).filter((value): value is number => value !== null));
-  const postDeployFailures = delivered.filter(item => deliveryState(item) === 'delivered-with-failure').length;
-  return { stages, lead, production, postDeploy, postDeployFailures };
+  return { stages, lead };
 }
 
 export function missingProofs(work: Work, now: Date) {
@@ -355,11 +351,6 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // No head is owed a proof the loop asks for: CI runs the unit tests, UAT the end-to-end ones,
     // and the control plane requests no producer (GY-1266, GY-1235). A mergeable candidate is not
     // the loop's either: GitHub merges it on its branch protection.
-  }
-  for (const item of work.filter(entry => entry.stage === 'done' && entry.delivery && deploySmokeRequired(entry.policy))) {
-    const outcome = deliveryState(item);
-    if (!item.delivery!.deployment) add('deployment', item, `${item.key} is merged and waiting for the deployment that serves it to be observed`);
-    else if (outcome === 'awaiting-smoke') add('smoke', item, `${item.key} is deployed at ${item.delivery!.deployment.sha.slice(0, 12)} and waiting for its smoke proof`);
   }
   return subjects;
 }
