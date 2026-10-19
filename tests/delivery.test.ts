@@ -11,6 +11,7 @@ import { Delivery, commonInterval, mergeSegments, serviceState, type Environment
 import { server } from '../src/server.js';
 import type { Principal, Work, Observation } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 /**
  * D3 acceptance checks of the turnkey delivery roadmap, one test per check, named
@@ -70,7 +71,8 @@ async function delivered(mergeSha = 'e'.repeat(40)) {
   w = await engine.observe(w.id, (await reload(w)).revision, observation());
   const committed = { revision: (await engine.store.workItem(w.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  w = await engine.observe(w.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha });
+  // GY-2010: the merge writer's ledger delivers it, as production does; no GitHub merge is observed.
+  w = await deliverThroughLedger(engine, w.id, mergeSha, mergedAt);
   assert.equal(w.stage, 'done'); assert.equal(w.delivery?.mergeSha, mergeSha);
   return w;
 }

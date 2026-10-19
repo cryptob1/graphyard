@@ -1,9 +1,9 @@
-// Concern: cycle steps 5–7 — shepherd reviews, reconcile what GitHub merged, the release-level deployment reading.
+// Concern: cycle steps 5–7 — shepherd reviews, escalate merges the gates never authorized, the release-level deployment reading.
 import { createHash } from 'node:crypto';
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
-import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, message, retainedActions, storeAction } from './state.js';
+import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, message, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { canonicalJson } from '../onboarding.js';
 import { decisionInput } from '../master.js';
@@ -11,9 +11,7 @@ import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, standingVerdict, type RoutineDecision } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
-import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
-import { mainGuardAttention } from '../main-guard.js';
-import { promotionFreeze } from './main-watch.js';
+import { defaultDeploymentReuseMinutes, deploymentDetail, deploymentStepBudgetMs, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { readingDueNow, readingsStep } from './cycle-readings.js';
 import { openThroughputOwner, throughputAnsweredAt, throughputClaim, throughputDecisionCause, throughputDecisionRelease, throughputHandAsked, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputSelfAsked, throughputStallText, type ThroughputStall } from '../throughput.js';
 
@@ -51,10 +49,9 @@ export async function shepherdStep(cycle: Cycle) {
 }
 
 /**
- * Step 6: reconcile what GitHub merged. GitHub merges a candidate whose build, review and required
- * checks passed on its head (docs/delivery.md); the merged observation records the delivery. The
- * loop runs no merge of its own: it names, once, a merge whose gates had not passed — held as a
- * violation until a two-party decision reconciles it — and a revert the main guard abandoned.
+ * Step 6: the control-plane merge writer's trial, push and merge ledger are authoritative for what
+ * landed (docs/delivery.md); this step merges nothing. It names, once, a merge whose gates had not
+ * passed on its head — held as a violation until a two-party decision reconciles it.
  */
 export async function mergeStep(cycle: Cycle) {
   const { state, effects, now, performed, isolate, open } = cycle;
@@ -63,28 +60,7 @@ export async function mergeStep(cycle: Cycle) {
     if (state.actions[key]?.state === 'done') return;
     performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
-  //    A revert the main guard abandoned (GY-1250) is raised as one attention line naming the
-  //    merge, the failing check and the revert PR; nothing waits on it. One abandoned while main's
-  //    check failed (`red`, GY-1332) is raised every cycle until main's latest run of each failing
-  //    check passes, then once more as recovered; an older record is raised once. Once the cursor
-  //    holds as many resolved rows as pruneDaemonState keeps, a revert abandoned before the oldest of
-  //    them may have had its row retired, so it is not raised again unless its row is still held
-  //    (`mainGuardAttention`'s `since`); a red line's row is re-recorded every cycle, so it is.
-  const abandoned = (cycle.snapshot?.work ?? []).filter(item => item.mainGuardReverts?.some(revert => revert.state === 'abandoned'));
-  if (abandoned.length) {
-    const resolved = Object.entries(state.actions).filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
-    const since = resolved.length >= retainedActions ? Math.min(...resolved.map(([, action]) => Date.parse(action.at))) : -Infinity;
-    for (const line of mainGuardAttention(abandoned, since, key => Boolean(state.actions[key]))) {
-      const previous = state.actions[line.key];
-      const raise = async (detail: string) => { performed.push(await record(state, line.key, { kind: 'escalation', work: line.work, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); };
-      // Without a reader of main's check runs the loop cannot tell when main is green again, so it raises the line once.
-      if (!line.red.length || !effects.baseCheck) { if (!previous) await raise(line.text); continue; }
-      if (previous?.detail === line.recovered) continue;
-      // A check whose run on main cannot be read is not known to pass: main is still red.
-      const passed = await Promise.all(line.red.map(check => effects.baseCheck!(check).then(base => base.state === 'passed', () => false)));
-      await raise(passed.every(Boolean) ? line.recovered : line.text);
-    }
-  }
+  // GY-2010: Main guard attention (revert PRs via the GitHub App) is gone with the API client.
 }
 
 /** Step 7: observe what is actually deployed, as one release-level reading; a merged item is already done (GY-1981). */
@@ -125,28 +101,7 @@ export async function deploymentStep(cycle: Cycle) {
   //      publication is retried next cycle and holds nothing else back.
   if (effects.publishProductionEnvironment) await effects.publishProductionEnvironment().catch(() => undefined);
 
-  // 7a''. Promotion is the loop's, not GitHub's cron, which is best-effort and on 2026-10-05 dropped
-  //       four scheduled runs in a row (GY-1302): as soon as the base branch has moved past the last
-  //       promoted SHA and the last cut, no candidate is in validation and the run.promoteEveryMinutes
-  //       minimum gap has passed since the last dispatch (GY-1488), the release-candidate workflow is
-  //       dispatched with promote=true.
-  //       A failed read or dispatch is recorded under one key and retried with backoff, and the
-  //       cycle's read and dispatch stamps are kept, so a failure never repeats every cycle.
-  const promotion = effects.promotion, promotionFailure = 'promotion:failed';
-  if (promotion && readyToRetry(state.actions[promotionFailure], state.cycle)) {
-    const checked = await withinDeploymentBudget(state, 'promotion', () => promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes, intervalMs: config.run.intervalSeconds * 1000, ...promotionFreeze(effects.mainWatch?.freeze ?? false, state.mainWatch) }), deadline, now);
-    if (checked === stillVerifying) deferred.push('the promotion check');
-    else {
-      if (!checked.ok) throw checked.error;
-      const result = checked.value;
-      state.promotion = result.state;
-      if (result.failure) {
-        const detail = `Promotion could not be checked or dispatched: ${result.failure}`;
-        performed.push(await record(state, promotionFailure, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[promotionFailure]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      } else if (state.actions[promotionFailure]) delete state.actions[promotionFailure];
-      if (result.dispatched) performed.push(await record(state, `promotion:${result.state.mainSha}`, { kind: 'deployment', work: null, principal: null, state: 'done', detail: result.state.reason ?? `Dispatched ${promotionWorkflow}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-    }
-  }
+  // 7a''. GY-1982: no promotion drive: the between-cycles self-upgrade deploys each new base tip itself.
 
   // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
   //        the loop records a measurement for the release the control plane serves, with its own

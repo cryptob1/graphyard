@@ -45,15 +45,14 @@ test('docs/install.md is an agent-executable runbook with commands, verification
   assert.ok(steps.some(step => step[2].includes('install --provider PROVIDER --repo OWNER/REPO --apply')));
   assert.ok(steps.filter(step => /Verify|Expected output|Verification/.test(step[2])).length >= 3, 'each step must state what to verify');
 
-  // The three human inputs (GY-2009: no App confirmation click), and the secret rules, are stated explicitly.
+  // The three human inputs (GY-2010: no GitHub App confirmation), and the secret rules, are stated explicitly.
   for (const rule of ['Never print, echo, `cat`, log, paste, or commit a credential', 'One principal per role', 'Workers never receive an admin, coordinator, or producer credential', 'Proof producers get explicit grants only', '`0700`', '`0600`']) {
     assert.ok(runbook.includes(rule), `the runbook must state: ${rule}`);
   }
   assert.match(runbook, /Which provider/);
   assert.match(runbook, /Provider login/);
-  assert.doesNotMatch(runbook, /GitHub App confirmation click/);
   assert.match(runbook, /Approval of the printed plan/);
-  assert.match(runbook, /Never invent a fourth/);
+  assert.match(runbook, /^Ask only: \*\*Which provider\*\*; \*\*Provider login\*\*; \*\*Approval of the printed plan\*\*\. Graphyard registers no GitHub App/m);
 
   // A missing provider CLI is not a fourth thing to ask a human for: every provider row carries
   // the command that installs it, so a live install stops only for the account behind it.
@@ -65,7 +64,7 @@ test('docs/install.md is an agent-executable runbook with commands, verification
   // Failure handling is a symptom-to-action table, not prose.
   const failures = runbook.slice(runbook.indexOf('## Failure handling'));
   assert.ok((failures.match(/^\| `/gm) ?? []).length >= 8, 'the failure table must cover the real refusals');
-  for (const symptom of ['Preflight is incomplete', 'did not become healthy', 'deploy key', 'inside the managed repository']) {
+  for (const symptom of ['Preflight is incomplete', 'did not become healthy', 'gh repo deploy-key', 'inside the managed repository']) {
     assert.ok(failures.includes(symptom), `failure handling must cover "${symptom}"`);
   }
 });

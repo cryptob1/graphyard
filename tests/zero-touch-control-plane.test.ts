@@ -166,11 +166,11 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   assert.deepEqual(result.handoffs, [], 'no browser or device handoff');
   assert.ok(!events.some(event => event.kind === 'handoff' || event.kind === 'waiting'), 'no handoff or waiting event');
   assert.ok(result.checklist.every(item => item.done), JSON.stringify(result.checklist.filter(item => !item.done)));
-  assert.ok(world.calls.filter(args => args[0] === 'install').every(args => !args.some(arg => /^--(no-github-app|github-app|reuse-app|reviewer)$/.test(arg))), 'no GitHub App is registered: install binds none and takes no App flag (GY-2009)');
+  assert.ok(world.calls.filter(args => args[0] === 'install').every(args => !args.some(arg => /^--(reviewer|no-github-app|reuse-app|github-app)$/.test(arg))), 'no GitHub App is registered: install takes no App flag');
   assert.deepEqual(world.ghCalls, [['repo', 'view', repository, '--json', 'name']], 'the operator\'s gh login only looked the repository up');
   assert.equal(world.deployKeys.length, 1);
   const status = await request(operatorAgent, 'status');
-  assert.equal(status.github, false, 'the plane runs with no GitHub App');
+  assert.equal('github' in status, false, 'the plane runs with no GitHub App: its status reports none (GY-2010)');
   assert.equal(status.mergeWriter.merger, 'control-plane', 'the control plane is the merge writer');
   assert.ok(result.goal, 'the goal was submitted');
   const key = result.goal!;

@@ -105,8 +105,7 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
       assert.equal(healthBefore.readiness, false);
       // A readiness probe asking ?ready is kept off this replica until startup validation completes.
       assert.equal((await fetch(`${baseUrl}/healthz?ready`)).status, 503);
-      // Only mutations are refused: a webhook delivery and a lease heartbeat pass, and so do reads.
-      assert.equal(refusedBeforeReady('POST', '/api/github/webhook'), false);
+      // Only mutations are refused: a lease heartbeat passes, and so do reads (no GitHub webhook is served since GY-2010).
       assert.equal(refusedBeforeReady('POST', '/api/work/GY-1/heartbeat'), false);
       assert.equal(refusedBeforeReady('GET', '/api/work/GY-1'), false);
       assert.equal(refusedBeforeReady('POST', '/api/work/GY-1/complete'), true);

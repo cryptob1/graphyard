@@ -36,8 +36,8 @@ export function refusedBodyDetail(result: unknown): string {
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
-import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
+import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
+import { type ReviewFinding, type SuccessionRead, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
@@ -57,7 +57,7 @@ import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
 import { baseTree } from '../cli/planned-files-intent.js'; import { currentBaseTree } from '../executor.js';
-import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
+import type { ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
@@ -111,6 +111,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   requestProof: (work: Work) => void | Promise<void>;
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
+  /** An item as the control plane holds it now, read outside any transaction (GY-2151): a containment settlement is judged on this record before it is posted, because the plane lowers the fence against its own record, not the cycle's snapshot. */
+  readWork?: (work: Work) => Promise<Work>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation

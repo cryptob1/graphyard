@@ -83,25 +83,25 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/validation.md', /`command`: `run` in the checkout with `TARGET_URL`.*`{"kind":"command","run":"npx playwright test"}`/],
   ['docs/validation.md', /`agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS\|FAIL - reason`.*"goal":"Win tic-tac-toe"/],
   ['docs/validation.md', /`secrets: \["NAME"\]` from `~\/\.config\/graphyard\/INSTALL\/e2e-secrets\.TARGET\.env` \(0600, uncommitted\) as variables and `\{\{secret:NAME\}\}`, redacted/],
-  // GY-1526 AC-6: the loop-driven cut and the related-item revert of control-plane mode.
-  ['docs/delivery.md', /The loop cuts \(`run\.candidates\.everyMerges` 5, `idleMinutes` 15\), validates, promotes and verifies .*no workflow.*a failed required E2E case reverts the newest candidate item a matching verification map covers \(`candidateReverts`; reopened\); a main-watch freeze holds all/],
+  // GY-1982: the loop deploys each new base tip and rolls a failed one back.
+  ['docs/delivery.md', /\*\*The master loop deploys continuously\*\*.*`promotion\.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`/],
   // GY-1848: the repository's release failure-action keys and their defaults.
   ['docs/delivery.md', /`release\.onFailure` `hold` \(default `revert`\) names each failing case, step and would-be target or `no map matched`, reverting\/reopening nothing; `release\.revertUnmatched: false` holds an unmatched failure instead of the newest item/],
-  // GY-1555 AC-6: setup-from-zero's control-plane merger subsection; steps 5 and 7 fold into step 4, where doctor's fixes point.
-  ['docs/setup-from-zero.md', /### Control-plane merger\n\n`up` creates an ed25519 deploy key and registers it read-write on OWNER\/REPO .*no App, no branch protection/],
-  ['docs/setup-from-zero.md', /## 4\. Register the GitHub App\n\n.*Not required for the control-plane merger.*Reviewer and revert-approver Apps: /],
+  // GY-1555 AC-6, GY-2010: setup-from-zero's control-plane merger subsection; no GitHub App step remains.
+  ['docs/setup-from-zero.md', /### Control-plane merger\n\n`install --apply` \(and `up`\) creates an ed25519 deploy key and registers it read-write on OWNER\/REPO .*No GitHub App, webhook or branch protection is set up/],
+  // GY-2010: install's deploy-key step replaces the App confirmation.
+  ['docs/install.md', /## Step 3: deploy key\n\n`--apply` generates `INSTALL\/deploy-key` .*registers it read-write on OWNER\/REPO with `gh repo deploy-key add`/],
   // GY-1523 AC-8: the head form of submit, its CLI and the change number it allocates.
   ['docs/protocol/work-commands.md', /`\{"epoch":1,"head":SHA\}` \(`complete GY-N EPOCH --head \[SHA\]`.*allocates one change number per head into `candidate\.pr`\/`submission\.pr`/],
   // GY-1529 AC-5: the Coordinator recovery section names its symptoms, the recover command and how promotion resumes.
   // GY-1607 AC-4: the deployment page says CI and release-candidate runners pull Docker Hub images through the mirror.
   ['docs/deployment.md', /CI and release-candidate runners pull Docker Hub images through the `mirror\.gcr\.io` mirror/],
-  ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; verified promotions repin\./],
-  // GY-1778 AC-2: the GitHub page names the bounded plan read and the one place its bounds are named.
-  ['docs/github.md', /\*\*plan\*\* reads `\/api\/status` and `GET \/api\/work\?pr=N` \(never the work list\) bounded by `planReads` \(`scripts\/enumerate-ci-proofs\.mjs`\)/],
+  ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; deploys repin\./],
+  // GY-1778 AC-2: plan-read bounds live on the protocol read-endpoints page (docs/github.md deleted in GY-2010).
   ['docs/protocol/read-endpoints.md', /`\/api\/work`: the fleet \(open items whole, settled deliveries summarized\), `\?pr=N` only the item whose candidate or submission names pull request N \(else `\[\]`\)/],
-  // GY-1686 AC-3: both master-agent pages name master browser capture as the remedy for a criterion needing a live Confirm-access fixture, never a human.
-  ['docs/master-agent.md', /Live Confirm-access fixtures: \[`master browser capture`\]\(master-agent-reference\.md#github-administration-through-the-browser\), never a human/],
-  ['docs/master-agent-reference.md', /a criterion needing a live one runs `master browser capture \[--dry-run\]` on the sudo-protected App permissions page, submitting nothing, never a human/],
+  // GY-2010: no GitHub App is held, so both master-agent pages say the App browser flows refuse (GY-1686's capture remedy is gone).
+  ['docs/master-agent.md', /No GitHub App is held, so the \[browser flows\]\(master-agent-reference\.md#github-administration-through-the-browser\) refuse/],
+  ['docs/master-agent-reference.md', /`master browser app-permissions\|installation-accept\|capture` therefore refuse, naming the missing App credential/],
   // GY-1784 AC-6 and GY-1828: the operations page states the worktree-disk reading's answered condition (out of reach over the plan, the pass's own removals included), its currency bound, the hard line and the recovery band.
   ['docs/operations.md', /`disk` attention under `run\.diskThresholdGb` is answered \(reported, faultless\) while the latest worktree-reclaim pass is ≤30 min old and out of reach \(nothing disposable now, no backlog or error, its removals included; no fault standing\); ≤ half the threshold, or ENOSPC\/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers/],
   // GY-1690 AC-3 and GY-1729: the release-candidate section says the chart exercise forwards a free port it re-establishes, waits for the rollout, retries transient API failures and names the last line a failed job ends on.

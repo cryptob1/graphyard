@@ -595,10 +595,9 @@ export function canonicalJson(value: unknown): string {
 
 /**
  * The `graphyard install` that already owns this repository's identities, as `init --scan --apply`
- * must reuse them (GY-1413): its install directory and confirmed App (null for an install applied
- * with `--no-github-app`, GY-1642), or null when the repository has no install on this machine. An install still waiting at its App step is refused before
- * anything is written — init would otherwise open a second App page and mint a second principal set
- * that would replace the deployed one. Its identities belong to the server it installed, so an
+ * must reuse them (GY-1413): its install directory and the App a pull-request-era install recorded
+ * (null for every install since GY-2010), or null when the repository has no install on this
+ * machine. Its identities belong to the server it installed, so an
  * apply that selects another server (`url`) is refused too: onboarding written for that server
  * with no principals or App of its own could not authenticate its agents. A null `url` selects the
  * install's own server.
@@ -607,11 +606,8 @@ export async function installedOnboarding(root: string, repository: string, url:
   const directory = installDirectory(installIdFor(repository), configHome);
   const record = await readInstallRecord(directory);
   if (!record || record.repository.toLowerCase() !== repository.toLowerCase()) return null;
-  // A control-plane merger install (`--no-github-app`, GY-1550) binds no App by choice: init reuses
-  // its identities and commits the onboarding files with no App block, and opens no App page either.
-  if (!record.github && !record.noGithubApp) throw new Error(`graphyard install --apply for ${repository} has not finished its GitHub App step: its record ${resolve(directory, 'install.json')} names no App. Finish the App step on the page graphyard install --apply serves, or rerun graphyard install --apply if it is no longer waiting (an install registers no App and merges through the control plane; docs/setup-from-zero.md). init opens no App page of its own and mints no principals beside the install's; nothing was written in ${root}.`);
   const origin = (value: string) => { try { return new URL(value).origin; } catch { return value; } };
-  if (url && (!record.url || origin(url) !== origin(record.url))) throw new Error(`graphyard install --apply owns ${repository}'s identities and App for ${record.url ?? 'its own server'} (${resolve(directory, 'install.json')}), not ${url}. Rerun init --scan --apply with --url ${record.url ?? 'that server'}; init mints no principals for another server beside the install's. Nothing was written in ${root}.`);
+  if (url && (!record.url || origin(url) !== origin(record.url))) throw new Error(`graphyard install --apply owns ${repository}'s identities for ${record.url ?? 'its own server'} (${resolve(directory, 'install.json')}), not ${url}. Rerun init --scan --apply with --url ${record.url ?? 'that server'}; init mints no principals for another server beside the install's. Nothing was written in ${root}.`);
   return { directory, url: record.url, githubApp: record.github ? { appId: record.github.appId, slug: record.github.slug } : null };
 }
 

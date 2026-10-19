@@ -13,7 +13,7 @@ Per concurrent session: worker identity, host ID (`install --workers`) or:
 node "$GRAPHYARD_CLI" init --url https://YOUR-GRAPHYARD-HOST --herdr --host-id UNIQUE_MACHINE_NAME --token-stdin
 ```
 
-Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`; setup writes no `.github/workflows` file: the merge writer's trial (build, tests, secret scan) is the gate ([GitHub](github.md)); masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
+Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`; setup writes no `.github/workflows` file: the merge writer's trial (build, tests, secret scan) is the gate; masterless: `graphyard watch GY-1 EPOCH -- COMMAND` ([worker](protocol/leases.md#watch)).
 
 ### Documentation policy
 
@@ -76,7 +76,7 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ## 3. Start the master
 
-`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as OS user whose GitHub credentials workers can't read; `--browser-profile`: Chrome as GitHub admin (`master browser`); App confirmation and GitHub Mobile *Confirm access* stay human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
+`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as OS user whose GitHub credentials workers can't read; `--browser-profile`: a GitHub-signed-in Chrome profile; GitHub Mobile *Confirm access* stays human-only. Reviewer: `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
 
 ### The loop must be supervised
 
@@ -86,18 +86,18 @@ Shared hosts: units are per repository (`graphyard-executor-OWNER-NAME@N.service
 
 ### The pipeline doctor
 
-Every `run.doctor.intervalMinutes` (10) a Pi **doctor** acts, never asks people (`master scope`, `requirements`, `unblock`, `decide`+`approver`, `settle-containment`, `close`, `create`, `release`, `checkout-restore`); runs a `master-role` refusal's command, then unblocks; posts findings (`master status` `doctor`); files only code-change items. Off: `run.doctor.enabled=false`.
+Every `run.doctor.intervalMinutes` (5), or watchdog-fired, a Pi **doctor** acts, never asks people (`master scope/requirements/unblock/decide`+`approver`/`settle-containment`/`close`/`create`/`release`/`checkout-restore`); runs a `master-role` refusal's command, then unblocks; posts findings (`master status` `doctor`); files only code-change items (`create FILE 'why'`, reason required). Off: `run.doctor.enabled=false`.
 
 ### Supervised mode (up --local)
 
-`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: an agent reviewer reviews each head, the control plane merges it; no approver or escalation runs, so you answer decisions. `master status` prints `supervision`. Promote: `master reviewer setup`, `master reviewer add`, `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)).
+`graphyard up --local` writes `"supervision": "supervised"` and your login (`operatorLogin`) to `master.json`; absent is autonomous. Supervised: an agent reviewer reviews each head, the control plane merges it; no approver or escalation runs, so you answer decisions. `master status` prints `supervision`. Promote: `master reviewer add`, then `master promote --admin-token-stdin` ([promotion](master-agent-reference.md#promotion-to-autonomy)); it also needs a reviewer App bound before GY-2010, so a new install stays supervised.
 
-## 4. Prove the first PR
+## 4. Prove the first change
 
 `graphyard doctor --profile through-merge` names gaps; `master run` dispatches small item, merged when the merge writer's trial passes and it pushes main with its deploy key (no branch protection); `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
-## 5. Inventory PRs
+## 5. Existing PRs
 
-`graphyard onboard inventory --repo OWNER/REPO [--mapping FILE] [--out FILE]` labels open PRs and drafts: `continue`, `hold` (draft), `adopt` (mergeable; protection, ruleset checks clean per App) or `superseded` (base holds the head). Read-only; `--mapping` binds keys.
+Graphyard reads no pull request, so there is no PR inventory (`graphyard onboard` is gone): open PRs stay with their existing controller; file work for one as an item.
 
-`master adopt GY-N --pr NUMBER --head SHA [--source-key KEY --source-url URL] REASON` binds an open non-draft PR at its live head (source kept); attempts use its branch, `complete` only it; a moved head or second owner is refused by name, a repeat is a no-op; GitHub is never written.
+`master adopt GY-N --pr NUMBER --head SHA …` is refused: adoption binds a PR's live head and Graphyard reads no GitHub API, so no new adoption binds; a replayed key answers from its receipt. Items adopted earlier keep their binding: attempts start at the stored adopted head from the shared object store and submit with `complete GY-N EPOCH --head`, never through the PR.

@@ -14,7 +14,7 @@ Only Graphyard writes to main.
 
 ## Merge writer
 
-Four oldest heads share one trial and push, each delivered at its commit; a failed batch merges singly: `merge.intent`; merge-commit trial (affected and proof tests; no tests without `scripts/ci-tests.mjs`, build without `package.json`; host-sized shards; one retry on timeout, cancel, host failure (`merge.trial`)); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved rejection waits; a conflict or failed trial reworks (`mergeWriter.reworks`). A timed-out head goes alone, last; timed out twice while others pass, it reworks (`trial failed`, the slow files). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Keys name persisted attempts: lost replies replay (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger, then retry anew. `master status`: `mergeWriter.queue`.
+Four oldest heads share one trial and push, each delivered at its commit; a failed batch merges singly: `merge.intent`; merge-commit trial (affected and proof tests; no tests without `scripts/ci-tests.mjs`, build without `package.json`; dashboard changes: the [browser suite](master-agent-reference.md#merge-trial); host-sized shards; one retry on timeout, cancel, host failure (`merge.trial`)); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved rejection waits; a conflict or failed trial reworks (`mergeWriter.reworks`). A timed-out head goes alone, last; twice while others pass, it reworks (`trial failed`, slow files). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Keys name attempts: lost replies replay (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger, retry anew. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 
@@ -24,7 +24,7 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinn
 
 ## The merger
 
-The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`. Candidates: object store, `Hotfix:` first, then oldest item.
+The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`. Candidates: object store, `Hotfix:`/base-repair first, then oldest item.
 
 `POST /api/work/:id/merge-record` (coordinator, `Idempotency-Key`) records each step; `pushed`/`reconciled` name the open intent's merge commit, else 409.
 
@@ -33,7 +33,7 @@ The control plane is every install's only merge writer: nothing sets another, an
 1. **Shadow mode**: trials beside the GitHub gate, nothing written; done, and deleted (GY-2087).
 2. **Switch** `control-plane`: done, for every install.
 3. **Run the Snake pilot.**
-4. **After a week**, delete the github-mode gate code.
+4. **Done (GY-2010):** the github-mode API client, App credentials, webhooks, caches, request budget and main guard are deleted; gates read the merge ledger alone, and base failures and flakes come from the writer's trials, never a CI log.
 
 ## Measures
 

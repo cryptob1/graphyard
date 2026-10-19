@@ -7,7 +7,7 @@ import { standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
 import { type Work } from '../model/work.js';
 import { pendingCaseChanges } from './master-status-case-changes.js';
 import { installationMerger } from '../executor.js';
-import { leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
+import { deployLine, leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { loopCodeRoot } from '../daemon/checkout-state.js';
 import { baseFailureAttention, daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
 import { timeToMergeBySize } from '../decomposition.js';
@@ -69,7 +69,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const sections = new ReportSections(); // optional sections (GY-422)
   const { reviewRecords, reviewRuntime, producerRecords, reviews, producers, retries } = await reconcileLedgers(root, master, snapshot, runtime);
   // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
-  const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost, coordinator));
+  const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost));
   // Status reads the cursor as the loop would; the loop logs and persists any repair.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
@@ -170,8 +170,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // GY-1511: the Herdr server holding this install's agents, and the command that opens them.
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,
-    // The promotion drive (GY-1302): last promoted SHA, production lag, next due promotion.
-    promotion,
+    // GY-1982: + a failed deploy's line.
+    promotion: { ...promotion, deploy: deployLine(cursor?.promotion?.deployFailed) },
     launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
     itemSize,
     // Every open item the control plane names no action for, with the account it names and how

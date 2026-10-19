@@ -16,6 +16,7 @@ import { actionSettleMs } from '../src/model/action-progress.js';
 import { coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit, coordinationSnapshot as trimInProcess, coordinationViewHeader, coordinationWork, deliverySettled, type CoordinationOmissions } from '../src/server/work-view.js';
 import { coordinationRecords, coordinationSessions, coordinationTail } from '../src/store/coordination-sql.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { mergeDelivered, mergeIntent } from './helpers/merge-ledger.js';
 
 /**
  * GY-203: migrations and backups take their own advisory locks, and the coordination snapshot is
@@ -279,9 +280,10 @@ test('integration:index-matches-documents — the index equals the documents aft
   w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   await check('evidenced');
   w = await engine.observe(w.id, (await reload(w)).revision, observation()); await check('reobserved');
-  const committed = { revision: (await engine.store.workItem(w.id))!.revision }; await check('merge committed');
+  // The merge writer's trial, push and reconciliation deliver it (GY-2010).
+  w = await mergeIntent(engine, w, 'e'.repeat(40)); await check('merge intended');
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  w = await engine.observe(w.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  w = await mergeDelivered(engine, w, 'e'.repeat(40));
   assert.equal(w.stage, 'done'); await check('delivered');
   assert.equal((await store.pool.query('SELECT pr_state FROM work_index WHERE id=$1', [w.id])).rows[0].pr_state, 'merged');
   // Writes that bypass the engine are indexed all the same: a deployment recorded, then a

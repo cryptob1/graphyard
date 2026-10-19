@@ -4,7 +4,6 @@ import type { AddressInfo } from 'node:net';
 import { Store } from '../store.js';
 import { Engine } from '../engine.js';
 import { demand, parseReviewerApps } from '../model.js';
-import { githubFromEnv, installationFingerprint, type AppPermissionReport, type GitHub } from '../github.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
@@ -19,7 +18,6 @@ import { productionBranch } from '../release-candidate.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
 import { startDirectMerge } from '../direct-merge.js';
-import { GitHubCacheStore } from '../github-cache.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
 import { processControlPlaneJob } from './control-plane-observation.js';
@@ -49,31 +47,16 @@ export async function main(options: MainOptions = {}) {
   const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
-  mark('github'); const github = await githubFromEnv();
-  // GitHub answers persist across restarts, so a deploy starts warm instead of re-spending the budget.
-  const githubCache = github ? new GitHubCacheStore(store.pool, String(github.config.installationId)) : null;
-  if (github && githubCache) void github.attachCache(githubCache);
-  // Startup preflight: a permission shortfall is announced before the first job can run
-  // into it, and the jobs that need the missing permission are held rather than retried.
-  // A passing preflight (startup or periodic) releases holds decided against a different
-  // installation, including holds left by an earlier process; a hold decided against this same
-  // installation (a 403 the declaration does not explain) keeps its bounded expiry.
-  const announcePreflight = async (report: AppPermissionReport) => {
-    for (const line of report.attention) console.error(`GitHub App permissions: ${line}`);
-    if (!report.error && !report.suspended && !report.missing.length) await store.releaseHeldJobs(installationFingerprint(report));
-  };
-  mark('github.preflight'); if (github) await announcePreflight(await github.preflight()); mark('github.preflight done');
   const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
   // The producers this installation already ran with. An over-limit roster of these starts
   // with a warning; only a principal added beyond the limit refuses, naming the variable.
   const knownPrincipals = (await store.pool.query('SELECT principal_id FROM proof_grants')).rows.map(row => String(row.principal_id));
   const build = buildIdentity();
-  // Railway's API when a Railway token is set, else the GitHub deployments Railway reports (GY-1327),
-  // under the environment the master published to the ledger (Railway's `<project> / production`, GY-1426).
-  const provider = productionProvider(process.env, github, fetch, await resolvedWatchEnvironment(store.pool));
+  // Railway's API when a Railway token is set; GitHub deployments are no longer read (GY-2010).
+  const provider = productionProvider(process.env, null, fetch, await resolvedWatchEnvironment(store.pool));
   // Production deploys the release branch when the release pipeline owns it (GY-1207); GRAPHYARD_PRODUCTION_BRANCH names another.
-  const production = new ProductionWatch(store, { provider, github, build, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', releaseBranch: process.env.GRAPHYARD_PRODUCTION_BRANCH?.trim() || productionBranch });
-  const http = server(engine, credentials, github, artifacts, { knownPrincipals, production });
+  const production = new ProductionWatch(store, { provider, github: null, build, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', releaseBranch: process.env.GRAPHYARD_PRODUCTION_BRANCH?.trim() || productionBranch });
+  const http = server(engine, credentials, artifacts, { knownPrincipals, production });
   // The deployed-variables record the status route reports gains the generated-files variable the
   // installers set beside GRAPHYARD_PRINCIPALS, so master status can compare what the deployment
   // runs with against the managed repository's manifest and name the command that fixes it.
@@ -82,7 +65,7 @@ export async function main(options: MainOptions = {}) {
   console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared; the regression guard exempts nothing'}`);
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); ${observationLine(provider, build)}`);
 
-  const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), github?.config.repository ?? process.env.GITHUB_REPOSITORY ?? '');
+  const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), process.env.GITHUB_REPOSITORY ?? '');
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
@@ -92,7 +75,7 @@ export async function main(options: MainOptions = {}) {
   // opens first; until startup validation completes, /healthz reports `readiness: false`, every
   // mutation that could act on unvalidated state is refused with a retryable 503, and the
   // observation workers and production watch are not started. A failed attempt is logged and the
-  // reconciliation tick retries it. Webhooks soft-accept while readiness is false (GY-1700).
+  // reconciliation tick retries it. 
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let scanning: ReturnType<typeof startPatternScan> | null = null;
@@ -181,22 +164,17 @@ export async function main(options: MainOptions = {}) {
     if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
     // Routine ledger rows past the retention window go in bounded, audited batches (store/compaction.ts).
     if (Date.now() - ledgerCompactedAt >= ledgerCompactionIntervalMs) { ledgerCompactedAt = Date.now(); await step('compactLedger', () => compactLedger(store.pool, { retentionMs: configuredLedgerRetentionMs() }).catch(error => { console.error('ledger compaction failed', error instanceof Error ? error.message : 'unknown'); return null; })); }
-    if (github) {
-      const preflight = await step('github.preflight', () => github.preflightIfDue());
-      if (preflight) await announcePreflight(preflight);
-    }
   }, 2000);
-  http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}; GitHub ${github ? 'connected' : 'not configured'}`));
+  http.listen(options.port ?? Number(process.env.PORT ?? 4310), options.host ?? process.env.HOST ?? '127.0.0.1', () => console.log(`Graphyard listening on port ${(http.address() as AddressInfo).port}`));
   await once(http, 'listening');
   void runStartupValidation();
 
   const close = async () => {
     closing = true;
-    services.readiness = false; // soft-accept webhooks before the pool drains (GY-1700)
+    services.readiness = false;
     reconciliation.stop(); stopPlaneBeat(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
-    await Promise.resolve(githubCache?.close());
     await store.close();
   };
   const shutdown = () => { void close().then(() => process.exit(0)); setTimeout(() => process.exit(1), 10_000).unref(); };
@@ -206,15 +184,13 @@ export async function main(options: MainOptions = {}) {
 
 /**
  * Whether a request is refused while startup validation runs (GY-1127): every mutation under /api
- * except a GitHub webhook delivery, which only wakes durable jobs, and a work lease heartbeat,
- * which reads no validation state and would otherwise lapse leases for the whole startup window.
- * Reads stay open, and /healthz answers liveness throughout. Webhooks stay open for HMAC; the
- * route soft-accepts while not ready (GY-1700) rather than this gate answering 503.
+ * except a work lease heartbeat, which reads no validation state and would otherwise lapse leases
+ * for the whole startup window. Reads stay open, and /healthz answers liveness throughout.
  */
 export function refusedBeforeReady(method = 'GET', url = '/'): boolean {
   if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return false;
   const path = new URL(url, 'http://localhost').pathname;
-  return path.startsWith('/api/') && path !== '/api/github/webhook' && !/^\/api\/work\/[^/]+\/heartbeat$/.test(path);
+  return path.startsWith('/api/') && !/^\/api\/work\/[^/]+\/heartbeat$/.test(path);
 }
 
 export type ReconciliationStep = <T>(name: string, run: () => Promise<T>) => Promise<T>;
