@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, statSync } from 'node:fs';
-import { chmod, link, readdir, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
+import { link, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { dirname, resolve } from 'node:path';
@@ -9,19 +9,17 @@ import { parseArgs } from 'node:util';
 import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
 import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentation.js';
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
-import { applyWiring, deploymentAdapters, observeReleaseWiring, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
+import { deploymentAdapters, wiringActions, type DeploymentAdapter, type DeploymentContext } from './deploy-target.js';
 import { adapterFor, carriesCredential, hetznerAddress, publishedPort, readRemote, isProviderReference, quotedPrice, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
-import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
-import { appClient, configureWebhook, detectCiAppIds, headSha, githubCli, installationClient, installationToken, readWebhookConfig, repositoryInstallation, triggerDelivery, verifyDelivery, webhookUrlFor, CHECK_NAME, type AppFacts, type DeliveryProof } from './github.js';
-import { ensureDeployKey } from './deploy-key.js';
-import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
+import { asUser, existingMachineAdapter, generateHostSecrets, SIGNIN_CLAIM_VARIABLE, hostHerdrOnly, hostLayout, hostProfilesOnly, hostPlan, hostDeployKeyFile, hostRemote, hostTokenFile, installHostFleet, readHostSecrets, selfContainedAdapter, MIGRATE_SOURCE_VARIABLE, type HostFleetResult } from './host.js';
+import { githubCli, type GitHubCli } from './github.js';
+import { DEPLOY_KEY_FILE, ensureDeployKey, registerDeployKey } from './deploy-key.js';
+import { detectHerdr, detectRuntimes, masterRuntime, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
 import { generatedFilesAssignment, generatedManifestScript, type GeneratedFilesAssignment } from './generated-files.js';
 import { repositoryPolicyAssignment } from '../model/repository-policy.js';
 import { applicationProblems, caseIdsOf, projectDeliveryAssignment, projectDeliveryVariable } from '../project-applications.js';
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
-import { assertOutsideRepository, configHome, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalRecords, principalsVariable, readInstallRecord, reconcileRoster, recordedRoster, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord, type RosterPrincipal } from './secrets.js';
-import { AppStepPending, readAppFile, readSavedApp, readUninstalledApp, type SavedApp } from './manifest.js';
-import { appRoles, importApp, listApps, publiclyReachable, reuseExistingApp, savedRegistrations, type AppCredentials, type AppRole, type SavedRegistration } from '../github-setup.js';
+import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalRecords, principalsVariable, readInstallRecord, reconcileRoster, recordedRoster, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord, type RosterPrincipal } from './secrets.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
 import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
 import { HerdrSetupFailure } from '../herdr-host.js';
@@ -29,7 +27,7 @@ import { localTransport, sshTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
 import { durableCheckoutPreflight, loopStopTimeoutSeconds, underTestRunner } from '../supervisor.js';
-import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PlannedPrincipal, type PreflightItem, type Provider } from './types.js';
+import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PreflightItem, type Provider } from './types.js';
 
 export * from './types.js';
 export { adapterFor, type ProviderAdapter } from './adapters.js';
@@ -57,8 +55,8 @@ export interface InstallDependencies {
   log?: (line: string) => void;
   detectRuntimes?: (transport: Transport) => Promise<DetectedRuntime[]>;
   detectHerdr?: (transport: Transport) => Promise<HerdrState>;
-  /** Runs the App-manifest browser flow and resolves once the human has confirmed. The registration credentials are written to `file`, which the installer keeps under the install directory, never inside a repository. */
-  githubApp?: (request: { root: string; repository: string; origin: string; file: string; reviewer?: string; reuse?: AppPageReuse }) => Promise<AppFacts & { slug: string; botUserId?: number }>;
+  /** Generates (when absent) and registers the merge writer's deploy key; ensureDeployKey through the transport's gh by default. */
+  ensureDeployKey?: (installDir: string, repository: string, gh: GitHubCli) => Promise<string>;
   registerProfiles?: (request: ProfileRequest) => Promise<ProfileRegistration>;
   runHerdr?: (args: string[]) => string;
   /** Test seam: exercise the orchestration against a scripted provider. */
@@ -77,8 +75,6 @@ export interface ProfileRequest {
   runtimes: DetectedRuntime[]; herdr: HerdrState; herdrRebind?: boolean;
   /** GY-1511: this install's own Herdr instance, where the plugin is linked instead of the host's default one. */
   herdrInstance?: HerdrInstance | null;
-  /** True on the registration before the App step: the master is configured with the App still pending. */
-  appPending?: boolean;
   workers: WorkerProfileDraft[]; reviewers: ReviewerProfileDraft[]; masterKind: string | null;
   runHerdr?: (args: string[]) => string;
 }
@@ -92,46 +88,20 @@ export interface ProfileRequest {
  */
 export interface HerdrChoice { herdr?: 'rebind' | 'skip' | 'instance' }
 /**
- * GY-1442: Apps already installed on the account that the install reuses instead of creating one
- * (`--reuse-app SLUG`, repeatable): each serves the role its saved registration on this host has.
- */
-export interface ReuseChoice { reuseApps?: string[] }
-/**
  * GY-1851: `--fresh-cursor`, which `graphyard up` passes when it re-issues an install's credentials
  * onto a fresh database: a self-contained host's master loop is stopped, its cursor archived beside
  * itself, and the loop started again, on the host where it runs. Other installs run no loop here.
  */
 export interface FreshCursorChoice { freshCursor?: boolean }
 /**
- * GY-1550: `--no-github-app` installs the control plane with no GitHub App at all. Nothing is
- * registered, reused or confirmed in a browser, and GITHUB_APP_ID, GITHUB_INSTALLATION_ID,
- * GITHUB_PRIVATE_KEY, GITHUB_WEBHOOK_SECRET and GITHUB_CI_APP_IDS stay unset, so the server
- * serves with `/api/status.github` false. `graphyard up` installs this
- * way (GY-1527): the repository and its deploy key come from the operator's gh login instead.
- */
-export interface GitHubAppChoice { noGithubApp?: boolean }
-/**
  * GY-1846: observation-only install of an existing repository (`--observe-only`). The control
  * plane may be deployed, but nothing the managed repository or its product owns is changed — no
  * release ref, branch protection, auto-merge or merge queue, App, worker principal, profile,
- * supervisor unit, master loop, Herdr link or product deployment — and Railway variables are never
- * read by value. Implies --no-github-app and --no-herdr; the plan lists each held action.
+ * supervisor unit, master loop, Herdr link, deploy key or product deployment — and Railway
+ * variables are never read by value. Implies --no-herdr; the plan lists each held action.
  */
-export interface ObserveOnlyChoice {
-  observeOnly?: boolean;
-  /**
-   * GY-1877: set only by `graphyard app bind SLUG` (never an install flag): binds an App `graphyard
-   * app import` saved on this host to the recorded observation-only control plane, running exactly
-   * the full install's App step (the five App variables, a deploy, its health, the App webhook
-   * repointed here) and nothing else.
-   */
-  bindApp?: string;
-}
+export interface ObserveOnlyChoice { observeOnly?: boolean }
 export type InstallRequest = InstallInputs & HerdrChoice;
-/** The variables an App binding writes; `--no-github-app` leaves every one of them unset. */
-export const APP_VARIABLES = ['GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS'] as const;
-/** What the App page offers to reuse instead of creating an App, and the reuse itself. */
-export interface AppPageReuse { slugs: string[]; adopt: (slug: string) => Promise<AppCredentials & { installationId: number }> }
 
 /**
  * The install request the `install` command's flags describe. It lives beside `resumeCommand`,
@@ -140,7 +110,7 @@ export interface AppPageReuse { slugs: string[]; adopt: (slug: string) => Promis
 export function installRequestFromArgs(args: string[]) {
   const { values } = parseArgs({ args, options: {
     provider: { type: 'string' }, repo: { type: 'string' }, plan: { type: 'boolean' }, apply: { type: 'boolean' },
-    domain: { type: 'string' }, workers: { type: 'string' }, reviewer: { type: 'string' }, image: { type: 'string' },
+    domain: { type: 'string' }, workers: { type: 'string' }, image: { type: 'string' },
     'producer-proof': { type: 'string', multiple: true }, 'base-branch': { type: 'string' }, 'review-policy': { type: 'string' },
     'required-check': { type: 'string', multiple: true }, 'review-count': { type: 'string' },
     'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, 'server-name': { type: 'string' }, workspace: { type: 'string' },
@@ -158,8 +128,7 @@ export function installRequestFromArgs(args: string[]) {
   const provider = values.target ?? values.provider;
   if (!provider || !providers.includes(provider as any)) throw new Error(`Use --provider ${providers.join('|')}, or --target host|hetzner`);
   // Observation-only (GY-1846) changes nothing the managed repository or its product owns, so
-  // every flag that asks for such a change is refused; --no-herdr is implied. Install never
-  // registers a GitHub App or writes branch protection (GY-2009).
+  // every flag that asks for such a change is refused; --no-herdr is implied.
   if (values['observe-only']) {
     const changes = observeOnlyConflicts(values, provider);
     if (changes.length) throw new Error(`--observe-only changes nothing the repository owns, so it cannot be combined with ${changes.join(', ')}`);
@@ -171,9 +140,7 @@ export function installRequestFromArgs(args: string[]) {
   // A count that silently became NaN would install a control plane with no worker principal
   // or an unusable port, so a non-numeric value stops the command instead.
   const count = (flag: string, value: string) => { const parsed = Number(value); if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`--${flag} takes a whole number`); return parsed; };
-  // GY-2009: every install registers no GitHub App and writes no branch protection; the merge
-  // writer deploy key is the only GitHub access install plans or applies.
-  const request: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice = { repository: values.repo, noGithubApp: true,
+  const request: InstallRequest & ObserveOnlyChoice & FreshCursorChoice = { repository: values.repo,
     ...(values['herdr-rebind'] ? { herdr: 'rebind' as const } : values['no-herdr'] ? { herdr: 'skip' as const } : values['herdr-instance'] ? { herdr: 'instance' as const } : {}), provider: provider as InstallRequest['provider'],
     ...(values.target || provider === 'host' ? { selfContained: true } : {}),
     ...(values.local ? { local: true } : {}), ...(values.migrate ? { migrate: true } : {}),
@@ -183,7 +150,7 @@ export function installRequestFromArgs(args: string[]) {
     ...(values['base-branch'] ? { baseBranch: values['base-branch'] } : {}),
     ...(values.domain ? { domain: values.domain } : {}), ...(values.workers ? { workers: count('workers', values.workers) } : {}),
     ...(values.port ? { port: count('port', values.port) } : {}),
-    ...(values.reviewer ? { reviewer: values.reviewer } : {}), ...(values.image ? { image: values.image } : {}),
+    ...(values.image ? { image: values.image } : {}),
     ...(values['producer-proof']?.length ? { producerProofs: values['producer-proof'] } : {}),
     ...(reviewPolicy ? { reviewPolicy: reviewPolicy as 'github' | 'agent' } : {}),
     ...(values['required-check']?.length ? { requiredChecks: values['required-check'] } : {}),
@@ -200,8 +167,8 @@ export function installRequestFromArgs(args: string[]) {
 /**
  * The `install` flags that redeploy a recorded installation's server at `image` (GY-1962, `graphyard
  * upgrade`): its repository, provider or target, base branch, service, domain and host, and the
- * choices the record carries — its installer-created workers and producer grants, review policy,
- * no-App or observation-only mode — so the full apply plans the roster it has and revokes nothing.
+ * choices the record carries — its installer-created workers and producer grants, review policy
+ * or observation-only mode — so the full apply plans the roster it has and revokes nothing.
  * An installation with no installer-created worker was applied with --observe-only. The record keeps
  * no Railway workspace, so an account in several workspaces names it again with `workspace`.
  */
@@ -227,7 +194,7 @@ export function redeployArguments(record: InstallRecord, image: string, workspac
 
 function observeOnlyConflicts(values: Record<string, string | boolean | string[] | undefined>, provider: string) {
   const given = (name: string) => Array.isArray(values[name]) ? (values[name] as string[]).length > 0 : !!values[name];
-  return [...['reviewer', 'workers', 'producer-proof', 'create-environments', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only', 'profiles-only'].filter(given).map(name => `--${name}`),
+  return [...['workers', 'producer-proof', 'create-environments', 'migrate', 'herdr-rebind', 'herdr-instance', 'herdr-only', 'profiles-only'].filter(given).map(name => `--${name}`),
     ...(values.target || provider === 'host' ? ['--target'] : []),
     // The local provider runs the control plane as a systemd user unit on this machine, a supervisor unit observation-only never installs.
     ...(provider === 'local' ? ['--provider local'] : [])];
@@ -238,11 +205,11 @@ export const OBSERVE_ONLY_HELD = 'held by observation-only (--observe-only)';
 const held = (action: Omit<PlanAction, 'state' | 'held'>, reason: string): PlanAction => ({ ...action, state: 'held', held: `${OBSERVE_ONLY_HELD}: ${reason}` });
 
 export interface InstallSession {
-  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice & FreshCursorChoice;
+  root: string; inputs: Required<Pick<InstallInputs, 'repository' | 'provider' | 'baseBranch'>> & InstallRequest & ObserveOnlyChoice & FreshCursorChoice;
   installId: string; directory: string; adapter: ProviderAdapter; context: AdapterContext;
   /** The roster this apply deploys: the plan's principals reconciled with the recorded roster (GY-1879, `reconcileRoster`). */
   principals: RosterPrincipal[]; tokens: Map<string, string>; vault: Vault;
-  record: InstallRecord | null; reviewers: { name: string; appId: number; botUserId: number }[];
+  record: InstallRecord | null;
   mode: 'plan' | 'apply';
   /** True once every principal credential exists on disk, so fingerprints are real. */
   materialized: boolean;
@@ -262,10 +229,6 @@ export interface InstallSession {
    * before it existed.
    */
   repositoryPolicy?: { assignment: ReturnType<typeof repositoryPolicyAssignment> | null; error: string | null };
-  /** The App registration this install reuses instead of the browser step, or why the named one cannot be. */
-  savedApp: { app: SavedApp | null; error: string | null };
-  /** Every App registration saved on this host (GY-1442): what --reuse-app and the App page's reuse choose from. */
-  registrations: SavedRegistration[];
   /**
    * The repository's delivery model (GY-1102): the reviewed policy graphyard.json commits, or the
    * one a scan would propose when none is committed yet (`committed` false), with the adapter that
@@ -301,7 +264,6 @@ export async function repositoryDelivery(root: string, merger: string | null = n
   return { policy: proposeDelivery(input, detectDeploy(input, stack), stack, { merger }), committed: false };
 }
 
-const APP_HUMAN_STEP = 'Open the page the installer serves and prints (http://127.0.0.1:4311; it opens no browser), confirm the Graphyard GitHub App there, and install it on the managed repository; when GitHub asks to Confirm access, approve the GitHub Mobile prompt.';
 const CORE_HUMAN_STEPS = [
   'Authenticate the provider CLI and GitHub CLI once (the installer prints the exact command when either is missing).',
   'Approve the printed plan before rerunning with --apply.',
@@ -312,180 +274,9 @@ export function repositoryRoot(cwd: string) {
   catch { throw new Error('Run graphyard install from the checkout of the repository being managed'); }
 }
 
-/** The main checkout a linked worktree belongs to (the worktree itself otherwise), where github-setup saved the App. */
-function mainCheckout(root: string) {
-  try { return resolve(execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(), '..'); }
-  catch { return root; }
-}
 
-/**
- * The App registration an install reuses, so one command needs no browser click when the operator
- * already has the Graphyard App on this repository: the file named by --github-app, else this
- * installation's own saved registration, else the one `graphyard github-setup` saved in the
- * checkout. A registration for another repository is never reused; a named file that cannot be
- * used is a preflight failure rather than a silent fallback to the browser.
- */
-async function findSavedApp(root: string, directory: string, inputs: InstallInputs, fetcher: typeof fetch): Promise<InstallSession['savedApp']> {
-  const forRepository = (app: Pick<SavedApp, 'repository'> | null) => !!app && (app.repository ?? '').toLowerCase() === inputs.repository.toLowerCase();
-  // A registration without its installation (the operator installed the App outside the setup
-  // page, say from a phone) is completed from the App's own JWT before any App page opens (GY-1476).
-  const installed = async (file: string): Promise<SavedApp | null> => {
-    const app = await readUninstalledApp(file).catch(() => null);
-    if (!app || !forRepository(app)) return null;
-    const installationId = await repositoryInstallation(app.facts, inputs.repository, fetcher).catch(() => null);
-    return installationId ? { file, repository: app.repository, facts: { ...app.facts, installationId }, detected: true } : null;
-  };
-  if (inputs.githubAppFile) {
-    const file = resolve(inputs.githubAppFile);
-    let app: SavedApp | null;
-    try { app = await readSavedApp(file) ?? await installed(file); } catch (error: any) { return { app: null, error: `${file} is unreadable: ${error.code === 'ENOENT' ? 'no such file' : error.message}` }; }
-    if (!app) return { app: null, error: `${file} holds no complete control-plane App registration (appId, installationId and privateKey)` };
-    if (!forRepository(app)) return { app: null, error: `${file} registers the App for ${app.repository ?? 'no repository'}, not ${inputs.repository}` };
-    return { app, error: null };
-  }
-  for (const file of [resolve(directory, 'github-app.json'), resolve(root, '.graphyard', 'github-app.json'), resolve(mainCheckout(root), '.graphyard', 'github-app.json')]) {
-    const app = await readSavedApp(file).catch(() => null) ?? await installed(file);
-    if (forRepository(app)) return { app, error: null };
-  }
-  return { app: null, error: null };
-}
 
-/**
- * The registrations `graphyard app import` wrote to this install's directory (GY-1877). A bind or
- * --reuse-app copies the App into github-app.json, which lists first and shares its App ID, so a
- * later import (a rotated key, a new webhook secret) is found only by reading the imported files.
- */
-async function importedRegistrations(directory: string): Promise<SavedRegistration[]> {
-  const names = await readdir(directory).then(entries => entries.filter(name => /^imported-app-[a-z0-9][a-z0-9-]{0,99}\.json$/.test(name)).sort(), () => [] as string[]);
-  const found: SavedRegistration[] = [];
-  for (const name of names) {
-    const file = resolve(directory, name);
-    const app = await readFile(file, 'utf8').then(text => JSON.parse(text), () => null);
-    if (!Number.isSafeInteger(app?.appId) || typeof app.slug !== 'string' || !app.slug || typeof app.privateKey !== 'string' || !app.privateKey) continue;
-    found.push({ file, role: appRoles.includes(app.role) ? app.role : 'control-plane', app });
-  }
-  return found;
-}
-/** The host's registrations with each App this install imported replaced by its imported registration. */
-const preferImported = (registrations: SavedRegistration[], imported: SavedRegistration[]) => [
-  ...imported, ...registrations.filter(entry => !imported.some(own => own.app.appId === entry.app.appId)),
-];
 
-/** The App registrations saved on this host: every install directory under the config home (`app import`'s too), then the checkout's. */
-export async function hostRegistrations(root: string, override?: string) {
-  const home = configHome(override);
-  const installs = await readdir(home, { withFileTypes: true }).then(entries => entries.filter(entry => entry.isDirectory()).map(entry => resolve(home, entry.name)).sort(), () => [] as string[]);
-  return savedRegistrations([...installs, resolve(root, '.graphyard'), resolve(mainCheckout(root), '.graphyard')]);
-}
-export interface AppCommandDependencies {
-  root: string; configHome?: string; fetcher?: typeof fetch;
-  /** `gh` with the host's login: resolves stdout, rejects on a non-zero exit. */
-  gh?: (args: string[]) => Promise<string>;
-  /** What `app bind` prepares its install session with (GY-1877); the host's transport and fetch by default. */
-  install?: InstallDependencies;
-}
-/**
- * `app import` and `app list` (GY-1451): reuse an App created elsewhere without GitHub sudo. The
- * install the App joins is the repository's (`--repo`, else the checkout's origin); its own
- * webhook, once installed, is the one a control-plane App may keep. `app bind SLUG [--plan]`
- * (GY-1877) binds an imported App to the recorded observation-only installation.
- */
-export async function appCommand(args: string[], dependencies: AppCommandDependencies) {
-  const [action, ...rest] = args;
-  const { values, positionals } = parseArgs({ args: rest, options: { repo: { type: 'string' }, 'app-id': { type: 'string' }, 'key-file': { type: 'string' }, role: { type: 'string' }, plan: { type: 'boolean' }, 'ssh-host': { type: 'string' }, 'ssh-user': { type: 'string' }, 'ssh-key': { type: 'string' }, workspace: { type: 'string' } }, allowPositionals: true });
-  if (action !== 'bind' && (positionals.length || values.plan || values['ssh-host'] || values['ssh-user'] || values['ssh-key'] || values.workspace)) throw new Error('Only app bind takes a SLUG, --plan, --workspace or --ssh-host/--ssh-user/--ssh-key: use app import --app-id ID --key-file PEM [--role ROLE], app list, or app bind SLUG [--plan]');
-  const repository = values.repo ?? (await discover(dependencies.root)).repository;
-  if (!repository) throw new Error('Use --repo OWNER/NAME, or run from a checkout whose origin is the managed repository');
-  const directory = installDirectory(installIdFor(repository), dependencies.configHome);
-  const record = await readInstallRecord(directory).catch(() => null);
-  const webhookUrl = record?.url ? webhookUrlFor(record.url) : null;
-  const fetcher = dependencies.fetcher ? { fetcher: dependencies.fetcher } : {};
-  if (action === 'import') {
-    if (!values['app-id'] || !values['key-file']) throw new Error('Use app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver]');
-    const role = (values.role ?? 'control-plane') as AppRole;
-    if (!appRoles.includes(role)) throw new Error(`--role takes ${appRoles.join(', ')}`);
-    return importApp({ appId: Number(values['app-id']), keyFile: values['key-file'], role, repository, directory, webhookUrl, ...fetcher });
-  }
-  if (action === 'list') {
-    if (values['app-id'] || values['key-file'] || values.role) throw new Error('app list takes only --repo');
-    const gh = dependencies.gh ?? (async (args: string[]) => {
-      const result = await githubCli(localTransport())(args, { allowFailure: true });
-      if (result.code !== 0) throw new Error(`gh ${args.slice(0, 3).join(' ')} failed: ${(result.stderr || result.stdout).trim().split('\n')[0] || `exit ${result.code}`}`);
-      return result.stdout;
-    });
-    return listApps({ repository, registrations: await hostRegistrations(dependencies.root, dependencies.configHome), webhookUrl, gh, ...fetcher });
-  }
-  if (action === 'bind') return bindAppCommand(positionals, values, repository, directory, record, dependencies);
-  throw new Error('Use app import --app-id ID --key-file PEM [--role ROLE], app list, or app bind SLUG');
-}
-/**
- * `app bind SLUG [--plan]` (GY-1877): the separate step after `install --observe-only --apply`. It
- * prepares the recorded installation's own session (provider, service, domain, base branch) as an
- * observation-only one that binds SLUG, and prints its plan, or applies it: exactly the App step.
- * The record keeps no SSH target or Railway workspace, so a docker-host installation names its host
- * again with --ssh-host, an SSH-reached one its --ssh-user and --ssh-key, and a Railway one whose
- * account belongs to several workspaces its --workspace, as its install did.
- */
-async function bindAppCommand(positionals: string[], values: { 'app-id'?: string; 'key-file'?: string; role?: string; plan?: boolean; 'ssh-host'?: string; 'ssh-user'?: string; 'ssh-key'?: string; workspace?: string }, repository: string, directory: string, record: InstallRecord | null, dependencies: AppCommandDependencies) {
-  const [slug, ...extra] = positionals;
-  if (!slug || extra.length || values['app-id'] || values['key-file'] || values.role) throw new Error('Use app bind SLUG [--plan] [--repo OWNER/NAME] [--workspace NAME] [--ssh-host HOST [--ssh-user USER] [--ssh-key FILE]]');
-  if (!/^[a-z0-9][a-z0-9-]{0,99}$/i.test(slug)) throw new Error(`app bind takes an App slug such as graphyard-owner-repo, not ${slug}`);
-  if (!record) throw new Error(`No installation of ${repository} is recorded under ${directory}; app bind binds an App to a deployed observation-only control plane. Run graphyard install --provider PROVIDER --repo ${repository} --observe-only --apply first`);
-  if (record.provider === 'docker-host' && !values['ssh-host']) throw new Error(`${repository} is installed on a Docker host, and its record keeps no SSH target: rerun as graphyard app bind ${slug} --ssh-host HOST [--ssh-user USER] [--ssh-key FILE], naming the host its observation-only install reached`);
-  if (record.provider !== 'docker-host' && values['ssh-host']) throw new Error(`--ssh-host names a docker-host installation's target; ${repository} is installed on ${record.provider}`);
-  if (record.provider !== 'railway' && values.workspace) throw new Error(`--workspace names a Railway installation's workspace; ${repository} is installed on ${record.provider}`);
-  if (record.provider !== 'docker-host' && record.provider !== 'hetzner' && (values['ssh-user'] || values['ssh-key'])) throw new Error(`--ssh-user and --ssh-key reach a docker-host or Hetzner installation; ${repository} is installed on ${record.provider}`);
-  const session = await prepareInstall(dependencies.root, {
-    repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy,
-    ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}),
-    ...(values['ssh-host'] ? { sshHost: values['ssh-host'] } : {}), ...(values['ssh-user'] ? { sshUser: values['ssh-user'] } : {}),
-    ...(values['ssh-key'] ? { sshKey: values['ssh-key'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}),
-    observeOnly: true, bindApp: slug,
-  }, { log: line => console.error(line), ...(dependencies.configHome ? { configHome: dependencies.configHome } : {}), ...(dependencies.fetcher ? { fetch: dependencies.fetcher } : {}), ...dependencies.install }, values.plan ? 'plan' : 'apply');
-  const plan = await buildPlan(session);
-  return values.plan ? plan : applyInstall(session, plan);
-}
-/** The App --reuse-app names for ROLE, judged by the role its saved registration has. */
-const reusedFor = (session: Pick<InstallSession, 'inputs' | 'registrations'>, role: AppRole) =>
-  (session.inputs.reuseApps ?? []).find(slug => session.registrations.find(entry => entry.app.slug.toLowerCase() === slug.toLowerCase())?.role === role) ?? null;
-/** `gh` on the install's transport (the host's login), resolving stdout or naming its failure. */
-const ghText = (session: InstallSession) => async (args: string[]) => {
-  const result = await githubCli(session.context.transport)(args, { allowFailure: true });
-  if (result.code !== 0) throw new Error(`gh ${args.slice(0, 4).join(' ')} failed: ${(result.stderr || result.stdout).trim().split('\n')[0] || `exit ${result.code}`}`);
-  return result.stdout;
-};
-/** Reuse SLUG as the ROLE App: read-only for the plan, adding the repository to its installation on apply. */
-function reuseApp(session: InstallSession, slug: string, role: AppRole, webhookUrl: string | null, apply: boolean) {
-  return reuseExistingApp({ slug, role, repository: session.inputs.repository, registrations: session.registrations, webhookUrl, gh: ghText(session), fetcher: session.deps.fetch, apply });
-}
-/** Every --reuse-app slug whose saved registration serves ROLE. One App serves each role, so more than one is refused, never silently dropped. */
-export const reusedForRole = (slugs: readonly string[], registrations: readonly SavedRegistration[], role: AppRole) =>
-  slugs.filter(slug => registrations.find(entry => entry.app.slug.toLowerCase() === slug.toLowerCase())?.role === role);
-/** The --reuse-app preflight: every named App is saved here, fits a role this install fills, and passes reuseExistingApp's checks. */
-async function reusePreflight(session: InstallSession, ghReady: boolean): Promise<PreflightItem[]> {
-  const items: PreflightItem[] = [];
-  for (const slug of session.inputs.reuseApps ?? []) {
-    const name = `Reuse App ${slug}`;
-    const saved = session.registrations.find(entry => entry.app.slug.toLowerCase() === slug.toLowerCase());
-    const fix = 'Name an App whose registration an earlier install or github-setup saved on this host, or drop --reuse-app to register a new App in the browser';
-    if (!saved) { items.push({ name, ok: false, detail: `no registration for App ${slug} is saved on this host${session.registrations.length ? `; saved: ${session.registrations.map(entry => entry.app.slug).join(', ')}` : ''}`, fix }); continue; }
-    if (saved.role === 'reviewer' && !session.inputs.reviewer) { items.push({ name, ok: false, detail: `${slug} is a reviewer App and this install registers no reviewer`, fix: 'Add --reviewer NAME so the reused App serves as that reviewer' }); continue; }
-    const sameRole = reusedForRole(session.inputs.reuseApps ?? [], session.registrations, saved.role);
-    if (sameRole.length > 1) { items.push({ name, ok: false, detail: `--reuse-app names ${sameRole.length} ${saved.role} Apps (${sameRole.join(', ')}), and this install uses one ${saved.role} App`, fix: `Keep one --reuse-app for the ${saved.role} role` }); continue; }
-    if (saved.role === 'control-plane' && session.inputs.githubAppFile) { items.push({ name, ok: false, detail: '--github-app and --reuse-app both name the control-plane App', fix: 'Keep one of them' }); continue; }
-    if (!ghReady) { items.push({ name, ok: false, detail: 'adding the repository to the App\'s installation needs the GitHub CLI', fix: 'Authenticate gh (see the GitHub CLI check), then rerun' }); continue; }
-    try {
-      const reuse = await reuseApp(session, slug, saved.role, session.record?.url ? webhookUrlFor(session.record.url) : null, false);
-      items.push({ name, ok: true, detail: `the ${saved.role} App ${saved.app.slug} (app ${saved.app.appId}) holds the permissions it needs and is installed on ${reuse.account}${reuse.selection === 'all' ? ' for every repository' : `; --apply adds ${session.inputs.repository} to that installation`}` });
-    } catch (error) { items.push({ name, ok: false, detail: error instanceof Error ? error.message : String(error), fix }); }
-  }
-  return items;
-}
-/** The page's reuse offer for ROLE: every App of that role saved on this host, reused on the page's choice. */
-function pageReuse(session: InstallSession, role: AppRole, url: string): AppPageReuse | undefined {
-  const slugs = session.registrations.filter(entry => entry.role === role).map(entry => entry.app.slug);
-  return slugs.length ? { slugs, adopt: async slug => (await reuseApp(session, slug, role, role === 'control-plane' ? webhookUrlFor(url) : null, true)).app } : undefined;
-}
 
 /**
  * The base branch an install without `--base-branch` uses: `master` when the checkout's remote has
@@ -520,16 +311,14 @@ export function composeCheckoutMounts(root: string): { repoCheckout: string | nu
   return { repoCheckout: root, repoGitDir: common };
 }
 
-export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ReuseChoice & GitHubAppChoice & ObserveOnlyChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
+export async function prepareInstall(cwd: string, rawInputs: InstallRequest & ObserveOnlyChoice, dependencies: InstallDependencies = {}, mode: 'plan' | 'apply' = 'apply'): Promise<InstallSession> {
   const provider = rawInputs.provider;
   if (!provider) throw new Error('Use --provider railway|hetzner|docker-host|compose|local, or --target host|hetzner');
-  // Observation-only (GY-1846) binds no App and leaves Herdr untouched, whoever builds the request.
+  // Observation-only (GY-1846) registers no deploy key and leaves Herdr untouched, whoever builds the request.
   if (rawInputs.observeOnly) {
     if (provider === 'host' || provider === 'local' || rawInputs.selfContained || rawInputs.migrate || rawInputs.createEnvironments) throw new Error('--observe-only deploys only the control plane and installs no supervisor unit: it cannot install a self-contained host or the local provider\'s systemd unit, migrate, or create environments');
-    rawInputs = { ...rawInputs, noGithubApp: true, herdr: 'skip' };
-  } else if (rawInputs.bindApp) throw new Error('graphyard app bind binds an imported App to an observation-only installation only');
-  // GY-2009: install never registers a GitHub App or writes branch protection.
-  else rawInputs = { ...rawInputs, noGithubApp: true };
+    rawInputs = { ...rawInputs, herdr: 'skip' };
+  }
   // A self-contained install puts the whole of Graphyard on one machine: an existing one (host) or
   // a Hetzner server it creates (GY-717).
   const selfContained = provider === 'host' || !!rawInputs.selfContained;
@@ -625,14 +414,6 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     context.host!.secretsUnreadable = stored.unreadable;
   }
   const materialized = tokens.size === principals.length && !!context.databasePassword;
-  // --no-github-app must not adopt a saved registration: derivedVariables and a later
-  // master setup would otherwise push GITHUB_APP_* onto a deployment that chose none.
-  const savedApp = rawInputs.noGithubApp
-    ? { app: null, error: null } satisfies InstallSession['savedApp']
-    : await findSavedApp(root, directory, inputs, dependencies.fetch ?? fetch);
-  const registrations = preferImported(await hostRegistrations(root, dependencies.configHome), await importedRegistrations(directory));
-  for (const entry of registrations) { vault.add(entry.app.privateKey); if (entry.app.webhookSecret) vault.add(entry.app.webhookSecret); }
-  if (savedApp.app) { vault.add(savedApp.app.facts.privateKey); if (savedApp.app.facts.webhookSecret) vault.add(savedApp.app.facts.webhookSecret); }
   const adapter = dependencies.adapter ?? (selfContained ? selfContainedAdapter(provider === 'host' ? existingMachineAdapter : adapterFor(provider)) : adapterFor(provider));
   const deployment: DeploymentContext = {
     repository: inputs.repository, installId, baseBranch: inputs.baseBranch, policy: delivery.policy,
@@ -645,7 +426,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Re
     : delivery.committed ? requiredPullRequestChecks(delivery.policy) : detected.proposedChecks;
   return {
     root, inputs, installId, directory, adapter, context, principals, tokens, vault, record,
-    reviewers: record?.reviewers ?? [], mode, materialized, generatedFiles, repositoryPolicy, savedApp, registrations,
+    mode, materialized, generatedFiles, repositoryPolicy,
     delivery: { ...delivery, adapter: deploymentAdapters[delivery.policy.deploy.adapter], context: deployment, merger },
     reviewPolicy, requiredChecks,
     reviewCount: reviewPolicy === 'agent' ? 0 : Math.max(0, inputs.reviewCount ?? 1),
@@ -713,7 +494,7 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     { name: 'GRAPHYARD_PRINCIPALS', value: principalsVariable(session.principals, session.tokens), secret: true },
     { name: 'GITHUB_REPOSITORY', value: inputs.repository, secret: false },
     { name: 'GITHUB_BASE_BRANCH', value: inputs.baseBranch, secret: false },
-    { name: 'GRAPHYARD_REVIEWER_APPS', value: JSON.stringify(session.reviewers.map(reviewer => ({ id: reviewer.name, runtime: reviewer.name.replace(/-reviewer$/, ''), appId: reviewer.appId, botUserId: reviewer.botUserId }))), secret: false },
+    { name: 'GRAPHYARD_REVIEWER_APPS', value: JSON.stringify((session.record?.reviewers ?? []).map(reviewer => ({ id: reviewer.name, runtime: reviewer.name.replace(/-reviewer$/, ''), appId: reviewer.appId, botUserId: reviewer.botUserId }))), secret: false },
     // The capacity limits derived from the principal set being deployed; the server derives the
     // same values when they are unset, and an explicit value keeps the install predictable
     // across upgrades. A re-run after the roster changed reports the old values as drift.
@@ -733,52 +514,11 @@ export function coreEnv(session: InstallSession): EnvValue[] {
   ];
 }
 
-export function githubEnv(facts: AppFacts, ciAppIds: number[]): EnvValue[] {
-  return [
-    { name: 'GITHUB_APP_ID', value: String(facts.appId), secret: false },
-    { name: 'GITHUB_INSTALLATION_ID', value: String(facts.installationId), secret: false },
-    { name: 'GITHUB_PRIVATE_KEY', value: facts.privateKey, secret: true },
-    { name: 'GITHUB_WEBHOOK_SECRET', value: facts.webhookSecret, secret: true },
-    { name: 'GITHUB_CI_APP_IDS', value: ciAppIds.join(','), secret: false },
-  ];
-}
-
-/**
- * The main guard reverts a broken base through a second App, never the control plane's own
- * (GY-1352): the first reviewer App this install registered serves, read from its saved
- * registration. Without one the guard cannot revert unaided, and readiness says so.
- */
-export async function revertApproverEnv(session: Pick<InstallSession, 'reviewers' | 'directory'>): Promise<EnvValue[]> {
-  const source = await revertApproverSource(session);
-  return source ? revertApproverFromFile(source) : [];
-}
-/** The registration the revert approver signs with: an App reused as the revert approver (GY-1451), else the first reviewer App. */
-async function revertApproverSource(session: Pick<InstallSession, 'reviewers' | 'directory'>) {
-  const reused = resolve(session.directory, REVERT_APPROVER_FILE);
-  if ((await readAppFile(reused))?.privateKey) return reused;
-  return session.reviewers[0] ? appCredentialFile(session, session.reviewers[0].name) : null;
-}
-
-/**
- * The revert approver variables from one saved App registration (the JSON the manifest flow or
- * `master reviewer bind` writes: appId, installationId, privateKey), or none when it holds no key.
- */
-export async function revertApproverFromFile(file: string): Promise<EnvValue[]> {
-  const app = await readAppFile(file);
-  if (!app?.privateKey || app.privateKey === 'undefined') return [];
-  return [
-    { name: 'GRAPHYARD_REVERT_APPROVER_APP_ID', value: String(app.appId), secret: false },
-    { name: 'GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID', value: String(app.installationId), secret: false },
-    { name: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY', value: app.privateKey, secret: true },
-  ];
-}
-
 // ---------------------------------------------------------------------------
 // Self-provisioning an existing installation (GY-1416)
 //
-// An installation deployed before the plan derived a variable never got it: production predates
-// GY-1352, so its main guard had no revert approver although the reviewer App's registration sat
-// on this host. A variable the plan derives from a credential saved here is never a human request.
+// An installation deployed before the plan derived a variable never got it. A variable the plan
+// derives from a credential saved on this host is never a human request.
 // `master setup` finds each one the running deployment lacks and, with --apply, sets exactly those
 // through the provider adapter — secrets over stdin, never printed — with one audit entry each.
 // ---------------------------------------------------------------------------
@@ -809,24 +549,14 @@ export interface PendingRedeploy { read(): Promise<PendingSetup>; write(staged: 
 export const derivedFrom = (values: EnvValue[], source: string): DerivedVariable[] => values.map(value => ({ ...value, source }));
 
 /**
- * Every variable an install session derives from credentials this host holds: the core variables
- * once every principal credential exists, the saved control-plane App registration, and the revert
- * approver from the reviewer App's registration (`revertApproverEnv`).
- *
- * A `--no-github-app` install (the request or the install record) never derives App variables, so
- * `master setup --apply` cannot reintroduce an App onto a deployment that chose none (GY-1550).
+ * Every variable an install session derives from credentials this host holds: the core variables,
+ * once every principal credential exists. No GitHub App variable is ever derived (GY-2010).
  */
 export async function derivedVariables(session: InstallSession): Promise<DerivedVariable[]> {
-  const saved = session.savedApp.app;
-  const noApp = !!session.inputs.noGithubApp || !!session.record?.noGithubApp;
-  return [
-    ...(session.materialized ? derivedFrom(coreEnv(session), `the install plan's credentials under ${session.directory}`) : []),
-    ...(!noApp && saved ? derivedFrom(githubEnv(saved.facts, session.record?.github?.ciAppIds ?? []), `the control-plane App registration ${saved.file}`) : []),
-    ...derivedFrom(await revertApproverEnv(session), `the revert approver App registration ${await revertApproverSource(session) ?? ''}`),
-  ];
+  return session.materialized ? derivedFrom(coreEnv(session), `the install plan's credentials under ${session.directory}`) : [];
 }
 
-/** A variable is present when it, or its file-mounted twin (`…_PRIVATE_KEY_FILE`), is set. */
+/** A variable is present when it, or its file-mounted twin (`…_FILE`), is set. */
 const presentOn = (variables: Record<string, string>, name: string) => variables[name] !== undefined || variables[`${name}_FILE`] !== undefined;
 
 /**
@@ -931,53 +661,49 @@ function variableDrift(session: InstallSession, action: string, values: EnvValue
 // ---------------------------------------------------------------------------
 
 /**
- * The `gh` login an install needs: `repo`, to register the merge writer deploy key (GY-2009).
- * No install binds an App or registers a webhook, so no provider needs `admin:repo_hook`.
- * A login whose scopes `gh` does not list (a fine-grained token) is not refused for scopes it may hold.
+ * The `gh` login an install needs (GY-1412, GY-2010): `repo`, on an account that administers the
+ * repository, for every provider. A full install registers the merge writer's deploy key with it;
+ * `--observe-only` (GY-1862) reads the release refs with it and writes nothing. A login whose
+ * scopes `gh` does not list (a fine-grained token) is not refused for scopes it may hold.
  */
+export const GITHUB_CLI_SCOPES = ['repo'] as const;
 export function githubCliPreflight(provider: Provider, status: { code: number; stdout: string; stderr?: string }, repository: string): PreflightItem {
-  const needed = ['repo'];
-  const login = `gh auth login --scopes ${needed.join(',')}`;
-  const note = '; no install registers a webhook, so none needs admin:repo_hook';
-  if (status.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: ${login} (the account must administer ${repository})${note}` };
+  const needed = [...GITHUB_CLI_SCOPES];
+  if (status.code !== 0) return { name: 'GitHub CLI', ok: false, detail: 'gh is missing or not authenticated', fix: `Install GitHub CLI and run: gh auth login --scopes ${needed.join(',')} (the account must administer ${repository})` };
   const listed = /Token scopes:\s*(.*)/.exec(`${status.stdout}\n${status.stderr ?? ''}`)?.[1];
   const held = listed === undefined ? null : [...listed.matchAll(/[\w:-]+/g)].map(match => match[0]);
   const lacking = held ? needed.filter(scope => !held.includes(scope)) : [];
-  if (lacking.length) return { name: 'GitHub CLI', ok: false, detail: `the gh login lacks scope ${lacking.join(', ')} (${provider} needs ${needed.join(', ')})${note}`, fix: `Run: gh auth refresh --scopes ${needed.join(',')}` };
-  return { name: 'GitHub CLI', ok: true, detail: `authenticated for deploy-key registration with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}${note}` };
+  if (lacking.length) return { name: 'GitHub CLI', ok: false, detail: `the gh login lacks scope ${lacking.join(', ')} (${provider} needs ${needed.join(', ')})`, fix: `Run: gh auth refresh --scopes ${needed.join(',')}` };
+  return { name: 'GitHub CLI', ok: true, detail: `authenticated for the deploy key and the release wiring with ${held ? `scopes ${needed.join(', ')}` : 'unlisted scopes'}` };
 }
 
 /**
- * A local Compose or local-provider install serves loopback only, so GitHub can never deliver to it (GY-1474): its App
- * is registered without a webhook, the control plane polls GitHub, and every step that expects a
- * delivery is skipped rather than reported as failing.
+ * The plan's step for the merge writer's deploy key (GY-1551, GY-2010), the only credential a full
+ * install gives Graphyard on GitHub: generated beside the install (on the host for a self-contained
+ * one, whose private half never leaves it) and registered read-write through the gh login.
  */
-export function pollsGitHub(provider: Provider) { return provider === 'compose' || provider === 'local'; }
-export function webhookPreflight(provider: Provider): PreflightItem | null {
-  return pollsGitHub(provider) ? { name: 'GitHub webhook', ok: true, detail: `${provider} is local: the control plane polls GitHub and registers no webhook, so webhook configuration and delivery verification are skipped` } : null;
+function deployKeyAction(session: InstallSession): PlanAction {
+  const { context, inputs } = session;
+  const title = 'Generate the merge writer\'s deploy key';
+  if (inputs.observeOnly) return held({ id: 'github.deploy-key', target: 'github', title: `${title} and register it on ${inputs.repository}` }, 'no deploy key is generated or registered, so the merge writer cannot push');
+  if (context.host) return { id: 'github.deploy-key', target: 'host', state: 'update', title: `${title} on the host (${hostDeployKeyFile(context.host.layout, session.installId)}, mode 0600; its private half never leaves the host) when absent, register its public half read-write on ${inputs.repository} through this machine's gh login unless already listed, and clone the managed checkout over SSH with it` };
+  const file = resolve(session.directory, DEPLOY_KEY_FILE);
+  return { id: 'github.deploy-key', target: 'github', state: existsSync(file) ? 'update' : 'create', title: `${title} (${file}, mode 0600) when absent and register it read-write on ${inputs.repository} through the gh login unless already listed; the merge writer pushes ${inputs.baseBranch} with it, and no GitHub App, webhook or branch protection is set up` };
 }
-type WebhookProof = DeliveryProof & { skipped?: true };
 
 export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
-  if (session.inputs.bindApp) return buildBindAppPlan(session);
   const { adapter, context, record } = session;
   const preflight = await adapter.preflight(context);
   const gh = githubCli(context.transport);
-  const noApp = !!session.inputs.noGithubApp;
   const observeOnly = !!session.inputs.observeOnly;
   const candidateModel = session.delivery.policy.mode === 'release-candidate';
-  // GY-2009: gh registers the merge writer deploy key; observe-only and release-candidate wiring
-  // still need it. Install never registers an App or reads protection.
-  const ghNeeded = true;
-  const ghStatus = ghNeeded ? await gh(['auth', 'status'], { allowFailure: true }) : { code: 1, stdout: '', stderr: '' };
-  if (ghNeeded) preflight.push(githubCliPreflight(context.provider, ghStatus, session.inputs.repository));
-  const polling = noApp ? null : webhookPreflight(context.provider);
-  if (polling) preflight.push(polling);
+  // gh registers the deploy key and creates a candidate model's release wiring; observe-only still
+  // refuses a signed-out caller (GY-1862). Every one needs only the `repo` scope.
+  preflight.push(githubCliPreflight(context.provider, await gh(['auth', 'status'], { allowFailure: true }), session.inputs.repository));
   // The master loop runs from this checkout and its unit refuses a temporary directory: say so
   // before anything is created (GY-1457). A host install runs its loop on the host instead. The
   // test suite's checkouts are all temporary, so it checks durableCheckoutPreflight directly.
   if (!context.host && !underTestRunner()) preflight.push(durableCheckoutPreflight(session.root));
-  const protectionHuman: string | null = null;
   // A declared manifest the installer cannot read would deploy a server whose regression guard
   // exempts nothing, so it blocks --apply like any other preflight until the script is fixed.
   preflight.push(session.generatedFiles.error
@@ -985,21 +711,6 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     : { name: 'Generated-file manifest', ok: true, detail: session.generatedFiles.assignment ? `declares ${session.generatedFiles.assignment.value}` : 'the repository declares no generated files' });
   // Deploying the generic default over a declaration that does not parse would silently weaken every gate.
   if (session.repositoryPolicy?.error) preflight.push({ name: 'Repository policy', ok: false, detail: session.repositoryPolicy.error, fix: `Correct the risk, review and e2e sections of ${repositoryConfigFile} (docs/delivery.md), then rerun` });
-  // --no-github-app never strips a live App: refuse before any write when the install record
-  // already binds one (GY-1550). Orphaned deployment variables are judged after observe below.
-  // An observation-only installation keeps the App `app bind` bound (GY-1877) and binds none itself.
-  const kept = observeOnly && record?.github ? keptRegistration(session) : null;
-  // A registration imported again since the bind (a rotated key, a new webhook secret) is not what
-  // the server and the App's webhook hold until `graphyard app bind` writes it to both.
-  if (observeOnly && record?.github && kept && !bindingCurrent(record.github, kept.app, null)) preflight.push({ name: 'GitHub App', ok: false, detail: `the imported registration of GitHub App ${record.github.slug} (app ${record.github.appId}) was imported again since graphyard app bind bound it, so its key and webhook secret are not the ones the server and the App webhook hold`, fix: `graphyard app bind ${record.github.slug}, then rerun` });
-  else if (observeOnly && record?.github) preflight.push(kept
-    ? { name: 'GitHub App', ok: true, detail: `--observe-only keeps GitHub App ${record.github.slug} (app ${record.github.appId}) that graphyard app bind bound, and binds no App itself` }
-    : { name: 'GitHub App', ok: false, detail: `this installation binds GitHub App ${record.github.slug} (app ${record.github.appId}), and no registration of it is imported on this host to keep its variables with`, fix: `graphyard app import --repo ${session.inputs.repository} --app-id ${record.github.appId} --key-file PEM, then rerun` });
-  else if (noApp && record?.github) preflight.push({ name: 'GitHub App', ok: false, detail: `this installation already binds GitHub App ${record.github.slug} (app ${record.github.appId}); an install binds no App (GY-2009) and does not strip a live one`, fix: `Remove that App's binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment, then rerun` });
-  else if (session.inputs.githubAppFile) preflight.push(session.savedApp.error
-    ? { name: 'GitHub App registration', ok: false, detail: session.savedApp.error, fix: 'Name the JSON the manifest flow saved for this repository with --github-app FILE, or omit --github-app to register the App in the browser' }
-    : { name: 'GitHub App registration', ok: true, detail: `reusing app ${session.savedApp.app!.facts.appId} from ${session.savedApp.app!.file}` });
-  if (!noApp) preflight.push(...await reusePreflight(session, ghStatus.code === 0));
   if (candidateModel) preflight.push(...await session.delivery.adapter.preflight(session.delivery.context));
   // Herdr's graphyard plugin, read before anything is planned around it: one already bound to
   // another server is repointed only with --herdr-rebind (GY-1413).
@@ -1008,26 +719,6 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   const herdrRelink = session.inputs.herdr !== 'skip' && herdrBoundElsewhere(herdr?.binding ?? null, herdrTarget) ? herdr!.binding!.bound : null;
   if (herdrRelink && session.inputs.herdr !== 'rebind') preflight.push({ name: 'Herdr plugin', ok: false, detail: herdrRebindRefusal(herdrRelink, herdrTarget ?? 'this installation'), fix: 'Rerun with --herdr-instance to give this installation its own Herdr instance, --herdr-rebind to repoint the plugin at it, or --no-herdr to leave Herdr untouched' });
   const observation = preflight.every(item => item.ok) ? await adapter.observe(context) : { installed: false, compute: false, database: false, app: false, url: null, variables: {}, detail: ['provider preflight is incomplete; the installation was not inspected'] } as AdapterObservation;
-  // Adapters whose setEnv merges (Railway, local: they expose applyVariables) keep variables
-  // absent from a write. Refuse before changing the deployment when any GITHUB_APP_* is still
-  // there; adapters that rewrite the whole environment clear them with the core-only write.
-  if (noApp && !record?.github) {
-    const heldVariables = APP_VARIABLES.filter(name => presentOn(observation.variables, name));
-    const merges = typeof adapter.applyVariables === 'function';
-    // A merge adapter whose running service exists but whose variable listing could not be read
-    // (Railway swallows an unparsable `variables --json`) may still hold an App: refuse rather
-    // than find out from the server after the deploy.
-    const unread = merges && observation.app && observation.variablesObserved !== true;
-    if (heldVariables.length && merges) preflight.push({ name: 'GitHub App', ok: false, detail: `the ${context.provider} deployment still holds ${heldVariables.join(', ')}; that adapter keeps variables absent from a write, so an install that binds no App cannot leave them unset`, fix: `Remove ${heldVariables.join(', ')} from the ${context.service} service on ${context.provider}, then rerun` });
-    // Observation-only never reads values, so it cannot know the names either: the server's own
-    // report of a bound App after the deploy (performInstall) is what refuses a leftover one.
-    // A service this installation's own observation-only apply created never held an App; any
-    // other existing one may keep orphaned App variables through the merged write, so refuse.
-    else if (unread && observeOnly && await observeOnlyCreated(session)) preflight.push({ name: 'GitHub App', ok: true, detail: `--observe-only: ${context.service} was created by this installation's own observation-only apply, which never sets ${APP_VARIABLES.join(', ')}; its variables are not read` });
-    else if (unread && observeOnly) preflight.push({ name: 'GitHub App', ok: false, detail: `--observe-only reads no variable of the existing ${context.service} service on ${context.provider}, so whether it still holds ${APP_VARIABLES.join(', ')} is unknown; that adapter keeps variables absent from a write, and the deploy would keep the App's access to the repository`, fix: `Rerun with --server-name NAME naming a service that does not exist yet, or without --observe-only so its variables can be read` });
-    else if (unread) preflight.push({ name: 'GitHub App', ok: false, detail: `the variables of the ${context.service} service on ${context.provider} could not be read, so whether it still holds ${APP_VARIABLES.join(', ')} is unknown; that adapter keeps variables absent from a write, so an install that binds no App cannot promise to leave them unset`, fix: `Make the ${context.provider} variable listing of ${context.service} readable (remove any ${APP_VARIABLES.join(', ')} it holds), then rerun` });
-    else preflight.push({ name: 'GitHub App', ok: true, detail: `no App is registered or reused; ${APP_VARIABLES.join(', ')} stay unset; the merge writer deploy key is the only GitHub access` });
-  }
 
   // The deployed roster is reconciled, not replaced (GY-1879): an existing installation's workers
   // and producers stay in session.principals with their credentials, so observation-only revokes none.
@@ -1061,33 +752,19 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   actions.push({ id: 'provider.deploy', target: 'provider', state: observation.app ? 'update' : 'create', title: 'Deploy the application and wait for it to become healthy' });
   actions.push({ id: 'provider.url', target: 'provider', state: observation.url ? 'satisfied' : 'create', title: context.domain ? `Bind ${context.domain} to the service over HTTPS` : 'Obtain the public HTTPS URL of the service', values: observation.url ? [{ name: 'url', value: observation.url, secret: false }] : [] });
   actions.push({ id: 'verify.health', target: 'graphyard', state: 'update', title: 'Verify GET /healthz returns {"ok":true}' });
+  actions.push(deployKeyAction(session));
 
-  // GY-2009: no GitHub App, no branch protection or rulesets — only the merge writer deploy key.
-  if (observeOnly && record?.github) actions.push({ id: 'github.app', target: 'github', state: 'satisfied', title: `Keep GitHub App ${record.github.slug} (app ${record.github.appId}) bound by graphyard app bind: its variables stay on the server${typeof adapter.applyVariables === 'function' ? '' : ` (${context.provider} rewrites the whole environment, so they are written again unchanged)`}, and no App is registered, reused or bound` });
-  else if (observeOnly) actions.push(held({ id: 'github.app', target: 'github', title: 'Register or reuse the Graphyard GitHub App and install it on the managed repository' }, `no App is bound; ${APP_VARIABLES.join(', ')} stay unset and the server serves without GitHub`));
-  else {
-    if (record?.github) drift.push({ action: 'github.deploy-key', field: 'GitHub App', expected: 'none', observed: `app ${record.github.appId} (${record.github.slug}) bound by an earlier apply` });
-    for (const name of APP_VARIABLES) if (presentOn(observation.variables, name)) drift.push({ action: 'github.deploy-key', field: name, expected: 'unset', observed: 'set on the deployment' });
-    actions.push({ id: 'github.deploy-key', target: 'github', state: 'create', title: 'Register the merge writer deploy key (read-write) under the install directory; no GitHub App and no branch protection or ruleset' });
-  }
   // The release-candidate pipeline's environments (GY-1102): free wiring, then every UAT and
   // production resource the deployment adapter would create, cost-bearing ones marked human.
   if (candidateModel) {
-    const ghReady = preflight.some(item => item.name === 'GitHub CLI' && item.ok);
-    const wiring = wiringActions(session.delivery.context, ghReady ? await observeReleaseWiring(gh, session.inputs.repository) : null);
+    const wiring = wiringActions(session.delivery.context);
     const environments = session.delivery.adapter.plan(session.delivery.context);
     if (observeOnly) actions.push(...wiring.map(action => action.state === 'satisfied' ? action : held(action, action.id === 'release.branches' ? 'missing release refs are not created' : 'missing GitHub environments are not created')),
       ...environments.map(action => action.state === 'satisfied' ? action : held(action, `the ${session.delivery.policy.deploy.adapter} product deployment adapter does not run`)));
     else actions.push(...wiring, ...environments);
   }
 
-  actions.push({ id: 'verify.status', target: 'graphyard', state: 'update', title: `Verify authenticated GET /api/status reports the admin actor, the managed repository, and ${noApp ? 'github false: no bound App' : 'the bound App'}` });
-  // A local install has no webhook to deliver to, so its delivery check is skipped, not failed.
-  actions.push(noApp
-    ? { id: 'verify.webhook', target: 'graphyard', state: 'satisfied', title: 'Skipped: no GitHub App is registered, so there is no webhook and no delivery to verify' }
-    : pollsGitHub(context.provider)
-    ? { id: 'verify.webhook', target: 'graphyard', state: 'satisfied', title: 'Skipped: a local install registers no webhook, so there is no delivery to verify; the control plane polls GitHub' }
-    : { id: 'verify.webhook', target: 'graphyard', state: 'update', title: 'Publish one neutral check run and confirm GitHub delivered it to the server.' });
+  actions.push({ id: 'verify.status', target: 'graphyard', state: 'update', title: 'Verify authenticated GET /api/status reports the admin actor and the managed repository' });
   if (!host && observeOnly) actions.push(
     held({ id: 'local.workers', target: 'local', title: 'Generate worker principals and their credentials' }, 'no worker principal is installed'),
     held({ id: 'local.profiles', target: 'local', title: 'Register master, reviewer, and worker profiles for authenticated agent runtimes on this machine' }, 'no profile, supervisor unit or master loop is installed or started'),
@@ -1115,18 +792,17 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
       observed: `${deployed.id} declares ${deployed.sessionKind ? `sessionKind ${deployed.sessionKind}` : 'no sessionKind'}; human-only requests have no one who can answer them` });
   }
 
-  const browserApps: Exclude<AppRole, 'revert-approver'>[] = [];
   const plan: InstallPlan = {
     version: 1, repository: session.inputs.repository, provider: context.provider, installId: session.installId,
     installDirectory: session.directory, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy,
     domain: context.domain, url: observation.url ?? record?.url ?? null, existing, secretsRedacted: true,
     preflight, principals: session.principals, actions, drift,
-    humanSteps: [CORE_HUMAN_STEPS[0], ...CORE_HUMAN_STEPS.slice(1),
+    humanSteps: [...CORE_HUMAN_STEPS,
       ...(host ? ['After install, sign in once with the printed link and connect each agent account on the dashboard Agents page; nobody logs into the host.'] : []),
       ...(candidateModel ? ['Approve any UAT or production resource the plan marks as costing money before rerunning with --apply --create-environments; without that flag none is created.'] : [])],
     ...(host ? { host: hostPlan(context) } : {}),
     ...(context.provider === 'hetzner' ? { price: quotedPrice(context) } : {}),
-    delivery: deliverySummary(session), browserApps, ...(observeOnly ? { observeOnly: true } : {}),
+    delivery: deliverySummary(session), ...(observeOnly ? { observeOnly: true } : {}),
   };
   const serialized = JSON.stringify(plan);
   session.vault.assertClean(serialized, 'the installation plan');
@@ -1139,11 +815,8 @@ function deliverySummary(session: InstallSession): InstallPlan['delivery'] {
     perCandidate: policy.mode === 'per-pr' ? [] : policy.mergeGate.perCandidate.map(entry => entry.check), adapter: policy.deploy.adapter };
 }
 
-/**
- * The plan's github.protection step on a base an operator ruleset governs (GY-1926): AC-2's add to
- * the one ruleset requiring checks, or the refusal naming each candidate. Classic protection is
- * never planned there.
- */
+
+
 /** This install's own Herdr instance under --herdr-instance (GY-1511), else null: the host's default instance. */
 export function ownHerdrInstance(session: Pick<InstallSession, 'installId' | 'inputs'>) {
   return session.inputs.herdr === 'instance' ? installHerdrInstance(session.installId) : null;
@@ -1199,10 +872,6 @@ function herdrAction(session: InstallSession, herdr: Awaited<ReturnType<typeof o
   return { id: 'local.herdr', target: 'local', state: 'create', title: `Link and enable Herdr's graphyard plugin for this repository (${steps})` };
 }
 
-function describeProtection(protection: any) {
-  const checks = (protection?.required_status_checks?.checks ?? []).map((check: any) => `${check.context}${check.app_id ? ` (app ${check.app_id})` : ''}`);
-  return `strict=${!!protection?.required_status_checks?.strict}; checks ${checks.join(', ') || 'none'}; reviews ${protection?.required_pull_request_reviews?.required_approving_review_count ?? 0}; enforce_admins=${!!protection?.enforce_admins?.enabled}; conversation_resolution=${!!protection?.required_conversation_resolution?.enabled}; force_pushes=${!!protection?.allow_force_pushes?.enabled}; deletions=${!!protection?.allow_deletions?.enabled}`;
-}
 
 // ---------------------------------------------------------------------------
 // Apply
@@ -1210,11 +879,12 @@ function describeProtection(protection: any) {
 
 export interface InstallSummary {
   repository: string; provider: Provider; installId: string; installDirectory: string;
-  url: string; webhookUrl: string; check: string; reviewers: { name: string; appId: number; botUserId: number }[];
+  url: string;
   principals: { id: string; role: string; fingerprint: string; tokenFile: string }[];
-  github: { appId: number; installationId: number; slug: string; ciAppIds: number[] } | null;
-  protection: string; health: boolean; status: { actor: string; role: string; repository: string; githubAppId: number | null };
-  webhook: WebhookProof; profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
+  /** The merge writer's deploy key (GY-2010): its private key file, on the host for a self-contained install; null for --observe-only. */
+  deployKey: string | null;
+  health: boolean; status: { actor: string; role: string; repository: string };
+  profiles: ProfileRegistration; drift: PlanDrift[]; nextSteps: string[];
   /** The self-contained host: its units, runtimes, accounts and Herdr workspace (GY-717). */
   host?: HostFleetResult;
   /** GY-1851 (`--fresh-cursor`): the host's loop restarted on a fresh cursor; the old one's archive, or null when it had none. */
@@ -1284,44 +954,11 @@ export async function applyInstall(session: InstallSession, plan: InstallPlan): 
     refuseUnready(session, plan);
     await prepareInstallDirectory(session.directory, session.root);
     const release = await acquireApplyLock(session.directory, session.deps.now());
-    try { await refuseMovedRoster(session); return await (session.inputs.bindApp ? performBindApp(session, plan) : performInstall(session, plan)); } finally { await release(); }
+    try { await refuseMovedRoster(session); return await performInstall(session, plan); } finally { await release(); }
   } catch (error: any) {
-    if (error instanceof InstallPaused) throw error;
     const message = session.vault.scrub(String(error?.message ?? error));
     throw message === error?.message ? error : new Error(message);
   }
-}
-
-/**
- * The App manifest flow's registration credentials (the App private key and webhook secret)
- * are stored beside the rest of the installation's secrets, under the install directory and
- * outside every Git checkout — the runbook's hard rule, which the default would otherwise
- * break by writing `<repository>/.graphyard/github-app.json`.
- */
-const appCredentialFile = (session: Pick<InstallSession, 'directory'>, reviewer?: string) =>
-  resolve(session.directory, reviewer ? `github-reviewer-${reviewer}.json` : 'github-app.json');
-/** Where an App reused as the revert approver (`--reuse-app` of a revert-approver registration) is saved as this install's own. */
-const REVERT_APPROVER_FILE = 'github-revert-approver.json';
-/** The service an observation-only apply of this installation created (GY-1846), before creating it. */
-const OBSERVE_ONLY_SERVICE_FILE = 'observe-only-service.json';
-/** The deployment this installation's latest apply left observation-only (GY-1877), which `app bind` alone may bind; a full apply removes it. */
-const OBSERVE_ONLY_APPLIED_FILE = 'observe-only-applied.json';
-const sameService = async (session: InstallSession, file: string) => {
-  try {
-    const marker = JSON.parse(await readFile(resolve(session.directory, file), 'utf8'));
-    return marker?.provider === session.context.provider && marker?.service === session.context.service;
-  } catch { return false; }
-};
-const observeOnlyCreated = (session: InstallSession) => sameService(session, OBSERVE_ONLY_SERVICE_FILE);
-const observeOnlyApplied = (session: InstallSession) => sameService(session, OBSERVE_ONLY_APPLIED_FILE);
-/** The imported control-plane registration of the App the record binds, which an observation-only rerun keeps (GY-1877). */
-const keptRegistration = (session: Pick<InstallSession, 'record' | 'registrations'>) =>
-  session.registrations.find(entry => entry.role === 'control-plane' && entry.app.appId === session.record?.github?.appId) ?? null;
-/** The App variables an observation-only rerun writes again unchanged: only a rewrite adapter needs them, a merge adapter keeps them. */
-function keptAppEnv(session: InstallSession): EnvValue[] {
-  const github = session.record?.github, kept = session.inputs.observeOnly && github ? keptRegistration(session) : null;
-  if (!github || !kept || typeof session.adapter.applyVariables === 'function') return [];
-  return githubEnv({ appId: github.appId, slug: github.slug, installationId: github.installationId, privateKey: kept.app.privateKey, webhookSecret: kept.app.webhookSecret }, github.ciAppIds);
 }
 
 /**
@@ -1428,13 +1065,9 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   await materializeInstall(session);
 
   const observation = await adapter.observe(context);
-  // Recorded before the service exists, so a rerun after an interrupted apply knows it as its own.
-  if (session.inputs.observeOnly && !observation.app) await writeFile(resolve(session.directory, OBSERVE_ONLY_SERVICE_FILE), JSON.stringify({ provider: context.provider, service: context.service }), { mode: 0o600 });
-  if (session.inputs.observeOnly) await writeFile(resolve(session.directory, OBSERVE_ONLY_APPLIED_FILE), JSON.stringify({ provider: context.provider, service: context.service }), { mode: 0o600 });
-  else await rm(resolve(session.directory, OBSERVE_ONLY_APPLIED_FILE), { force: true });
   log(`Provisioning ${context.provider} for ${session.inputs.repository}`);
   await adapter.provision(context, observation);
-  await adapter.setEnv(context, [...coreEnv(session), ...keptAppEnv(session)]);
+  await adapter.setEnv(context, coreEnv(session));
   await adapter.deploy(context);
   const url = await adapter.url(context);
   log(`Service URL: ${url}`);
@@ -1442,8 +1075,6 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (!health) throw new Error(`The service at ${url} did not become healthy. Inspect: graphyard install --provider ${context.provider} --repo ${session.inputs.repository} --logs`);
 
   let record = session.record ?? emptyRecord(session, url);
-  // The App an observation-only rerun keeps (GY-1877): preflight refused one it cannot keep.
-  const keptBinding = session.inputs.observeOnly ? session.record?.github ?? null : null;
   const migratedFrom = context.host?.migrate && session.record && (session.record.provider !== context.provider || !session.record.selfContained)
     ? { provider: session.record.provider, at: new Date(deps.now()).toISOString(), principals: session.record.principals.map(principal => ({ id: principal.id, fingerprint: principal.fingerprint })) }
     : record.migratedFrom;
@@ -1452,93 +1083,45 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (migratedFrom) for (const principal of session.principals) {
     if (migratedFrom.principals.some(old => old.fingerprint === fingerprint(session.tokens.get(principal.id)!))) throw new Error(`The host reuses a credential of the old installation (${principal.id}); the old loop would keep its leases`);
   }
-  // The record names this run's App choice before the App step can pause it: a rerun without
-  // --no-github-app waiting at its App page must not keep a prior no-App install's marker, or
-  // `init --scan --apply` would onboard against an App still being bound (GY-1642).
-  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, noGithubApp: !!session.inputs.noGithubApp && !keptBinding, merger: session.delivery.merger ?? record.merger, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, selfContained: !!context.host, migratedFrom, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
-  // The master's local configuration and the profiles come before the App step (GY-1413), so
-  // `master environments` and `master harness` (setup-from-zero steps 8-9) run while a human
-  // confirms the App; the registration after it binds the confirmed App. Without an App
-  // (GY-1550) there is no wait to bridge, so the profiles are registered once, at the end.
-  const noApp = !!session.inputs.noGithubApp;
-  const early = !context.host && !record.github && !noApp ? await registerProfiles(session, url, true) : null;
-
-  // GitHub: the App manifest flow needs the live HTTPS origin, so it runs after the URL exists.
-  // --no-github-app binds nothing: preflight already refused a live App binding and any
-  // merge-style deployment that still holds GITHUB_APP_*; a whole-environment rewrite clears
-  // orphaned App variables with the core-only write above, so they stay unset.
-  let bound: BoundApp | null = null;
-  if (!noApp) try {
-    bound = await bindApp(session, url, record, log);
-  } catch (error) {
-    if (!(error instanceof AppStepPending)) throw error;
-    const pending = await pausedSummary(session, plan, url, health, early, error);
-    vault.assertClean(JSON.stringify(pending), 'the paused installation summary');
-    throw new InstallPaused(vault.scrub(error.message), vault.scrub(pending));
-  }
-  const gh = githubCli(context.transport);
   const observeOnly = !!session.inputs.observeOnly;
-  // GY-2009: register the merge writer deploy key; never read or write branch protection or rulesets.
-  let protectionDetail = observeOnly
-    ? `${OBSERVE_ONLY_HELD}: no GitHub App, branch protection or ruleset is read or written`
-    : 'no GitHub App and no branch protection; the merge writer deploy key is the only GitHub access';
-  let deployKeyFile: string | null = null;
-  if (!observeOnly) {
-    const key = deployKeyFile = await ensureDeployKey(session.directory, session.inputs.repository, gh);
-    protectionDetail = `merge writer deploy key registered at ${key} (read-write); no GitHub App and no branch protection or ruleset`;
-    log(protectionDetail);
-  }
+  const gh = githubCli(context.transport);
+  // The merge writer's deploy key (GY-2010): the only credential Graphyard holds on GitHub. A host
+  // generates its own (installHostFleet); every other full install generates it here.
+  const ensure = deps.ensureDeployKey ?? ((installDir: string, repository: string, cli: GitHubCli) => ensureDeployKey(installDir, repository, cli));
+  const deployKey = observeOnly || context.host ? null : await ensure(session.directory, session.inputs.repository, gh);
+  if (deployKey) log(`Deploy key ${deployKey} is registered read-write on ${session.inputs.repository} for the merge writer`);
 
-  // The release pipeline's free wiring, then the adapter's environments: paid ones only with
-  // --create-environments, every other one left pending with its exact command.
+  // The adapter's environments: paid ones only with --create-environments, every other one left
+  // pending with its exact command, beside the free wiring the operator runs once.
   const release: InstallSummary['release'] = { mode: session.delivery.policy.mode, adapter: session.delivery.policy.deploy.adapter, created: [], pending: [] };
   if (release.mode === 'release-candidate' && !observeOnly) {
-    release.created.push(...await applyWiring(gh, session.delivery.context));
     const provisioned = await session.delivery.adapter.provision(session.delivery.context, { createPaid: !!session.inputs.createEnvironments });
     release.created.push(...provisioned.created);
-    release.pending = provisioned.pending.map(action => ({ id: action.id, ...(action.command ? { command: action.command } : {}), ...(action.human ? { human: action.human } : {}) }));
+    release.pending = [...wiringActions(session.delivery.context), ...provisioned.pending].map(action => ({ id: action.id, ...(action.command ? { command: action.command } : {}), ...(action.human ? { human: action.human } : {}) }));
   }
   const releaseCreated = [...new Set([...(record.release?.created ?? []), ...release.created.filter(id => !id.startsWith('release.branches') && !id.startsWith('release.github'))])];
   record = { ...record, release: { adapter: release.adapter, created: releaseCreated } };
 
   const status = await authenticatedStatus(session, url);
-  // Preflight refused merge-style leftovers and live App bindings; a rewrite adapter cleared
-  // orphaned App variables with the core-only write. Anything still reported here is a bug.
-  if (keptBinding && status.githubAppId !== keptBinding.appId) throw new Error(`The server at ${url} reports ${status.githubAppId === null ? 'no GitHub App' : `GitHub App ${status.githubAppId}`} although this observation-only installation keeps GitHub App ${keptBinding.slug} (app ${keptBinding.appId}) bound by graphyard app bind`);
-  if (noApp && !keptBinding && status.githubAppId !== null) throw new Error(`The server at ${url} reports GitHub App ${status.githubAppId} although install left every GITHUB_APP_* variable unset`);
-  const since = deps.now();
-  let webhook: WebhookProof;
-  if (!bound) webhook = { delivered: false, skipped: true, statusCode: null, event: null, at: null, detail: 'skipped: no GitHub App is registered, so there is no webhook and nothing to deliver' };
-  else if (bound.polling) webhook = { delivered: false, skipped: true, statusCode: null, event: null, at: null, detail: 'skipped: a local install registers no webhook; the control plane polls GitHub' };
-  else if (bound.webhookElsewhere) webhook = { delivered: false, statusCode: null, event: null, at: null, detail: `the reused App's webhook still serves ${bound.webhookElsewhere}; this installation receives no GitHub events until it is moved here with --migrate` };
-  else try {
-    await triggerDelivery(installationClient(bound.facts, deps.fetch), session.inputs.repository, await headSha(gh, session.inputs.repository, session.inputs.baseBranch));
-    webhook = await verifyDelivery(bound.app, since, deps.wait);
-  } catch (error: any) { webhook = { delivered: false, statusCode: null, event: null, at: null, detail: vault.scrub(`Could not publish the verification event: ${error.message}`) }; }
-
-  // GY-2009: a self-contained host installs its fleet whether or not an App is bound; without one it gets no App key.
   const fleet = context.host && 'installFleet' in adapter
     ? await (adapter as ProviderAdapter & { installFleet: typeof installHostFleet }).installFleet(context, {
       url, adminToken: session.tokens.get(principalOfRole(session.principals, 'admin').id)!, coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
-      reviewer: session.inputs.reviewer ?? null, fetch: deps.fetch, log,
-      cloneToken: bound ? vault.add((await installationToken(bound.facts, deps.fetch)).token) : null,
-      deployKeyFile,
-      github: bound ? { appId: bound.facts.appId, installationId: bound.facts.installationId, slug: bound.facts.slug, privateKey: bound.facts.privateKey, ...(bound.facts.botUserId ? { botUserId: bound.facts.botUserId } : {}) } : null,
+      fetch: deps.fetch, log,
+      registerDeployKey: async (publicKey, title) => {
+        const file = resolve(session.directory, 'host-deploy-key.pub');
+        await writeFile(file, publicKey.endsWith('\n') ? publicKey : `${publicKey}\n`, { mode: 0o600 });
+        await registerDeployKey(file, session.inputs.repository, gh, title);
+      },
     })
     : null;
   const freshCursor = fleet && session.inputs.freshCursor ? await resetHostCursor(await hostRemote(context), context.host!.layout.checkout, fleet) : null;
-  const profiles = fleet ? fleet.profiles : observeOnly ? observedProfiles() : await registerProfiles(session, url, noApp);
-  const githubRecord = bound ? { appId: bound.facts.appId, installationId: bound.facts.installationId, slug: bound.facts.slug, ciAppIds: bound.ciApps.map(entry => entry.appId) } : null;
+  const profiles = fleet ? fleet.profiles : observeOnly ? observedProfiles() : await registerProfiles(session, url);
   record = installRecordSchema.parse({
     ...record,
-    github: bound ? { ...githubRecord, webhookFingerprint: fingerprint(bound.facts.webhookSecret) } : keptBinding,
-    // Persist the no-App choice so master setup / derivedVariables never reintroduce App vars
-    // from a leftover github-app.json on this host (GY-1550); bound is null exactly when noApp.
-    noGithubApp: noApp && !keptBinding,
     deployment: { sshHost: context.sshHost, sshUser: context.sshUser, local: !!context.host?.local, port: context.provider === 'compose' ? context.port : null, image: session.inputs.image ?? null },
-    reviewers: session.reviewers,
     profiles: [
       ...(profiles.master.configured ? [{ name: 'master', principal: principalOfRole(session.principals, 'coordinator').id, kind: profiles.master.kind ?? 'unknown', role: 'master' as const }] : []),
       ...profiles.workers.map(worker => ({ name: worker.name, principal: worker.principal, kind: worker.kind, role: 'worker' as const })),
@@ -1550,11 +1133,11 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
 
   const summary: InstallSummary = {
     repository: session.inputs.repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
-    url, webhookUrl: webhookUrlFor(url), check: CHECK_NAME, reviewers: session.reviewers,
+    url,
     principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, fingerprint: fingerprint(session.tokens.get(principal.id)!), tokenFile: context.host ? hostTokenFile(context.host.layout, principal.id) : tokenFile(session.directory, principal.id) })),
-    github: githubRecord ?? (keptBinding ? { appId: keptBinding.appId, installationId: keptBinding.installationId, slug: keptBinding.slug, ciAppIds: keptBinding.ciAppIds } : null),
-    protection: protectionDetail, health, status, webhook, profiles, drift: plan.drift,
-    nextSteps: observeOnly ? observeOnlySteps(session, url, plan) : [...nextSteps(session, url, false, webhook, profiles), ...release.pending.map(action => `${action.human ?? 'Pending'} Command: ${action.command}`)],
+    deployKey: deployKey ?? fleet?.deployKey ?? null,
+    health, status, profiles, drift: plan.drift,
+    nextSteps: observeOnly ? observeOnlySteps(session, url, plan) : [...nextSteps(session, url, profiles), ...release.pending.map(action => `${action.human ?? 'Pending'} Command: ${action.command}`)],
     release,
     ...(observeOnly ? { held: plan.actions.filter(action => action.state === 'held').map(action => ({ id: action.id, title: action.title, held: action.held! })) } : {}),
     ...(fleet ? { host: fleet } : {}), ...(freshCursor ? { freshCursor } : {}),
@@ -1565,350 +1148,6 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   return vault.scrub(summary);
 }
 
-/** The App an apply bound (never with --no-github-app): its facts, the CI Apps beside it, and how its webhook stands. */
-interface BoundApp {
-  facts: Awaited<ReturnType<typeof resolveApp>>; ciApps: { appId: number; slug: string }[]; app: ReturnType<typeof appClient>;
-  /** No webhook: a local install, or an origin GitHub cannot reach. */
-  polling: boolean;
-  /** The live installation the reused App's webhook keeps serving, when it is not moved here. */
-  webhookElsewhere: string | null;
-}
-
-/**
- * The App step of an apply: resolve (or register) the control-plane App and any reviewer App,
- * write the App variables beside the core ones, redeploy, and point the App's webhook here.
- * Throws AppStepPending when nobody confirms the App in time; the caller turns that into the
- * paused summary.
- */
-async function bindApp(session: InstallSession, url: string, record: InstallRecord, log: (line: string) => void): Promise<BoundApp> {
-  const { adapter, context, deps, vault } = session;
-  const facts = await resolveApp(session, url, record);
-  vault.add(facts.privateKey); vault.add(facts.webhookSecret);
-  if (session.inputs.reviewer && !session.reviewers.some(reviewer => reviewer.name === session.inputs.reviewer)) {
-    const reusedReviewer = reusedFor(session, 'reviewer');
-    const reviewerFacts = reusedReviewer ? await adoptApp(session, reusedReviewer, 'reviewer', url)
-      : await deps.githubApp!({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session, session.inputs.reviewer), reviewer: session.inputs.reviewer, reuse: pageReuse(session, 'reviewer', url) });
-    if (!reviewerFacts.botUserId) throw new Error('GitHub did not return the reviewer bot identity; rerun the reviewer registration');
-    if (reviewerFacts.appId === facts.appId) throw new Error('A reviewer App must be a different identity from the Graphyard control-plane App');
-    session.reviewers = [...session.reviewers, { name: session.inputs.reviewer, appId: reviewerFacts.appId, botUserId: reviewerFacts.botUserId }];
-    log(`Registered reviewer App ${session.inputs.reviewer} (app ${reviewerFacts.appId})`);
-  }
-  // A revert approver reused by --reuse-app (GY-1451) replaces the reviewer App in that seat; it is never the control plane's.
-  const reusedApprover = reusedFor(session, 'revert-approver');
-  if (reusedApprover && (await adoptApp(session, reusedApprover, 'revert-approver', url)).appId === facts.appId) throw new Error('The revert approver App must be a different identity from the Graphyard control-plane App');
-
-  const gh = githubCli(context.transport);
-  const ciApps = await detectCiAppIds(gh, session.inputs.repository, session.inputs.baseBranch, facts.appId);
-  log(`CI App identities on ${session.inputs.baseBranch}: ${ciApps.map(app => `${app.slug} (${app.appId})`).join(', ') || 'none observed yet'}`);
-  const revertApprover = await revertApproverEnv(session);
-  for (const value of revertApprover) if (value.secret) vault.add(value.value);
-  await adapter.setEnv(context, [...coreEnv(session), ...githubEnv(facts, ciApps.map(app => app.appId)), ...revertApprover]);
-  await adapter.deploy(context);
-  if (!await waitForHealth(session, url)) throw new Error('The service did not return to health after the GitHub credentials were written');
-
-  const app = appClient(facts, deps.fetch);
-  // An App registered for an origin GitHub cannot reach (loopback, private) has no hook, whatever
-  // the provider: PATCHing its /app/hook/config 404s, so it is configured and proved like a local
-  // install's, which is to say not at all (GY-1476).
-  const webhookConfig = pollsGitHub(context.provider) ? null : await readWebhookConfig(app);
-  const polling = pollsGitHub(context.provider) || (!publiclyReachable(url) && !webhookConfig?.url);
-  // A GitHub App has one webhook. A reused App whose webhook still reaches a live installation keeps
-  // it unless this install is the cutover (--migrate), so a trial host never takes an existing
-  // installation's events away from it.
-  const webhookElsewhere = facts.reused && !context.host?.migrate && webhookConfig?.url && webhookConfig.url !== webhookUrlFor(url) && await answersHealth(session, String(webhookConfig.url)) ? String(webhookConfig.url) : null;
-  if (webhookElsewhere) log(`The App webhook stays with ${webhookElsewhere}, an installation that still answers; rerun with --migrate to move it here`);
-  else if (polling) log('A local install registers no App webhook; the control plane polls GitHub');
-  else {
-    if (webhookConfig?.url !== webhookUrlFor(url)) log(`Repointing the App webhook to ${webhookUrlFor(url)}`);
-    await configureWebhook(app, url, facts.webhookSecret);
-  }
-  return { facts, ciApps, app, polling, webhookElsewhere };
-}
-
-// ---------------------------------------------------------------------------
-// graphyard app bind SLUG (GY-1877)
-// ---------------------------------------------------------------------------
-
-/** The imported registration `app bind SLUG` names, judged by slug alone; its role is checked in the preflight. */
-const bindAppRegistration = (session: Pick<InstallSession, 'inputs' | 'registrations'>) =>
-  session.registrations.find(entry => entry.app.slug.toLowerCase() === session.inputs.bindApp!.toLowerCase()) ?? null;
-
-/**
- * The plan of `graphyard app bind SLUG`: the App-only bind of an observation-only installation
- * (GY-1877). It runs the full install's App step and nothing more — the five App variables, a
- * deployment-preserving redeploy on merge adapters (GY-1908; never a source upload), its health,
- * the App webhook repointed here — against the control plane an earlier observation-only apply
- * recorded, for an App `graphyard app import` saved on this host. Everything else a full install
- * performs stays held by observation-only, and the plan says so.
- */
-async function buildBindAppPlan(session: InstallSession): Promise<InstallPlan> {
-  const { adapter, context, record } = session;
-  const slug = session.inputs.bindApp!;
-  const repository = session.inputs.repository;
-  const preflight = await adapter.preflight(context);
-  const gh = githubCli(context.transport);
-  const ghStatus = await gh(['auth', 'status'], { allowFailure: true });
-  preflight.push(githubCliPreflight(context.provider, ghStatus, repository));
-  const url = record?.url ?? null;
-  // Only an installation an observation-only apply deployed, whose recorded roster holds no worker
-  // or producer: a rewrite adapter's environment is written from this session's principals, so a
-  // full or --no-github-app install's workers would be revoked while reported held.
-  const provenance = await observeOnlyApplied(session);
-  const roster = (record?.principals ?? []).filter(principal => principal.role === 'worker' || principal.role === 'producer');
-  const installFix = `graphyard install --provider ${context.provider} --repo ${repository} --observe-only --apply, then rerun graphyard app bind ${slug}`;
-  if (!url) preflight.push({ name: 'Installation', ok: false, detail: `no observation-only installation of ${repository} is recorded under ${session.directory}; app bind binds an App to a control plane that is already deployed`, fix: installFix });
-  else if (!provenance) preflight.push({ name: 'Installation', ok: false, detail: `the installation recorded under ${session.directory} (${context.service} on ${context.provider}) was not applied with --observe-only; app bind binds an App to an observation-only installation only`, fix: `Bind an App to a full installation with graphyard install --provider ${context.provider} --repo ${repository} --reuse-app ${slug} --apply` });
-  else if (roster.length) preflight.push({ name: 'Installation', ok: false, detail: `this installation authenticates ${roster.map(principal => principal.id).join(', ')}, which an observation-only bind would revoke`, fix: `Bind the App with a full install: graphyard install --provider ${context.provider} --repo ${repository} --reuse-app ${slug} --apply` });
-  else preflight.push({ name: 'Installation', ok: true, detail: `${context.service} on ${context.provider} serves ${url}, recorded by an earlier observation-only apply` });
-  const saved = bindAppRegistration(session);
-  const bound = record?.github ?? null;
-  const name = `Bind App ${slug}`;
-  const importFix = `graphyard app import --repo ${repository} --app-id ID --key-file PEM (the App's id and a private key from its settings page), then rerun`;
-  if (!saved) preflight.push({ name, ok: false, detail: `no registration for App ${slug} is imported on this host${session.registrations.length ? ` (saved: ${session.registrations.map(entry => entry.app.slug).join(', ')})` : ''}; only an App whose private key this host holds can sign as that App`, fix: importFix });
-  else if (saved.role !== 'control-plane') preflight.push({ name, ok: false, detail: `${saved.app.slug} is saved as a ${saved.role} App, and app bind binds the control-plane App`, fix: importFix });
-  else if (bound && bound.appId !== saved.app.appId) preflight.push({ name, ok: false, detail: `this installation already binds GitHub App ${bound.slug} (app ${bound.appId}); app bind does not replace a bound App`, fix: `Rerun graphyard app bind ${bound.slug}, or remove that binding and every ${APP_VARIABLES.join(', ')} variable from the ${context.provider} deployment first` });
-  else if (ghStatus.code !== 0) preflight.push({ name, ok: false, detail: 'reading the repository and adding it to the App\'s installation needs the GitHub CLI', fix: 'Authenticate gh (see the GitHub CLI check), then rerun' });
-  let installationId: number | null = null, deselected = false;
-  if (saved && saved.role === 'control-plane' && !(bound && bound.appId !== saved.app.appId) && ghStatus.code === 0 && url) try {
-    const reuse = await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), false);
-    installationId = reuse.app.installationId;
-    deselected = !!bound && !await reachesRepository(session, saved.app, installationId);
-    preflight.push({ name, ok: true, detail: `the imported control-plane App ${saved.app.slug} (app ${saved.app.appId}) holds the permissions it needs and is installed on ${reuse.account}${reuse.selection === 'all' ? ' for every repository' : bound && !deselected ? '' : `; --apply adds ${repository} to that installation${deselected ? `, which no longer reaches it` : ''}`}` });
-  } catch (error) { preflight.push({ name, ok: false, detail: error instanceof Error ? error.message : String(error), fix: importFix }); }
-
-  // An App the record binds with the registration it holds now. `graphyard app import` writes a fresh
-  // webhook secret on every import, so a re-import (a rotated private key) no longer matches the
-  // recorded fingerprint, and a reinstalled App no longer matches the recorded installation: either
-  // binds again, writing the variables, deploying and setting the webhook secret.
-  const alreadyBound = !!saved && !!bound && bound.appId === saved.app.appId && bindingCurrent(bound, saved.app, installationId);
-  const rebinding = !!saved && !!bound && bound.appId === saved.app.appId && !alreadyBound;
-  if (rebinding) preflight.push({ name: `Rebind App ${slug}`, ok: true, detail: `the imported registration of ${saved!.app.slug} differs from the one bound ${bound!.webhookFingerprint !== fingerprint(saved!.app.webhookSecret) ? '(it was imported again, so its private key and webhook secret are new)' : `(its installation is now ${installationId}, not ${bound!.installationId})`}; --apply writes the App variables, deploys and sets the webhook secret again` });
-  // CI Apps are detected again on every run: a bind that observed none, or a publisher added or
-  // replaced since, writes the App variables and deploys once the detected set differs.
-  const detected = alreadyBound && ghStatus.code === 0 ? (await detectCiAppIds(gh, repository, session.inputs.baseBranch, saved!.app.appId)).map(app => app.appId) : [];
-  const ciChanged = alreadyBound && detected.length > 0 && (detected.length !== bound!.ciAppIds.length || detected.some(id => !bound!.ciAppIds.includes(id)));
-  const ciPending = alreadyBound && (!bound!.ciAppIds.length || ciChanged);
-  const polling = pollsGitHub(context.provider);
-  const webhookUrl = url ? webhookUrlFor(url) : '<service URL>/api/github/webhook';
-  // Whether the App's one webhook already delivers here is read as the App itself; a bind that is
-  // not recorded yet always writes it, since GitHub does not know the imported App's fresh secret.
-  const hook = saved && alreadyBound && !polling ? await readWebhookConfig(appClient({ appId: saved.app.appId, privateKey: saved.app.privateKey }, session.deps.fetch)) : null;
-  const merges = typeof adapter.applyVariables === 'function';
-  // A rewrite adapter writes the control-plane variables again beside the App's; a bind refuses any it would change.
-  const rewritten = url && !merges ? await rewrittenCoreVariables(session) : [];
-  if (rewritten.length) preflight.push({ name: 'Control-plane variables', ok: false, detail: `${context.provider} rewrites the whole environment, and binding the App would also change ${rewritten.join(', ')} on ${context.service}; app bind writes exactly ${APP_VARIABLES.join(', ')}`, fix: rewriteFix(session) });
-  const actions: PlanAction[] = [
-    { id: 'github.app', target: 'github', state: alreadyBound && !deselected ? 'satisfied' : 'update', title: `Bind the imported GitHub App ${slug}${saved ? ` (app ${saved.app.appId})` : ''} as the control-plane App: add ${repository} to its installation with the host's gh login, verify the App reaches it, and record the binding in ${session.directory}; no browser step` },
-    { id: 'github.env', target: 'provider', state: ciPending || rebinding ? 'update' : alreadyBound ? 'satisfied' : 'create', title: `Write exactly ${APP_VARIABLES.join(', ')} to the server${merges ? '' : `; ${context.provider} rewrites the whole environment, so the control-plane variables are written again unchanged beside them`}`, values: [
-      { name: 'GITHUB_APP_ID', value: saved ? String(saved.app.appId) : '<from the imported registration>', secret: false },
-      { name: 'GITHUB_INSTALLATION_ID', value: bound && alreadyBound ? String(bound.installationId) : '<from the App installation>', secret: false },
-      { name: 'GITHUB_PRIVATE_KEY', value: REDACTED, secret: true },
-      { name: 'GITHUB_WEBHOOK_SECRET', value: REDACTED, secret: true, ...(saved?.app.webhookSecret ? { fingerprint: fingerprint(saved.app.webhookSecret) } : { note: 'held by the imported registration' }) },
-      { name: 'GITHUB_CI_APP_IDS', value: alreadyBound && bound?.ciAppIds.length ? bound.ciAppIds.join(',') : `<the Apps publishing checks on ${session.inputs.baseBranch}>`, secret: false },
-    ] },
-    { id: 'provider.deploy', target: 'provider', state: alreadyBound && !ciPending ? 'satisfied' : 'update', title: merges
-      ? `Redeploy the serving SUCCESS deployment with the App variables (refuse when latest is a newer failed attempt; no source upload or GRAPHYARD_BUILD_SHA stamp) and wait for that redeploy and the bound App to serve${ciPending ? ' (only if CI Apps are now observed)' : ''}`
-      : `Deploy the application with the App variables and wait for it to become healthy${ciPending ? ' (only if CI Apps are now observed)' : ''}` },
-    { id: 'provider.url', target: 'provider', state: url ? 'satisfied' : 'create', title: 'The public HTTPS URL of the service, as recorded', values: url ? [{ name: 'url', value: url, secret: false }] : [] },
-    { id: 'verify.health', target: 'graphyard', state: 'update', title: 'Verify GET /healthz returns {"ok":true}' },
-    polling
-      ? { id: 'github.webhook', target: 'github', state: 'satisfied', title: 'Skipped: a local install registers no App webhook; the control plane polls GitHub' }
-      : { id: 'github.webhook', target: 'github', state: hook?.url === webhookUrl ? 'satisfied' : alreadyBound || rebinding ? 'update' : 'create', title: `Point the App webhook at ${webhookUrl} with the shared secret the server holds` },
-    { id: 'github.ci-app-ids', target: 'github', state: ciChanged ? 'update' : alreadyBound && bound?.ciAppIds.length ? 'satisfied' : 'create', title: `Detect the GitHub App IDs publishing checks on ${session.inputs.baseBranch} and set GITHUB_CI_APP_IDS`, values: alreadyBound && bound?.ciAppIds.length ? [{ name: 'GITHUB_CI_APP_IDS', value: bound.ciAppIds.join(','), secret: false }] : [] },
-    { id: 'verify.status', target: 'graphyard', state: 'update', title: 'Verify authenticated GET /api/status reports the admin actor, the managed repository, and the bound App' },
-    held({ id: 'github.protection', target: 'github', title: `Require Graphyard's status checks and reviews on ${session.inputs.baseBranch} and enable its merge queue or auto-merge` }, `${session.inputs.baseBranch}'s branch protection, auto-merge and merge-queue settings are never written`),
-  ];
-  // The release pipeline's refs, environments and product deployment, held exactly as the observation-only plan holds them.
-  if (session.delivery.policy.mode === 'release-candidate') actions.push(
-    ...wiringActions(session.delivery.context, null).map(action => held(action, action.id === 'release.branches' ? 'missing release refs are not created' : 'missing GitHub environments are not created')),
-    ...session.delivery.adapter.plan(session.delivery.context).map(action => held(action, `the ${session.delivery.policy.deploy.adapter} product deployment adapter does not run`)));
-  actions.push(
-    held({ id: 'verify.webhook', target: 'graphyard', title: 'Publish one neutral check run and confirm GitHub delivered it to the server.' }, 'no check run is published; the webhook is repointed, not proven by a delivery'),
-    held({ id: 'local.workers', target: 'local', title: 'Generate worker principals and their credentials' }, 'no worker principal is installed'),
-    held({ id: 'local.profiles', target: 'local', title: 'Register master, reviewer, and worker profiles for authenticated agent runtimes on this machine' }, 'no profile, supervisor unit or master loop is installed or started'),
-    held({ id: 'local.herdr', target: 'local', title: "Link and enable Herdr's graphyard plugin for this repository" }, 'Herdr is left untouched'));
-  const plan: InstallPlan = {
-    version: 1, repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
-    baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, domain: context.domain, url, existing: !!record, secretsRedacted: true,
-    preflight, principals: session.principals, actions, drift: [], humanSteps: [CORE_HUMAN_STEPS[1]],
-    delivery: deliverySummary(session), browserApps: [], observeOnly: true,
-  };
-  session.vault.assertClean(JSON.stringify(plan), 'the installation plan');
-  return session.vault.scrub(plan);
-}
-
-/**
- * Whether the recorded binding still holds the imported registration: the same webhook secret (every
- * `graphyard app import` writes a new one, so a re-imported, rotated key never matches) and, when the
- * App's installation was read, the same installation.
- */
-/**
- * Whether the App's installation still reaches the repository, read as the App itself: a repository
- * removed from a selected-repositories installation since the bind is no longer reached, though the
- * account's installation, and so the binding, still stands.
- */
-const reachesRepository = async (session: InstallSession, app: Pick<AppFacts, 'appId' | 'privateKey'>, installationId: number) =>
-  await repositoryInstallation(app, session.inputs.repository, session.deps.fetch) === installationId;
-
-/**
- * What a rewrite adapter's bind would change besides the App variables (GY-1877): `setEnv` writes
- * the whole environment, so the control-plane variables this session derives — the repository
- * policy and generated-files manifest re-read from the checkout, the principals — are compared,
- * as markers, with the deployed file. Every variable that differs, is missing, or is deployed but
- * no longer derived is named; a merge adapter writes only the App variables and changes nothing else.
- */
-async function rewrittenCoreVariables(session: InstallSession): Promise<string[]> {
-  const { adapter, context } = session;
-  if (typeof adapter.applyVariables === 'function') return [];
-  const observation = await adapter.observe(context);
-  if (observation.variablesObserved !== true) return ['the deployed environment (it could not be read)'];
-  const deployed = observation.variables, core = coreEnv(session);
-  const changed = core.filter(value => deployed[value.name] !== variableMarker(value.name, value.value)).map(value => value.name);
-  // A Compose bundle mounts a key and names its file (GITHUB_PRIVATE_KEY_FILE) in the variable's place.
-  const written = [...core.map(value => value.name), ...APP_VARIABLES];
-  const dropped = Object.keys(deployed).filter(name => !written.some(known => name === known || name === `${known}_FILE`));
-  return [...changed, ...dropped];
-}
-const rewriteFix = (session: InstallSession) => `The deployment's control-plane variables no longer match what this checkout derives; restore the checkout (graphyard.json, the principals) the observation-only install deployed, or redeploy them first with graphyard install --provider ${session.context.provider} --repo ${session.inputs.repository} --observe-only --apply, then rerun graphyard app bind ${session.inputs.bindApp}`;
-
-const bindingCurrent = (bound: { webhookFingerprint: string; installationId: number }, app: { webhookSecret?: string }, installationId: number | null) =>
-  bound.webhookFingerprint === fingerprint(app.webhookSecret ?? '') && (installationId === null || installationId === bound.installationId);
-
-/**
- * The apply of `graphyard app bind SLUG` (GY-1877): bindApp's steps for the imported App, then the
- * binding recorded once the server reports that App. An App the record already binds is written
- * nowhere again — the variables, the deploy and the webhook stand, and the apply reads only —
- * unless its first bind observed no CI App: those are detected again, and written once some appear.
- */
-async function performBindApp(session: InstallSession, plan: InstallPlan): Promise<InstallSummary> {
-  const { adapter, context, deps, vault } = session;
-  const log = (line: string) => deps.log(vault.scrub(line));
-  const slug = session.inputs.bindApp!, repository = session.inputs.repository, base = session.inputs.baseBranch;
-  let record = session.record!;
-  const url = record.url!;
-  const saved = bindAppRegistration(session)!;
-  const sameApp = record.github?.appId === saved.app.appId;
-  // A re-imported registration (a rotated key, a new webhook secret) or a reinstalled App binds again.
-  const installationId = sameApp ? (await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), false)).app.installationId : null;
-  const alreadyBound = sameApp && bindingCurrent(record.github!, saved.app, installationId);
-  if (sameApp && !alreadyBound) log(`The imported registration of GitHub App ${saved.app.slug} (app ${saved.app.appId}) differs from the one bound to ${url}; binding it again`);
-  // A bound App whose installation no longer reaches the repository has it added back and reached with the App's own token; nothing else is written again.
-  if (alreadyBound && !await reachesRepository(session, saved.app, installationId!)) {
-    log(`Installation ${installationId} of GitHub App ${saved.app.slug} no longer reaches ${repository}; adding it back`);
-    await reuseApp(session, slug, 'control-plane', webhookUrlFor(url), true);
-  }
-  let facts: AppFacts & { slug: string }, ciAppIds: number[];
-  const detect = async () => {
-    const ciApps = await detectCiAppIds(githubCli(context.transport), repository, base, facts.appId);
-    log(`CI App identities on ${base}: ${ciApps.map(app => `${app.slug} (${app.appId})`).join(', ') || 'none observed yet'}`);
-    return ciApps.map(app => app.appId);
-  };
-  let write = !alreadyBound;
-  if (alreadyBound) {
-    facts = { appId: saved.app.appId, slug: saved.app.slug, installationId: record.github!.installationId, privateKey: saved.app.privateKey, webhookSecret: saved.app.webhookSecret };
-    // CI Apps are detected on every rerun: a publisher added or replaced since the last bind is written.
-    const detected = await detect();
-    const recorded = record.github!.ciAppIds;
-    write = detected.length > 0 && (detected.length !== recorded.length || detected.some(id => !recorded.includes(id)));
-    ciAppIds = write ? detected : recorded;
-    log(write ? `GitHub App ${saved.app.slug} (app ${facts.appId}) is bound to ${url}; GITHUB_CI_APP_IDS changed to ${ciAppIds.join(',')} and is written now` : `GitHub App ${saved.app.slug} (app ${facts.appId}) is already bound to ${url}; its variables, deploy and webhook stand`);
-  } else {
-    facts = await adoptApp(session, slug, 'control-plane', url);
-    vault.add(facts.privateKey); vault.add(facts.webhookSecret);
-    ciAppIds = await detect();
-  }
-  if (write) {
-    // Exactly the five App variables. A merge adapter keeps every other variable and redeploys the
-    // current deployment (GY-1908): never `railway up` or a GRAPHYARD_BUILD_SHA stamp, which would
-    // replace the served source with the CLI checkout. A rewrite adapter's environment is the whole
-    // file, so the control-plane variables ride along beside them, proven unchanged first.
-    const appEnv = githubEnv(facts, ciAppIds);
-    // Read again just before the write: the deployment may have changed since the plan.
-    const rewritten = await rewrittenCoreVariables(session);
-    if (rewritten.length) throw new Error(`${context.provider} rewrites the whole environment, and binding the App would also change ${rewritten.join(', ')}; nothing was written. ${rewriteFix(session)}`);
-    // Railway redeploy returns after the mutation; preserveServingDeployment makes applyVariables
-    // refuse a non-serving latest and wait for the specific redeploy to become SUCCESS (GY-1908).
-    if (typeof adapter.applyVariables === 'function') {
-      context.preserveServingDeployment = true;
-      await adapter.applyVariables(context, appEnv);
-    } else {
-      await adapter.setEnv(context, [...coreEnv(session), ...appEnv]);
-      await adapter.deploy(context);
-    }
-  }
-  const health = await waitForHealth(session, url);
-  if (!health) throw new Error(`The service at ${url} did not return to health after the GitHub credentials were written. Inspect: graphyard install --provider ${context.provider} --repo ${repository} --logs`);
-  // Poll until the serving instance reports this App: after a variable-only redeploy the previous
-  // healthy instance can still answer /healthz, and a same-id key rotation must not change the
-  // webhook or record the binding until the new credentials serve (GY-1908).
-  const status = await waitForBoundApp(session, url, facts.appId);
-  if (status.githubAppId !== facts.appId) throw new Error(`The server at ${url} reports ${status.githubAppId === null ? 'no GitHub App' : `GitHub App ${status.githubAppId}`} after GitHub App ${facts.slug} (app ${facts.appId}) was written to it, so the binding is not recorded. Inspect: graphyard install --provider ${context.provider} --repo ${repository} --logs, then rerun graphyard app bind ${slug}`);
-  const webhookUrl = webhookUrlFor(url);
-  let webhookDetail: string;
-  if (pollsGitHub(context.provider)) webhookDetail = 'skipped: a local install registers no webhook; the control plane polls GitHub';
-  else {
-    const app = appClient(facts, deps.fetch);
-    const hook = alreadyBound ? await readWebhookConfig(app) : null;
-    if (hook?.url === webhookUrl) webhookDetail = `skipped: the App webhook already delivers to ${webhookUrl}`;
-    else {
-      log(`Repointing the App webhook to ${webhookUrl}`);
-      await configureWebhook(app, url, facts.webhookSecret);
-      webhookDetail = `skipped: the App webhook now delivers to ${webhookUrl}; no check run is published to prove a delivery (${OBSERVE_ONLY_HELD})`;
-    }
-  }
-  const github = { appId: facts.appId, installationId: facts.installationId, slug: facts.slug, ciAppIds };
-  if (write) {
-    record = installRecordSchema.parse({ ...record, github: { ...github, webhookFingerprint: fingerprint(facts.webhookSecret) }, noGithubApp: false, updatedAt: new Date(deps.now()).toISOString() });
-    await writeInstallRecord(session.directory, record, vault);
-  }
-  const heldActions = plan.actions.filter(action => action.state === 'held');
-  const summary: InstallSummary = {
-    repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
-    url, webhookUrl, check: CHECK_NAME, reviewers: session.reviewers,
-    principals: session.principals.map(principal => ({ id: principal.id, role: principal.role, fingerprint: fingerprint(session.tokens.get(principal.id)!), tokenFile: tokenFile(session.directory, principal.id) })),
-    github, protection: `${OBSERVE_ONLY_HELD}: ${base}'s branch protection, auto-merge and merge-queue settings were not read or written`,
-    health, status, webhook: { delivered: false, skipped: true, statusCode: null, event: null, at: null, detail: webhookDetail },
-    profiles: observedProfiles(), drift: plan.drift,
-    nextSteps: [
-      `Open ${url} and sign in with the credential in ${tokenFile(session.directory, principalOfRole(session.principals, 'admin').id)}.`,
-      `Observation-only: GitHub App ${facts.slug} (app ${facts.appId}) is bound to the control plane, and nothing ${repository} or its product owns was changed. Held for a later full install: ${heldActions.map(action => action.id).join(', ')}.`,
-      `Rerun "${fullPlanCommand(session)}" (this install's inputs without --observe-only) to see what the full install would change before applying it; it reuses the bound App with no browser step.`,
-    ],
-    release: { mode: session.delivery.policy.mode, adapter: session.delivery.policy.deploy.adapter, created: [], pending: [] },
-    held: heldActions.map(action => ({ id: action.id, title: action.title, held: action.held! })),
-  };
-  vault.assertClean(JSON.stringify(summary), 'the installation summary');
-  return vault.scrub(summary);
-}
-
-/**
- * What `install --apply` completed when its App step timed out (GY-1413): the control plane is up
- * and healthy and stays running, the local profiles exist, and nothing GitHub-bound was written.
- */
-export interface PausedInstall {
-  complete: false; repository: string; provider: Provider; installId: string; installDirectory: string;
-  url: string; health: boolean;
-  completed: string[];
-  github: { app: 'pending'; step: string; credentials: string };
-  credentials: { principals: string; githubApp: string };
-  stack: { running: true; detail: string; stop: string | null };
-  profiles: ProfileRegistration | null;
-  resume: string; nextSteps: string[];
-}
-
-/**
- * How long the App page is served (GY-1457): `graphyard up` sets GRAPHYARD_APP_WAIT_MS to its own
- * wait plus a minute, so the page outlives the browser drive's Confirm-access wait; otherwise 900 s.
- */
-export function appStepWait(env: NodeJS.ProcessEnv) {
-  const ms = Number(env.GRAPHYARD_APP_WAIT_MS);
-  return Number.isSafeInteger(ms) && ms > 0 ? { timeoutMs: ms } : {};
-}
-
-/** The App step paused the install; `summary` is what it completed, printed as JSON before the exit. */
-export class InstallPaused extends Error {
-  constructor(message: string, readonly summary: PausedInstall) { super(message); }
-}
 
 /** A shell word: plain when it needs no quoting, otherwise single-quoted. */
 const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
@@ -1929,7 +1168,7 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     selfContained: [],
     repository: value('repo', inputs.repository),
     baseBranch: inputs.baseBranch !== 'main' ? value('base-branch', inputs.baseBranch) : [],
-    domain: value('domain', inputs.domain), workers: value('workers', inputs.workers), port: value('port', inputs.port), reviewer: value('reviewer', inputs.reviewer),
+    domain: value('domain', inputs.domain), workers: value('workers', inputs.workers), port: value('port', inputs.port),
     producerProofs: values('producer-proof', inputs.producerProofs),
     reviewPolicy: value('review-policy', inputs.reviewPolicy), reviewCount: value('review-count', inputs.reviewCount),
     requiredChecks: values('required-check', inputs.requiredChecks),
@@ -1941,34 +1180,9 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
     createEnvironments: flag('create-environments', inputs.createEnvironments),
     herdr: inputs.herdr === 'rebind' ? ['--herdr-rebind'] : inputs.herdr === 'skip' ? ['--no-herdr'] : inputs.herdr === 'instance' ? ['--herdr-instance'] : [],
   };
-  return ['graphyard', 'install', ...Object.values(flags).flatMap(value => value ?? []), ...flag('observe-only', inputs.observeOnly), ...flag('fresh-cursor', inputs.freshCursor), '--apply'].join(' ');
+  return ['graphyard', 'install', ...Object.values(flags).flat(), ...flag('observe-only', inputs.observeOnly), ...flag('fresh-cursor', inputs.freshCursor), '--apply'].join(' ');
 }
 
-async function pausedSummary(session: InstallSession, plan: InstallPlan, url: string, health: boolean, profiles: ProfileRegistration | null, pending: AppStepPending): Promise<PausedInstall> {
-  const { context } = session;
-  const before = plan.actions.slice(0, Math.max(0, plan.actions.findIndex(action => action.id === 'github.app'))).map(action => action.id);
-  const controlPlaneApp = !pending.reviewer;
-  const savedFile = controlPlaneApp ? pending.file : appCredentialFile(session);
-  const resume = resumeCommand(session);
-  const stop = context.provider === 'compose' ? `docker compose --project-directory ${context.workdir} down`
-    : context.local ? (context.local.supervisor.systemd ? `systemctl --user stop ${context.local.unit}` : `kill $(cat ${context.local.paths.pid})`) : null;
-  return {
-    complete: false, repository: session.inputs.repository, provider: context.provider, installId: session.installId, installDirectory: session.directory,
-    url, health,
-    completed: [...before, ...(profiles?.master.configured ? ['local.profiles'] : []), ...(profiles?.repository.connected ? ['local.herdr'] : []), ...(controlPlaneApp ? [] : ['github.app'])],
-    github: { app: 'pending', step: controlPlaneApp ? 'github.app' : 'github.reviewer', credentials: pending.saved ? `GitHub returned the ${controlPlaneApp ? 'App' : `reviewer App "${pending.reviewer}"`} registration to ${pending.file}; it is not installed on ${session.inputs.repository} yet` : `none saved: nobody confirmed the ${controlPlaneApp ? 'App' : `reviewer App "${pending.reviewer}"`}, so ${pending.file} was never written` },
-    // A self-contained target's tokens were written on the host by its setEnv; this machine keeps fingerprints only.
-    credentials: { principals: context.host ? `saved on the host under ${context.host.layout.tokensDirectory} (mode 0600); this machine keeps fingerprints only in ${session.directory}` : `saved under ${session.directory} (mode 0600)`, githubApp: controlPlaneApp ? (pending.saved ? `registration saved in ${savedFile}, installation pending` : 'not saved') : `saved in ${savedFile}` },
-    stack: { running: true, detail: `the control plane keeps running at ${url}${stop ? ` (Compose project ${context.workdir})` : context.host ? ' on the host' : ''}`, stop },
-    profiles,
-    resume,
-    nextSteps: [
-      `A human confirms the ${controlPlaneApp ? 'Graphyard GitHub App' : `reviewer App "${pending.reviewer}"`} (docs/setup-from-zero.md step ${controlPlaneApp ? 4 : 5}), then run: ${resume}. It is idempotent and keeps everything above.`,
-      ...(profiles?.master.configured ? ['graphyard master environments and graphyard master harness already work in this checkout (steps 8-9).'] : []),
-      ...(stop ? [`To stop the control plane instead: ${stop}`] : []),
-    ],
-  };
-}
 
 /**
  * `graphyard principal add|remove` (GY-1879): deploy `roster`, the installation's recorded roster
@@ -2042,10 +1256,12 @@ export async function applyRosterChange(session: InstallSession, record: Install
 const servedAs = (listed: { role?: string; sessionKind?: string | null; grants?: string[] }, entry: RosterPrincipal) => listed.role === entry.role
   && (listed.sessionKind ?? null) === (entry.sessionKind ?? null) && [...(listed.grants ?? [])].sort().join(',') === [...(entry.grants ?? [])].sort().join(',');
 
+/** The GitHub App and revert-approver variables a deployment from before GY-2010 may still carry. */
+const LEGACY_APP_VARIABLE = /^(GITHUB_(APP_ID|INSTALLATION_ID|PRIVATE_KEY(_FILE)?|WEBHOOK_SECRET|CI_APP_IDS)|GRAPHYARD_REVERT_APPROVER_\w+)$/;
 /**
  * The environment a bundle deployment (Compose, a Docker host, a self-contained host) runs now, read
- * from its server.env, with each mounted App key read back from its bundle file, so a roster edit
- * rewrites the bundle with every other value as deployed: the App, its keys and any operator setting.
+ * from its server.env, so a roster edit rewrites the bundle with every other value as deployed (any
+ * operator setting included) and without a pull-request-era App's variables.
  */
 async function deployedBundle(session: InstallSession): Promise<EnvValue[]> {
   const { context } = session;
@@ -2053,16 +1269,13 @@ async function deployedBundle(session: InstallSession): Promise<EnvValue[]> {
     : context.provider === 'hetzner' ? context.ssh(await hetznerAddress(context), context.sshUser) : context.transport;
   const text = await readRemote(transport, `${context.workdir}/server.env`);
   if (text === null) throw new Error(`${context.workdir}/server.env could not be read; the roster is not edited blind. Rerun graphyard install --apply`);
-  const keys: Record<string, string> = { GITHUB_PRIVATE_KEY_FILE: 'GITHUB_PRIVATE_KEY', GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY_FILE: 'GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY' };
   const values: EnvValue[] = [];
   for (const line of text.split('\n')) {
     const index = line.indexOf('=');
     if (index <= 0 || line.startsWith('#')) continue;
     const name = line.slice(0, index).trim(), value = line.slice(index + 1);
-    if (!keys[name]) { values.push({ name, value, secret: name !== SIGNIN_CLAIM_VARIABLE }); continue; }
-    const key = await readRemote(transport, `${context.workdir}/${value.slice(value.lastIndexOf('/') + 1)}`);
-    if (key === null) throw new Error(`The mounted key ${value} behind ${name} could not be read from ${context.workdir}; the roster is not edited blind`);
-    values.push({ name: keys[name], value: session.vault.add(key), secret: true });
+    // A pull-request-era App's variables are dropped, never carried into the rewrite (GY-2010).
+    if (!LEGACY_APP_VARIABLE.test(name)) values.push({ name, value, secret: name !== SIGNIN_CLAIM_VARIABLE });
   }
   return values;
 }
@@ -2072,10 +1285,6 @@ function emptyRecord(session: InstallSession, url: string): InstallRecord {
   return installRecordSchema.parse({ version: 1, installId: session.installId, repository: session.inputs.repository, provider: session.context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, domain: session.context.domain, url, principals: [], github: null, reviewers: [], profiles: [], createdAt: at, updatedAt: at });
 }
 
-async function answersHealth(session: InstallSession, webhook: string) {
-  try { return (await session.deps.fetch(`${new URL(webhook).origin}/healthz`, { signal: AbortSignal.timeout(15_000) })).ok; }
-  catch { return false; }
-}
 
 async function waitForHealth(session: InstallSession, url: string, attempts = 40) {
   for (let attempt = 0; attempt < attempts; attempt++) {
@@ -2093,85 +1302,29 @@ async function authenticatedStatus(session: InstallSession, url: string) {
   const body = await response.json() as any;
   if (body?.actor?.role !== 'admin') throw new Error('The generated admin credential did not authenticate as an admin actor');
   if (String(body?.repository ?? '').toLowerCase() !== session.inputs.repository.toLowerCase()) throw new Error('The server is bound to a different repository than the one being installed');
-  return { actor: String(body.actor.id), role: String(body.actor.role), repository: String(body.repository), githubAppId: body.githubAppId ?? null };
+  return { actor: String(body.actor.id), role: String(body.actor.role), repository: String(body.repository) };
 }
 
-/** Poll authenticated /api/status until it reports `appId`, so a redeploy that has not yet loaded the App is not recorded bound (GY-1908). */
-async function waitForBoundApp(session: InstallSession, url: string, appId: number, attempts = 40) {
-  let last = await authenticatedStatus(session, url);
-  for (let attempt = 0; attempt < attempts && last.githubAppId !== appId; attempt++) {
-    await session.deps.wait(3_000);
-    last = await authenticatedStatus(session, url);
-  }
-  return last;
-}
 
-async function resolveApp(session: InstallSession, url: string, record: InstallRecord): Promise<AppFacts & { slug: string; botUserId?: number; reused?: boolean }> {
-  const { deps } = session;
-  const reused = reusedFor(session, 'control-plane');
-  if (reused) {
-    const facts = await adoptApp(session, reused, 'control-plane', url);
-    if (record.github && record.github.appId !== facts.appId) deps.log(`GitHub App changed from ${record.github.appId} to ${facts.appId}`);
-    return { ...facts, reused: true };
-  }
-  const saved = session.savedApp.app;
-  if (saved) {
-    // A saved registration is used only once GitHub mints an installation token from it, so a
-    // deleted App or an uninstalled repository is found here rather than by the fleet.
-    try {
-      await installationToken(saved.facts, deps.fetch);
-      const own = appCredentialFile(session);
-      // An installation found through the App's JWT is recorded with the registration (GY-1476).
-      if (saved.detected) { await writeFile(own, JSON.stringify({ ...JSON.parse(await readFile(saved.file, 'utf8')), installationId: saved.facts.installationId }, null, 2), { mode: 0o600 }); await chmod(own, 0o600); }
-      else if (saved.file !== own) { await writeFile(own, await readFile(saved.file, 'utf8'), { mode: 0o600 }); await chmod(own, 0o600); }
-      deps.log(`Reusing the GitHub App ${saved.facts.slug} (app ${saved.facts.appId}) from ${saved.file}; no browser step`);
-      if (record.github && record.github.appId !== saved.facts.appId) deps.log(`GitHub App changed from ${record.github.appId} to ${saved.facts.appId}`);
-      return { ...saved.facts, reused: true };
-    } catch (error: any) {
-      if (session.inputs.githubAppFile) throw new Error(`The GitHub App saved in ${saved.file} cannot authenticate to ${session.inputs.repository}: ${error.message}`);
-      deps.log(`The GitHub App saved in ${saved.file} cannot authenticate (${error.message}); registering one in the browser instead`);
-    }
-  }
-  if (!deps.githubApp) throw new Error('No GitHub App flow is available in this environment');
-  const facts = await deps.githubApp({ root: session.root, repository: session.inputs.repository, origin: url, file: appCredentialFile(session), reuse: pageReuse(session, 'control-plane', url) });
-  if (record.github && record.github.appId !== facts.appId) session.deps.log(`GitHub App changed from ${record.github.appId} to ${facts.appId}`);
-  return facts;
-}
 
-/**
- * `--reuse-app` on apply (GY-1442): the repository is added to the App's installation, the App is
- * shown to reach it, and its registration is saved as this install's own, so a rerun reuses it.
- */
-async function adoptApp(session: InstallSession, slug: string, role: AppRole, url: string): Promise<AppFacts & { slug: string; botUserId?: number }> {
-  const reuse = await reuseApp(session, slug, role, role === 'control-plane' ? webhookUrlFor(url) : null, true);
-  const own = role === 'revert-approver' ? resolve(session.directory, REVERT_APPROVER_FILE) : appCredentialFile(session, role === 'reviewer' ? session.inputs.reviewer : undefined);
-  await writeFile(own, JSON.stringify({ ...reuse.app, ...(role === 'reviewer' ? { reviewer: session.inputs.reviewer } : {}) }, null, 2), { mode: 0o600 }); await chmod(own, 0o600);
-  session.deps.log(`Reusing the ${role} App ${reuse.app.slug} (app ${reuse.app.appId}) from ${reuse.file}: ${reuse.added ? `added ${session.inputs.repository} to its installation ${reuse.app.installationId}` : `its installation ${reuse.app.installationId} covers every repository on ${reuse.account}`}; no browser step`);
-  return { appId: reuse.app.appId, slug: reuse.app.slug, installationId: reuse.app.installationId, privateKey: reuse.app.privateKey, webhookSecret: reuse.app.webhookSecret ?? '', ...(reuse.app.botUserId ? { botUserId: reuse.app.botUserId } : {}) };
-}
 
-async function registerProfiles(session: InstallSession, url: string, appPending = false): Promise<ProfileRegistration> {
+async function registerProfiles(session: InstallSession, url: string): Promise<ProfileRegistration> {
   const { context, deps } = session;
   const runtimes = await (deps.detectRuntimes ?? detectRuntimes)(context.transport);
   const herdr = session.inputs.herdr === 'skip' ? { available: false, version: null, reason: '--no-herdr: Herdr was left untouched' } : await (deps.detectHerdr ?? detectHerdr)(context.transport);
   const workerIds = workerPrincipals(session.principals).map(principal => principal.id);
   const workers = workerProfiles(session.installId, workerIds, runtimes, principal => tokenFile(session.directory, principal));
-  const reviewers = reviewerProfiles(runtimes, session.inputs.reviewer ?? null);
   const master = masterRuntime(runtimes);
   const request: ProfileRequest = {
     root: session.root, url, cliPath: deps.cliPath ?? fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url)),
     hostId: deps.hostId ?? hostname(), installDirectory: session.directory,
     coordinatorToken: session.tokens.get(principalOfRole(session.principals, 'coordinator').id)!,
     workerTokens: workerIds.map(principal => ({ principal, token: session.tokens.get(principal)! })),
-    runtimes, herdr, workers, reviewers, masterKind: master?.kind ?? null,
-    herdrRebind: session.inputs.herdr === 'rebind', appPending, herdrInstance: ownHerdrInstance(session),
+    runtimes, herdr, workers, reviewers: [], masterKind: master?.kind ?? null,
+    herdrRebind: session.inputs.herdr === 'rebind', herdrInstance: ownHerdrInstance(session),
     ...(deps.runHerdr ? { runHerdr: deps.runHerdr } : {}),
   };
-  const registration = deps.registerProfiles ? await deps.registerProfiles(request) : await (await import('./profiles.js')).registerLocalProfiles(request);
-  // Without an App (GY-1550) the master is configured the way it is while an App step is pending,
-  // with no App id to bind; its registration says so instead of promising a confirmation.
-  if (session.inputs.noGithubApp && registration.master.configured) return { ...registration, master: { ...registration.master, detail: 'configured without a GitHub App: master environments and master harness work now; the control plane serves without an App' } };
-  return registration;
+  return deps.registerProfiles ? deps.registerProfiles(request) : (await import('./profiles.js')).registerLocalProfiles(request);
 }
 
 /** Observation-only registers no profile and touches no Herdr (GY-1846). */
@@ -2182,7 +1335,7 @@ function observedProfiles(): ProfileRegistration {
 
 /** This install's own command with --observe-only and the flags it implied dropped, as a --plan (GY-1846). */
 export function fullPlanCommand(session: Pick<InstallSession, 'inputs'>) {
-  const { observeOnly: _observeOnly, noGithubApp: _noGithubApp, herdr: _herdr, bindApp: _bindApp, ...inputs } = session.inputs;
+  const { observeOnly: _observeOnly, herdr: _herdr, ...inputs } = session.inputs;
   return resumeCommand({ inputs: inputs as InstallSession['inputs'] }).replace(/ --apply$/, ' --plan');
 }
 
@@ -2195,17 +1348,14 @@ function observeOnlySteps(session: InstallSession, url: string, plan: InstallPla
   ];
 }
 
-function nextSteps(session: InstallSession, url: string, mergeCheckExists: boolean, webhook: WebhookProof, profiles: ProfileRegistration) {
+function nextSteps(session: InstallSession, url: string, profiles: ProfileRegistration) {
   const host = session.context.host;
   const steps = [
     host ? 'Open the signIn link once to sign in to the dashboard as the admin; it works a single time, then use Agents → Connect an account for each runtime.'
       : `Open ${url} and sign in with the credential in ${tokenFile(session.directory, principalOfRole(session.principals, 'admin').id)}.`,
     'Create the first work item: write it like examples/work.json and run "graphyard master create FILE"; the supervised master loop dispatches, reviews and merges it (docs/setup-from-zero.md step 12).',
   ];
-  if (session.inputs.noGithubApp) steps.push('No GitHub App is bound and none is needed: the merge writer\'s trial gates every merge and pushes main with its deploy key, Graphyard\'s only GitHub access; no branch protection, ruleset or Actions workflow is set up (docs/github.md).');
-  else if (!session.reviewers.length && !session.inputs.reviewer) steps.push(`No reviewer App is registered, so no independent review can pass: rerun with --reviewer NAME (docs/setup-from-zero.md step 5).`);
-  if (!mergeCheckExists && !session.inputs.noGithubApp) steps.push(`Rerun "graphyard install --provider ${session.context.provider} --repo ${session.inputs.repository} --apply" after Graphyard publishes "${CHECK_NAME}" on the first pull request, so branch protection can require the App-bound check.`);
-  if (!webhook.delivered && !webhook.skipped) steps.push(`Webhook delivery is unconfirmed: ${webhook.detail}`);
+  steps.push(`The merge writer trial-merges each submitted head and pushes ${session.inputs.baseBranch} with the deploy key alone; no GitHub App, webhook, pull request or branch protection is involved, and reviews run as control-plane reviewer sessions (graphyard master environments --apply writes their profiles).`);
   if (host) steps.push(`Everything runs on the host as the ${host.layout.user} account; nobody logs into it. Accounts start unconnected until connected from the dashboard.`);
   else if (!profiles.workers.length) steps.push('No authenticated agent runtime was found on this machine; sign in to a supported runtime and rerun --apply, or add a worker profile with "graphyard master worker add".');
   if (!session.principals.some(principal => principal.role === 'producer')) steps.push('No proof producer was created. Add one with --producer-proof NAME for each proof that CI may submit; a producer must never be given to an implementation worker.');

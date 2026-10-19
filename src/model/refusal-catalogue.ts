@@ -1,6 +1,5 @@
 import type { NextActionKind } from './action-kinds.js';
-import { ciCheckRefusalPattern, ciCheckRefusalSource } from './ci-refusal.js';
-import { requiredCheckFailurePattern } from './required-check-refusal.js';
+import { mergeWriterPushPattern, mergeWriterTrialPattern } from './ci-refusal.js';
 
 /**
  * The refusals the engine can produce, declared beside the mapping that has to cover them.
@@ -78,21 +77,17 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'review', id: 'profiles-exhausted', match: /^Every configured reviewer profile is exhausted for this candidate/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider' },
   { gate: 'review', id: 'provider-reason', match: /.*/, example: 'Pull request is draft; mark it ready to request code review', kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'], free: true },
-  // test
-  { gate: 'test', id: 'check-not-passed', match: ciCheckRefusalPattern, kinds: ['resync', 'request-rework'],
-    example: 'Required CI check test has not passed on the current candidate' },
-  { gate: 'test', id: 'required-check-failed', match: requiredCheckFailurePattern, kinds: ['request-rework'],
-    example: 'Required check secrets failed on the current candidate' },
+  // test: the control plane's reading of the head, then the merge writer's own trial and push
+  // (GY-2010): the item waits on the writer. No GitHub check, mergeability or protection refuses a gate.
+  { gate: 'test', id: 'unobserved', match: /^GitHub has not been observed at the current candidate$/, example: 'GitHub has not been observed at the current candidate', kinds: ['resync'] },
+  { gate: 'test', id: 'merge-writer-trial', match: mergeWriterTrialPattern, kinds: ['merge'], example: 'merge writer has not trialled aaaaaaaaaaaa on bbbbbbbbbbbb' },
   // merge
+  { gate: 'merge', id: 'merge-writer-push', match: mergeWriterPushPattern, kinds: ['merge'], example: 'merge writer has not pushed aaaaaaaaaaaa' },
   { gate: 'merge', id: 'github-unobserved', match: /^GitHub has not been observed at the current candidate$/, example: 'GitHub has not been observed at the current candidate', kinds: ['resync'] },
-  // The same shape covers GitHub's not-yet-computed mergeability (GY-548), worded apart from a refusal.
-  { gate: 'merge', id: 'not-mergeable', match: /^(Pull request is not mergeable against the current base$|GitHub is computing mergeability against the current base)/, example: 'Pull request is not mergeable against the current base', kinds: ['resync'] },
   { gate: 'merge', id: 'escalation', match: /^Unresolved .+ escalation requires operator resolution: /, kinds: ['escalate'],
     example: 'Unresolved security-concern escalation requires operator resolution: the candidate ships a credential' },
   { gate: 'merge', id: 'lead-hold', match: /^Slice lead .+ ruled .+ under rule .+; delivery is blocked until the authorized recovery: /, kinds: ['escalate'],
     example: 'Slice lead lead-a ruled send-back under rule R-1; delivery is blocked until the authorized recovery: the slice is frozen for the release' },
-  { gate: 'merge', id: 'conversation-protection', match: /^Branch protection still requires conversation resolution, which Graphyard's review gate does not use: /, kinds: ['escalate'],
-    example: "Branch protection still requires conversation resolution, which Graphyard's review gate does not use: GitHub refuses the merge of 0123456789ab while 1 thread stays open (chatgpt-codex-connector on docs/a.md:1). graphyard master protection --apply removes the requirement; the reviewer's approval of the head is the review gate" },
 ];
 
 /** The shape that claims a refusal of this gate, most specific first; null when none does. */

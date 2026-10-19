@@ -3,7 +3,7 @@ import { type Work, type AgentReview, reviewProviderOf, RefusedResponse } from '
 import { scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { askIdentity, routedScopeRequest, widenedPlannedFiles } from '../model/scope-collapse.js';
 import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
-import { baseRefreshConflict, checkRerunHeld, ciAppIdsOf, requiredCheck, requiredCheckRun, requiredChecksOf, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { conflictReworkDue, decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
@@ -273,7 +273,7 @@ export function routineDecision(work: Work, config: ReviewCapConfig, now: number
 }
 /**
  * What the item calls for, before asking whether the loop may attest that its worker is stopped.
- * `baseFailed` names required checks the base head fails too (GY-528); `exhausted`, spent producer requests (GY-496).
+ * `baseFailed` names required checks the base head fails too (GY-528), and no longer decides anything since stored checks return no head (GY-2010); `exhausted`, spent producer requests (GY-496).
  */
 export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?: ReadonlySet<string>, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = [], attestRefusals: readonly RefusedAttestation[] = []): RoutineDecision | null {
   if (work.stage === 'done') {
@@ -310,8 +310,9 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // which waits for one — must not hold this rework.
   const proofs = proofRework(work);
   if (proofs) return { action: 'rework', ...proofs };
-  const ci = failedCheckRework(work, baseFailed);
-  if (ci) return { action: 'rework', ...ci };
+  // No stored CI check result returns a head (GY-2010): checks were GitHub's, and a pull-request-era
+  // failure a document still carries is history. The merge writer's own trial judges the head and
+  // requests its rework round when it fails.
   const spent = exhaustedProofRework(work, exhausted);
   if (spent) return { action: 'rework', ...spent };
   const attestRefused = refusedAttestationRework(work, attestRefusals);
@@ -389,34 +390,6 @@ export function overtakenDecision(work: Work, decision: RoutineDecision, standin
   if (head) throw new Error(`${other}; the control plane holds one attest decision at a time, so this one is requested once it settles: graphyard master decisions ${work.key}`);
   if (standing.state !== 'requested' || !canWithdraw) throw new Error(`${other}, and ${canWithdraw ? 'only a requested decision can be withdrawn' : 'this loop has no way to withdraw it'}: graphyard master decisions ${work.key}`);
   return `The candidate moved to ${sha.slice(0, 12)}; ${other}, so it can never apply and is withdrawn for a request that names the current ${merge ? 'candidate' : 'head'}`;
-}
-/**
- * The rework a required CI check that failed on exactly the current head calls for, or null. The
- * next action for such a head is already `request-rework` (refusal-mapping.ts), but nothing asked
- * for the round: GY-245 sat in Test for four hours after its refreshed head's `test` failed. The latest attempt of each check decides, so a rerun that is still
- * going or passed asks for nothing; the binding names the head and the failed checks. A candidate
- * failed only on what the base broke and its tip fixed is refreshed onto that tip instead (GY-793).
- */
-export function failedCheckRework(work: Work, baseFailed?: ReadonlySet<string>): { reason: string; binding: string } | null {
-  const candidate = work.candidate, observation = work.observation;
-  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return null;
-  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed' || baseBreakHold(work)) return null;
-  // A check the base head fails too is no worker's to fix (GY-528): the loop raises it against the base once.
-  // The policy's checks and the base branch's other required checks alike (GY-430): PR #221's
-  // `secrets` scan failed, GitHub blocked the merge, and nothing asked for the round. A policy
-  // check's run is read through the test gate's trust boundary (GY-731); a protection-only
-  // check's through the app protection binds it to, or any app with the CI apps preferred (GY-1060).
-  const failed = requiredChecksOf(work).filter(required => {
-    if (baseFailed?.has(required.name)) return false;
-    const latest = required.policy ? requiredCheck(work, required.name) : requiredCheckRun(required, observation.checks, ciAppIdsOf(work));
-    // A failure awaiting its one rerun (GY-516) is not yet the worker's: a rework round would push a
-    // new head and lose the queue position, approval and proofs the rerun keeps.
-    // A run GitHub cancelled is no failure of the head (GY-1109): the check is rerun, never reworked.
-    return !!latest && ['failure', 'timed_out', 'action_required', ...(required.policy ? [] : ['startup_failure'])].includes(latest.result) && !checkRerunHeld(work, required.name);
-  }).map(required => required.name).sort();
-  if (!failed.length) return null;
-  return { reason: `${work.key}: required CI check${failed.length === 1 ? '' : 's'} ${failed.join(', ')} failed on candidate ${candidate.sha.slice(0, 12)}. No gate passes a head whose required checks failed, so the item returns to a worker to fix what CI found.`,
-    binding: `${candidate.sha}:ci:${failed.join(',')}` };
 }
 /**
  * GY-496. A producer request the loop stopped attempting: every automatic session it launched for

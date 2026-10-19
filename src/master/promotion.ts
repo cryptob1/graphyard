@@ -58,7 +58,7 @@ export function assertPromotionRoute(config: Pick<MasterConfig, 'supervision'>, 
 
 /** The operator's GitHub login as gh reads it; only the name is read, gh's token stays in gh (GY-1501). */
 export async function ghLogin(): Promise<string | null> {
-  try { return (await runChild('gh', ['api', 'user', '--jq', '.login'], { timeoutMs: 30_000 })).trim() || null; } catch { return null; }
+  try { return (await runChild('gh', ['config', 'get', 'user', '-h', 'github.com'], { timeoutMs: 30_000 })).trim() || null; } catch { return null; }
 }
 
 /** A fetcher that records the promotion as the reason of every identity write the autonomy apply makes. */

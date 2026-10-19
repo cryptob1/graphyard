@@ -10,13 +10,14 @@ import { importExternalRun, type ExternalRunResult } from './runner-report.js';
 import { importedRunVerdict, type FlakyAcceptance, type ImportedBlockingCase } from './e2e/runner.js';
 import { candidateAtHead, candidateTagPrefix, releaseFilingIdentity, type PromotionImports, type ReleaseCandidate } from './release-candidate.js';
 import { externalRunsImportGrant } from './server/principals.js';
+import type { GitRunner } from './merge-writer/local-observation.js';
 
 /**
  * GY-1842 gave the format and the verdict rule (`importExternalRun`, `importedRunVerdict`); this
  * module is the one way a run gets in from outside the process. A producer credential holding the
  * `external-runs:import` grant (GY-1879; the grant authorizes nothing else, and no proof evidence) posts one
  * run; the plane binds it to the release candidate whose head is exactly the run's `sha` — read
- * from the repository's `rc/` tags through the GitHub App, the ledger `release cut` writes, never
+ * from the repository's `rc/` tags in the coordinator checkout (GY-2010: no GitHub read), the ledger `release cut` writes, never
  * from a candidate id the producer names — and refuses a run cut at no candidate. The record keeps
  * every verdict as given (`skipped` stays skipped) and the run's provenance: run and case ids,
  * the original result values, evidence links, the tool version and the catalog commit, which is
@@ -70,24 +71,45 @@ export function importedHold(records: readonly ImportedRunRecord[], acceptances:
   return { held: cases.length > 0, cases, runs: records.length };
 }
 
-/** What the ledger read needs of the GitHub adapter: repository-relative API reads. */
-export interface LedgerReader { request(path: string, method?: string, body?: unknown): Promise<any> }
+/** The release ledger as the coordinator checkout holds it: its `rc/` tag refs, and one annotated tag object's target and message. */
+export interface LedgerReader {
+  tags(prefix: string): Promise<TagRef[]>;
+  tag(objectSha: string): Promise<{ object: string; message: string } | null>;
+}
 interface TagRef { ref: string; object: { sha: string; type: string } }
-const refPage = 100, refPages = 50, cachedTags = refPage * refPages;
-/** Annotated tags never move, so a tag object's record is read from GitHub once per process. */
+const cachedTags = 5000;
+/** Annotated tags never move, so a tag object's record is read once per process. */
 const tagRecords = new Map<string, ReleaseCandidate | null>();
 
+/** The ledger read through `git` in the checkout the plane serves from (GY-2010): the tags the loop's fetch brought in. */
+export function gitLedger(run: GitRunner): LedgerReader {
+  return {
+    async tags(prefix) {
+      const listed = await run(['for-each-ref', '--format=%(refname) %(objectname) %(objecttype)', `refs/tags/${prefix}`]);
+      if (listed.status !== 0) throw new Refusal(`The release candidate tags could not be read from the coordinator checkout: ${listed.stderr || `git exited ${listed.status}`}`, 502);
+      return listed.stdout.split('\n').filter(Boolean).map(line => { const [ref, sha, type] = line.split(' '); return { ref: ref!, object: { sha: sha!, type: type! } }; });
+    },
+    async tag(objectSha) {
+      const read = await run(['cat-file', 'tag', objectSha]);
+      if (read.status !== 0) return null;
+      const split = read.stdout.indexOf('\n\n');
+      const object = /^object ([0-9a-f]+)$/m.exec(split < 0 ? read.stdout : read.stdout.slice(0, split))?.[1];
+      return object ? { object, message: split < 0 ? '' : read.stdout.slice(split + 2) } : null;
+    },
+  };
+}
+
 /** The candidate record one `rc/` tag carries, or null for a tag that is not a readable candidate record. */
-async function candidateRecord(github: LedgerReader, ref: TagRef): Promise<ReleaseCandidate | null> {
+async function candidateRecord(ledger: LedgerReader, ref: TagRef): Promise<ReleaseCandidate | null> {
   const cached = tagRecords.get(ref.object.sha);
   if (cached !== undefined) return cached;
   let record: ReleaseCandidate | null = null;
   if (ref.object.type === 'tag') {
-    const tag = await github.request(`/git/tags/${ref.object.sha}`);
+    const tag = await ledger.tag(ref.object.sha);
     try {
-      const parsed = JSON.parse(String(tag?.message ?? ''));
+      const parsed = JSON.parse(tag?.message ?? '');
       // The record is trusted only where it agrees with the tag: the head it names is the commit the tag marks.
-      if (parsed && typeof parsed.id === 'string' && typeof parsed.sha === 'string' && typeof parsed.cutAt === 'string' && parsed.sha === tag?.object?.sha) record = parsed as ReleaseCandidate;
+      if (parsed && typeof parsed.id === 'string' && typeof parsed.sha === 'string' && typeof parsed.cutAt === 'string' && parsed.sha === tag?.object) record = parsed as ReleaseCandidate;
     } catch { record = null; }
   }
   if (tagRecords.size >= cachedTags) tagRecords.delete(tagRecords.keys().next().value!);
@@ -98,23 +120,15 @@ async function candidateRecord(github: LedgerReader, ref: TagRef): Promise<Relea
 /**
  * The newest release candidate whose head is `sha`, read from the repository's `rc/` tags newest
  * first (candidate ids are compact instants, so the tag name orders them): tags are dereferenced
- * only until the first match, which is the newest; a ledger with none at this head is read whole,
- * once, and kept, the cache holding every tag the listing can return.
+ * only until the first match, which is the newest.
  */
-export async function candidatesAtHead(github: LedgerReader, sha: string): Promise<ReleaseCandidate[]> {
-  const refs: TagRef[] = [];
-  for (let page = 1; page <= refPages; page++) {
-    const batch = await github.request(`/git/matching-refs/tags/${candidateTagPrefix}?per_page=${refPage}&page=${page}`);
-    if (!Array.isArray(batch)) throw new Refusal('GitHub did not return the release candidate tags', 502);
-    refs.push(...batch.filter((entry: TagRef) => typeof entry?.ref === 'string' && entry.ref.startsWith(`refs/tags/${candidateTagPrefix}`) && typeof entry.object?.sha === 'string'));
-    if (batch.length < refPage) break;
-  }
-  const matching: ReleaseCandidate[] = [];
+export async function candidatesAtHead(ledger: LedgerReader, sha: string): Promise<ReleaseCandidate[]> {
+  const refs = (await ledger.tags(candidateTagPrefix)).filter(entry => entry.ref.startsWith(`refs/tags/${candidateTagPrefix}`) && !!entry.object.sha);
   for (const ref of refs.sort((a, b) => b.ref.localeCompare(a.ref))) {
-    const record = await candidateRecord(github, ref);
-    if (record?.sha === sha) { matching.push(record); break; }
+    const record = await candidateRecord(ledger, ref);
+    if (record?.sha === sha) return [record];
   }
-  return matching;
+  return [];
 }
 
 type Db = Pick<pg.PoolClient, 'query'>;
@@ -144,15 +158,15 @@ const committedRun = async (db: Db, run: ExternalRunResult): Promise<ImportedRun
 const sameRun = (existing: ImportedRunRecord, run: ExternalRunResult) =>
   demand(isDeepStrictEqual(existing.run, run), `Run ${run.runId} from ${run.producer} was already imported with a different document; a run id names one run`, 409);
 
-/** What the import needs of the control plane: its store and the GitHub adapter the ledger is read through. */
-export interface ImportPlane { store: Store; github: LedgerReader | null }
+/** What the import needs of the control plane: its store and the release ledger it binds runs through. */
+export interface ImportPlane { store: Store; ledger: LedgerReader }
 
 /**
  * Import one run for `actor`. Refuses any credential but a producer's holding `external-runs:import` (403), a run naming no head
- * (400), a plane with no GitHub adapter to read the ledger through (503), a head no candidate was
+ * (400), a ledger the checkout cannot read (502), a head no candidate was
  * cut at (409), a candidate bound to another producer principal (409) and a sealed candidate (409). The record is written once per producer and run id: the same document again replays
- * it (`replayed`) with the candidate it bound to, read from the record before any GitHub read, so a
- * replay succeeds while GitHub is unreachable; a different one under that id is refused (409). A
+ * it (`replayed`) with the candidate it bound to, read from the record before any ledger read, so a
+ * replay succeeds while the ledger is unreadable; a different one under that id is refused (409). A
  * first import is rechecked under the run's lock, so concurrent first imports write once. The answer
  * carries the record, this run's own verdict and the candidate's hold after the import.
  */
@@ -168,8 +182,7 @@ export async function importRun(plane: ImportPlane, actor: Principal, input: unk
     sameRun(committed, run);
     return { imported: committed, replayed: true, verdict: importedRunVerdict(run), hold: importedHold(records) };
   }
-  demand(plane.github, 'The control plane reads the release ledger through its GitHub App, and none is configured', 503);
-  const candidate = candidateAtHead(await candidatesAtHead(plane.github, run.sha), run.sha);
+  const candidate = candidateAtHead(await candidatesAtHead(plane.ledger, run.sha), run.sha);
   demand(candidate, `No release candidate was cut at ${run.sha}; an import binds only to a candidate's exact head`, 409);
   const record: ImportedRunRecord = { run, candidate: { id: candidate.id, sha: candidate.sha }, importedBy: actor.id, importedAt: now.toISOString() };
   return plane.store.transaction(async db => {

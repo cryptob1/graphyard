@@ -27,7 +27,6 @@ test('unit:install-no-github-gates — default --plan lists the merge writer dep
   const fixture = await harness({ provider: 'compose' });
   try {
     const { request } = installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--workers', '1', '--plan']);
-    assert.equal(request.noGithubApp, true);
     const session = await prepareInstall(fixture.root, request, fixture.deps, 'plan');
     const plan = await buildPlan(session);
     const ids = plan.actions.map(action => action.id);
@@ -37,26 +36,24 @@ test('unit:install-no-github-gates — default --plan lists the merge writer dep
       assert.ok(!ids.includes(absent), `${absent} must not be planned: ${ids.join(', ')}`);
     }
     assert.ok(!plan.humanSteps.some(step => /GitHub App|branch protection|ruleset/i.test(step)), plan.humanSteps.join('\n'));
-    assert.deepEqual(plan.browserApps, []);
   } finally { await fixture.cleanup(); }
 });
 
 test('unit:install-no-github-gates — apply calls no /protection or /rulesets endpoint, registers no App, and registers the deploy key', async () => {
   const fixture = await harness({
     provider: 'compose',
-    statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: 'owner/project', github: false, githubAppId: null, githubInstallationId: null },
+    statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: 'owner/project' },
   });
   try {
     const { request } = installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--workers', '1', '--apply']);
-    const session = await prepareInstall(fixture.root, request, { ...fixture.deps, githubApp: async () => { throw new Error('App flow must not run'); } });
+    const session = await prepareInstall(fixture.root, request, fixture.deps);
     const plan = await buildPlan(session);
     const summary = await applyInstall(session, plan);
     const lines = fixture.allCommandLines();
     assert.ok(!lines.some(line => /\/protection|\/rulesets/.test(line)), `gate API called: ${lines.filter(l => /protection|rulesets/.test(l)).join('\n')}`);
     assert.ok(lines.some(line => /deploy-key list/.test(line)), 'deploy-key list');
     assert.ok(lines.some(line => /deploy-key add/.test(line)) || lines.some(line => /deploy-key list/.test(line)), 'deploy-key registration');
-    assert.equal(summary.github, null);
-    assert.match(summary.protection, /deploy key/i);
+    assert.ok(summary.deployKey, 'the deploy key is recorded');
     assert.ok(!existsSync(join(session.directory, 'github-app.json')));
   } finally { await fixture.cleanup(); }
 });

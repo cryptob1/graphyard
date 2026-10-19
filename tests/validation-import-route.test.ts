@@ -11,6 +11,7 @@ import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { assessPromotion, cut, deployToUat, gitIn, productionBranch, promote, releaseFilingIdentity, validateAndRecord, type ReleaseCandidate, type UatRecord } from '../src/release-candidate.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { releaseLedgerGit } from './helpers/release-ledger-git.js';
 
 // GY-1860: a producer imports an external run through POST /api/validation/import. The plane binds
 // it to the release candidate whose head is exactly the run's sha (read from the `rc/` tags through
@@ -40,18 +41,8 @@ const candidates = [
   { id: '20261017T040000Z', sha: unknownSha }, { id: '20261017T050000Z', sha: pointerSha }, { id: '20261017T060000Z', sha: producerSha },
 ].map(entry => ({ ...entry, cutAt: `${entry.id.slice(0, 4)}-${entry.id.slice(4, 6)}-${entry.id.slice(6, 8)}T${entry.id.slice(9, 11)}:00:00.000Z`, trigger: 'manual', since: null, items: [] })) as Pick<ReleaseCandidate, 'id' | 'sha' | 'cutAt'>[];
 const tagObject = (index: number) => String(index + 1).repeat(40);
-/** The GitHub reads the import makes: the `rc/` tag refs, and each annotated tag carrying its candidate record. `down` fails every read. */
-const github = {
-  config: { repository: 'owner/project' }, down: false, reads: 0,
-  async request(path: string) {
-    github.reads++;
-    if (github.down) throw new Error('GitHub is unreachable');
-    if (path.startsWith('/git/matching-refs/tags/rc/')) return /page=1(?:&|$)/.test(path) ? candidates.map((entry, index) => ({ ref: `refs/tags/rc/${entry.id}`, object: { sha: tagObject(index), type: 'tag' } })) : [];
-    const index = candidates.findIndex((_, i) => path === `/git/tags/${tagObject(i)}`);
-    if (index >= 0) return { object: { sha: candidates[index].sha, type: 'commit' }, message: JSON.stringify(candidates[index]) };
-    throw new Error(`unexpected GitHub read ${path}`);
-  },
-};
+/** The release ledger the import reads from the coordinator checkout: the `rc/` tag refs, and each annotated tag carrying its candidate record. `down` fails every read. */
+const github = releaseLedgerGit(() => candidates, tagObject);
 
 let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
 
@@ -61,8 +52,8 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('validation_import_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_import_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, 'owner/project');
-  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), github as any);
+  const engine = new Engine(store, [15368], 120, 'owner/project'); engine.gitRunner = github.run;
+  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
@@ -149,7 +140,7 @@ test('unit:validation-import-route-binds-by-sha — POST /api/validation/import 
     const offline = await imported(handIn);
     assert.equal(offline.replayed, true);
     assert.deepEqual(offline.imported, first.imported, 'the replay carries the candidate the run bound to');
-    assert.equal(github.reads, reads, 'a replay reads nothing from GitHub');
+    assert.equal(github.reads, reads, 'a replay reads nothing from the ledger');
     assert.equal((await call(`validation/import/${boundSha}`, reader)).body.runs.length, 1, 'an offline replay writes nothing');
     const offlineChanged = await call('validation/import', producer, { ...handIn, cases: handIn.cases.slice(0, 1) });
     assert.equal(offlineChanged.status, 409, 'a different document under a used run id is still refused');

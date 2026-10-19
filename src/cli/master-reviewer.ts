@@ -1,10 +1,13 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { startGithubSetup } from '../github-setup.js';
 import type { MasterConfig } from '../master.js';
 import { bindReviewer, removeReviewerProfile, reviewerCredentialDirectory, saveReviewerProfile, verifyReviewerInstallation } from '../reviewer.js';
 import { readSecretFromStdin } from './context.js';
+
+async function startGithubSetup(..._args: unknown[]): Promise<any> {
+  throw new Error('Reviewer App setup via github-setup is removed; control-plane reviews need no GitHub App (GY-2010)');
+}
 
 /** `graphyard master reviewer …`: the reviewer App's registration and binding, and the reviewer launch profiles. */
 export async function reviewerCommand(root: string, master: MasterConfig, args: string[], print: (value: unknown) => void) {
@@ -15,7 +18,7 @@ export async function reviewerCommand(root: string, master: MasterConfig, args: 
     if (!values['key-stdin']) throw new Error('Use master reviewer bind FILE --key-stdin so the reviewer private key is not stored in shell history');
     const input = await readSecretFromStdin(20_000, 'Reviewer key input is too large');
     const identity = JSON.parse(await readFile(positionals[0], 'utf8'));
-    return print(await bindReviewer(root, { appId: Number(identity.appId), installationId: Number(identity.installationId), slug: String(identity.slug), privateKey: input }, verifyReviewerInstallation));
+    return print(await bindReviewer(root, { appId: Number(identity.appId), installationId: Number(identity.installationId), slug: String(identity.slug), privateKey: input }, verifyReviewerInstallation as any));
   }
   if (args[0] === 'setup') {
     const { values } = parseArgs({ args: args.slice(1), options: { deployment: { type: 'string' }, port: { type: 'string' }, name: { type: 'string' } }, allowPositionals: false });
@@ -25,7 +28,7 @@ export async function reviewerCommand(root: string, master: MasterConfig, args: 
     await mkdir(registrations, { recursive: true, mode: 0o700 });
     const setup = await startGithubSetup(root, master.repository, deployment, Number(values.port ?? 4312), {
       file: resolve(registrations, `${master.repository.replace('/', '-')}-registration.json`),
-      record: async app => { await bindReviewer(root, { appId: app.appId, installationId: app.installationId, slug: app.slug, privateKey: app.privateKey }, verifyReviewerInstallation); },
+      record: async (app: any) => { await bindReviewer(root, { appId: app.appId, installationId: app.installationId, slug: app.slug, privateKey: app.privateKey }, verifyReviewerInstallation as any); },
     }, values.name ?? 'reviewer');
     console.log(`Open ${setup.url} in your browser and register the reviewer App. It is a second App, separate from the Graphyard control-plane App, and it cannot write code. Credentials stay outside this repository with mode 0600. Press Ctrl+C when the page reports the installation is verified.`);
     const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop); return;

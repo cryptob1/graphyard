@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises';
 import { buildPlan, coreEnv, materializeInstall, prepareInstall, applyInstall } from '../src/install/index.js';
 import { chooseRailwayWorkspace, variableMarker } from '../src/install/adapters.js';
 import type { Provider } from '../src/install/types.js';
-import { harness, satisfiedProtection, RAILWAY_WORKSPACES, type Harness } from './install-harness.js';
+import { harness, RAILWAY_WORKSPACES, type Harness } from './install-harness.js';
 
 const supported: Provider[] = ['railway', 'hetzner', 'docker-host', 'compose'];
 const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider, ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }), ...(provider === 'hetzner' ? { sshKey: 'graphyard-key', maxMonthly: 50 } : {}) });
@@ -27,7 +27,7 @@ test('every supported provider produces a complete ordered plan that applies not
       assert.ok(plan.preflight.every(item => item.ok || item.fix), `${provider} preflight must say how to fix a gap`);
 
       const ids = plan.actions.map(action => action.id);
-      for (const required of ['local.credentials', 'provider.env.core', 'provider.deploy', 'provider.url', 'verify.health', 'github.deploy-key', 'verify.status', 'verify.webhook', 'local.profiles', 'local.herdr']) {
+      for (const required of ['local.credentials', 'provider.env.core', 'provider.deploy', 'provider.url', 'verify.health', 'github.deploy-key', 'verify.status', 'local.profiles', 'local.herdr']) {
         assert.ok(ids.includes(required), `${provider} plan is missing ${required}`);
       }
       // GY-2009: no App, App variables, webhook, CI App ids or branch protection on any provider.
@@ -56,7 +56,7 @@ test('re-planning an existing installation reports it as satisfied instead of pr
     try {
       const session = await materializeInstall(await prepareInstall(first.root, inputsFor(provider), first.deps));
       const envFile = renderEnv(provider, coreEnv(session));
-      second = await harness({ provider, installed: true, envFile, protection: satisfiedProtection(null), root: first.root, configHome: first.configHome });
+      second = await harness({ provider, installed: true, envFile, root: first.root, configHome: first.configHome });
       const plan = await buildPlan(await prepareInstall(second.root, inputsFor(provider), second.deps, 'plan'));
 
       const provisioning = plan.actions.filter(action => action.id.startsWith('provider.provision.'));
@@ -147,7 +147,7 @@ test('a database password a provider resolves for itself is compared by presence
     const session = await materializeInstall(await prepareInstall(first.root, inputsFor('railway'), first.deps));
     const resolved = 'postgres://postgres:railway-managed-password-9xz@monorail.proxy.rlwy.net:41234/railway';
     const envFile = renderEnv('railway', coreEnv(session).map(value => value.name === 'DATABASE_URL' ? { ...value, value: resolved } : value));
-    second = await harness({ provider: 'railway', installed: true, envFile, protection: satisfiedProtection(null), root: first.root, configHome: first.configHome });
+    second = await harness({ provider: 'railway', installed: true, envFile, root: first.root, configHome: first.configHome });
     const plan = await buildPlan(await prepareInstall(second.root, inputsFor('railway'), second.deps, 'plan'));
 
     assert.ok(!plan.drift.some(item => item.field === 'DATABASE_URL'), 'a resolved DATABASE_URL was reported as drift');

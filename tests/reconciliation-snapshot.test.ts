@@ -9,6 +9,8 @@ import { server } from '../src/server.js';
 import { buildMasterStatus } from '../src/master.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { mergeIntent } from './helpers/merge-ledger.js';
+import { pushRefusal } from '../src/model/gates.js';
 
 /**
  * GY-94, as GitHub delivers (GY-1235): the record a merge is judged against is the last snapshot
@@ -81,108 +83,18 @@ async function candidate(options: { approved?: boolean } = {}) {
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/reconciliation-${n}`, branch: `graphyard/gy-94-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, id());
   w = await engine.observe(w.id, w.revision, observation(w, approved ? {} : { reviews: [] }));
-  if (approved) { assert.equal(w.stage, 'merge'); assert.ok(w.gates.every(gate => gate.passed), w.gates.flatMap(gate => gate.reasons).join('; ')); }
+  // The merge writer's trial of the head (GY-2010): the test gate passes and the merge gate waits on the push alone.
+  if (approved) {
+    w = await engine.observe(w.id, (await mergeIntent(engine, w)).revision, observation(w));
+    assert.equal(w.stage, 'merge');
+    assert.ok(w.gates.every(gate => gate.passed || gate.name === 'merge' && gate.reasons.join() === pushRefusal(head(w))), w.gates.flatMap(gate => gate.reasons).join('; '));
+  }
   else assert.equal(w.stage, 'review');
   return w;
 }
 // Every ledger row whose document already reports the merge, whole or resolved from its delta.
 const snapshotsReporting = async (workId: string, mergeSha: string) => (await store.pool.query(`SELECT created_at, whole, payload->'work' AS work FROM (SELECT created_at, payload ? 'work' AS whole, ${resolvedPayloadSql()} AS payload FROM events WHERE work_id=$1 ORDER BY seq) e
   WHERE payload->'work'->'observation'->>'mergeSha'=$2`, [workId, mergeSha])).rows as { created_at: Date; whole: boolean; work: Work }[];
-
-test('integration:reconciliation-snapshot-precedes-merge — GY-81 exactly: a whole-second mergedAt and post-merge observations inside the whole-second cutoff window; the merge is judged against the last snapshot that precedes it, never one that already reports it', async () => {
-  // A head whose gates passed: GitHub's merge of it is the delivery, citing the last pre-merge snapshot.
-  const passing = await candidate();
-  const passingRecord = await reload(passing.id);
-  await delay(1100);
-  const landed = await engine.observe(passing.id, passingRecord.revision, await mergedAt(passing, sha(`merge-${passing.key}`)));
-  assert.equal(landed.stage, 'done', landed.violations.join(' | '));
-  assert.equal(landed.delivery!.authorizationRevision, passingRecord.revision, 'the delivery cites the last snapshot that precedes the merge');
-  assert.equal('reconciliation' in landed.delivery!, false);
-
-  // A head merged before its review passed. Approvals observed after the merge, inside the
-  // whole-second cutoff window, must never stand in for the record before it.
-  const work = await candidate({ approved: false });
-  const mergeSha = sha(`merge-${work.key}`);
-  const preMerge = await reload(work.id);
-  assert.equal(preMerge.gates.find(gate => gate.name === 'review')!.passed, false, 'the record before the merge had not passed review');
-  // The merge lands in a later whole second than the last pre-merge record, as GitHub reports it,
-  // early in that second so the post-merge observations below fall inside its whole-second cutoff window.
-  await delay(1100);
-  await waitUntil(Math.ceil(Date.parse(await dbNow()) / 1000) * 1000 + 10);
-  const merged = { ...await mergedAt(work, mergeSha), reviews: [] };
-  const providerMergedTime = Date.parse(merged.mergedAt!);
-  const oldCutoff = providerMergedTime + 1000;
-  let current = await engine.observe(work.id, preMerge.revision, merged);
-  assert.notEqual(current.stage, 'done'); assert.ok(current.violations.includes(unauthorizedMergeViolation)); assert.equal(current.delivery, undefined);
-  // GitHub now reports the approval: the post-merge snapshot passes review.
-  const approvedAfter = { ...merged, reviews: [{ reviewer: 'reviewer', sha: head(work), state: 'APPROVED' }], at: new Date().toISOString() };
-  current = await engine.observe(work.id, current.revision, approvedAfter);
-  assert.equal(current.gates.find(gate => gate.name === 'review')!.passed, true, 'the record written after the merge passes review');
-  // Read again unchanged: a routine observation, stored as a delta row (store/snapshot-delta.ts, GY-979).
-  current = await engine.observe(work.id, current.revision, { ...approvedAfter, at: new Date().toISOString() });
-  // The poisoned snapshots: written inside the old window, each already reporting the merge and
-  // carrying its consequences — the violation, and an approval that came after it.
-  const poisoned = await snapshotsReporting(work.id, mergeSha);
-  assert.equal(poisoned.length, 3);
-  assert.ok(poisoned.some(snapshot => !snapshot.whole), 'a routine observation stores only what changed and still resolves to a document reporting the merge');
-  for (const snapshot of poisoned) {
-    assert.ok(snapshot.created_at.getTime() < oldCutoff, `post-merge snapshot at ${snapshot.created_at.toISOString()} falls inside the old cutoff window ending ${new Date(oldCutoff).toISOString()}`);
-    assert.ok(snapshot.work.observation!.merged); assert.ok(snapshot.work.violations.includes(unauthorizedMergeViolation));
-  }
-  assert.ok(poisoned.some(snapshot => snapshot.work.gates.find(gate => gate.name === 'review')!.passed), 'a poisoned snapshot shows the approval');
-  // The recovery, requested after the cutoff: the pre-merge snapshot is the one judged, so the
-  // decision is refused for the review it lacked, once, and nothing is delivered.
-  await waitUntil(oldCutoff);
-  const decision = await mergeDecision(current, `Reconcile ${work.key}: GitHub merged ${mergeSha.slice(0, 12)} before its review was observed`);
-  current = await engine.observe(work.id, (await reload(work.id)).revision, { ...approvedAfter, at: new Date().toISOString() });
-  assert.notEqual(current.stage, 'done'); assert.equal(current.delivery, undefined);
-  const refusal = current.violations.find(entry => entry.startsWith(`Reconciliation by decision ${decision} refused: `))!;
-  assert.ok(refusal, current.violations.join(' | ')); assert.match(refusal, /gate review had not passed/);
-  assert.equal((await events(work.id, 'merge.reconciliation.refused')).length, 1);
-  assert.equal((await events(work.id, 'merge.reconciled')).length, 0);
-});
-
-test('integration:reconciliation-refusal-not-circular — the unauthorized-merge violation a reconciliation clears, an earlier refusal, and a merge gate that only reports what GitHub answers never refuse an otherwise sound reconciliation; every other refusal stands, and the delivery judgement stays strict', async () => {
-  const work = await candidate();
-  const mergeSha = sha(`merge-${work.key}`);
-  // The merge lands in a later whole second than the last pre-merge record, as GitHub reports it.
-  await delay(1100);
-  const merged = await mergedAt(work, mergeSha);
-  const providerMergedTime = Date.parse(merged.mergedAt!);
-  const cutoff = providerMergedTime + 1000;
-  const all = await store.list();
-  const sound = await reload(work.id);
-  assert.equal(sound.mergeAuthorization ?? null, null, 'no merge authorization is recorded (GY-1235)');
-  const judge = (past: Work, options?: { reconciling?: boolean }) => historicalAuthorizationRefusals(past, all, merged, cutoff, providerMergedTime, options);
-  assert.deepEqual(judge(sound), [], 'the real pre-merge record is sound');
-  assert.deepEqual(judge(sound, { reconciling: true }), []);
-  // GY-81's poisoned snapshot: what the merge itself wrote.
-  const poisoned: Work = { ...sound, violations: [unauthorizedMergeViolation, `Reconciliation by decision ${randomUUID()} refused: violation stood: ${unauthorizedMergeViolation}`],
-    gates: sound.gates.map(gate => gate.name === 'merge' ? { ...gate, passed: false, reasons: ['Pull request is not mergeable against the current base'] } : gate) };
-  assert.deepEqual(judge(poisoned, { reconciling: true }), [], 'neither the violation nor GitHub\'s post-merge mergeability refuses the reconciliation');
-  // The same record judged for a delivery is refused for the violation it carries.
-  const strict = judge(poisoned);
-  assert.deepEqual(strict, [`violation stood: ${unauthorizedMergeViolation}`, `violation stood: ${poisoned.violations[1]}`]);
-  // A merge gate refusing for anything GitHub does not answer still refuses, and so does any other
-  // violation and any other gate.
-  const held: Work = { ...poisoned, gates: sound.gates.map(gate => gate.name === 'merge' ? { ...gate, passed: false, reasons: ['Pull request is not mergeable against the current base', 'Unresolved lease-loss escalation requires operator resolution'] } : gate) };
-  assert.deepEqual(judge(held, { reconciling: true }), ['gate merge had not passed: Unresolved lease-loss escalation requires operator resolution']);
-  const otherViolation: Work = { ...poisoned, violations: [...poisoned.violations, 'Post-merge checks differ from the recorded authorization; follow-up required'] };
-  assert.deepEqual(judge(otherViolation, { reconciling: true }), ['violation stood: Post-merge checks differ from the recorded authorization; follow-up required']);
-  const unreviewed: Work = { ...poisoned, gates: sound.gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Independent approval of the current commit is required'] } : gate) };
-  assert.deepEqual(judge(unreviewed, { reconciling: true }), ['gate review had not passed: Independent approval of the current commit is required']);
-  const otherHead: Work = { ...sound, candidate: { ...sound.candidate!, sha: sha('another-head') } };
-  assert.match(judge(otherHead).join(' | '), /not the merged head/);
-  // Proofs gate nothing: a record without evidence is judged on its gates alone.
-  assert.deepEqual(judge({ ...sound, evidence: [] }), []);
-  // End to end: GitHub's merge of the sound record is delivered on the merged observation itself,
-  // with no decision, although that observation carries GitHub's post-merge mergeability.
-  const current = await engine.observe(work.id, sound.revision, merged);
-  assert.equal(current.stage, 'done', current.violations.join(' | '));
-  assert.deepEqual(current.violations, []);
-  assert.equal(current.delivery!.authorizationRevision, sound.revision);
-  assert.equal((await events(work.id, 'merge.reconciled')).length, 0, 'no reconciliation was needed');
-});
 
 test('integration:operator-authorized-delivery — a merge whose gates had not passed and the record refuses is delivered only on a decision an operator owns: an admin credential on one side, citing the refusal; the delivery states that no execution authorized it, names the operator, both reasons and what the record lacked, and is distinguishable in the ledger and in master status from a reconciled delivery', async () => {
   // GY-92: an unreviewed candidate the operator merged administratively while the review gate was open.

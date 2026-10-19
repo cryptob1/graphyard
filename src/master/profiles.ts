@@ -489,19 +489,14 @@ export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | nul
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
 }
 
-/**
- * The master config's githubAppId while the install's App step is still pending (GY-1413): the
- * master's local configuration (`master environments`, `master harness`) is usable before a human
- * confirms the App, bound to a server that reports no App either. Any real id stays strict.
- */
+/** The master config's githubAppId on an install that registered no GitHub App (GY-1413); since GY-2010 none binds one. */
 export const APP_PENDING = 0;
 
+/** The master is bound to the control plane serving its repository and base branch; a recorded App id is history and binds nothing (GY-2010). */
 export function assertMasterBinding(config: MasterConfig, status: any) {
   if (status.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
-  const appBound = config.githubAppId === APP_PENDING ? status.githubAppId === null || status.githubAppId === undefined : status.githubAppId === config.githubAppId;
-  if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch || !appBound) throw new Error(config.githubAppId === APP_PENDING && Number.isSafeInteger(status.githubAppId)
-    ? `The control plane now has GitHub App ${status.githubAppId} but this master was configured while the App step was pending; rerun graphyard install --apply (or master init) to bind it`
-    : 'The Graphyard repository, managed base branch, or GitHub App changed; rerun master init before continuing');
+  if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch)
+    throw new Error('The Graphyard repository or managed base branch changed; rerun master init before continuing');
 }
 
 // ---- The coordinator checkout guard (GY-857) -----------------------------------------------------

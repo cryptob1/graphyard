@@ -159,20 +159,19 @@ test('init --scan writes only an ignored proposal and covers every required area
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('applying a reviewed proposal performs the App flow, registers principals and grants, and is idempotent with drift reporting', async () => {
+test('applying a reviewed proposal registers principals and grants with no GitHub App, and is idempotent with drift reporting', async () => {
   const root = await fixtureRepo(nodeRailway);
   try {
     const proposal = await scanProposal(root, { url: 'https://graphyard.example', runtimes: ['codex'] });
     await saveProposal(root, proposal);
-    let flows = 0, tokens = 0;
+    let tokens = 0;
     const dependencies = {
       url: 'https://graphyard.example',
-      githubSetup: async () => { flows++; return { appId: 1234, slug: 'graphyard-owner-repo' }; },
       token: () => `secret-${++tokens}-`.padEnd(40, 't'),
       now: () => new Date('2030-01-01T00:00:00Z'),
     };
     const first = await applyProposal(root, proposal, dependencies);
-    assert.equal(flows, 1);
+    assert.equal(first.githubApp, null, 'no GitHub App is registered (GY-2010)');
     assert.ok(first.applied.some(entry => /AGENTS.md/.test(entry)));
     assert.match(await readFile(join(root, 'AGENTS.md'), 'utf8'), /Graphyard coordination/);
     const principalsFile = join(root, '.graphyard/principals.json');
@@ -190,11 +189,10 @@ test('applying a reviewed proposal performs the App flow, registers principals a
     assert.equal(JSON.parse(await readFile(join(root, '.graphyard/profiles/reviewer.json'), 'utf8')).provider, 'github');
     const applied = await loadAppliedSetup(root);
     assert.equal(applied!.proposalDigest, proposalDigest(proposal));
-    assert.deepEqual(applied!.artifacts.githubApp, { appId: 1234, slug: 'graphyard-owner-repo' });
+    assert.equal(applied!.artifacts.githubApp, null);
     assert.deepEqual(applied!.artifacts.profiles, ['codex-primary', 'reviewer']);
 
     const second = await applyProposal(root, proposal, dependencies);
-    assert.equal(flows, 1);
     assert.equal(second.applied.length, 0);
     assert.ok(second.unchanged.includes('AGENTS.md coordination section'));
     assert.ok(second.unchanged.includes('principal and grant registry'));
@@ -224,7 +222,6 @@ test('apply registers only the worker principals the reviewed proposal declares'
     await saveProposal(root, proposal);
     let tokens = 0;
     const result = await applyProposal(root, proposal, { url: 'https://graphyard.example',
-      githubSetup: async () => ({ appId: 1234, slug: 'graphyard-owner-repo' }),
       token: () => `secret-${++tokens}-`.padEnd(40, 't'), now: () => new Date('2030-01-01T00:00:00Z') });
     const registry = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
     assert.deepEqual(registry.principals.map((entry: any) => entry.id), ['operator', 'master', 'evidence']);
@@ -237,7 +234,6 @@ test('apply registers only the worker principals the reviewed proposal declares'
     const withRuntime = await scanProposal(root, { url: 'https://graphyard.example', runtimes: ['codex'] });
     await saveProposal(root, withRuntime);
     const second = await applyProposal(root, withRuntime, { url: 'https://graphyard.example',
-      githubSetup: async () => ({ appId: 1234, slug: 'graphyard-owner-repo' }),
       token: () => `secret-${++tokens}-`.padEnd(40, 't'), now: () => new Date('2030-01-01T00:00:00Z') });
     assert.deepEqual(second.workerPrincipals, ['worker-1']);
     const grown = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
@@ -410,10 +406,11 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     const refreshed = JSON.parse(await readFile(join(root, '.graphyard/setup-proposal.json'), 'utf8'));
     assert.ok(refreshed.ci.jobs.includes('notify'));
 
+    // A pull-request-era saved App registration is neither read nor revived (GY-2010).
     await writeFile(join(root, '.graphyard/github-app.json'), JSON.stringify({ appId: 99, slug: 'graphyard-owner-repo', repository: 'owner/repo', privateKey: 'test-only', webhookSecret: 'test-only', installationId: 7 }), { mode: 0o600 });
     const applied = JSON.parse(await runCli(root, ['init', '--scan', '--apply', '--url', 'https://graphyard.example'], env));
-    assert.deepEqual(applied.githubApp, { appId: 99, slug: 'graphyard-owner-repo' });
-    assert.equal(applied.githubPending, false);
+    assert.equal(applied.githubApp, null);
+    assert.match(applied.next, /Install the principals array as GRAPHYARD_PRINCIPALS/);
     assert.match(await readFile(join(root, 'AGENTS.md'), 'utf8'), /Graphyard coordination/);
     const appliedProposal = JSON.parse(await readFile(join(root, '.graphyard/setup-proposal.json'), 'utf8'));
     const registry = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
@@ -428,7 +425,7 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     assert.equal(afterChange.drift.length, 1);
     assert.match(afterChange.drift[0], /changed after setup was applied/);
     const status = JSON.parse(await runCli(root, ['doctor'], env));
-    assert.equal(status.setup.githubApp.appId, 99);
+    assert.equal(status.setup.githubApp, null);
     assert.equal(status.setup.drift.length, 1);
     // The readiness checklist is part of doctor: with no server it cannot be ready, every
     // item states what was observed and the direct recovery, and drift is a missing item.
@@ -437,7 +434,7 @@ test('CLI init --scan applies nothing without approval and --apply enforces the 
     assert.equal(byId.server.status, 'missing'); assert.match(byId.server.recovery, /GRAPHYARD_TOKEN/);
     assert.equal(byId['setup-proposal'].status, 'missing'); assert.match(byId['setup-proposal'].detail, /drift/);
     assert.equal(byId['test-formats'].status, 'ready'); assert.match(byId['test-formats'].detail, /vitest → junit-xml-v1/);
-    assert.equal(byId['github-app'].status, 'unknown'); assert.match(byId['github-app'].recovery, /GITHUB_APP_ID/);
+    assert.equal(byId['github-app'], undefined, 'doctor asks for no GitHub App: the deploy key is the install\'s only remote credential (GY-2010)');
     assert.ok(status.readiness.items.every((item: any) => item.status === 'ready' || typeof item.recovery === 'string'));
     // While the control plane itself fails, next names the setup-from-zero step that installs it (GY-1412).
     assert.match(status.next, /^FAIL control-plane: not reachable: .*\(fix: docs\/setup-from-zero\.md step 3/);

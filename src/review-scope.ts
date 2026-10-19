@@ -9,69 +9,8 @@ import type { ChildRun } from './child-runner.js';
 import { pathScope } from './model/scope.js';
 import { parseSuccessions, successorMinSimilarity, successorTrailer, type Succession } from './model/successors.js';
 
-/** A review text the loop read and the grounds it is cited as: one trusted comment of an unresolved thread, or the reviewer's change request. */
+/** A review text the loop cites as grounds: a review follow-up finding recorded on the item. */
 export interface ReviewFinding { ground: string; text: string }
-
-const findingThreadsQuery = `query($owner: String!, $name: String!, $number: Int!, $after: String) {
-  repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    nodes { id isResolved comments(first: 100) { pageInfo { hasNextPage endCursor } nodes { body author { login } } } }
-  } } }
-}`;
-// The rest of one thread's comments, for a thread longer than the page the thread listing carries.
-const threadCommentsQuery = `query($id: ID!, $after: String) {
-  node(id: $id) { ... on PullRequestReviewThread { comments(first: 100, after: $after) { pageInfo { hasNextPage endCursor } nodes { body author { login } } } } }
-}`;
-
-/** A GitHub login as both APIs spell it: GraphQL drops the `[bot]` suffix REST keeps. */
-const login = (value: unknown) => String(value ?? '').toLowerCase().replace(/\[bot\]$/, '');
-
-/**
- * The findings standing against the item's head: each unresolved thread's comments by a trusted
- * author, and the latest change request the configured reviewer posted on `sha`. Trusted is the
- * configured reviewer and the automatic bot reviewers the review launch waits for: anyone else who
- * can comment on the pull request — the item's own worker included — could otherwise open a thread
- * naming a file and have the loop widen scope for it. A failed read throws; the caller then leaves
- * the refusal standing rather than widening on nothing.
- */
-export async function readReviewFindings(input: { repository: string; pr: number; sha: string; reviewer: string | null; trusted: readonly string[] }, run: ChildRun): Promise<ReviewFinding[]> {
-  const trusted = new Set([...input.trusted, ...(input.reviewer ? [input.reviewer] : [])].map(login));
-  const [owner, name] = input.repository.split('/');
-  const findings: ReviewFinding[] = [];
-  let after: string | null = null;
-  for (let page = 0; page < 20; page++) {
-    const parsed: any = JSON.parse(String(await run('gh', ['api', 'graphql', '-f', `query=${findingThreadsQuery}`, '-f', `owner=${owner}`, '-f', `name=${name}`, '-F', `number=${input.pr}`, ...(after ? ['-f', `after=${after}`] : [])])));
-    const connection: any = parsed?.data?.repository?.pullRequest?.reviewThreads;
-    if (!Array.isArray(connection?.nodes)) throw new Error(`GitHub did not list the review threads of pull request #${input.pr}`);
-    for (const thread of connection.nodes) {
-      if (thread?.isResolved !== false || typeof thread.id !== 'string') continue;
-      const comments: any[] = [...(thread.comments?.nodes ?? [])];
-      // Every comment of the thread, not the first page: a trusted author naming the file late in a
-      // long thread is as much a finding as one naming it first.
-      for (let more = thread.comments?.pageInfo, pages = 0; more?.hasNextPage; pages++) {
-        if (pages >= 20) throw new Error(`review thread ${thread.id} on pull request #${input.pr} has more comments than the loop reads`);
-        const next: any = JSON.parse(String(await run('gh', ['api', 'graphql', '-f', `query=${threadCommentsQuery}`, '-f', `id=${thread.id}`, '-f', `after=${more.endCursor}`])))?.data?.node?.comments;
-        if (!Array.isArray(next?.nodes)) throw new Error(`GitHub did not list the comments of review thread ${thread.id}`);
-        comments.push(...next.nodes);
-        more = next.pageInfo;
-      }
-      for (const comment of comments) {
-        if (!trusted.has(login(comment?.author?.login)) || typeof comment?.body !== 'string' || !comment.body) continue;
-        findings.push({ ground: `review thread ${thread.id}`, text: comment.body });
-      }
-    }
-    if (!connection.pageInfo?.hasNextPage) break;
-    after = connection.pageInfo.endCursor;
-  }
-  if (input.reviewer) {
-    const reviews: any[] = JSON.parse(String(await run('gh', ['api', '--paginate', '--slurp', `repos/${input.repository}/pulls/${input.pr}/reviews?per_page=100`]))).flat();
-    // The reviewer's standing verdict, as the observer reads it (src/github.ts): a COMMENTED review
-    // — a thread reply, a blocked note — withdraws nothing, so it never hides a change request.
-    const latest = reviews.filter(review => String(review?.user?.login).toLowerCase() === input.reviewer!.toLowerCase() && review?.commit_id === input.sha && ['APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'].includes(review?.state)).at(-1);
-    if (latest?.state === 'CHANGES_REQUESTED' && typeof latest.body === 'string' && latest.body) findings.push({ ground: `review ${latest.id}`, text: latest.body });
-  }
-  return findings;
-}
 
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 /** Whether `text` names `path` itself — as a whole token, optionally with `:line` — not a longer path that contains it. */

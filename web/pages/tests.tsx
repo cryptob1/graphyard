@@ -5,7 +5,7 @@ import type { CaseRun, TrackedCase } from '../../src/scenarios';
 /** Each result in words and a mark; a skip is its own state and never reads as a pass. */
 export const resultLabel: Record<string, { mark: string; word: string; tone: string }> = {
   pass: { mark: '✓', word: 'passed', tone: 'pass' }, fail: { mark: '×', word: 'failed', tone: 'fail' }, skipped: { mark: '◌', word: 'skipped', tone: 'skipped' },
-  'not-run': { mark: '○', word: 'not run on this head', tone: 'none' }, 'no-pr': { mark: '○', word: 'no pull request yet', tone: 'none' }, never: { mark: '○', word: 'never run', tone: 'none' },
+  'not-run': { mark: '○', word: 'not run yet', tone: 'none' }, 'no-pr': { mark: '○', word: 'no pull request yet', tone: 'none' }, never: { mark: '○', word: 'never run', tone: 'none' },
 };
 export const Result = ({ result }: { result: string }) => { const r = resultLabel[result] ?? resultLabel.never; return <span className={`case-result result-${r.tone}`}>{r.mark} {r.word}</span>; };
 const day = (at: string) => new Date(at).toLocaleString();
