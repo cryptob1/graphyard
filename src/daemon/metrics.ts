@@ -10,6 +10,7 @@ import { approvalWatchSchema, type ApprovalWatch, type DaemonActionKind, type Da
 import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
 import { decisionKey, scopeOutcomeAnswered } from './reconcile.js';
 import { docsSyncHolding } from '../model/docs-sync.js';
+import { isHotfix, wipHoldWording } from '../model/dispatch.js';
 import { approvedUnapplied, boundDetail, mergeableCandidate, namePaths, routineDecision, withheldDecision } from './decisions.js';
 import type { RoutineDecision } from './decisions.js';
 
@@ -301,6 +302,7 @@ export interface ActionableSubject { key: string; kind: DaemonActionKind; work: 
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
   context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'];
     /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not a dispatch wait. */ fleetHeld?: boolean;
+    /** GY-2097: the dispatch step held a claimable item under the in-flight cap — `maxInFlight` items are being built or waiting to merge — so its wait is the cap's capacity, not a dispatch wait. */ wipHeld?: boolean;
     /** GY-1890: whether an item's own launch is in flight; its slot is allocated, so its wait is that launch, never the fleet's capacity. */ launching?: (item: Work) => boolean } = {}): ActionableSubject[] {
   const subjects: ActionableSubject[] = [];
   // A subject's detail is bounded to 500 characters: the master session wakes once per changed
@@ -337,7 +339,10 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // GY-1890: with no launch profile free the wait on a claimable item is the fleet's slot
     // capacity, so it is a capacity subject, not a dispatch one: the loop cannot end it by acting.
     // An item whose own launch is in flight already holds its slot: it waits on that launch, not the fleet.
-    try { assertDispatchable(item, work, new Date(now).toISOString()); const fleetHeld = context.fleetHeld && !context.launching?.(item); add(fleetHeld ? 'capacity' : 'dispatch', item, fleetHeld ? `${item.key} is claimable but no worker profile is free; it starts when one frees` : `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
+    // GY-2097: the same reading for an item the in-flight cap holds — only a merge frees a slot, so
+    // the wait is the cap's capacity; a "Hotfix: …" item starts whatever the count and keeps the
+    // loop's own dispatch subject while it waits for a profile.
+    try { assertDispatchable(item, work, new Date(now).toISOString()); const launching = !!context.launching?.(item), fleetHeld = context.fleetHeld && !launching, wipHeld = !launching && context.wipHeld && !isHotfix(item); add(wipHeld || fleetHeld ? 'capacity' : 'dispatch', item, wipHeld ? `${item.key} ${wipHoldWording.held}` : fleetHeld ? `${item.key} is claimable but no worker profile is free; it starts when one frees` : `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
     const request = item.scopeRequest;
     if (request && (!request.decision || redecidableScopeRefusal(item)) && item.lease && item.lease.epoch === request.epoch && Date.parse(item.lease.expiresAt) > now)
       add('scope', item, boundDetail(`${item.key}: ${request.requestedBy} is waiting for a decision on ${namePaths(request.paths, 300)}`, 500));

@@ -22,8 +22,16 @@ export function offerToSavePassword(token: string, scope: { PasswordCredential?:
   return true;
 }
 export const HELPER_TEXT = 'Tokens are scoped to your role and kept for this browser session.';
-/** How the human operator signs in without a token (GY-738). */
-export const SIGN_IN_LINK_TEXT = 'Operator? Open the one-time link graphyard login prints: it signs you in as a human, no token needed.';
+/** The one command that signs the human operator in without a token (GY-738, GY-2171). */
+export const SIGN_IN_COMMAND = 'graphyard login';
+/** Where a session a sign-in link opens is kept: it lasts 30 days, so it outlives the browser session a typed token keeps to (GY-2171). */
+export const HUMAN_SESSION_KEY = 'graphyard-token';
+/** The token this browser holds: a typed one for this browser session, else a sign-in link's 30-day human session. */
+export const storedToken = () => sessionStorage.getItem(HUMAN_SESSION_KEY) ?? localStorage.getItem(HUMAN_SESSION_KEY) ?? '';
+/** The operator's line: run the command (a click copies it) on the Graphyard host and open the link it prints. */
+function SignInCommand() {
+  return <p className="login-help">Operator? Run <code className="login-command" title="Click to copy" onClick={() => void navigator.clipboard?.writeText(SIGN_IN_COMMAND).catch(() => {})}>{SIGN_IN_COMMAND}</code> on the Graphyard host and open the link it prints to sign in for 30 days.</p>;
+}
 export const LINK_REFUSED_NOTICE = 'That sign-in link has expired or was already used. Ask for a new one.';
 
 /** The one-time code a sign-in link carries in its fragment (`/#sign-in=CODE`), which never reaches a server log. */
@@ -107,7 +115,7 @@ export function LoginView({ state, error, draftToken, setDraftToken, submit, ret
       <input type="text" name="username" autoComplete="username" value={LOGIN_USERNAME} readOnly tabIndex={-1} aria-hidden="true" style={visuallyHidden}/>
       <label>Access token<input type="password" name="password" required autoFocus value={draftToken} onChange={e => setDraftToken(e.target.value)} autoComplete="current-password" placeholder="Your Graphyard token"/></label>
       <button type="submit">Open control plane ↗</button>
-      <p className="login-help">{SIGN_IN_LINK_TEXT}</p>
+      <SignInCommand/>
     </form>}
     {state.kind === 'verifying' && <div className="login-status">
       <p role="status" aria-busy="true" aria-live="polite" className="login-progress"><span className="spinner" aria-hidden="true"/>Verifying connection…</p>
@@ -134,7 +142,7 @@ export default function LoginPage({ token, error, signOut, setError, sessionEpoc
     const epoch = ++sessionEpoch.current;
     void redeemSignIn(code, (input, init) => fetch(input, init)).then(outcome => {
       if (epoch !== sessionEpoch.current) return;
-      if (outcome.kind === 'signed-in') { setError(''); sessionStorage.setItem('graphyard-token', outcome.token); setToken(outcome.token); }
+      if (outcome.kind === 'signed-in') { setError(''); localStorage.setItem(HUMAN_SESSION_KEY, outcome.token); setToken(outcome.token); }
       else setError(outcome.kind === 'refused' ? LINK_REFUSED_NOTICE : `Can't reach the control plane at ${host}`);
     });
   }, []);

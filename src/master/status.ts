@@ -22,7 +22,7 @@ import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlan
 import { classified } from '../model/fault-classes.js';
 import { launchFailedBeforeStart } from '../model/escalation.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
-import { requestRemedy } from '../model/dispatch.js';
+import { maxInFlight, requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergeAuthorized, mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
 import { splitRelation, splitReport } from '../decomposition.js';
@@ -356,7 +356,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const idle = workerSessions.filter(session => session.mode === 'launch' && session.credential.available && (session.state === 'offline' || session.state === 'idle') && !rows.some(row => row.owner === session.principal));
   const launchProfiles = workerSessions.filter(session => session.mode === 'launch').length;
   const fleet = { effective: inFlightCount + scheduling.order.length, inFlight: inFlightCount, dispatchable: scheduling.order.length, idleWorkers: idle.length, workers: launchProfiles,
-    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; planned-file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle` };
+    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; planned-file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle; the dispatcher starts new work while fewer than ${maxInFlight} ${inFlightCount === 1 ? 'item is' : 'items are'} in flight${atCapClause(inFlightCount)}` };
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
   const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text, ...classified('unrunnable-remedy'),
@@ -422,6 +422,8 @@ export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[
   const conflicting = candidates.filter(entry => entry.conflicts.length);
   return { sequence, conflicting: conflicting.map(entry => ({ key: entry.key, conflicts: entry.conflicts })) };
 }
+/** The clause the fleet statement adds once the in-flight cap is full (GY-2097); empty while it has room. */
+const atCapClause = (inFlight: number) => inFlight >= maxInFlight ? ` — ${inFlight} in flight is the cap, so ready work waits until one merges (Hotfix items excepted)` : '';
 
 /**
  * The deliveries that did not come through an authorized merge execution, each with the decision
