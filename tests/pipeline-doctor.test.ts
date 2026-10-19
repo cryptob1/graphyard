@@ -10,7 +10,7 @@ import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, dedupDoctorFiles, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects, type DoctorFile } from '../src/daemon/doctor.js';
 import { applyDoctorRun, doctorTool, filingDigest } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
-import { faultClassOf, faultClassPolicyDefaults, recurringClasses, type FaultInstance } from '../src/model/fault-classes.js';
+import { deliveredFaultClassCover, faultClassOf, faultClassPolicyDefaults, recurringClasses, type FaultInstance } from '../src/model/fault-classes.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import graphyardExtension, { doctorSanctionedCommands as piSanctioned, doctorRedirects, doctorSegmentAllowed, graphyardTools as piTools } from '../integrations/pi/index.js';
@@ -267,7 +267,7 @@ test('unit:doctor-scheduled-and-scoped — the doctor runs every five minutes by
   assert.ok(prompt.includes('human-only'), 'the template names the human-only decisions a finding cannot act on');
 });
 
-test('unit:doctor-run-recorded — a doctor run records one event per item it found or acted on, one run summary on the cursor and the control plane, and files a fault item only when no open item already covers its class', async () => {
+test('unit:doctor-run-recorded — a doctor run records one event per item it found or acted on, one run summary on the cursor and the control plane, and files each class once per run', async () => {
   clearDoctorRuns();
   const work = [item({ stageEnteredAt: at(60_000) }), item({ id: 'id-GY-75', key: 'GY-75', stageEnteredAt: at(0) })];
   const filed: { title: string; priority: number }[] = [];
@@ -310,10 +310,9 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   const events = Object.values(first.state.actions).filter(action => action.kind === 'fault');
   assert.deepEqual(events.filter(action => action.work).map(action => action.work).sort(), ['GY-74', 'GY-75'], 'one event per item with a finding or an action');
   assert.ok(events.some(action => action.work === null && /2 finding\(s\), 1 action\(s\)/.test(action.detail)), 'one run summary event names what was stuck, what it did and what it filed');
-  // Dedup: the covered class is not filed; the uncovered one is filed through master create's checks.
-  assert.deepEqual(filed, [{ title: 'Lapsed fences pile up', priority: 0 }], 'only the fault class with no open item is filed, at P0/P1');
-  assert.deepEqual(run.filed.map(entry => entry.work), ['GY-91']);
-  assert.ok(events.some(action => /already covered by an open item/.test(action.detail)), 'the deduplicated filing is recorded, not silently dropped');
+  // Dedup: both classes file (GY-2186: no standing item covers a class any more); the same class twice in one run would dedup.
+  assert.deepEqual(filed.map(entry => entry.title), ['Decision faults recur', 'Lapsed fences pile up'], 'each class of the run files, at P0/P1');
+  assert.deepEqual(run.filed.map(entry => entry.work), ['GY-91', 'GY-91']);
 
   // The live post is admitted: the operator-agent identity the loop posts as reaches /api/doctor.
   assert.equal(await operatorAgentRouteGuard.handle({ actor: { id: 'operator', role: 'operator-agent' }, url: new URL('https://graphyard.example/api/doctor') } as any, undefined as any), Next, 'the operator-agent route guard admits the doctor run post');
@@ -439,8 +438,8 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   await doctorStep(cycle(work, { doctor: filingDoctor, state: sixth.state }));
   assert.deepEqual(filedKeys, [filingKey], 'the filing is retried on the later cycle under the same stable key');
   assert.equal(sixth.state.doctor.pendingFiles.length, 0, 'the filing leaves the pending list once accepted');
-  // A later run refuses again; by its retry an open item covers the class, so the filing is
-  // dropped as covered instead of standing beside the item that already covers it.
+  // A later run refuses again; its retry files the same content once create takes it (GY-2186: no
+  // open item covers a class any more).
   refuseFilings = true;
   const seventh = cycle(work, { doctor: filingDoctor, state: sixth.state, clock: Date.parse(at(11 * 60_000)) });
   await doctorStep(seventh);
@@ -448,11 +447,11 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   assert.equal(sixth.state.doctor.pendingFiles.length, 1, 'the run that fired at its interval filed again and was refused again');
   const refilingKey = sixth.state.doctor.pendingFiles[0].key;
   assert.notEqual(refilingKey, filingKey, 'each run files under its own key');
-  work.push(item({ id: 'id-GY-95', key: 'GY-95', stage: 'ready', origin: { faultClass: { class: 'merge', threshold: 1, windowHours: 1, count: 1, detectedAt: observedAt, instances: [] } } }));
   sixth.state.cycle += 1;
+  refuseFilings = false;
   await doctorStep(cycle(work, { doctor: filingDoctor, state: sixth.state }));
-  assert.equal(sixth.state.doctor.pendingFiles.length, 0, 'the pending filing is dropped once an open item covers its class');
-  assert.ok(/now covered by an open item/.test(sixth.state.actions[refilingKey]?.detail ?? ''), 'the drop is recorded, not silent');
+  assert.equal(sixth.state.doctor.pendingFiles.length, 0, 'the pending filing is retried under its key and filed');
+  assert.deepEqual(filedKeys, [filingKey, refilingKey], 'the retry files under its own stable key');
   clearDoctorRuns();
 
   // The route itself aggregates a run's findings and actions into one event per affected item: an
@@ -818,41 +817,33 @@ test(`manual:fault-class-loop — GY-1336 ${gy1336Doctor.filing}: a refused fili
   clearDoctorRuns();
 });
 
-// ---- GY-1338: a settled run deduplicates against the open items when it settles -----------------
+// ---- GY-1338: a settled run settles what it filed against the open items read when it settles ----
 //
-// GY-1338 replays GY-1336's third shape at its source: a doctor run launched before GY-1332 existed
-// (created 00:17:48Z) settled at 00:30:34Z and filed GY-1333 for the merge class GY-1332 already
-// covered, because it deduplicated against the snapshot of the cycle that launched it.
+// GY-1338's dedup-against-a-cover is retired with the filings (GY-2186): a run files what its
+// payload asked, once per class, whatever open items stand. What remains is the fresh-snapshot
+// read: a settled run still reads the open items once, when it settles, and files nothing blind
+// when that read fails.
 const gy1338 = { launched: '2026-10-06T00:10:00.000Z', covering: '2026-10-06T00:17:48.544Z', settled: '2026-10-06T00:30:34.922Z' };
 const gy1332 = () => item({ id: 'id-GY-1332', key: 'GY-1332', stage: 'backlog', createdAt: gy1338.covering,
   origin: { faultClass: { class: 'merge', threshold: 1, windowHours: 1, count: 1, detectedAt: gy1338.covering, instances: [] } } } as Partial<Work>);
 
-test('unit:doctor-report-dedup-fresh-snapshot — a settled run deduplicates its filings against the open items read when it settles, not the launching cycle\'s snapshot', async () => {
+test('unit:doctor-report-dedup-fresh-snapshot — a settled run files its payload once per class, waits for the retry when the snapshot is unreadable, and never files blind', async () => {
   clearDoctorRuns();
   const filed: string[] = [];
   const doctor = filingDoctor([mainGuardFiling(['unit:guard-retry'])], async input => { filed.push(input.title); return item({ id: 'id-GY-1333', key: 'GY-1333' }); });
-  // The launching cycle saw no merge item; by the time the run settles, GY-1332 is open.
-  let current = [item()];
-  const replay = cycle([item()], { doctor, clock: Date.parse(gy1338.launched), effects: { snapshot: async () => ({ work: current, now: gy1338.settled }) } });
-  current = [item(), gy1332()];
+  // The launching cycle's snapshot is not what settles the run: the fresh read answers.
+  let reads = 0;
+  const replay = cycle([item()], { doctor, clock: Date.parse(gy1338.launched), effects: { snapshot: async () => { reads += 1; return { work: [item(), gy1332()], now: gy1338.settled }; } } });
   await doctorStep(replay);
   await doctorRunsSettled();
-  assert.deepEqual(filed, [], 'no duplicate of GY-1332 is filed');
+  assert.deepEqual(filed, [mainGuardFiling([]).title], 'the filing files whatever open items stand');
+  assert.equal(reads, 1, 'one fresh-snapshot read at settlement');
   assert.equal(replay.state.doctor.runs[0].state, 'reported');
-  assert.match(replay.state.doctor.runs[0].detail, /0 filed, 1 deduplicated/);
-  assert.ok(Object.values(replay.state.actions).some(action => /already covered by an open item/.test(action.detail)), 'recorded as covered');
-  assert.deepEqual(replay.state.faults.instances, [], 'no fault');
-  clearDoctorRuns();
-
-  // With no covering item when it settles, the run files as before.
-  const uncovered = cycle([item()], { doctor });
-  await doctorStep(uncovered);
-  await doctorRunsSettled();
-  assert.deepEqual(filed, [mainGuardFiling([]).title]);
+  assert.match(replay.state.doctor.runs[0].detail, /1 filed, 0 deduplicated/);
   clearDoctorRuns();
 
   // Unable to read the open items when it settles, the run files nothing blind: the filing waits for
-  // the retry, which deduplicates against its own cycle's snapshot, with no failed action.
+  // the retry, which reads afresh, with no failed action.
   filed.length = 0;
   const unread = cycle([item()], { doctor, effects: { snapshot: async () => { throw new Error('Graphyard refused work-snapshot (502): Application failed to respond'); } } });
   await doctorStep(unread);
@@ -862,20 +853,19 @@ test('unit:doctor-report-dedup-fresh-snapshot — a settled run deduplicates its
   assert.deepEqual(Object.values(unread.state.actions).filter(action => action.state === 'failed'), []);
   unread.state.cycle += 1;
   await doctorStep(cycle([item(), gy1332()], { doctor, state: unread.state }));
-  assert.deepEqual(filed, [], 'the retry sees GY-1332 and drops it');
+  assert.deepEqual(filed, [mainGuardFiling([]).title], 'the retry reads afresh and files');
   assert.deepEqual(unread.state.doctor.pendingFiles, []);
-  assert.deepEqual(unread.state.faults.instances, []);
   clearDoctorRuns();
 });
 
-test(`manual:fault-class-loop — GY-1336 GY-1333: the run that filed GY-1333 at ${gy1338.settled}, replayed, files no duplicate of GY-1332`, async () => {
+test(`manual:fault-class-loop — GY-1336 GY-1333: the run that filed GY-1333 at ${gy1338.settled}, replayed, files once and opens no loop fault`, async () => {
   clearDoctorRuns();
   const filed: string[] = [];
   const doctor = filingDoctor([mainGuardFiling(['integration: main guard retries a refused revert'])], async input => { filed.push(input.title); return item({ id: 'id-GY-1333', key: 'GY-1333' }); });
-  const launched = cycle([item()], { doctor, clock: Date.parse(gy1338.launched), effects: { snapshot: async () => ({ work: [item(), gy1332()], now: gy1338.settled }) } });
+  const launched = cycle([item(), gy1332()], { doctor, clock: Date.parse(gy1338.launched), effects: { snapshot: async () => ({ work: [item(), gy1332()], now: gy1338.settled }) } });
   await doctorStep(launched);
   await doctorRunsSettled();
-  assert.deepEqual(filed, [], 'GY-1333 is not filed');
+  assert.deepEqual(filed, [mainGuardFiling([]).title], 'the doctor files its payload; no open item covers a class any more (GY-2186)');
   assert.deepEqual(launched.state.doctor.pendingFiles, []);
   assert.deepEqual(loopFaultsOf(launched.state), []);
   clearDoctorRuns();
@@ -1047,120 +1037,61 @@ const capacityFault = (id: string, offsetMs: number, linkedTo: string | null = n
   text: 'mid-attempt exhaustion', at: at(offsetMs), lastSeenAt: at(offsetMs), linkedTo,
 });
 
-test('integration:doctor-refile-after-landing-covered — a doctor re-offer of GY-1710\'s shape after a delivered capacity landing is recorded covered and never submitted to master create', async () => {
+test('integration:doctor-refile-after-landing — a doctor re-offer files on its own cadence now: once, deduplicated per payload, never gated by a cover', async () => {
   clearDoctorRuns();
   const filed: string[] = [];
-  const preLanding = [
-    capacityFault('approver|claude-c|pre', -200 * 60_000),
-    capacityFault('worker|claude-c|pre', -150 * 60_000),
-  ];
   const doctor = filingDoctor([gy1711CapacityFile()], async input => { filed.push(input.title); return item({ id: 'id-GY-1710', key: 'GY-1710', title: input.title }); });
   const work = [gy1708Delivered()];
   const replay = cycle(work, { doctor });
-  replay.state.faults.instances = preLanding;
+  replay.state.faults.instances = [capacityFault('approver|claude-c|pre', -200 * 60_000)];
   await doctorStep(replay);
   await doctorRunsSettled();
-  assert.deepEqual(filed, [], 'master create is never called');
-  assert.match(replay.state.doctor.runs[0].detail, /0 filed, 1 deduplicated/);
-  assert.ok(Object.values(replay.state.actions).some(action => /already covered by a delivered item/.test(action.detail)), 'recorded covered against the delivered landing');
-  // Empty ledger (the live GY-1710 shape): still covered — nothing postdates the landing.
-  const empty = cycle(work, { doctor });
-  await doctorStep(empty);
-  await doctorRunsSettled();
-  assert.deepEqual(filed, [], 'empty ledger stays covered');
-  assert.ok(Object.values(empty.state.actions).some(action => /already covered by a delivered item/.test(action.detail)));
-  // A pending retry is dropped the same way once the delivered cover stands.
-  empty.state.doctor.pendingFiles = [{ key: 'doctor:retry:file:capacity', at: observedAt, file: gy1711CapacityFile() }];
-  empty.state.cycle += 1;
-  await doctorStep(cycle(work, { doctor, state: empty.state }));
-  assert.deepEqual(empty.state.doctor.pendingFiles, [], 'retry drops when a delivered item covers the class');
-  assert.match(empty.state.actions['doctor:retry:file:capacity']?.detail ?? '', /now covered by a delivered item/);
+  assert.deepEqual(filed, [gy1711CapacityFile().title], 'the doctor files: no standing cover gates it (GY-2186)');
+  assert.match(replay.state.doctor.runs[0].detail, /1 filed, 0 deduplicated/);
   clearDoctorRuns();
 });
 
-test('integration:doctor-filing-after-new-instance — an instance first seen after the delivered cover\'s landing files afresh; the cover does not stand while any windowed unlinked instance postdates the landing', async () => {
+test('integration:doctor-same-payload-dedup — a doctor run that reports the same class twice files the first and records the repeats covered', async () => {
   clearDoctorRuns();
   const filed: string[] = [];
-  const preLanding = [capacityFault('capacity|pre|gate', -200 * 60_000)];
-  const belowThreshold = [
-    capacityFault('capacity|post|1', -10 * 60_000),
-    capacityFault('capacity|post|2', -5 * 60_000),
-  ];
-  const atThreshold = [
-    ...belowThreshold,
-    capacityFault('capacity|post|3', -1 * 60_000),
-  ];
-  const doctor = filingDoctor([gy1711CapacityFile()], async input => { filed.push(input.title); return item({ id: 'id-GY-1712', key: 'GY-1712', title: input.title }); });
-  const work = [gy1708Delivered()];
-  // Pre-landing only: the delivered cover stands — doctor must not file (base open-item-only dedup would).
-  const held = cycle(work, { doctor });
-  held.state.faults.instances = preLanding;
-  await doctorStep(held);
-  await doctorRunsSettled();
-  assert.deepEqual(filed, [], 'pre-landing evidence alone does not file while the delivered cover stands');
-  clearDoctorRuns();
-  // Below the default recurrence threshold: cover has fallen, but the doctor matches the loop and waits.
-  const waiting = cycle(work, { doctor });
-  waiting.state.faults.instances = belowThreshold;
-  await doctorStep(waiting);
-  await doctorRunsSettled();
-  assert.deepEqual(filed, [], 'one or two post-landing instances stay suppressed under the default threshold of 3');
-  assert.equal(recurringClasses(belowThreshold, work, faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!.file, false);
-  assert.ok(Object.values(waiting.state.actions).some(action => /below the recurrence threshold/.test(action.detail)),
-    'the run notes the below-threshold suppress reason');
-  clearDoctorRuns();
-  // At threshold: the doctor files exactly when the recurrence sweep would.
-  const replay = cycle(work, { doctor });
-  replay.state.faults.instances = atThreshold;
+  const same = gy1711CapacityFile();
+  const doctor = filingDoctor([same, { ...same }], async input => { filed.push(input.title); return item({ id: 'id-GY-1711', key: 'GY-1711', title: input.title }); });
+  const replay = cycle([gy1708Delivered()], { doctor });
   await doctorStep(replay);
   await doctorRunsSettled();
-  assert.deepEqual(filed, [gy1711CapacityFile().title], 'the doctor files once post-landing instances reach the recurrence threshold');
-  assert.deepEqual(replay.state.doctor.runs[0].filed.map(entry => entry.work), ['GY-1712']);
-  const sweep = recurringClasses(atThreshold, work, faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!;
-  assert.equal(sweep.file, true, 'the loop\'s recurrence sweep would file at the same moment');
-  assert.equal(sweep.item, null);
+  assert.deepEqual(filed, [same.title], 'the first filing of the class files; the repeat is covered by it');
+  assert.match(replay.state.doctor.runs[0].detail, /1 filed, 1 deduplicated/);
   clearDoctorRuns();
 });
 
-test('integration:doctor-settlement-uses-plane-clock — applyDoctorRun compares fault times to the fresh snapshot clock, not a lagging coordinator now()', async () => {
-  // Plane ahead of the host: post-landing instances stamped on the plane clock look "in the future"
-  // against the coordinator's now(), and a host-clock comparison would keep the delivered cover.
+test('integration:doctor-settlement-uses-plane-clock — applyDoctorRun settles a filing against the fresh snapshot read, whatever the host now()', async () => {
   const planeNow = Date.parse(observedAt);
   const hostBehind = () => planeNow - 60 * 60_000;
   const filed: string[] = [];
-  const atThreshold = [
-    capacityFault('capacity|skew|1', -10 * 60_000),
-    capacityFault('capacity|skew|2', -5 * 60_000),
-    capacityFault('capacity|skew|3', -1 * 60_000),
-  ];
   const work = [gy1708Delivered()];
   const effects = filingDoctor([gy1711CapacityFile()], async input => { filed.push(input.title); return item({ id: 'id-GY-1713', key: 'GY-1713', title: input.title }); });
   const replay = cycle(work, { doctor: effects, now: hostBehind });
-  replay.state.faults.instances = atThreshold;
   const run = summary(observedAt, 'running');
   replay.state.doctor.runs = [run];
   await applyDoctorRun(replay, effects, run, { findings: [], actions: [], filed: [gy1711CapacityFile()] }, hostBehind);
-  assert.deepEqual(filed, [gy1711CapacityFile().title], 'settlement against the plane clock files at threshold despite the lagging host clock');
+  assert.deepEqual(filed, [gy1711CapacityFile().title], 'settlement against the plane clock files the doctor\'s item');
 });
 
-test('integration:delivered-cover-through-duplicate-closure — with GY-1710 closed duplicate-of GY-1708, later capacity instances link to GY-1708 instead of producing a new filing', () => {
+test('integration:delivered-cover-through-duplicate-closure — deliveredFaultClassCover still resolves the cover triage closes a filed item against', () => {
   const gy1708 = gy1708Delivered();
   const gy1710 = item({
     id: 'id-GY-1710', key: 'GY-1710', stage: 'done', title: gy1711CapacityFile().title,
     origin: { faultClass: { class: 'capacity', threshold: 1, windowHours: 1, count: 1, detectedAt: at(-30 * 60_000), instances: [] } },
     closure: { kind: 'duplicate', ref: 'GY-1708', reason: 'duplicate of the landed capacity fix', by: 'master', at: at(-20 * 60_000), from: 'backlog' },
   } as Partial<Work>);
-  const preLanding = [capacityFault('capacity|pre|dup', -200 * 60_000)];
-  // Doctor dedup resolves the cover through the duplicate ref.
-  assert.deepEqual(dedupDoctorFiles([gy1711CapacityFile()], [gy1710, gy1708], preLanding, Date.parse(observedAt), faultClassPolicyDefaults).map(entry => entry.covered), [true]);
-  // Instances recorded after the duplicate closure but still first-seen before the landing link to
-  // GY-1708 (the answer) rather than filing a third capacity item.
+  assert.equal(deliveredFaultClassCover([gy1710, gy1708], 'capacity')?.item.key, 'GY-1708',
+    'the cover follows the duplicate ref to the delivered answer, as triage reads it');
+  // The windowed count the attention reads is blind to covers: it counts what the record holds.
   const linkable = [
     capacityFault('capacity|link|1', -200 * 60_000),
     capacityFault('capacity|link|2', -190 * 60_000),
     capacityFault('capacity|link|3', -180 * 60_000),
   ];
-  const recurrence = recurringClasses(linkable, [gy1710, gy1708], faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!;
-  assert.equal(recurrence.file, false, 'no new filing while every windowed instance predates the landing');
-  assert.equal(recurrence.item?.key, 'GY-1708', 'instances link to the delivered answer, not the closed duplicate');
+  const recurrence = recurringClasses(linkable, faultClassPolicyDefaults, Date.parse(observedAt)).find(entry => entry.faultClass === 'capacity')!;
+  assert.equal(recurrence.count, 3, 'every windowed instance counts, whatever a delivered fix answers');
 });

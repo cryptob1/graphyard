@@ -5,7 +5,7 @@ import { agentOwner, buildMasterStatus, type MasterConfig } from '../master.js';
 import { nameOrphanSupervisors } from './status-attention.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
 import { routedScopeStatus } from './owed-report.js';
-import { speedSections } from '../flow-analytics.js';
+import { leadTimeReport, speedSections } from '../flow-analytics.js';
 import { timedStep } from '../master/timings.js';
 import { withPipelineTimelines } from '../pipeline-speed.js';
 import type { ReportSections } from '../master/sections.js';
@@ -53,5 +53,10 @@ export async function buildPipelineStatus(
   // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
   // breach attention (GY-1232) and the stage holding each item's time (GY-1382); a failed read marks its section.
   const delivery = await speedSections(status.speed, masterApi, snapshot, { root, targets: master.deliverySpeed, sections });
-  return { probe, sessions, status, delivery };
+  // The one speed number (GY-1989): median released→merged over the last 10 merges with the previous
+  // 10 beside it, read from the items' own release records; a failed read marks its section and the
+  // report carries no line, rather than a figure guessed from what did read.
+  const lead = await timedStep('lead time', () => leadTimeReport(snapshot.work, masterApi))
+    .catch(error => { sections.mark('lead time', 'GET /api/events?kind=ready', error); return null; });
+  return { probe, sessions, status, delivery, lead };
 }

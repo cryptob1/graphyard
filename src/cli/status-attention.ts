@@ -6,6 +6,11 @@ import { mergeStalls, requiredCheckDisagreements, verdictContradictions } from '
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
 import { baseBreakHold, describeBaseBreak } from '../master/base-break-refresh.js';
+import type { LeadTimeReport } from '../pipeline-speed.js';
+import { baseFailureAttention } from '../daemon/cycle-base-failures.js';
+import { recurringFaultAttention } from '../daemon/faults.js';
+import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
+import type { DaemonState } from '../daemon/state.js';
 
 // The orphaned-supervisor builders live in their own module (GY-138); they are read from here too.
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
@@ -97,6 +102,13 @@ export const directMergeLine = (coordinator: any): { directMerge?: string } => c
 export const mergeWriterLine = (coordinator: any): { mergeWriter?: string } => coordinator?.mergeWriter?.line ? { mergeWriter: coordinator.mergeWriter.line } : {};
 
 /**
+ * The one speed number (GY-1989) as the report's first field: the median released→merged lead time
+ * over the last 10 merges with the previous 10's beside it, ahead of everything else so a reader
+ * meets the number the loop optimizes for first. Absent while its read failed, never a guess.
+ */
+export const leadTimeHeadline = (lead: LeadTimeReport | null | undefined): { leadTime?: LeadTimeReport } => lead ? { leadTime: lead } : {};
+
+/**
  * The worker scope requests the loop has routed to the independent approver (GY-176), as the
  * `(key, epoch, at)` that identifies each ask. A routed request is the approver's to judge and the
  * worker's to be told about; naming `master scope` for it would send a master to decide what is
@@ -164,4 +176,14 @@ export async function docsBudgetAttention(root: string, baseBranch: string, onto
   const docs = await docsHeadroomStatus(root, baseBranch);
   onto.push(...docs.attention);
   return docs.docs;
+}
+
+/** GY-2186: each fault class recurring past its policy threshold in the window is one attention line naming the class, the count, the window and the latest instance. */
+export function recurringFaultLines(cursor: Pick<DaemonState, 'faults'> | null): AttentionItem[] {
+  return cursor ? recurringFaultAttention(cursor, faultClassPolicyFromEnv(process.env), Date.now()) : [];
+}
+
+/** The loop cursor's own attention: a failing base test and a fault class recurring past its threshold (GY-2186), one line each. */
+export function loopCursorLines(cycling: { baseFailures: Parameters<typeof baseFailureAttention>[0] }, cursor: Pick<DaemonState, 'faults'> | null, baseBranch: string): AttentionItem[] {
+  return [...baseFailureAttention(cycling.baseFailures, baseBranch), ...recurringFaultLines(cursor)];
 }

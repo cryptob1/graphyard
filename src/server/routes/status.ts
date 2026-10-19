@@ -16,7 +16,7 @@ import { autoMergeStatus, mergeHolds, mergeWriterStatus } from '../../merger-mod
 import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
-import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
+import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment, leadTimeReport } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
 import { routedScopeDecisions } from '../scope-holds.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
@@ -41,6 +41,11 @@ export const statusRoutes = defineRoutes('status', [
       // Settled deliveries as the work index's summary (GY-1376): this read never loads every document.
       const work = await engine.store.fleet();
       const visibleWork = operatorVisible(work);
+      // The one speed number (GY-1989), read from the items' own release records; a failed read is
+      // absent, never an error: the status every client polls keeps answering. It names work items
+      // across the repository, so a scoped operator agent does not read it, exactly as production.
+      const eventsReader = (path: string) => readEventHistory(services.engine.store.pool, parseEventHistoryQuery(new URLSearchParams(path.startsWith('events?') ? path.slice('events?'.length) : path)));
+      const leadTime = actor.role === 'operator-agent' ? null : await leadTimeReport(visibleWork, eventsReader).catch(() => null);
       // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
       // on the read every client polls, so the Needs you page renders that table (GY-102).
       // The production environment the master publishes (else this process's own setting), so the
@@ -79,6 +84,8 @@ export const statusRoutes = defineRoutes('status', [
         autoMerge: await autoMergeStatus(engine.store.pool),
         // Delivery defaults, applications and case bindings (GY-1901).
         project: projectDelivery(),
+        // Median lead time, released to merged, over the last 10 merges (GY-1989).
+        leadTime,
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
         leaseHealth: engine.leaseHealth.report(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):

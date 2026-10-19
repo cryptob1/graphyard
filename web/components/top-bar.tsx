@@ -7,6 +7,18 @@ import type { Dashboard } from '../pages/dashboard';
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
 
 /**
+ * The board's one speed number (GY-1989): the median released→merged lead time over the last 10
+ * merges, with the previous 10's median as the trend, computed on the control plane from each
+ * item's own release record and served ready-made on status (`leadTime`) — the number the loop
+ * optimizes for, read first on every page. Nothing qualifies — no merge with a recorded release —
+ * reads as no line, never as a zero. Plain text, not a live region: it refreshes with every poll.
+ */
+export function LeadTimeLine({ status }: { status?: Dashboard['status'] }) {
+  const line = (status?.leadTime as { line?: unknown } | null | undefined)?.line;
+  return typeof line === 'string' && line ? <p className="lead-time" data-lead-time="shown">{line}</p> : null;
+}
+
+/**
  * The board's one release line (GY-1979): the commit production serves, whether it is healthy,
  * and how many merged changes it does not carry yet — read from the production watch's report on
  * status (`production`), the same view the board reads (src/model/release.ts). Health is the
@@ -36,8 +48,9 @@ const meaning = (label: string): GlossaryTerm | null => {
 };
 
 /**
- * The board's top bar (GY-1979): the one release line, then the pages of the current section,
- * when it has more than one (Shipped, Insights, Settings). The tabs are not a second navigation:
+ * The board's top bar (GY-1979): the one speed number, then the one release line, then the pages
+ * of the current section, when it has more than one (Shipped, Insights, Settings). The tabs are
+ * not a second navigation:
  * no page shares a label with a sidebar entry (a test holds the registry to that), they list only
  * the pages under the entry the sidebar has selected, and a section with a single page draws none
  * at all. The repository and how fresh the data is live at the foot of the sidebar.
@@ -47,6 +60,7 @@ export default function TopBar(dashboard: Dashboard) {
   const section = viewFor(view).section;
   const tabs = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   return <div className="top-bar">
+    {status && <LeadTimeLine status={status}/>}
     {status && <ReleaseLine status={status}/>}
     {tabs.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab => { const term = meaning(tab.label); return <button key={tab.id} type="button" className={tab.id === view ? 'tab active' : 'tab'} aria-current={tab.id === view ? 'page' : undefined} onClick={() => setView(tab.id)}>{term ? <Term term={term} focusable={false}>{tab.label}</Term> : tab.label}</button>; })}</nav>}
   </div>;

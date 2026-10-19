@@ -6,13 +6,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { attentionKind, classifyAttention, launchWaitKind, faultCatalogue, faultClasses, faultClassOf, faultClassItem, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
+import { attentionKind, classifyAttention, launchWaitKind, faultCatalogue, faultClasses, faultClassOf, faultKinds, groupFaults, isFaultKind, escalationFaultKind, noteActionOutcome, noteFault, recurringClasses, retainedFaultInstances, statusFaults, trackFaults, workFaults, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import { workOriginSchema } from '../src/model/interventions.js';
 import { escalationTriggers, type Evidence, type Observation, type Work } from '../src/model.js';
 import { nameUnobtainableReviews, requestAttemptLimit, settledAnswerGraceMs, unansweredRequest, type DispatchRequest, type RequestProgress } from '../src/model/dispatch.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { agentOwner, buildMasterStatus, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { containmentSettleWaitBoundMs, cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { containmentSettleWaitBoundMs, cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import { sessionRetries } from '../src/producer.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/cli/unanswered-requests.js';
@@ -253,10 +253,10 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   }
   assert.deepEqual(state.faults.instances.map(entry => entry.faultClass), ['unclassified', 'unclassified', 'unclassified'], 'each failure is still recorded');
   const threshold = { ...policy, threshold: 3 };
-  assert.deepEqual(recurringClasses(state.faults.instances, [], threshold, clock + 5 * 60_000).filter(entry => entry.faultClass === 'loop'), [], 'none counts toward the loop class');
+  assert.deepEqual(recurringClasses(state.faults.instances, threshold, clock + 5 * 60_000).filter(entry => entry.faultClass === 'loop'), [], 'none counts toward the loop class');
   // A loop kind the entry keeps still counts.
   for (let index = 0; index < 3; index++) storeAction(state, `loop:${index}`, { kind: 'fault', work: null, principal: null, state: 'failed', detail: 'the loop missed its budget', attempts: 1, epoch: null, cycle: index, at: iso(index * 60_000) }, 'loop-cost');
-  assert.deepEqual(recurringClasses(state.faults.instances, [], threshold, clock + 5 * 60_000).filter(entry => entry.faultClass === 'loop').map(entry => [entry.count, entry.file]), [[3, true]]);
+  assert.deepEqual(recurringClasses(state.faults.instances, threshold, clock + 5 * 60_000).filter(entry => entry.faultClass === 'loop').map(entry => entry.count), [3]);
   // GY-1404: the step kind stays the fallback where the site names no cause — a doctor-run post the
   // control plane refused for the run itself, not plane-wide, is still action:fault, unclassified.
   const posting = emptyDaemonState(config());
@@ -268,8 +268,7 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   assert.deepEqual(posting.faults.instances.map(entry => [entry.kind, entry.faultClass]), [['action:fault', 'unclassified'], ['plane-unavailable', 'deployment']]);
 });
 
-test('unit:fault-classes-catalogue-total — after GY-1530 every source\'s kind is still listed exactly once, the step kinds action:fault/action:diagnosis stay parked under unclassified for emitters that pass no cause, and the causes the doctor and the diagnosis step now pass are catalogued under their classes', async () => {
-  const { noDiagnosisKind } = await import('../src/daemon/diagnosis.js'); // dynamic: the exercise runs this case on the base tree, where the symbol is absent
+test('unit:fault-classes-catalogue-total — after GY-1530 every source\'s kind is still listed exactly once, the step kinds action:fault/action:diagnosis stay parked under unclassified for emitters that pass no cause, and the causes the doctor passes are catalogued under their classes', async () => {
   const listed = faultClasses.flatMap(faultClass => faultCatalogue[faultClass].map(kind => ({ kind, faultClass })));
   for (const { kind } of listed) assert.equal(listed.filter(entry => entry.kind === kind).length, 1, `${kind} is listed under exactly one class`);
   assert.equal(new Set(faultKinds).size, faultKinds.length, 'no kind is listed twice');
@@ -278,147 +277,76 @@ test('unit:fault-classes-catalogue-total — after GY-1530 every source\'s kind 
   // The step kinds name no cause (GY-1338): an emitter that still passes none lands here, never in loop or elsewhere.
   assert.deepEqual([...faultCatalogue.unclassified], ['unclassified', 'action:fault', 'action:diagnosis']);
   for (const kind of ['action:fault', 'action:diagnosis']) assert.equal(storeAction(emptyDaemonState(config()), kind, { kind: kind.slice(7) as 'fault' | 'diagnosis', work: null, principal: null, state: 'failed', detail: 'no cause passed', attempts: 1, epoch: null, cycle: 1, at: iso(0) }).faultClass, 'unclassified');
-  // GY-1530's causes: a filing or fix item create refuses is the proof class's fix-item; a diagnostician whose runs were stopped at their bound is session-liveness's overlong-session.
+  // GY-1530's causes: a filing or fix item create refuses is the proof class's fix-item; a session stopped at its bound is session-liveness's overlong-session.
   assert.equal(faultClassOf('fix-item'), 'proof');
   assert.equal(faultClassOf('overlong-session'), 'session-liveness');
-  assert.equal(faultClassOf(noDiagnosisKind([{ runtime: 'pi', result: 'timeout' }, { runtime: 'pi', result: 'timeout' }])!), 'session-liveness');
   assert.equal(faultClassOf('plane-unavailable'), 'deployment');
 });
 
-test('unit:fault-classes — the fix-item kind a diagnosis\'s refused fix item carries is listed exactly once, under proof', () => {
+test('unit:fault-classes — the fix-item kind a refused fix item carries is listed exactly once, under proof', () => {
   assert.equal(faultClasses.filter(name => (faultCatalogue[name] as readonly string[]).includes('fix-item')).join(), 'proof');
   assert.equal(faultKinds.filter(kind => kind === 'fix-item').length, 1);
   assert.equal(new Set(faultKinds).size, faultKinds.length, 'no kind is listed twice');
 });
 
-test('unit:recurring-class-item — below the threshold nothing is filed', async () => {
-  const filed: unknown[] = [];
-  const effects = { fileFaultClass: async (input: unknown) => { filed.push(input); return item('GY-99'); }, faultClassPolicy: policy, persist: async () => {} } as unknown as DaemonEffects;
+test('unit:recurring-class-item — below the threshold nothing recurs', async () => {
   const state = emptyDaemonState(config());
   const work = [blocked('GY-1'), blocked('GY-2')];
   trackFaults(state.faults, cycleFaults(state, work, clock), iso(0));
-  await fileRecurringFaultClasses(state, effects, work, clock, () => clock, []);
-  assert.equal(filed.length, 0, 'two instances in the window are below a threshold of three');
+  assert.deepEqual(recurringFaultClasses(state), [], 'two instances in the window are below a threshold of three');
   // The same two faults standing for many cycles are still two instances, not a recurrence.
   for (let cycle = 1; cycle <= 5; cycle++) trackFaults(state.faults, cycleFaults(state, work, clock + cycle * 60_000), iso(cycle * 60_000));
   assert.equal(state.faults.instances.length, 2);
-  await fileRecurringFaultClasses(state, effects, work, clock + 5 * 60_000, () => clock, []);
-  assert.equal(filed.length, 0);
+  assert.deepEqual(recurringFaultClasses(state), []);
   // Instances outside the window do not count towards it either.
-  assert.deepEqual(recurringClasses([instance('scope', 'GY-1', -30 * hour), instance('scope', 'GY-2', -26 * hour), instance('scope', 'GY-3', -1 * hour)], [], policy, clock).map(entry => entry.file), [false]);
+  assert.deepEqual(recurringClasses([instance('scope', 'GY-1', -30 * hour), instance('scope', 'GY-2', -26 * hour), instance('scope', 'GY-3', -1 * hour)], policy, clock).map(entry => entry.faultClass), ['scope']);
 });
 
-test('unit:recurring-class-item — a class past the threshold files one item as the operator-agent, and later instances link to it', async () => {
-  const filed: { input: any; key: string }[] = [];
+/** The classes whose windowed instances reach the policy threshold — what recurringFaultAttention reads (GY-2186). */
+function recurringFaultClasses(state: DaemonState, at: number = clock) {
+  return recurringClasses(state.faults.instances, policy, at).filter(entry => entry.count >= policy.threshold).map(entry => entry.faultClass);
+}
+
+test('unit:recurring-class-item — a class past the threshold files no item; its instances stay recorded', async () => {
   let backlog: Work[] = [blocked('GY-1'), blocked('GY-2'), blocked('GY-3')];
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: backlog.map(entry => ({ ...entry })), now: new Date(now).toISOString() }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     faultClassPolicy: policy, persist: async () => {},
-    fileFaultClass: async (input: any, key: string) => { filed.push({ input, key }); const created = item(`GY-${100 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); return created; },
   } as unknown as DaemonEffects;
   let now = clock;
   const state = emptyDaemonState(config());
   const cycle = await runCycle(config(), state, effects, () => now);
-  assert.equal(filed.length, 1, 'three stalled-gate faults in the window file one item');
-  const { input } = filed[0];
-  assert.equal(input.origin.faultClass.class, 'stalled-gate', 'the item records the class it closes');
-  assert.doesNotThrow(() => workOriginSchema.parse(input.origin), 'the origin is one the control plane accepts on create');
-  assert.deepEqual(input.origin.faultClass.instances.map((entry: { subject: string }) => entry.subject).sort(), ['GY-1', 'GY-2', 'GY-3'], 'it lists the instances');
-  for (const key of ['GY-1', 'GY-2', 'GY-3']) assert.match(input.description, new RegExp(`blocker on ${key}: ${key} waits on a vendor API`));
-  assert.match(input.title, /^Recurring stalled-gate faults: 3 in 24 hours/);
-  assert.equal(input.policy, undefined, 'the default policy: independent review, which operator-created work must require');
-  assert.match(filed[0].key, /^fault-class:stalled-gate:[0-9a-f]{32}$/, 'a stable idempotency key: a retried filing returns the same item');
-  assert.ok(cycle.actions.some(action => action.kind === 'fault' && action.state === 'done' && action.work === 'GY-101'), `the cycle reports the filing: ${JSON.stringify(cycle.actions)}`);
-  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'stalled-gate').map(entry => entry.linkedTo), ['GY-101', 'GY-101', 'GY-101'], 'the filed instances are linked to the item');
+  assert.deepEqual(recurringFaultClasses(state), ['stalled-gate'], 'three stalled-gate faults in the window reach the threshold');
+  assert.ok(cycle.actions.every(action => action.kind !== 'fault' || !/^Filed /.test(action.detail)), 'the cycle files no item (GY-2186)');
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'stalled-gate').map(entry => entry.linkedTo), [null, null, null], 'nothing is linked: no item stands');
+  assert.deepEqual(daemonSummary(state, now, 20_000, 'machine-a').faults.classes.find(entry => entry.faultClass === 'stalled-gate'), { faultClass: 'stalled-gate', instances: 3, latest: state.faults.instances.at(-1)!.at });
 
-  // The filed item is open: a further instance of the class links to it, and nothing is filed again.
-  const standing = item('GY-101', { origin: input.origin, title: input.title } as Partial<Work>);
-  backlog = [...backlog, blocked('GY-4'), standing];
+  // A further instance of the class is recorded the same way, still no item.
+  backlog = [...backlog, blocked('GY-4')];
   now = clock + 10 * 60_000;
   await runCycle(config(), state, effects, () => now);
-  assert.equal(filed.length, 1, 'one item per recurring class');
   const later = state.faults.instances.find(entry => entry.subject === 'GY-4')!;
-  assert.equal(later.linkedTo, 'GY-101', 'the later instance is linked to the open item');
-  // Even well past the threshold, while the item is open.
-  backlog = [...backlog, blocked('GY-5'), blocked('GY-6'), blocked('GY-7')];
-  now = clock + 20 * 60_000;
-  await runCycle(config(), state, effects, () => now);
-  assert.equal(filed.length, 1);
-  assert.ok(state.faults.instances.filter(entry => entry.faultClass === 'stalled-gate').every(entry => entry.linkedTo === 'GY-101'), 'every later instance links to the open item');
+  assert.equal(later.linkedTo, null, 'the later instance links to nothing');
   const summary = daemonSummary(state, now, 20_000, 'machine-a');
-  assert.deepEqual(summary.faults.classes.find(entry => entry.faultClass === 'stalled-gate')?.items, ['GY-101'], 'master status names the item standing for the class');
+  assert.deepEqual(summary.faults.classes.find(entry => entry.faultClass === 'stalled-gate'), { faultClass: 'stalled-gate', instances: 4, latest: later.at }, 'master status reads the count and the latest instance');
 
-  // Another class is judged on its own: two scope faults file nothing, a third files its own item.
+  // Another class is judged on its own.
   const scope = (key: string) => item(key, { scopeRequest: { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'w', at: iso(0) }, lease: { owner: 'w', epoch: 1, expiresAt: iso(2 * hour) } } as Partial<Work>);
-  backlog = [...backlog, scope('GY-8'), scope('GY-9')];
+  backlog = [...backlog, scope('GY-8'), scope('GY-9'), scope('GY-10')];
   now = clock + 30 * 60_000;
   await runCycle(config(), state, effects, () => now);
-  const classesFiled = () => filed.map(entry => entry.input.origin.faultClass.class as string);
-  assert.ok(!classesFiled().includes('scope'), `two scope faults file nothing: ${classesFiled()}`);
-  backlog = [...backlog, scope('GY-10')];
-  now = clock + 40 * 60_000;
-  await runCycle(config(), state, effects, () => now);
-  assert.equal(classesFiled().filter(name => name === 'scope').length, 1, `the third scope fault files the scope item: ${classesFiled()}`);
-  assert.equal(new Set(classesFiled()).size, filed.length, `one item per recurring class: ${classesFiled()}`);
-  assert.equal(classesFiled().filter(name => name === 'stalled-gate').length, 1);
-
-  // Once the class's item is delivered, instances it linked stay its own: they never file a second one.
-  const done = { ...standing, stage: 'done' } as Work;
-  assert.deepEqual(recurringClasses(state.faults.instances, [done], policy, now).filter(entry => entry.faultClass === 'stalled-gate'), []);
-});
-
-test('unit:recurring-class-item — the loop files through the master operator-agent identity', async () => {
-  const root = await temporaryDirectory('fault-root'), secrets = await temporaryDirectory('fault-secrets');
-  try {
-    execFileSync('git', ['init', '-q', '-b', 'main', root]);
-    for (const [key, value] of [['user.email', 'fault@example.invalid'], ['user.name', 'Fault Test'], ['commit.gpgsign', 'false']] as const)
-      execFileSync('git', ['config', key, value], { cwd: root });
-    await mkdir(join(root, 'tests/helpers'), { recursive: true });
-    await writeFile(join(root, 'tests/fault-class-scope.test.ts'), 'test("manual:fault-class-scope", () => {});\n');
-    await writeFile(join(root, 'tests/helpers/timing-baseline.json'), '{}\n');
-    await writeFile(join(root, 'tests/no-wall-clock-time-bombs.test.ts'), 'test("wall", () => {});\n');
-    execFileSync('git', ['add', '-A'], { cwd: root });
-    execFileSync('git', ['commit', '-qm', 'base'], { cwd: root });
-    const token = join(secrets, 'operator.token');
-    await writeFile(token, 'operator-token-'.padEnd(48, 'x'), { mode: 0o600 });
-    const posted: { url: string; auth: string | null; key: string | null; body: any }[] = [];
-    const fetcher = (async (url: string, init: RequestInit) => {
-      const headers = new Headers(init.headers);
-      posted.push({ url, auth: headers.get('Authorization'), key: headers.get('Idempotency-Key'), body: JSON.parse(String(init.body)) });
-      return new Response(JSON.stringify(item('GY-200', { origin: JSON.parse(String(init.body)).origin } as Partial<Work>)), { status: 201 });
-    }) as typeof fetch;
-    const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' }, fetcher };
-    assert.equal(daemonEffects(root, config(), deps).fileFaultClass, undefined, 'without an operator-agent identity the loop files nothing');
-    const effects = daemonEffects(root, { ...config(), operatorAgent: { id: 'graphyard-master-operator', credentialFile: token } } as MasterConfig, deps);
-    const recent = [instance('scope', 'GY-1', -3 * hour), instance('scope', 'GY-2', -2 * hour), instance('scope', 'GY-3', -hour)];
-    const created = await effects.fileFaultClass!(faultClassItem({ faultClass: 'scope', recent }, policy, clock), 'fault-class:scope:abc');
-    assert.equal(created.key, 'GY-200');
-    assert.equal(posted.length, 1);
-    assert.equal(posted[0].url, 'https://graphyard.example/api/work');
-    assert.equal(posted[0].auth, `Bearer ${'operator-token-'.padEnd(48, 'x')}`, 'the operator-agent credential, never the coordinator\'s');
-    assert.equal(posted[0].key, 'fault-class:scope:abc');
-    assert.equal(posted[0].body.origin.faultClass.class, 'scope');
-    assert.ok(posted[0].body.reason.length > 0, 'operator-agent mutations carry a reason');
-    // GY-1706: filing derives plannedFiles the way master create does — the proof test and its companions, not [].
-    assert.deepEqual([...posted[0].body.plannedFiles].sort(), [
-      'tests/fault-class-scope.test.ts', 'tests/helpers/timing-baseline.json', 'tests/no-wall-clock-time-bombs.test.ts',
-    ].sort());
-  } finally {
-    await rm(root, { recursive: true, force: true }); await rm(secrets, { recursive: true, force: true });
-  }
+  const classes = recurringFaultClasses(state, now);
+  assert.ok(classes.includes('scope') && classes.includes('stalled-gate'), `each class counts its own instances: ${classes.join(', ')}`);
 });
 
 test('unit:recurring-class-item — retained action history is not a standing fault: each run of failures is one instance', async () => {
-  // Upgrading onto a cursor that already holds old failures records nothing from them and files nothing.
+  // Upgrading onto a cursor that already holds old failures records nothing from them.
   const state = emptyDaemonState(config());
   for (const [index, key] of ['escalation:config:a', 'escalation:config:b', 'escalation:config:c', 'escalation:watchdog:1000'].entries())
     state.actions[key] = { kind: 'escalation', work: null, principal: null, state: 'failed', detail: `old refusal ${index}`, attempts: 1, epoch: null, cycle: 0, at: iso(-hour) };
-  const filed: unknown[] = [];
-  const effects = { fileFaultClass: async (input: unknown) => { filed.push(input); return item('GY-99'); }, faultClassPolicy: policy, persist: async () => {} } as unknown as DaemonEffects;
-  for (let cycle = 0; cycle < 3; cycle++) { trackFaults(state.faults, cycleFaults(state, [], clock + cycle * 60_000), iso(cycle * 60_000)); await fileRecurringFaultClasses(state, effects, [], clock + cycle * 60_000, () => clock, []); }
+  for (let cycle = 0; cycle < 3; cycle++) trackFaults(state.faults, cycleFaults(state, [], clock + cycle * 60_000), iso(cycle * 60_000));
   assert.equal(state.faults.instances.length, 0, 'the history is not re-observed');
-  assert.equal(filed.length, 0);
   // One action failing on every retry is one instance; a success ends it, and a later failure is a new one.
   const attempt = (outcome: 'started' | 'failed' | 'done', offset: number) => storeAction(state, 'deployment:work-1:x', { kind: 'deployment', work: 'GY-1', principal: null, state: outcome, detail: outcome, attempts: 1, epoch: null, cycle: 0, at: iso(offset) });
   for (let retry = 0; retry < 4; retry++) { attempt('started', retry * 1000); attempt('failed', retry * 1000 + 500); }
@@ -428,8 +356,6 @@ test('unit:recurring-class-item — retained action history is not a standing fa
   assert.equal(attempt('done', 5500).faultClass, undefined, 'a successful action carries no class');
   attempt('started', 6000); attempt('failed', 6500);
   assert.equal(state.faults.instances.length, 2, 'failing again after a success is a new instance');
-  await fileRecurringFaultClasses(state, effects, [], clock + 7000, () => clock, []);
-  assert.equal(filed.length, 0, 'two deployment instances stay below the threshold');
 });
 
 test('unit:recurring-class-item — a fault that clears and returns is a new instance', () => {
@@ -450,34 +376,26 @@ test('unit:recurring-class-item — a fault that clears and returns is a new ins
   assert.equal(record.instances.filter(entry => entry.kind === 'scope-request' && entry.at === iso(180_000)).length, 1);
 });
 
-test('unit:recurring-class-item — derived and status-level faults reach recurrence tracking and file their class', async () => {
-  const filed: any[] = [];
+test('unit:recurring-class-item — derived and status-level faults reach recurrence tracking', async () => {
   let backlog: Work[] = [];
   let status: Record<string, unknown> = { github: true };
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: backlog.map(entry => ({ ...entry })), now: new Date(now).toISOString() }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     faultClassPolicy: policy, persist: async () => {}, controlPlane: async () => status,
-    fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${100 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
   } as unknown as DaemonEffects;
   let now = clock;
   const state = emptyDaemonState(config());
-  const classesFiled = () => filed.map(input => input.origin.faultClass.class as string);
   // Derived attention: a leased item whose worker session Herdr does not show is a session-liveness fault,
   // which no item's own record carries. One standing session stays one instance however many cycles see it.
   const leased = (key: string) => item(key, { stage: 'build', lease: { owner: 'graphyard-worker-1', epoch: 1, expiresAt: iso(10 * hour) } } as Partial<Work>);
   backlog = [leased('GY-1')];
   for (let minute = 0; minute < 3; minute++) { now = clock + minute * 60_000; await runCycle(config(), state, effects, () => now); }
   assert.equal(state.faults.instances.filter(entry => entry.faultClass === 'session-liveness').length, 1, `one standing session fault is one instance: ${JSON.stringify(state.faults.instances)}`);
-  assert.deepEqual(classesFiled(), [], 'below the threshold nothing is filed');
   backlog = [leased('GY-1'), leased('GY-2'), leased('GY-3')];
   now = clock + 5 * 60_000;
   await runCycle(config(), state, effects, () => now);
-  assert.deepEqual(classesFiled(), ['session-liveness'], 'the third session-liveness fault files its class');
-  assert.deepEqual(filed[0].origin.faultClass.instances.map((entry: { kind: string }) => entry.kind), ['session', 'session', 'session']);
-  // Its criterion is one the candidate can prove before merge; the post-ship quiet is the loop's own count, never merge evidence.
-  assert.match(filed[0].criteria[0].text, /removed at the candidate: each instance listed on this item is reproduced against the base and shown not to recur against the candidate/);
-  assert.doesNotMatch(filed[0].criteria[0].text, /ships|after/);
+  assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'session-liveness').map(entry => entry.kind), ['session', 'session', 'session']);
 
   // Status-level: an App permission shortfall the control plane reports, cleared and raised again three times.
   for (let round = 0; round < 3; round++) {
@@ -487,7 +405,6 @@ test('unit:recurring-class-item — derived and status-level faults reach recurr
     now += 60_000; await runCycle(config(), state, effects, () => now);
   }
   assert.equal(state.faults.instances.filter(entry => entry.faultClass === 'configuration').length, 3, 'a shortfall that clears and returns is a new instance each time');
-  assert.deepEqual(classesFiled(), ['session-liveness', 'configuration'], 'the recurring status-level class files its own item');
   // A failed integration job on the coordination read is an observation fault, with or without the status read.
   assert.deepEqual(cycleFaults(state, [], clock, { jobs: [{ work_id: 'GY-1', error: 'GitHub answered 502' }, { work_id: 'GY-2', error: null }, { work_id: 'GY-3' }] }).map(fault => [fault.kind, fault.faultClass, fault.subject]), [['integration-job', 'observation', 'GY-1']], 'a healthy scheduled job is no fault');
   // An item's own fault and the same fault derived again for it are one observation, not two.
@@ -508,7 +425,7 @@ test('unit:recurring-class-item — a typed wait is one fault, not also a generi
   const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
   trackFaults(record, cycleFaults(emptyDaemonState(config()), ['GY-21', 'GY-22', 'GY-23'].map(key => ({ ...parked, id: `work-${key}`, key })), clock), iso(0));
   assert.deepEqual([...new Set(record.instances.map(entry => entry.faultClass))], ['human-decision']);
-  assert.deepEqual(recurringClasses(record.instances, [], policy, clock).filter(entry => entry.file).map(entry => entry.faultClass), ['human-decision']);
+  assert.deepEqual(recurringFaultClasses({ faults: record } as DaemonState), ['human-decision']);
 });
 
 test('unit:recurring-class-item — containment grace window is no fault; lapsed quarantine is a containment fault', () => {
@@ -531,21 +448,7 @@ test('unit:recurring-class-item — containment grace window is no fault; lapsed
   assert.equal(cycleFaults(emptyDaemonState(config()), [fenced], lapsedClock + containmentSettleWaitBoundMs, { config: config() }).filter(fault => fault.faultClass === 'containment').length, 1);
 });
 
-test('unit:recurring-class-item — a recurring human-decision class keeps the decision with the human', () => {
-  const recent = [instance('human-decision', 'GY-1', -3 * hour), instance('human-decision', 'GY-2', -2 * hour), instance('human-decision', 'GY-3', -hour)];
-  const filed = faultClassItem({ faultClass: 'human-decision', recent }, policy, clock);
-  assert.match(filed.criteria[0].text, /judged necessary .* or avoidable/);
-  assert.match(filed.criteria[0].text, /every necessary decision is still refused to every agent and answered only in the human's own session/);
-  assert.doesNotMatch(filed.criteria[0].text, /shared cause .* removed/);
-  assert.match(filed.description, /does not move any of them to an agent or weaken that boundary/);
-  assert.doesNotMatch(filed.description, /so the product handles the case itself/);
-  assert.equal(filed.origin.faultClass.class, 'human-decision', 'the item still records the class it closes');
-  // Every other class keeps the remove-the-cause requirement.
-  assert.match(faultClassItem({ faultClass: 'scope', recent }, policy, clock).criteria[0].text, /shared cause of the recurring scope faults is found and removed/);
-});
-
 test('unit:recurring-class-item — attention master status adds after buildMasterStatus reaches recurrence tracking', async () => {
-  const filed: any[] = [];
   let reported: { subject: string; text: string }[] = [];
   const seen: unknown[] = [];
   const effects = {
@@ -553,7 +456,6 @@ test('unit:recurring-class-item — attention master status adds after buildMast
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     faultClassPolicy: policy, persist: async () => {}, controlPlane: async () => ({ github: true }),
     reportedAttention: async (_work: Work[], coordinator: unknown, observed: unknown) => { seen.push({ coordinator, observed }); return { items: reported }; },
-    fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${100 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
   } as unknown as DaemonEffects;
   let now = clock;
   const state = emptyDaemonState(config());
@@ -566,7 +468,7 @@ test('unit:recurring-class-item — attention master status adds after buildMast
   assert.ok(seen.length >= 3, 'the loop reads the report-only attention every cycle, with the control plane status');
   assert.deepEqual(state.faults.instances.filter(entry => entry.faultClass === 'decision').map(entry => [entry.kind, entry.faultClass, entry.subject]),
     [['context-overflow', 'decision', 'GY-1'], ['context-overflow', 'decision', 'GY-2'], ['context-overflow', 'decision', 'GY-3']]);
-  assert.deepEqual(filed.map(input => input.origin.faultClass.class), ['decision'], 'the recurring report-only class files its item');
+  assert.deepEqual(recurringFaultClasses(state, clock + 3 * 60_000), ['decision'], 'the recurring report-only class reaches the threshold, and files nothing (GY-2186)');
   // A failing read is itself a loop fault, and the cycle goes on.
   (effects as any).reportedAttention = async () => { throw new Error('status read refused'); };
   now = clock + 10 * 60_000; await runCycle(config(), state, effects, () => now);
@@ -576,11 +478,10 @@ test('unit:recurring-class-item — attention master status adds after buildMast
   const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'fault' } };
   const unprovisioned = daemonEffects('/nonexistent', config(), deps);
   assert.equal(typeof unprovisioned.reportedAttention, 'function', 'report-only faults are read without an operator-agent identity');
-  assert.equal(unprovisioned.fileFaultClass, undefined, 'filing still needs the operator-agent identity');
   assert.equal(typeof daemonEffects('/nonexistent', { ...config(), operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/operator.token' } } as MasterConfig, deps).reportedAttention, 'function');
   // Without the identity the report-only faults keep standing as the same instances, and a later recurrence still counts.
   reported = ['GY-1', 'GY-2', 'GY-3'].map(overflow);
-  const tracked = emptyDaemonState(config()), bare = { ...effects, reportedAttention: async () => ({ items: reported }), fileFaultClass: undefined } as unknown as DaemonEffects;
+  const tracked = emptyDaemonState(config()), bare = { ...effects, reportedAttention: async () => ({ items: reported }) } as unknown as DaemonEffects;
   for (let round = 0; round < 2; round++) { now = clock + (20 + round) * 60_000; await runCycle(config(), tracked, bare, () => now); }
   assert.equal(tracked.faults.instances.filter(entry => entry.faultClass === 'decision').length, 3, 'the standing report-only faults are tracked, once each');
   assert.equal(Object.keys(tracked.faults.open).length >= 3, true, 'they still stand, so provisioning the identity later opens no spurious recurrence');
@@ -599,8 +500,7 @@ test('unit:recurring-class-item — review conflicts and the other lines status 
   const state = emptyDaemonState(config());
   trackFaults(state.faults, cycleFaults(state, work, clock, { config: config(), reported: derived.items }), iso(0));
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'review-conflict').map(entry => entry.subject), ['GY-1', 'GY-2', 'GY-3']);
-  assert.deepEqual(recurringClasses(state.faults.instances, work, policy, clock).filter(entry => entry.file).map(entry => entry.faultClass), ['review-convergence'],
-    'three review conflicts in the window file the review-convergence item');
+  assert.deepEqual(recurringFaultClasses(state), ['review-convergence'], 'three review conflicts in the window reach the review-convergence threshold');
 });
 
 test('unit:recurring-class-item — the fault record stays bounded when failing runs never succeed', () => {
@@ -665,14 +565,12 @@ test('unit:recurring-class-item — the loop reads status-level faults with coor
       assert.ok(faults.includes('production:deployment'), `a production incident is a deployment fault: ${faults.join(', ')}`);
       assert.ok(!faults.includes('integration-job:observation'), 'held jobs are not reclassified as generic integration-job faults');
     }
-    // Recurring past the threshold, the deployment class files its item.
-    const filed: any[] = [];
+    // Recurring past the threshold, the deployment class reaches its threshold once, and files nothing (GY-2186).
     let status: Record<string, unknown> = { github: true };
     const effects = {
       agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
       faultClassPolicy: policy, persist: async () => {}, controlPlane: async () => status,
-      fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${300 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
     } as unknown as DaemonEffects;
     const state = emptyDaemonState(config());
     let now = clock;
@@ -682,14 +580,13 @@ test('unit:recurring-class-item — the loop reads status-level faults with coor
       status = { github: true };
       now += 60_000; await runCycle(config(), state, effects, () => now);
     }
-    assert.deepEqual(filed.map(input => input.origin.faultClass.class), ['deployment'], 'the recurring production fault files the deployment class once');
+    assert.deepEqual(recurringFaultClasses(state), ['deployment'], 'the recurring production fault reaches the deployment threshold once');
   } finally {
     await rm(secrets, { recursive: true, force: true });
   }
 });
 
-test('unit:recurring-class-item — a failed control-plane read ends no standing fault, so transient failures file nothing', async () => {
-  const filed: any[] = [];
+test('unit:recurring-class-item — a failed control-plane read ends no standing fault, so transient failures count nothing afresh', async () => {
   let read: 'ok' | 'fail' = 'ok';
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
@@ -697,7 +594,6 @@ test('unit:recurring-class-item — a failed control-plane read ends no standing
     faultClassPolicy: policy, persist: async () => {},
     controlPlane: async () => { if (read === 'fail') throw new Error('status read timed out'); return { github: true, heldJobs: 1, jobs: [] }; },
     reportedAttention: async () => ({ items: [] }),
-    fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${400 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
   } as unknown as DaemonEffects;
   const state = emptyDaemonState(config());
   // The held job stands throughout; every other read of the status fails.
@@ -706,7 +602,7 @@ test('unit:recurring-class-item — a failed control-plane read ends no standing
     const now = clock + round * 60_000; await runCycle(config(), state, effects, () => now);
   }
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'held-jobs').length, 1, 'one standing fault is one instance across the unread cycles');
-  assert.deepEqual(filed, [], 'transient read failures neither reopen the standing fault nor file its class');
+  assert.deepEqual(recurringFaultClasses(state), [], 'transient read failures neither reopen the standing fault nor grow its class past the threshold');
   // A cycle that read everything and no longer sees the fault ends it; its return is a new instance.
   const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
   const held = { kind: 'held-jobs' as const, faultClass: 'configuration' as const, subject: 'installation', text: 'held' };
@@ -743,17 +639,6 @@ test('unit:recurring-class-item — distinct faults of one kind on one subject a
   trackFaults(record, faults.slice(0, 2), iso(120_000));
   assert.equal(Object.keys(record.open).length, 2, 'one fewer ends one');
   assert.equal(trackFaults(record, faults, iso(180_000)).length, 1, 'its return is one new instance');
-  // Three distinct faults of the class in the window reach the threshold, so the loop files it once.
-  const filed: any[] = [];
-  const effects = {
-    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    faultClassPolicy: policy, persist: async () => {}, controlPlane: async () => status, reportedAttention: async () => ({ items: [] }),
-    fileFaultClass: async (input: any) => { filed.push(input); return item(`GY-${500 + filed.length}`, { title: input.title, origin: input.origin } as Partial<Work>); },
-  } as unknown as DaemonEffects;
-  const state = emptyDaemonState(config());
-  await runCycle(config(), state, effects, () => clock);
-  assert.deepEqual(filed.map(input => [input.origin.faultClass.class, input.origin.faultClass.count]), [[faults[0].faultClass, 3]]);
 });
 
 test('unit:recurring-class-item — the loop reads the attention master status adds with the coordinator credential, so intervention patterns recur', async () => {
@@ -840,25 +725,17 @@ test('unit:recurring-class-item — a fault fixed while another of its kind appe
   assert.equal(new Set(record.instances.map(entry => entry.id)).size, record.instances.length, 'every instance has its own id');
 });
 
-test('unit:recurring-class-item — a filing interrupted by a restart is retried, or adopted when its item stands', async () => {
-  const filed: string[] = [];
-  const effects = { fileFaultClass: async (_input: unknown, key: string) => { filed.push(key); return item('GY-50', { origin: { faultClass: { class: 'stalled-gate' } } } as Partial<Work>); }, faultClassPolicy: policy, persist: async () => {} } as unknown as DaemonEffects;
+test('unit:recurring-class-item — a filing row a restart left behind is retired, never retried', async () => {
+  const effects = { faultClassPolicy: policy, persist: async () => {} } as unknown as DaemonEffects;
   const state = emptyDaemonState(config());
   const work = [blocked('GY-1'), blocked('GY-2'), blocked('GY-3')];
   trackFaults(state.faults, cycleFaults(state, work, clock), iso(0));
-  // The daemon stopped after recording the filing as started and before the reply.
+  // The daemon stopped after recording a filing as started and before the reply (a row an earlier loop wrote).
   storeAction(state, 'fault:stalled-gate', { kind: 'fault', work: null, principal: null, state: 'started', detail: 'Filing', attempts: 1, epoch: null, cycle: state.cycle, at: iso(0) });
   const [resumed] = reconcilePendingActions(state, work, clock);
-  assert.equal(resumed.state, 'failed', 'with no item standing for the class the filing is retryable, not indeterminate');
-  state.cycle += 1;
-  await fileRecurringFaultClasses(state, effects, work, clock, () => clock, []);
-  assert.equal(filed.length, 1, 'the interrupted filing is made again, under the idempotency key naming the same instances');
-  assert.equal(state.actions['fault:stalled-gate'].state, 'done');
-  // When the item the interrupted filing made does stand, the restart adopts it.
-  const again = emptyDaemonState(config());
-  storeAction(again, 'fault:stalled-gate', { kind: 'fault', work: null, principal: null, state: 'started', detail: 'Filing', attempts: 1, epoch: null, cycle: 0, at: iso(0) });
-  const standing = item('GY-51', { stage: 'backlog', origin: { faultClass: { class: 'stalled-gate', threshold: 3, windowHours: 24, count: 3, instances: [], detectedAt: iso(0) } } } as Partial<Work>);
-  assert.deepEqual(reconcilePendingActions(again, [blocked('GY-1'), standing], clock).map(entry => [entry.state, entry.work]), [['done', 'GY-51']]);
+  assert.equal(resumed.state, 'done', 'the loop files no item any more, so the row is retired, not retried (GY-2186)');
+  assert.match(resumed.detail, /fault-class filings are retired/);
+  assert.deepEqual(recurringFaultClasses(state), ['stalled-gate'], 'the class still reaches the threshold, as the attention line');
 });
 
 test('unit:recurring-class-item — a scope request from an attempt that no longer holds the lease is no standing fault', () => {
@@ -872,10 +749,10 @@ test('unit:recurring-class-item — a scope request from an attempt that no long
   const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
   const moot = ['GY-31', 'GY-32', 'GY-33'].map(key => item(key, { scopeRequest: request, lease: null } as Partial<Work>));
   trackFaults(record, cycleFaults(emptyDaemonState(config()), moot, clock), iso(0));
-  assert.deepEqual(recurringClasses(record.instances, [], policy, clock).filter(entry => entry.file), []);
+  assert.deepEqual(recurringFaultClasses({ faults: record } as DaemonState), []);
 });
 
-test('unit:recurring-class-item — a starved reviewer or producer role reaches the loop, so its capacity item can be filed', async () => {
+test('unit:recurring-class-item — a starved reviewer or producer role reaches the loop as a capacity instance', async () => {
   const waiting = (key: string, id: string) => item(key, { stage: 'review', autoDispatch: { review: { id, state: 'requested', provider: 'github', requestedAt: iso(-hour) }, producers: [], history: [] } } as unknown as Partial<Work>);
   const work = [waiting('GY-1', 'r1'), waiting('GY-2', 'r2')];
   const master = { ...config(), reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto', agentArgs: [], environment: {} }] } as unknown as MasterConfig;
@@ -920,19 +797,17 @@ test('unit:recurring-class-item — a Herdr outage opens no session faults and e
   assert.equal(trackFaults(state.faults, missing, iso(120_000)).length, 0, 'the outage ended nothing, so its return is no new instance');
   trackFaults(state.faults, [{ kind: 'held-jobs', faultClass: 'configuration', subject: 'installation', text: 'held' }], iso(180_000), herdrFaultKinds);
   assert.equal(Object.values(state.faults.open).length, 2, 'only the unread kinds are kept; a full read of the rest still tracks them');
-  // The loop's wiring: a failed Herdr read reaches the report as unavailable, and three live leases file nothing.
-  const filed: unknown[] = [], observed: unknown[] = [];
+  // The loop's wiring: a failed Herdr read reaches the report as unavailable.
+  const observed: unknown[] = [];
   const work = ['GY-1', 'GY-2', 'GY-3'].map((key, index) => item(key, { stage: 'build', ready: true, epoch: 1, lease: { owner: `worker-${index}`, epoch: 1, expiresAt: iso(hour) } } as Partial<Work>));
   const three = { ...master, workers: [0, 1, 2].map(index => ({ ...master.workers[0], name: `worker-${index}`, principal: `worker-${index}`, agentName: `work-${index}`, mode: 'existing' })) } as MasterConfig;
   const effects = { agents: () => [], herdr: async () => ({ agents: [], available: false }), credentials: async () => ({}), snapshot: async () => ({ work, now: iso(0) }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }), faultClassPolicy: policy, persist: async () => {},
-    controlPlane: async () => ({ github: true }), reportedAttention: async (_work: Work[], _coordinator: unknown, seen: { available?: boolean }) => { observed.push(seen.available); return { items: [] }; },
-    fileFaultClass: async (input: unknown) => { filed.push(input); return item('GY-99'); } } as unknown as DaemonEffects;
+    controlPlane: async () => ({ github: true }), reportedAttention: async (_work: Work[], _coordinator: unknown, seen: { available?: boolean }) => { observed.push(seen.available); return { items: [] }; } } as unknown as DaemonEffects;
   const outage = emptyDaemonState(three);
   for (let round = 0; round < 3; round++) await runCycle(three, outage, effects, () => clock + round * 60_000);
   assert.ok(observed.length && observed.every(value => value === false), 'the report reads Herdr as unavailable');
   assert.ok(!outage.faults.instances.some(entry => entry.kind === 'session'), JSON.stringify(outage.faults.instances));
-  assert.deepEqual(filed, [], 'a Herdr outage files no session-liveness item');
   // A missing session read with Herdr up stands through a cycle Herdr cannot be read, as the same instance.
   let up = true;
   const one = { ...three, workers: [three.workers[0]] } as MasterConfig, standing = emptyDaemonState(one);
@@ -976,7 +851,7 @@ test('unit:recurring-class-item — standing faults are observed on a slower cad
   assert.equal(state.faults.instances.filter(entry => entry.kind === 'held-jobs').length, 1, 'the fault standing across the interval is still one instance');
 });
 
-test('unit:recurring-class-item — daemonSummary reports faults under the policy the loop files by', () => {
+test('unit:recurring-class-item — daemonSummary reports faults under the policy the attention reads by', () => {
   const state = emptyDaemonState(config());
   const injected = { threshold: 7, windowHours: 2 };
   assert.deepEqual(daemonSummary(state, clock, 20_000, 'machine-a', injected).faults.policy, injected);
