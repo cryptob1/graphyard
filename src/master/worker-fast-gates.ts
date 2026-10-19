@@ -2,20 +2,20 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 /**
- * The fast mechanical gates (GY-1797): the module and docs budget tests, the docs growth and
- * glossary gates, the wall-clock bomb scan and the CI shard map, plus the docs page checker. Each
+ * The fast mechanical gates (GY-1797): the module budget test, the docs glossary gate, the wall-clock
+ * bomb scan and the CI shard map, plus the docs page checker. Each
  * runs locally in seconds, and each is a check CI fails a whole rework round on when a worker
  * ships past it, so the worker request names them where its before-push discipline is stated:
  * after the sync instruction, before the complete instruction. One exported constant, so the
- * request (dispatch.ts workerPrompt), its tests (tests/worker-prompt-gates.test.ts and the soak
- * tests/soak-worker-fast-gates.test.ts) and the documentation (docs/coordination.md) read the same
+ * request (dispatch.ts workerPrompt), its tests (tests/worker-prompt-gates.test.ts) and the
+ * documentation (docs/coordination.md) read the same
  * list; every entry is a test file or script this repository carries, and all of them run as one
  * command line, chained with `&&`, so the request names one. This module holds the list beside the
  * prompt rather than in dispatch.ts, which sits within a few lines of its own 800-line budget: the
  * first attempt at this item merged at 801 and was reverted by the very gate it names.
  */
 export const workerFastGates = {
-  tests: ['tests/module-budgets.test.ts', 'tests/docs-budget.test.ts', 'tests/docs-growth-gate.test.ts', 'tests/docs-glossary.test.ts', 'tests/no-wall-clock-time-bombs.test.ts', 'tests/ci-shards.test.ts'],
+  tests: ['tests/module-budgets.test.ts', 'tests/docs-glossary.test.ts', 'tests/no-wall-clock-time-bombs.test.ts', 'tests/ci-shards.test.ts'],
   scripts: ['scripts/check-docs.mjs'],
 } as const;
 /**

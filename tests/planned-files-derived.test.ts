@@ -128,15 +128,15 @@ test('unit:implied-scope-requests-reported — master status reports and counts,
   ]);
 });
 
-test('unit:planned-files-carry-companions — authoring carries the test file the proofs live in and the docs-budget gate, so items authored like GY-945 and GY-883 report no implied scope request', () => {
-  const tree = new Set(['src/model/policy.ts', 'src/model/gates.ts', 'src/model.ts', 'docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/docs-budget.test.ts', 'tests/auto-rebase.test.ts', 'tests/existing.test.ts']);
+test('unit:planned-files-carry-companions — authoring carries the test file the proofs live in, so items authored like GY-945 and GY-883 report no implied scope request', () => {
+  const tree = new Set(['src/model/policy.ts', 'src/model/gates.ts', 'src/model.ts', 'docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/auto-rebase.test.ts', 'tests/existing.test.ts']);
   // GY-945: web-UI prose criteria whose two proofs share `fleet-panel`, and a documentation guide.
   const fleet = [
     { id: 'AC-1', text: 'A fleet panel in the web UI lists every registry account.', proofs: ['unit:fleet-panel-renders-registry'] },
     { id: 'AC-2', text: 'Stale or probe-failed accounts are visually distinguished from healthy ones.', proofs: ['unit:fleet-panel-marks-stale-probe'] },
   ];
   const gy945 = derivePlannedFiles({ plannedFiles: ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css'], criteria: fleet }, tree);
-  assert.deepEqual(gy945.added, [{ path: 'tests/fleet-panel.test.ts', criterion: 'AC-1' }, { path: 'tests/docs-budget.test.ts', criterion: 'DOCS' }]);
+  assert.deepEqual(gy945.added, [{ path: 'tests/fleet-panel.test.ts', criterion: 'AC-1' }]);
   assert.deepEqual(gy945.missing, []);
   // GY-883: criteria naming src/model/policy.ts, src/model/gates.ts and the new tests/risk-lanes.test.ts.
   const lanes = [
@@ -144,7 +144,7 @@ test('unit:planned-files-carry-companions — authoring carries the test file th
     { id: 'AC-2', text: 'In src/model/gates.ts a low-lane item is landable with its checks green.', proofs: ['unit:lane-sets-required-gates'] },
   ];
   const gy883 = derivePlannedFiles({ plannedFiles: ['tests/risk-lanes.test.ts', 'docs/how-graphyard-works.md'], criteria: lanes }, tree);
-  assert.deepEqual(gy883.plannedFiles, ['tests/risk-lanes.test.ts', 'docs/how-graphyard-works.md', 'src/model/policy.ts', 'src/model/gates.ts', 'tests/docs-budget.test.ts'], 'a planned test file holds the proofs; the gate rides beside documentation');
+  assert.deepEqual(gy883.plannedFiles, ['tests/risk-lanes.test.ts', 'docs/how-graphyard-works.md', 'src/model/policy.ts', 'src/model/gates.ts'], 'a planned test file holds the proofs');
   // No documentation and no test proof: nothing is carried. A plain manual: proof still plans nothing;
   // a fault-class manual proof (GY-1706) plans its test file the way unit:/integration: proofs do.
   assert.deepEqual(derivePlannedFiles({ plannedFiles: ['src/model/gates.ts'], criteria: [{ id: 'AC-1', text: 'Gates change.', proofs: ['manual:x'] }] }, tree).added, []);
@@ -159,10 +159,10 @@ test('unit:planned-files-carry-companions — authoring carries the test file th
   const now = '2026-09-29T06:30:57.512Z';
   const open = (plannedFiles: string[], paths: string[], criteria: typeof fleet) => ({ key: 'GY-945', stage: 'build', criteria, plannedFiles, scopeDecision: null,
     scopeRequest: paths.length ? { epoch: 1, paths, reason: 'the feature', requestedBy: 'w', at: now } : null }) as unknown as Work;
-  const asked = ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts', 'tests/docs-budget.test.ts'];
+  const asked = ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts'];
   const before = impliedScopeRequests([open([], asked, fleet)]);
   assert.equal(before.count, 1);
-  assert.deepEqual(before.items[0].named.map(entry => entry.path), ['web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts', 'tests/docs-budget.test.ts']);
+  assert.deepEqual(before.items[0].named.map(entry => entry.path), ['web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts']);
   const carried = derivePlannedFiles({ plannedFiles: ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css'], criteria: fleet }, tree).plannedFiles;
   const unplanned = asked.filter(path => !carried.includes(path));
   assert.deepEqual(unplanned, [], 'every path GY-945 asked for is planned at authoring');

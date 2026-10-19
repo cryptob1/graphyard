@@ -9,7 +9,7 @@
 
 Per session: worker identity, host ID, or `init --url https://YOUR-HOST --herdr --host-id NAME --token-stdin`. Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`; the merge writer's trial is the gate; masterless: `graphyard watch GY-N EPOCH -- COMMAND` ([worker](protocol/work-commands.md#watch)).
 
-`init --scan --apply` records found docs paths and the `"changelog"` setting in `graphyard.json`; deploys print `GRAPHYARD_DOCUMENTATION`. Features and `bug`s owe *Documentation reflects this change* (docs diff or `complete --no-docs "WHY"`); `"wordBudget"` is [counted](development.md#documentation).
+`init --scan --apply` records found docs paths and the `"changelog"` setting in `graphyard.json`; deploys print `GRAPHYARD_DOCUMENTATION`. Features and `bug`s owe *Documentation reflects this change* (docs diff or `complete --no-docs "WHY"`), judged by the reviewer.
 
 ### What the generated instructions authorize
 
@@ -49,7 +49,7 @@ A Pi **doctor** acts on `run.doctor.intervalMinutes`, never asks people; files o
 
 ## 4. Prove the first change
 
-`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged by the merge writer's passing trial; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged when the merge writer's trial passes and pushes main with its deploy key; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 ## The dashboard
 

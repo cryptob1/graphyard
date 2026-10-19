@@ -1,11 +1,11 @@
 <!-- page: Operate Graphyard | 5 | loop -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
+The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; goals decompose by [planner](how-graphyard-works.md#from-goal-to-work-items). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches; merge gate-passing candidates; rework findings; deployment verification (one release health line; an item is delivered at merge); control plane performs "Close finished agent sessions". A loop-owned observation item's due reading is recorded on the serving release; `master reading GY-N pass|fail DETAIL` records one by hand. The [browser flows](master-agent-reference.md#github-administration-through-the-browser) refuse: the deploy key is the only remote credential. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, release health healthy or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions.
+Keep cycling: `master status`; `master run` dispatches; merge gate-passing candidates; rework findings; deployment verification (one release health line; delivered at merge); control plane performs "Close finished agent sessions". A loop-owned observation item's due reading is recorded on the serving release; `master reading GY-N pass|fail DETAIL` records one by hand. The [browser flows](master-agent-reference.md#github-administration-through-the-browser) refuse: the deploy key is the only remote credential. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, release health healthy or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions.
 
 `master restart` (stalled loop) runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` `master run`, else detached; never from [dirty checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). Loop sleeps `run.intervalSeconds` (≤30s actionable).
 

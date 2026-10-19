@@ -4,6 +4,9 @@ import { parseArgs } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
 import { selfVerification } from './verify.js';
+import { defaultChildRun, type ChildRun } from '../child-runner.js';
+import { trialFailurePrefix } from '../model/rework-ground.js';
+import { trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 
 /**
  * A submission is observed on GitHub before it is accepted, so while the control plane's GitHub
@@ -71,6 +74,28 @@ export function completionBody(args: readonly string[], headOf: () => string): {
 }
 
 /**
+ * GY-2517: the failing test files the item's latest merge-writer refusal names, or none. The trial
+ * refuses `trial failed: tests <file, …>` (merge-writer/executor.ts); a conflict, a failed build
+ * step or a trial that reached no verdict, a revert refusal and no refusal at all name no test
+ * files, so none is re-run for them.
+ */
+export function trialFailureTests(refusal: { kind: string; reason: string } | null | undefined): string[] {
+  const prefix = `${trialFailurePrefix}: tests `;
+  if (refusal?.kind !== 'merge' || !refusal.reason.startsWith(prefix)) return [];
+  return [...new Set(refusal.reason.slice(prefix.length).split(',').map(name => name.trim()).filter(Boolean))];
+}
+/** The rerun runs under the trial's own bound: its failing files are a subset of what the trial ran (GY-2517). */
+export const rerunTrialTimeoutMs = trialTimeoutMinutes * 60_000;
+/**
+ * GY-2517: re-run `files` in the worktree exactly the way `npm test` runs them — the runner the
+ * trial used — and answer whether they passed, with the output captured so the caller prints it.
+ */
+export async function rerunTrialFiles(root: string, files: readonly string[], run: ChildRun = defaultChildRun): Promise<{ ok: boolean; output: string }> {
+  try { return { ok: true, output: await run('npm', ['test', '--', ...files], { cwd: root, timeoutMs: rerunTrialTimeoutMs }) }; }
+  catch (error: any) { return { ok: false, output: `${error.stdout ?? ''}${error.stderr ?? ''}` || (error instanceof Error ? error.message : String(error)) }; }
+}
+
+/**
  * GY-1753 AC-1: push the repository's current branch to origin with upstream when it is a
  * `graphyard/` branch, so the PR head exists for a worker whose own push was refused; any other
  * branch (or a detached HEAD) pushes nothing. A failed push is returned, never thrown: `complete`'s own
@@ -111,6 +136,16 @@ export const completeCommand: CliCommand = {
   ],
   run: async (context, work) => {
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
+    // GY-2517: a rework after a failed merge trial re-runs the trial's failing test files here,
+    // before anything is pushed or submitted, so a head that still fails them no longer costs the
+    // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape
+    // names files; every other item runs nothing.
+    const failing = trialFailureTests(work.mergeLedger?.refusal);
+    if (failing.length) {
+      console.error(`complete re-runs the merge trial's failing tests on this head before submitting: ${failing.join(', ')}`);
+      const rerun = await rerunTrialFiles(context.repositoryRoot(), failing);
+      if (!rerun.ok) throw new Error(`complete refused: the merge trial's failing tests still fail on this head (${failing.join(', ')}):\n${rerun.output.trimEnd().slice(-4000)}`);
+    }
     // GY-1925: the two forms map one-to-one onto the merger modes the engine enforces at submit
     // (GY-1523 — a head is accepted only while the control plane is the merge writer, a pull request
     // only while GitHub is), so the form alone decides whether anything is pushed. The `--head` form

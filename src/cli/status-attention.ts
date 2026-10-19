@@ -1,6 +1,5 @@
 import { agentOwner, humanOwner, installationOwner, type AttentionItem } from '../master.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
-import { docsHeadroomStatus } from '../daemon/faults.js';
 import type { Work } from '../model.js';
 import { mergeStalls, requiredCheckDisagreements, verdictContradictions } from '../merge-queue.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
@@ -166,16 +165,6 @@ export function nameBaseBreaks<S extends { work: { key: string; refusal: { gate:
   });
   const attentionItems = status.attentionItems.map(item => named.has(item.subject) && failedCheckLine(item.text) ? { ...item, ...owner(item.subject), text: named.get(item.subject)!.text } : item);
   return { ...status, work: rows, attentionItems };
-}
-
-/**
- * The documentation word budget on the base branch (GY-574), as `reportedAttention` carries it: the
- * reading, with its attention pushed onto the installation attention it lands beside.
- */
-export async function docsBudgetAttention(root: string, baseBranch: string, onto: AttentionItem[]) {
-  const docs = await docsHeadroomStatus(root, baseBranch);
-  onto.push(...docs.attention);
-  return docs.docs;
 }
 
 /** GY-2186: each fault class recurring past its policy threshold in the window is one attention line naming the class, the count, the window and the latest instance. */

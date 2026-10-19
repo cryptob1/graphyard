@@ -29,7 +29,7 @@ test('unit:docs-sync-harness-allows-own-branch-push — the docs-sync role allow
   assert.equal(decide(`git commit -m "Graphyard docs-sync of ${plan.key} onto ${plan.base.slice(0, 12)}"`), 'allow', 'the merge commit is allowed');
   assert.equal(decide(`git merge --no-ff ${plan.base}`), 'allow');
   assert.equal(decide('git merge --abort'), 'allow');
-  assert.equal(decide('npm test -- tests/docs-budget.test.ts tests/docs-obligation.test.ts'), 'allow');
+  assert.equal(decide('npm test -- tests/docs-obligation.test.ts'), 'allow');
   // The prompt's own push instruction is the allowed command, verbatim.
   assert.ok(docsSyncPrompt({ repository: 'owner/project', cliPath }, plan, '/repo', '/w').includes(`${own} —`), 'the instruction names exactly the allowed push');
   for (const command of [
