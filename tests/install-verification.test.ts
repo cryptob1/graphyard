@@ -6,14 +6,13 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import type { GitHub } from '../src/github.js';
 import { applyInstall, buildPlan, prepareInstall, type InstallDependencies } from '../src/install/index.js';
 import { verifyDelivery, VERIFICATION_CHECK } from '../src/install/github.js';
 import { emptyObservation, type ProviderAdapter } from '../src/install/adapters.js';
 import { detectHerdr, detectRuntimes, masterRuntime, reviewerProfiles, workerProfiles } from '../src/install/runtimes.js';
 import { ensureTokens, installDirectory, plannedPrincipals, prepareInstallDirectory, Vault } from '../src/install/secrets.js';
 import { fakeTransport, type Transport } from '../src/install/transport.js';
-import { appKey, githubResponses, harness, temporaryRepository, GRAPHYARD_APP_ID, WEBHOOK_SECRET } from './install-harness.js';
+import { githubResponses, harness, temporaryRepository } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const INSTALL_ID = 'owner-project';
@@ -31,14 +30,6 @@ let database: EmbeddedPostgres; let store: Store; let http: ReturnType<typeof se
 let root: string; let configHome: string; let tokens: Map<string, string>;
 const principals = plannedPrincipals(INSTALL_ID, { workers: 2 });
 
-const github = {
-  config: { repository: 'owner/project', base: 'main', appId: GRAPHYARD_APP_ID, installationId: 500, privateKey: appKey, reviewerApps: [] },
-  reviewRepository: async () => ({ id: 1, fullName: 'owner/project' }),
-  reviewPermissions: async () => ({ pull_requests: 'write', issues: 'read', checks: 'write' }),
-  // The permission preflight has not run in this process; status reports that rather than failing.
-  permissionReport: () => null,
-} as unknown as GitHub;
-
 before(async () => {
   root = await temporaryRepository();
   configHome = await temporaryDirectory('verify');
@@ -51,7 +42,8 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_install');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_install`); await store.init();
   const engine = new Engine(store, [15368], 120, 'owner/project');
-  http = server(engine, principals.map(principal => ({ ...principal, token: tokens.get(principal.id)! })), github);
+  // GY-2009: install binds no GitHub App, so the control plane it verifies serves without one.
+  http = server(engine, principals.map(principal => ({ ...principal, token: tokens.get(principal.id)! })), null);
   await new Promise<void>(accept => http.listen(0, '127.0.0.1', accept));
   live = `http://127.0.0.1:${(http.address() as any).port}`;
 });
@@ -82,25 +74,19 @@ function stubAdapter(): ProviderAdapter {
   };
 }
 
-test('the installer verifies /healthz, authenticated /api/status, and webhook delivery against a live control plane', async () => {
-  const deliveries: any[] = [];
+test('the installer verifies /healthz and authenticated /api/status against a live control plane; it binds no App, so no webhook delivery is owed (GY-2009)', async () => {
   const herdrCommands: string[][] = [];
   const transport = fakeTransport({ responses: githubResponses({ installed: false, protection: null, deliveries: [], hookConfig: null }) });
+  // Nothing may reach api.github.com: the install's only GitHub access is gh adding the deploy key.
   const hybrid = (async (input: any, init: any = {}) => {
-    const url = String(input);
-    if (!url.startsWith('https://api.github.com')) return fetch(input, init);
-    const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
-    if (url.includes('/access_tokens')) return json(201, { token: 'installation-token', expires_at: new Date(Date.now() + 3_600_000).toISOString() });
-    if (url.endsWith('/app/hook/config')) return json(200, { url: `${live}/api/github/webhook`, content_type: 'json' });
-    if (url.includes('/app/hook/deliveries')) return json(200, deliveries);
-    if (url.includes('/check-runs')) { deliveries.unshift({ id: 1, event: 'check_run', status_code: 202, delivered_at: new Date().toISOString() }); return json(201, { id: 7 }); }
-    return json(404, {});
+    if (String(input).startsWith('https://api.github.com')) throw new Error(`install called the GitHub API: ${String(input)}`);
+    return fetch(input, init);
   }) as unknown as typeof fetch;
 
   const dependencies: InstallDependencies = {
     transport: transport as Transport, fetch: hybrid, configHome, sourceRoot: root, adapter: stubAdapter(),
     cliPath: join(root, 'package.json'), hostId: 'verification-host', wait: async () => {}, log: () => {},
-    githubApp: async () => ({ appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project', installationId: 500, privateKey: appKey, webhookSecret: WEBHOOK_SECRET }),
+    githubApp: async () => { throw new Error('the App manifest flow must never run: an install binds no App'); },
     detectRuntimes: async () => [
       { kind: 'claude', program: 'claude', path: '/usr/bin/claude', authenticated: true, reason: 'signed in' },
       { kind: 'codex', program: 'codex', path: '/usr/bin/codex', authenticated: true, reason: 'signed in' },
@@ -118,9 +104,10 @@ test('the installer verifies /healthz, authenticated /api/status, and webhook de
   assert.equal(summary.status.role, 'admin');
   assert.equal(summary.status.actor, `${INSTALL_ID}-operator`);
   assert.equal(summary.status.repository, 'owner/project');
-  assert.equal(summary.status.githubAppId, GRAPHYARD_APP_ID);
-  assert.equal(summary.webhook.delivered, true, summary.webhook.detail);
-  assert.equal(summary.webhook.statusCode, 202);
+  assert.equal(summary.status.githubAppId, null);
+  assert.equal(summary.github, null);
+  assert.equal(summary.webhook.skipped, true, summary.webhook.detail);
+  assert.equal(summary.webhook.delivered, false);
 
   // Profiles: one master, one profile per worker principal, bound to a detected runtime.
   assert.equal(summary.profiles.repository.connected, true);

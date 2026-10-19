@@ -61,11 +61,12 @@ async function observeOnlyFixture(interrupt = 0, existing = false) {
 const mutations = [/git\/refs/, /--method (POST|PUT|PATCH|DELETE)/, /\/protection/, /rulesets/, /allow_auto_merge|auto-merge|merge_queue/i, /^railway environment/, /^herdr /, /systemctl/, / master init/];
 
 test('unit:install-observe-only-changes-nothing — install --observe-only --apply creates no ref, writes no protection, auto-merge or merge queue, binds no App, installs no worker, profile, supervisor unit or Herdr link, runs no product deployment adapter, and its plan names each held action', async () => {
-  // The flag parses to the observation-only request, implying --no-github-app and --no-herdr,
+  // The flag parses to the observation-only request, implying no App (GY-2009: install never registers one) and --no-herdr,
   // refuses every flag that would change the repository, and survives the resume command.
   const { request } = installRequestFromArgs(['--provider', 'railway', '--repo', REPOSITORY, '--observe-only', '--apply']);
   assert.deepEqual({ observeOnly: request.observeOnly, noGithubApp: request.noGithubApp, herdr: request.herdr }, { observeOnly: true, noGithubApp: true, herdr: 'skip' });
-  assert.match(resumeCommand({ inputs: { ...request, baseBranch: 'main' } as any }), /--no-herdr .*--no-github-app --observe-only --apply$/);
+  assert.match(resumeCommand({ inputs: { ...request, baseBranch: 'main' } as any }), /--no-herdr --observe-only --apply$/);
+  assert.doesNotMatch(resumeCommand({ inputs: { ...request, baseBranch: 'main' } as any }), /--no-github-app|--github-app|--reuse-app/, 'GY-2009: the resume command carries no App flag');
   for (const flag of [['--reviewer', 'claude'], ['--workers', '2'], ['--create-environments'], ['--herdr-rebind'], ['--producer-proof', 'unit']])
     assert.throws(() => installRequestFromArgs(['--provider', 'railway', '--repo', REPOSITORY, '--observe-only', ...flag]), new RegExp(`--observe-only changes nothing the repository owns.*${flag[0]}`));
 
@@ -75,10 +76,11 @@ test('unit:install-observe-only-changes-nothing — install --observe-only --app
     assert.equal(plan.observeOnly, true);
     assert.ok(plan.preflight.every(item => item.ok), JSON.stringify(plan.preflight.filter(item => !item.ok)));
     const heldIds = plan.actions.filter(action => action.state === 'held').map(action => action.id);
-    assert.deepEqual(heldIds, ['github.app', 'github.protection', 'release.branches', 'release.github-environments', 'release.railway.project', 'release.railway.uat', 'release.railway.production', 'local.workers', 'local.profiles', 'local.herdr']);
+    assert.deepEqual(heldIds, ['github.app', 'release.branches', 'release.github-environments', 'release.railway.project', 'release.railway.uat', 'release.railway.production', 'local.workers', 'local.profiles', 'local.herdr']);
     for (const action of plan.actions.filter(entry => entry.state === 'held')) assert.ok(action.held!.startsWith(`${OBSERVE_ONLY_HELD}: `), `${action.id} is not named as held by observation-only`);
     assert.match(plan.actions.find(action => action.id === 'release.branches')!.held!, /release refs are not created/);
-    assert.match(plan.actions.find(action => action.id === 'github.protection')!.held!, /branch protection, auto-merge and merge-queue settings are never written/);
+    // GY-2009: no install plans a branch-protection write, so observation-only has none to hold.
+    assert.ok(!plan.actions.some(action => action.id === 'github.protection'));
     assert.match(plan.actions.find(action => action.id === 'release.railway.uat')!.held!, /product deployment adapter does not run/);
     assert.ok(!plan.principals.some(principal => principal.role === 'worker' || principal.role === 'producer'), 'a worker principal was planned');
     // The control plane itself is still deployed.
