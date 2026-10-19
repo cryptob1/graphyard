@@ -66,8 +66,6 @@ import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
-import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
-import { browserFlowChild } from './cycle-remedies.js';
 import { answeredMechanicalReviews } from './mechanical-plan-report.js';
 import { mechanicalFixState, readMechanicalFixState } from '../mechanical-findings.js';
 import { retriedSnapshot } from './snapshot-retry.js';
@@ -213,8 +211,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     answerSession: async (agent, keys) => { await herdrCall(run, ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event), blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
-    browserFlow: flow => browserFlowChild(run, root, flow),
-    recordRemedy: (row, attempt) => mutate(`actions/${row}/remedy`, attempt),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event), recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
     research: { cwd: root }, harness: { servingUnit: detectLoopSupervisorUnit() },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),

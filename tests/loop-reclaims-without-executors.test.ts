@@ -110,4 +110,8 @@ test('unit:executor-fleet-removed — the executor process, fleet, presence mode
   const layout = { userUnitDirectory: '/home/graphyard/.config/systemd/user' } as Parameters<typeof supervisedUnits>[0];
   assert.deepEqual(supervisedUnits(layout, perInstallUnits('owner/project')).map(unit => unit.role), ['master loop']);
   assert.doesNotMatch(readFileSync(join(root, 'src/install/host.ts'), 'utf8'), /graphyard-executor\.mjs/, 'the host install runs no executor installer');
+  // Nothing in the loop posts to the removed remedy route: the action-row remedy consumer went with it.
+  assert.equal(existsSync(join(root, 'src/daemon/cycle-remedies.ts')), false, 'the loop runs no stall-remedy step');
+  for (const file of ['src/daemon/effects-production.ts', 'src/daemon/cycle.ts'])
+    assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /\/remedy`|remedyStep|recordRemedy/, `${file} records no row remedy`);
 });

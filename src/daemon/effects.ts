@@ -79,8 +79,6 @@ import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
 import { diagnosticianSettings } from '../runner/payloads.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
-import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
-import { browserFlowChild } from './cycle-remedies.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
@@ -280,10 +278,6 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   blockDispatch?: (work: Work, reason: string) => Promise<unknown>; // GY-1078: an item's repeated dispatch-failure cause as its blocker; absent, the loop holds it
-  /** Run one master browser flow as a child command (GY-949); a refusal resolves, only a child that printed no result rejects. */
-  browserFlow?: (flow: RemedyFlow) => Promise<FlowResult>;
-  /** Record the loop's attempt of a remedy on the stalled row it was applied for (`POST /api/actions/:id/remedy`). */
-  recordRemedy?: (row: string, attempt: Omit<RemedyRecord, 'at' | 'by'>) => Promise<unknown>;
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
