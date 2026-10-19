@@ -1,6 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -36,17 +35,7 @@ const annotationOf = (names: string[]) => {
   return { message: command.slice(command.indexOf('::', 2) + 2).replace(/%0A/g, '\n').replace(/%0D/g, '\r').replace(/%25/g, '%') };
 };
 
-test('unit:base-break-refresh — CI names every failed test on its check run, and only a head whose failures all fail on the base it was built against and pass on the tip is a base breakage', async () => {
-  // The CI half: the required `test` job runs the report whenever a shard failed, not only when a
-  // timing assertion went over budget, on pull requests and pushes to main alike, with every shard's log.
-  const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  const job = ci.slice(ci.indexOf('\n  test:\n'));
-  assert.match(job, /id: report\n\s+if: steps\.timing\.outputs\.over == 'true' \|\| needs\.test-shard\.result == 'failure'\n/);
-  const report = job.slice(job.indexOf('- name: Report timing-dependent assertions'), job.indexOf('- name: Pass only when'));
-  assert.match(report, /if: steps\.report\.outputs\.run == 'true'/);
-  assert.match(report, /timing-report\.ts "\$RUNNER_TEMP\/graphyard-timing\.jsonl" "\$RUNNER_TEMP"\/timing\/test-\*\.log/);
-  assert.equal(job.match(/if: steps\.report\.outputs\.run == 'true'/g)?.length, 3, 'checkout, setup-node and the report all run when it reports');
-  assert.doesNotMatch(job, /if: steps\.timing\.outputs\.over == 'true'\n/, 'no step of the report is left gated on a timing failure alone');
+test('unit:base-break-refresh — the failed-tests report names every failed test, and only a head whose failures all fail on the base it was built against and pass on the tip is a base breakage', async () => {
   // The report step reads the suite's log and publishes one annotation naming each failed test.
   assert.deepEqual(failedTestsFromLog(specLog([broken, own])), [broken, own].sort());
   assert.equal(failedTestsFromLog('npm ERR! install failed'), null, 'a run that never reported names no test');

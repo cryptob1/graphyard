@@ -13,6 +13,7 @@ import { hostSizing, recommendServerType, parseServerTypes } from '../src/instal
 import { ensureTokens, fingerprint, installDirectory, plannedPrincipals, Vault, writeInstallRecord } from '../src/install/secrets.js';
 import { principalSchema } from '../src/server/principals.js';
 import { workerConfinementRefusal } from '../src/master/profiles.js';
+import { mergeWriterSettings } from '../src/master/merge-writer-settings.js';
 import { sessionNameRefusal } from '../src/session-name.js';
 import { connectProvider } from '../src/fleet.js';
 import { createPiHome, writeProviderAuthFile } from '../src/master/connect-accounts.js';
@@ -76,9 +77,11 @@ test('unit:host-install-plan — the host plan names every unit, runtime and cre
     // The dashboard reaches sessions on the same machine: no relay is provisioned, and the plan says so.
     assert.equal(host.sessionViewer, 'local');
     assert.equal(plan.actions.find(action => action.id === 'host.session-viewer')?.state, 'satisfied');
-    // Workers' GitHub credential: minted on the host from the App key, never typed in.
-    assert.ok(host.credentials.some(entry => entry.path === `${CONFIG}/github/app-private-key.pem`));
-    assert.match(plan.actions.find(action => action.id === 'host.github')!.title, /mint one-hour App installation tokens narrowed to owner\/project/);
+    // GY-2009: the host's one GitHub credential is the merge writer deploy key, where its merge writer reads it; no App key.
+    assert.ok(host.credentials.some(entry => entry.path === `${CONFIG}/owner-project/deploy-key`));
+    assert.ok(!host.credentials.some(entry => entry.path.startsWith(`${CONFIG}/github/`)), 'no App key is planned');
+    assert.match(plan.actions.find(action => action.id === 'host.github')!.title, /deploy key .*owner-project\/deploy-key.*no GitHub App key/);
+    assert.match(plan.actions.find(action => action.id === 'host.checkout')!.title, /over SSH \(git@github\.com:owner\/project\.git\) with the merge writer deploy key/);
     assert.ok(!plan.actions.some(action => action.id === 'local.profiles'), 'profiles are not registered on the operator machine');
   } finally { await fixture.cleanup(); }
 });
@@ -154,27 +157,37 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.ok(!fixture.requests.some(request => request.url.endsWith('/api/agent-registry/apply')), 'no account is registered before it is connected');
     assert.deepEqual(summary.host!.accounts.map(account => [account.name, account.login]), ['claude', 'codex', 'opencode', 'pi'].map(kind => [`${kind}-a`, null]));
 
-    // The managed repository is cloned with the App's installation token on standard input: never an argument, never stored.
+    // GY-2009: install registers no App. A fresh host gets the deploy key install registered, at the
+    // path the host's merge writer resolves (GRAPHYARD_CONFIG_HOME=<install>), and the managed
+    // repository — private or not — is cloned over SSH with that key alone; the checkout keeps it
+    // for its fetches and the writer's push. No installation token, App key, token helper or App bot identity reach the host.
+    const localKey = join(session.directory, 'deploy-key');
+    const hostKey = files.get(`${CONFIG}/owner-project/deploy-key`)!;
+    assert.equal(hostKey.content.trim(), readFileSync(localKey, 'utf8').trim(), 'the registered key is copied to the host');
+    assert.equal(hostKey.mode, 0o600);
+    assert.equal(hostKey.owner, '1001:1001');
+    assert.equal(files.get(`${CONFIG}/owner-project/deploy-key.pub`)?.content, readFileSync(`${localKey}.pub`, 'utf8'));
+    assert.ok(lines.includes(`install -d -m 0700 -o graphyard -g graphyard ${CONFIG}/owner-project`));
+    const saved = process.env.GRAPHYARD_CONFIG_HOME;
+    process.env.GRAPHYARD_CONFIG_HOME = CONFIG;
+    try { assert.equal(mergeWriterSettings({}, 'owner-project').deployKeyFile, `${CONFIG}/owner-project/deploy-key`, 'the host merge writer reads the copied key'); }
+    finally { if (saved === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = saved; }
     const clone = hostOf(fixture).commands.find(command => command.args.some(arg => arg.includes('clone --quiet')))!;
-    assert.equal(clone.input, 'installation-token-for-tests');
-    assert.ok(clone.args.includes('https://github.com/owner/project.git'));
-    assert.ok(!clone.args.some(arg => arg.includes('installation-token-for-tests')));
-    assert.ok(![...files.values()].some(file => file.content.includes('installation-token-for-tests')), 'the clone token is written nowhere on the host');
-
-    // Workers push and open pull requests with nobody logging in: gh is installed, the App key and the
-    // token helper sit in <install>/github at 0600, gh is wrapped, and git is pointed at the helper.
+    assert.equal(clone.input, undefined);
+    assert.ok(clone.args.includes('git@github.com:owner/project.git'), clone.args.join(' '));
+    assert.ok(!clone.args.some(arg => arg.includes('https://github.com/owner/project')), 'no anonymous HTTPS clone');
+    const sshCommand = `ssh -i ${CONFIG}/owner-project/deploy-key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
+    assert.ok(clone.args.includes(sshCommand), clone.args.join(' '));
+    const script = clone.args.find(arg => arg.includes('clone --quiet'))!;
+    assert.match(script, /GIT_SSH_COMMAND="\$3" git clone --quiet "\$2" "\$1"/);
+    assert.match(script, /git -C "\$1" config core\.sshCommand "\$3" && git -C "\$1" remote set-url origin "\$2"/);
+    assert.ok(hostOf(fixture).commands.findIndex(command => command.args.includes(`${CONFIG}/owner-project`)) < hostOf(fixture).commands.indexOf(clone), 'the key is on the host before the clone');
+    assert.ok(!clone.args.some(arg => arg.includes('GIT_TOKEN')));
+    assert.ok(!JSON.stringify(summary).includes(hostKey.content.split('\n')[1] ?? '\u0000'), 'the deploy key reaches no summary');
     assert.match(bootstrap, /command -v gh >\/dev\/null \|\| \(apt-get update && apt-get install -y gh\)/);
-    for (const name of ['app.json', 'app-private-key.pem', 'graphyard-github-credential.mjs']) {
-      const file = files.get(`${CONFIG}/github/${name}`)!;
-      assert.ok(file, name);
-      assert.equal(file.mode, 0o600, name);
-      assert.equal(file.owner, '1001:1001', name);
-    }
-    assert.equal(files.get(`${CONFIG}/github/app-private-key.pem`)!.content.trim(), appKey.trim());
-    assert.deepEqual(JSON.parse(files.get(`${CONFIG}/github/app.json`)!.content), { appId: GRAPHYARD_APP_ID, installationId: 500, repository: 'owner/project' });
-    assert.equal(files.get(HOST_GH_WRAPPER)?.mode, 0o755);
-    assert.ok(lines.some(line => line.endsWith(`git config --global credential.https://github.com.helper !node ${CONFIG}/github/graphyard-github-credential.mjs`)), 'git uses the helper for github.com');
-    assert.ok(lines.some(line => line.endsWith('git config --global user.name graphyard-owner-project[bot]')), 'commits carry the App bot identity');
+    for (const name of ['app.json', 'app-private-key.pem', 'graphyard-github-credential.mjs']) assert.equal(files.get(`${CONFIG}/github/${name}`), undefined, name);
+    assert.ok(!lines.some(line => line.includes('credential.https://github.com.helper')), 'git is pointed at no App token helper');
+    assert.ok(!lines.some(line => line.includes('[bot]')), 'commits carry no App bot identity');
 
     assert.deepEqual(summary.host!.units.filter(unit => unit.active !== 'active'), []);
     assert.equal(summary.host!.sessionViewer, 'local');
@@ -305,7 +318,7 @@ test('unit:host-install-plan — a missing database password on a host with exis
 
 test('unit:host-install-plan — a private managed repository that cannot be cloned fails the install with the reason', async () => {
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
-    extraResponses: [{ match: 'clone --quiet', result: { stdout: '', stderr: "remote: Repository not found.\nfatal: repository 'https://github.com/owner/project.git/' not found", code: 128 } }] });
+    extraResponses: [{ match: 'clone --quiet', result: { stdout: '', stderr: "ERROR: Repository not found.\nfatal: Could not read from remote repository.", code: 128 } }] });
   try {
     await assert.rejects(applyHost(fixture, hostInputs()), /Cloning owner\/project into \/home\/graphyard\/code\/owner-project on graphyard-host failed: .*not found/);
   } finally { await fixture.cleanup(); }
@@ -341,8 +354,9 @@ test('unit:self-contained-auth-plan — self-contained authentication needs no S
     assert.ok(!JSON.stringify(plan).includes(code));
     assert.ok(!JSON.stringify(summary).includes(session.tokens.get('owner-project-operator')!), 'the admin credential is not printed');
 
-    // (c) GitHub is connected through the existing App-manifest flow.
-    assert.equal(plan.actions.find(action => action.id === 'github.app')?.state, 'create');
+    // (c) GY-2009: GitHub is reached through the merge writer's deploy key; no App is created.
+    assert.equal(plan.actions.find(action => action.id === 'github.app'), undefined);
+    assert.ok(plan.actions.some(action => action.id === 'github.deploy-key'));
     // (d) Every runtime the host installs has a dashboard connection path, with a sealed key or the runtime's own login.
     for (const runtime of hostRuntimes) {
       const action = plan.actions.find(entry => entry.id === `dashboard.connect.${runtime.kind}`)!;
@@ -442,63 +456,8 @@ test('unit:self-contained-auth-plan — with no SSH and no manual file editing, 
 const savedApp = (repository = 'owner/project') => JSON.stringify({ appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project', installationId: 500, privateKey: appKey, webhookSecret: WEBHOOK_SECRET, repository });
 const noBrowser: InstallDependencies['githubApp'] = async () => { throw new Error('the browser App confirmation was requested'); };
 
-test('unit:self-contained-auth-plan — GitHub is connected with no human click when the operator already has the App: the saved registration is reused after a token minted from it proves it, the fleet starts, and the key reaches no plan', async () => {
-  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
-  try {
-    mkdirSync(join(fixture.root, '.graphyard'), { recursive: true });
-    writeFileSync(join(fixture.root, '.graphyard', 'github-app.json'), savedApp(), { mode: 0o600 });
-    const deps = { ...fixture.deps, githubApp: noBrowser };
-    const plan = await buildPlan(await prepareInstall(fixture.root, hostInputs(), deps, 'plan'));
-    const app = plan.actions.find(action => action.id === 'github.app')!;
-    assert.equal(app.state, 'update');
-    assert.match(app.title, new RegExp(`Reuse the Graphyard GitHub App graphyard-owner-project \\(app ${GRAPHYARD_APP_ID}, installation 500\\).*no browser step`));
-    assert.equal(app.human, undefined, 'reusing the App needs no human step');
-    assert.ok(!plan.humanSteps.some(step => /GitHub App in the browser/.test(step)), plan.humanSteps.join('\n'));
-    assert.ok(!JSON.stringify(plan).includes(appKey.split('\n')[1]) && !JSON.stringify(plan).includes(WEBHOOK_SECRET), 'the saved key and secret reach no plan');
-
-    const session = await prepareInstall(fixture.root, hostInputs(), deps);
-    const summary = await applyInstall(session, await buildPlan(session));
-    assert.ok(fixture.requests.some(request => request.url.endsWith('/app/installations/500/access_tokens')), 'the saved App is proven before it is used');
-    assert.equal(summary.github?.appId, GRAPHYARD_APP_ID);
-    assert.equal(fixture.state.hookConfig?.url, 'https://graphyard.example.test/api/github/webhook', 'an App whose webhook serves nothing live is pointed here');
-    // The fleet starts: the loop, the executors and every unit run, and workers hold the App key.
-    assert.deepEqual(summary.host!.units.filter(unit => unit.active !== 'active'), []);
-    assert.ok(hostLines(fixture).some(line => line.includes('systemctl --user enable --now graphyard-master-owner-project.service')));
-    assert.equal(fixture.hostFiles.get(`${CONFIG}/github/app-private-key.pem`)!.content.trim(), appKey.trim());
-    // The registration is kept with the installation's other secrets, 0600, so a re-apply reuses it there.
-    const own = join(installDirectory('owner-project', fixture.configHome), 'github-app.json');
-    assert.equal(statSync(own).mode & 0o777, 0o600);
-    assert.equal(JSON.parse(readFileSync(own, 'utf8')).appId, GRAPHYARD_APP_ID);
-  } finally { await fixture.cleanup(); }
-});
-
-test('unit:self-contained-auth-plan — a reused App whose webhook still serves a live installation keeps it there, so a trial host takes no events from it', async () => {
-  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
-  try {
-    fixture.state.hookConfig = { url: 'https://graphyard-production.example.test/api/github/webhook' };
-    const file = join(fixture.configHome, 'saved-app.json');
-    writeFileSync(file, savedApp(), { mode: 0o600 });
-    const summary = await (async () => { const session = await prepareInstall(fixture.root, hostInputs({ githubAppFile: file }), { ...fixture.deps, githubApp: noBrowser }); return applyInstall(session, await buildPlan(session)); })();
-    assert.ok(!fixture.requests.some(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')), 'the webhook was not repointed');
-    assert.equal(fixture.state.hookConfig.url, 'https://graphyard-production.example.test/api/github/webhook');
-    assert.equal(summary.webhook.delivered, false);
-    assert.match(summary.webhook.detail, /still serves https:\/\/graphyard-production\.example\.test.*--migrate/);
-    assert.deepEqual(summary.host!.units.filter(unit => unit.active !== 'active'), []);
-  } finally { await fixture.cleanup(); }
-});
-
-test('unit:self-contained-auth-plan — a --github-app file registered for another repository fails preflight and changes nothing', async () => {
-  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
-  try {
-    const file = join(fixture.configHome, 'other-app.json');
-    writeFileSync(file, savedApp('owner/other'), { mode: 0o600 });
-    const session = await prepareInstall(fixture.root, hostInputs({ githubAppFile: file }), { ...fixture.deps, githubApp: noBrowser });
-    const plan = await buildPlan(session);
-    assert.match(plan.preflight.find(item => item.name === 'GitHub App registration')!.detail, /for owner\/other, not owner\/project/);
-    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
-    assert.equal(fixture.hostFiles.size, 0, 'nothing was written to the host');
-  } finally { await fixture.cleanup(); }
-});
+// GY-2009 removed App reuse (a saved registration, --github-app FILE): install registers no App, and
+// tests/install-no-github-gates.test.ts proves the flags are unknown options.
 
 test('unit:self-contained-auth-plan — the sign-in claim is spent once and refused afterwards', async () => {
   const code = 'claim-for-the-signin-route-test-0123456789';

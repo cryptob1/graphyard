@@ -23,103 +23,35 @@ const PRO_403 = { stdout: '', stderr: 'gh: Upgrade to GitHub Pro or make this re
 const exists = (path: string) => stat(path).then(() => true, () => false);
 const confirmedApp = { appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project', installationId: 500, privateKey: appKey, webhookSecret: WEBHOOK_SECRET };
 
-test('unit:install-preflight-branch-protection — a 403 "Upgrade to GitHub Pro" fails preflight with a named HUMAN step, before anything is written', async () => {
-  const fixture = await harness({ provider: 'compose', extraResponses: [{ match: `gh api repos/${REPOSITORY}/branches/main/protection`, result: PRO_403 }] });
-  try {
-    const plan = await buildPlan(await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps, 'plan'));
-    const gate = plan.preflight.find(item => item.name === 'Branch protection')!;
-    assert.equal(gate.ok, false, 'a private free-plan repository cannot pass preflight');
-    assert.match(gate.detail, /403 "Upgrade to GitHub Pro or make this repository public"/);
-    assert.match(gate.detail, /private repository on a free plan cannot have branch protection/);
-    assert.match(gate.detail, /Graphyard \/ merge/);
-    assert.equal(gate.fix, `HUMAN: make ${REPOSITORY} public, or upgrade its GitHub plan (spending money is a human decision), then rerun the installer`);
-    assert.equal(plan.humanSteps[0], gate.fix, 'the plan names the human step first');
-    assert.equal(plan.actions.find(action => action.id === 'github.protection')!.human, gate.fix, 'the protection action is no longer a plain create');
-    // GitHub CLI itself is still fine; only the protection probe fails.
-    assert.equal(plan.preflight.find(item => item.name === 'GitHub CLI')!.ok, true);
-
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps, 'apply');
-    await assert.rejects(applyInstall(session, await buildPlan(session)), (error: Error) => {
-      assert.match(error.message, /Preflight is incomplete; the installer changed nothing/);
-      assert.match(error.message, /- Branch protection: GitHub answered 403/);
-      assert.match(error.message, /\n {2}HUMAN: make owner\/project public, or upgrade its GitHub plan/);
-      assert.doesNotMatch(error.message, /Run: HUMAN/);
-      return true;
-    });
-    assert.equal(await exists(session.directory), false, 'a refused apply creates no credential directory');
-    assert.ok(!fixture.commandLines().some(line => line.includes('compose') && line.includes(' up')), 'no compose stack was started');
-  } finally { await fixture.cleanup(); }
-
-  // Any other failed probe (SSO, missing admin rights, 5xx) says nothing about the branch: preflight
-  // fails naming GitHub's answer, never "not protected yet", and an apply deploys nothing.
-  for (const stderr of ['gh: Must have admin rights to Repository. (HTTP 403)', 'gh: HTTP 502: Bad Gateway (https://api.github.com/repos/owner/project/branches/main/protection)']) {
-    const failing = await harness({ provider: 'compose', extraResponses: [{ match: `gh api repos/${REPOSITORY}/branches/main/protection`, result: { stdout: '', stderr, code: 1 } }] });
+test('unit:install-preflight-branch-protection — install reads no branch protection (GY-2009): a 403 "Upgrade to GitHub Pro", an admin-rights refusal or a 5xx on the protection endpoint changes nothing, and preflight has no protection gate', async () => {
+  for (const result of [PRO_403, { stdout: '', stderr: 'gh: Must have admin rights to Repository. (HTTP 403)', code: 1 }, { stdout: '', stderr: 'gh: HTTP 502: Bad Gateway', code: 1 }]) {
+    const fixture = await harness({ provider: 'compose', extraResponses: [{ match: `gh api repos/${REPOSITORY}/branches/main/protection`, result }] });
     try {
-      const plan = await buildPlan(await prepareInstall(failing.root, { repository: REPOSITORY, provider: 'compose' }, failing.deps, 'plan'));
-      const gate = plan.preflight.find(item => item.name === 'Branch protection')!;
-      assert.equal(gate.ok, false, stderr);
-      assert.doesNotMatch(gate.detail, /not protected yet/);
-      assert.ok(gate.detail.includes(stderr), gate.detail);
-      assert.match(gate.detail, /protection is unknown/);
-      assert.match(gate.fix!, /^gh api repos\/owner\/project\/branches\/main\/protection, fix what GitHub answers/);
-      assert.ok(!plan.humanSteps.some(step => step.startsWith('HUMAN:')), 'an agent-fixable probe failure is no human step');
-      const session = await prepareInstall(failing.root, { repository: REPOSITORY, provider: 'compose' }, failing.deps, 'apply');
-      await assert.rejects(applyInstall(session, await buildPlan(session)), /Preflight is incomplete; the installer changed nothing\.\n- Branch protection: GitHub did not answer the protection read/);
-      assert.equal(await exists(session.directory), false, 'a refused apply creates no credential directory');
-      assert.ok(!failing.commandLines().some(line => line.includes('compose') && line.includes(' up')), 'no compose stack was started');
-    } finally { await failing.cleanup(); }
+      const plan = await buildPlan(await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps, 'plan'));
+      assert.ok(!plan.preflight.some(item => item.name === 'Branch protection'), 'no branch-protection preflight item');
+      assert.ok(!plan.actions.some(action => action.id === 'github.protection'), 'no protection action');
+      assert.ok(!plan.humanSteps.some(step => /branch protection|GitHub Pro/i.test(step)), plan.humanSteps.join('\n'));
+      assert.equal(plan.preflight.find(item => item.name === 'GitHub CLI')!.ok, true);
+      assert.ok(!fixture.commandLines().some(line => /\/protection|\/rulesets/.test(line)), 'the protection endpoint is never called');
+    } finally { await fixture.cleanup(); }
   }
-
-  // An unprotected branch (404) is the ordinary first install: preflight passes and the plan creates protection.
-  const fresh = await harness({ provider: 'compose' });
-  try {
-    const plan = await buildPlan(await prepareInstall(fresh.root, { repository: REPOSITORY, provider: 'compose' }, fresh.deps, 'plan'));
-    const gate = plan.preflight.find(item => item.name === 'Branch protection')!;
-    assert.equal(gate.ok, true); assert.match(gate.detail, /not protected yet; the plan creates its protection/);
-    assert.equal(plan.actions.find(action => action.id === 'github.protection')!.human, undefined);
-    assert.ok(!plan.humanSteps.some(step => step.startsWith('HUMAN:')));
-  } finally { await fresh.cleanup(); }
 });
 
 test('unit:init-reuses-install-identities — init --scan --apply never mints a second principal set or App page beside an install, in either order', async () => {
-  // Order 1: install --apply is waiting at its App step while init --scan --apply runs.
+  // GY-2009: install has no App step, so init never meets an install waiting at one; it reuses the finished install's identities.
   const fixture = await harness({ provider: 'compose' });
   try {
     const proposal = await scanProposal(fixture.root, { url: 'https://graphyard.example' });
-    let refusal = null as Error | null;
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, { ...fixture.deps,
-      githubApp: async request => {
-        refusal = await installedOnboarding(fixture.root, REPOSITORY, 'https://graphyard.example', fixture.configHome).then(() => null, error => error);
-        throw new AppStepPending(request.file, false, 900_000);
-      } }, 'apply');
-    await assert.rejects(applyInstall(session, await buildPlan(session)), InstallPaused);
-    assert.ok(refusal, 'init refuses while the install waits at its App step');
-    assert.match(refusal!.message, /graphyard install --apply for owner\/project has not finished its GitHub App step/);
-    assert.match(refusal!.message, /its record .*install\.json names no App\. Finish the App step on the page graphyard install --apply serves/);
-    assert.doesNotMatch(refusal!.message, /https?:\/\//, 'the refusal names no hard-coded server');
-    assert.match(refusal!.message, /init opens no App page of its own and mints no principals beside the install's; nothing was written/);
-    assert.equal(await exists(join(fixture.root, '.graphyard/principals.json')), false, 'no second principals file');
-
-    // The CLI refuses the same way, before any write: no AGENTS.md, no principals, no applied record.
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const key of Object.keys(env)) if (key.startsWith('GRAPHYARD_')) delete env[key];
     env.GRAPHYARD_CONFIG_HOME = fixture.configHome;
     await execFile(process.execPath, [launcher, 'init', '--scan', '--url', 'https://graphyard.example'], { cwd: fixture.root, env });
-    const agentsBefore = await exists(join(fixture.root, 'AGENTS.md'));
-    const cli = await execFile(process.execPath, [launcher, 'init', '--scan', '--apply', '--url', 'https://graphyard.example'], { cwd: fixture.root, env }).then(() => null, error => error);
-    assert.ok(cli, 'init --scan --apply exits non-zero');
-    assert.equal(cli.code, 1, String(cli.stderr));
-    assert.match(String(cli.stderr), /has not finished its GitHub App step/);
-    assert.doesNotMatch(String(cli.stderr), /EADDRINUSE/);
-    assert.equal(await exists(join(fixture.root, 'AGENTS.md')), agentsBefore, 'AGENTS.md untouched');
-    for (const file of ['principals.json', 'repository-setup.json', 'profiles']) assert.equal(await exists(join(fixture.root, '.graphyard', file)), false, `${file} was not written`);
-
-    // Order 2: the install finished (its App confirmed). init reuses its App and writes no principals.
+    // The install finished. init reuses its identities (no App: install registers none) and writes no principals.
     const finished = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps, 'apply');
     await applyInstall(finished, await buildPlan(finished));
     const installUrl = (await readInstallRecord(finished.directory))!.url!;
     const installed = await installedOnboarding(fixture.root, REPOSITORY, installUrl, fixture.configHome);
-    assert.deepEqual(installed, { directory: finished.directory, url: installUrl, githubApp: { appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project' } });
+    assert.deepEqual(installed, { directory: finished.directory, url: installUrl, githubApp: null });
     assert.deepEqual(await installedOnboarding(fixture.root, REPOSITORY, null, fixture.configHome), installed, "no selected server means the install's own");
     // Another server is not the install's: its identities and App are not reused for it, and nothing is minted either.
     await assert.rejects(installedOnboarding(fixture.root, REPOSITORY, 'https://other.example', fixture.configHome), (error: Error) => {
@@ -134,7 +66,7 @@ test('unit:init-reuses-install-identities — init --scan --apply never mints a 
     let appPageOpened = false;
     const result = await applyProposal(fixture.root, proposal, { url: installUrl, installed: installed!, githubSetup: async () => { appPageOpened = true; return { appId: 1, slug: 'second' }; } });
     assert.equal(appPageOpened, false, 'init opened no App page of its own');
-    assert.deepEqual(result.githubApp, { appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project' }, "the install's App is reused");
+    assert.equal(result.githubApp, null, 'the install registered no App, so none is reused or minted');
     assert.equal(result.principalsFile, null);
     assert.equal(await exists(join(fixture.root, '.graphyard/principals.json')), false, 'never a second principals file');
     assert.ok(result.unchanged.some(entry => /principal and grant registry \(managed by graphyard install/.test(entry)));
@@ -157,35 +89,6 @@ test('unit:init-reuses-install-identities — init --scan --apply never mints a 
     await assert.rejects(runManifestFlow(root, REPOSITORY, 'https://graphyard.example', { port, announce: () => {}, dependencies: { file: join(root, 'app.json') } }), named);
     assert.equal(appPageBusy(4311).message.includes('http://127.0.0.1:4311'), true);
   } finally { await new Promise<void>(accept => holder.close(() => accept())); await rm(root, { recursive: true, force: true }); }
-});
-
-test('unit:init-reuses-install-identities — a rerun that binds an App to a former --no-github-app install is refused by init while it waits at its App step', async () => {
-  // The server serves without an App until the upgrade binds one.
-  const options: Parameters<typeof harness>[0] = { provider: 'compose', statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: false, githubAppId: null, githubInstallationId: null } };
-  const fixture = await harness(options);
-  try {
-    const noApp = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose', noGithubApp: true }, { ...fixture.deps,
-      githubApp: async () => { throw new Error('the App manifest flow must never run with --no-github-app'); } }, 'apply');
-    await applyInstall(noApp, await buildPlan(noApp));
-    const before = await readInstallRecord(noApp.directory);
-    assert.equal(before!.noGithubApp, true); assert.equal(before!.github, null);
-    assert.equal((await installedOnboarding(fixture.root, REPOSITORY, null, fixture.configHome))!.githubApp, null, 'the no-App install onboards');
-
-    // The upgrade: rerun without --no-github-app, paused at its App step.
-    delete options.statusBody;
-    let refusal = null as Error | null, waiting = null as Awaited<ReturnType<typeof readInstallRecord>>;
-    const upgrade = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, { ...fixture.deps,
-      githubApp: async request => {
-        waiting = await readInstallRecord(noApp.directory);
-        refusal = await installedOnboarding(fixture.root, REPOSITORY, null, fixture.configHome).then(() => null, error => error);
-        throw new AppStepPending(request.file, false, 900_000);
-      } }, 'apply');
-    await assert.rejects(applyInstall(upgrade, await buildPlan(upgrade)), InstallPaused);
-    assert.equal(waiting!.noGithubApp, false, "the record names this run's App choice before the App step");
-    assert.ok(refusal, 'init refuses while the upgrade waits at its App step');
-    assert.match(refusal!.message, /has not finished its GitHub App step/);
-    await assert.rejects(installedOnboarding(fixture.root, REPOSITORY, null, fixture.configHome), /has not finished its GitHub App step/, 'the paused upgrade stays refused');
-  } finally { await fixture.cleanup(); }
 });
 
 test('unit:install-herdr-plugin-guard — the plan shows a Herdr relink and a plugin bound to another server is never repointed without --herdr-rebind', async () => {
@@ -287,40 +190,17 @@ test('unit:install-app-timeout-resume — an App step nobody confirms prints wha
     assert.equal(registered.saved, true); assert.match(registered.message, new RegExp(`returned the App registration to ${file}`));
   } finally { await rm(scratch, { recursive: true, force: true }); }
 
+  // GY-2009: install itself has no App step to pause at: it completes without ever calling the App flow, and resumes nothing.
   const fixture = await harness({ provider: 'compose' });
-  const order: string[] = [];
-  const registerProfiles = async (request: ProfileRequest) => { order.push(`profiles:${request.appPending ? 'pending' : 'bound'}`); return fixture.deps.registerProfiles!(request); };
   try {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose', reviewer: 'claude-reviewer' }, { ...fixture.deps, registerProfiles,
-      githubApp: async request => { order.push('app'); throw new AppStepPending(request.file, false, 900_000); } }, 'apply');
-    const paused = await applyInstall(session, await buildPlan(session)).then(() => null, error => error);
-    assert.ok(paused instanceof InstallPaused, 'a timed-out App step pauses the install');
-    assert.deepEqual(order, ['profiles:pending', 'app'], 'profiles and the master config are registered before the App step');
-    const summary = paused.summary;
-    assert.equal(summary.complete, false); assert.equal(summary.health, true);
-    assert.deepEqual(summary.github, { app: 'pending', step: 'github.app', credentials: `none saved: nobody confirmed the App, so ${join(session.directory, 'github-app.json')} was never written` });
-    assert.equal(summary.credentials.githubApp, 'not saved');
-    assert.equal(await exists(join(session.directory, 'github-app.json')), false, 'no credential file is claimed or written');
-    assert.ok(summary.completed.includes('provider.deploy') && summary.completed.includes('verify.health') && summary.completed.includes('local.profiles'));
-    assert.ok(!summary.completed.includes('github.app'));
-    assert.equal(summary.stack.stop, `docker compose --project-directory ${session.context.workdir} down`);
-    assert.match(summary.stack.detail, /keeps running at http/);
-    assert.equal(summary.resume, `graphyard install --provider compose --repo ${REPOSITORY} --reviewer claude-reviewer --apply`);
-    assert.deepEqual(installRequestFromArgs(summary.resume.split(' ').slice(2)).request, { repository: REPOSITORY, provider: 'compose', reviewer: 'claude-reviewer' });
-    assert.match(summary.nextSteps.join('\n'), /master environments and graphyard master harness already work/);
-    assert.match(paused.message, /Nothing was confirmed, so no App credentials were saved/);
-    assert.equal((await readInstallRecord(session.directory))!.github, null, 'the record shows the App step pending');
-
-    // Resume: the human confirmed the App, so the manifest flow saved it in the install directory;
-    // the rerun reuses it with no browser step and finishes.
-    await writeFile(join(session.directory, 'github-app.json'), JSON.stringify({ ...confirmedApp, repository: REPOSITORY }), { mode: 0o600 });
-    order.length = 0;
-    const resumed = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose', reviewer: 'claude-reviewer' }, { ...fixture.deps, registerProfiles,
-      githubApp: async request => { order.push(request.reviewer ? 'reviewer' : 'app'); if (!request.reviewer) throw new Error('the confirmed App must be reused'); return fixture.deps.githubApp!(request); } }, 'apply');
-    const done = await applyInstall(resumed, await buildPlan(resumed));
-    assert.equal(done.github!.appId, GRAPHYARD_APP_ID);
-    assert.deepEqual(order, ['profiles:pending', 'reviewer', 'profiles:bound'], 'the rerun keeps the earlier steps, reuses the App, and binds the master to it');
-    assert.equal((await readInstallRecord(resumed.directory))!.github!.appId, GRAPHYARD_APP_ID);
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose', reviewer: 'claude-reviewer' }, { ...fixture.deps,
+      githubApp: async () => { throw new Error('install must never run the App flow'); } }, 'apply');
+    const done = await applyInstall(session, await buildPlan(session));
+    assert.equal(done.github, null);
+    assert.equal(done.health, true);
+    assert.match(done.protection, /deploy key/i);
+    assert.equal(await exists(join(session.directory, 'github-app.json')), false, 'no App credential file is written');
+    assert.equal((await readInstallRecord(session.directory))!.github, null);
   } finally { await fixture.cleanup(); }
 
   // master environments and master harness succeed before the App is confirmed, against a control
@@ -366,34 +246,29 @@ test('unit:install-app-timeout-resume — an App step nobody confirms prints wha
   }
 });
 
-test('unit:install-app-timeout-resume — a self-contained host names the host token directory, never a local one it never wrote', async () => {
+test('unit:install-app-timeout-resume — a self-contained host writes its tokens on the host, never a local one, and runs no App step (GY-2009)', async () => {
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
   try {
     const inputs = { repository: REPOSITORY, provider: 'host' as const, selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test' };
-    const session = await prepareInstall(fixture.root, inputs, { ...fixture.deps, githubApp: async request => { throw new AppStepPending(request.file, false, 900_000); } }, 'apply');
-    const paused = await applyInstall(session, await buildPlan(session)).then(() => null, error => error);
-    assert.ok(paused instanceof InstallPaused, String(paused));
+    const session = await prepareInstall(fixture.root, inputs, { ...fixture.deps, githubApp: async () => { throw new Error('install must never run the App flow'); } }, 'apply');
+    const summary = await applyInstall(session, await buildPlan(session));
     const tokens = session.context.host!.layout.tokensDirectory;
-    assert.equal(paused.summary.credentials.principals, `saved on the host under ${tokens} (mode 0600); this machine keeps fingerprints only in ${session.directory}`);
     for (const principal of session.principals) {
       assert.equal(await exists(join(session.directory, `${principal.id}.token`)), false, 'no local token file exists to be claimed');
       assert.ok(fixture.hostFiles.has(`${tokens}/${principal.id}.token`), `${principal.id} token written on the host`);
     }
-    assert.equal(paused.summary.credentials.githubApp, 'not saved');
-    assert.equal(paused.summary.stack.stop, null, 'no Compose stop command for a host');
-    assert.match(paused.summary.stack.detail, /keeps running at https:\/\/graphyard\.example\.test on the host$/);
-    assert.match(paused.summary.resume, /^graphyard install --target host .*--apply$/);
+    assert.equal(summary.github, null);
   } finally { await fixture.cleanup(); }
 });
 
 test('unit:install-app-timeout-resume — the resume command carries every install input, so the rerun targets the same server, identity and spend consent', async () => {
   // Every flag install accepts, with values a shell must quote; the printed command parses back to the same request.
-  const everything: Required<Omit<InstallRequest, 'selfContained' | 'local' | 'migrate'>> = {
+  const everything: Required<Omit<InstallRequest, 'selfContained' | 'local' | 'migrate' | 'githubAppFile' | 'noGithubApp'>> = {
     repository: REPOSITORY, provider: 'hetzner', baseBranch: 'release', domain: 'graphyard.example.com', workers: 3, producerProofs: ['unit', 'browser'],
     reviewer: 'claude-reviewer', reviewPolicy: 'agent', requiredChecks: ['ci / test', "lint's check"], reviewCount: 2,
     sshHost: '203.0.113.7', sshUser: 'deploy', sshKey: 'operator key', workspace: 'My Team', image: 'ghcr.io/example/graphyard:1.2',
     port: 4320, serverName: 'foo', serverType: 'cx32', location: 'fsn1', maxMonthly: 19.52, confirmPrice: 7.05,
-    githubAppFile: '/home/operator/app files/github-app.json', createEnvironments: true, herdr: 'rebind',
+    createEnvironments: true, herdr: 'rebind',
   };
   const roundTrip = async (request: InstallRequest) => {
     const command = resumeCommand({ inputs: { baseBranch: 'main', ...request } as any });
@@ -403,12 +278,12 @@ test('unit:install-app-timeout-resume — the resume command carries every insta
     return { command, parsed: installRequestFromArgs(words.slice(2)).request };
   };
   const server = await roundTrip(everything);
-  assert.deepEqual(server.parsed, everything);
+  assert.deepEqual(server.parsed, { ...everything, noGithubApp: true }, 'every request is App-free (GY-2009)');
   for (const flag of ['--ssh-user deploy', "--ssh-key 'operator key'", '--server-name foo', '--server-type cx32', '--location fsn1', '--create-environments', '--max-monthly 19.52', '--confirm-price 7.05', "--workspace 'My Team'", '--herdr-rebind']) assert.ok(server.command.includes(flag), `${flag} in ${server.command}`);
   // A self-contained host keeps --target, --local and --migrate; --no-herdr survives too.
   const host: InstallRequest = { repository: REPOSITORY, provider: 'host', selfContained: true, local: true, migrate: true, herdr: 'skip' };
   const resumedHost = await roundTrip(host);
-  assert.deepEqual(resumedHost.parsed, host); assert.match(resumedHost.command, /--target host .*--local --migrate .*--no-herdr --apply$/);
+  assert.deepEqual(resumedHost.parsed, { ...host, noGithubApp: true }); assert.match(resumedHost.command, /--target host .*--local --migrate .*--no-herdr --apply$/);
   const createdHost: InstallRequest = { repository: REPOSITORY, provider: 'hetzner', selfContained: true, sshKey: 'k', maxMonthly: 0 };
-  assert.deepEqual((await roundTrip(createdHost)).parsed, createdHost);
+  assert.deepEqual((await roundTrip(createdHost)).parsed, { ...createdHost, noGithubApp: true });
 });
