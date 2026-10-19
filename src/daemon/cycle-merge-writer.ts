@@ -247,6 +247,8 @@ const flights = new WeakMap<DaemonState, Flight>();
 /** Resolves once the merge in flight for `state` has settled; for the step's tests. */
 /** The item previews this loop process serves, by item key (GY-1902). */
 const itemPreviews = new WeakMap<DaemonState, Map<string, LivePreview>>();
+/** Whether a merge trial is running beside the cycle: the loop's self-upgrade waits while one is, since its restart would kill the trial. */
+export const mergeWriterInFlight = (state: DaemonState) => { const flight = flights.get(state); return !!flight && !flight.settled; };
 export const mergeWriterIdle = async (state: DaemonState) => { for (let waited = 0; flights.get(state) && !flights.get(state)!.settled && waited < 600_000; waited += 5) await new Promise(resolve => setTimeout(resolve, 5)); };
 /** The action key a merge of `key`'s `head` is recorded under. */
 export const mergeWriterActionKey = (key: string, head: string) => `merge-writer:${key}:${head}`;
