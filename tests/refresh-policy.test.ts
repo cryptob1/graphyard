@@ -92,10 +92,11 @@ test('unit:refresh-only-head-and-conflicts — main moving under three candidate
   assert.equal(baseRefreshNeeded(unknown), null);
 });
 
-test('unit:queue-validation-is-merge-substate — a candidate the merge writer has not trialled is at test, passes merge once the writer pushed it, and returns to test when its trial fails; no queue validation substate remains', () => {
+test('unit:queue-validation-is-merge-substate — a candidate the merge writer has not trialled is Checking (at test), passes merge once the writer pushed it, and returns to test when its trial fails; no queue validation substate remains', () => {
   const running = evaluated(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'in_progress', appId: 15368 }] }, null), []);
   assert.equal(running.stage, 'test', 'stage comes from the candidate\'s own gates');
-  assert.equal(prSteps(running, now.getTime()).current, 'test');
+  assert.equal(prSteps(running, now.getTime()).current, 'checking');
+  assert.equal(prSteps(running, now.getTime()).label, 'Checking · 0 of 1 checks done');
   assert.deepEqual(checkStates(running, ciAppIds), [{ name: 'test', state: 'running' }]);
 
   const passed = evaluated(work('GY-1', commit('c1'), {}, 'reconciled'), []);

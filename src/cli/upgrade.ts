@@ -7,7 +7,8 @@ import { createBackup } from '../backup.js';
 import { Store } from '../store.js';
 import { checkoutRelease, compareDateVersions, datedVersionPattern, imageRepository, installationRoot, stableChannel, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
-import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
+import { installDirectory, readInstallRecord, readToken, type InstallRecord } from '../install/secrets.js';
+import { e2ePrincipalId } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
@@ -139,6 +140,18 @@ async function databaseSchemaOf(url: string | null): Promise<number | null> {
   catch { return null; }
 }
 
+/**
+ * The stamp the deployed commit's image builds with (GY-2167): the dated tag on it, else
+ * `unreleased <short>` — named explicitly for the build, so the tree's untracked files or a git
+ * read that fails under a loaded machine cannot leave the image unstamped.
+ */
+const releaseOfCommit = (cliRoot: string, commit: string): { version: string; revision: string } => {
+  let tags = '';
+  try { tags = git(cliRoot, 'tag', '--points-at', commit); } catch {}
+  const version = tags.split('\n').filter(tag => datedVersionPattern.test(tag)).sort(compareDateVersions).at(-1);
+  return { version: version ?? `unreleased ${commit.slice(0, 12)}`, revision: commit };
+};
+
 /** The real effect of each step; the backup runs on the code already loaded, the release that matches the database. */
 export function liveEffects(inputs: UpgradeInputs, recordFile: string, fetchHealth: (url: string) => Promise<Pick<Response, 'ok' | 'status' | 'json'>> = url => fetch(url, { signal: AbortSignal.timeout(10_000) })): UpgradeEffects {
   const shell = (command: string, cwd: string) => {
@@ -175,13 +188,15 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
  * already moved onto it: the upgrade sequence's npm ci, backup (with DATABASE_URL) and redeploy as
  * child processes, the health step until it passes or three minutes pass, and every end-to-end case;
  * or the one line naming why an install on neither compose nor local has none. `keepAlive` feeds the
- * loop's watchdog while a step runs.
+ * loop's watchdog while a step runs. The end-to-end cases run as the install's e2e identity
+ * (GY-2167), the roster principal whose credential may do what the cases do — a case's first step
+ * creates an item — never as the loop's own coordinator, which may create none.
  */
-export async function deployPorts(input: { cliRoot: string; repoRoot: string; repository: string; url: string; token: () => Promise<string>; run: ChildRun; keepAlive?: () => Promise<void> }): Promise<DeployPorts | string> {
+export async function deployPorts(input: { cliRoot: string; repoRoot: string; repository: string; url: string; run: ChildRun; keepAlive?: () => Promise<void> }): Promise<DeployPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
   const install = await readInstallRecord(directory).catch(() => null);
   if (install?.provider !== 'compose' && install?.provider !== 'local') return `continuous deploy needs a compose or local install; ${install ? `this one runs on ${install.provider}` : 'no install record names this repository'}, so releases reach it only through graphyard upgrade`;
-  const run = (command: string, args: string[], cwd: string) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000 }));
+  const run = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000, ...(env ? { env } : {}) }));
   const beating = async <T>(work: () => Promise<T>) => {
     const timer = input.keepAlive ? setInterval(() => void input.keepAlive!().catch(() => {}), 30_000) : null;
     try { return await work(); } finally { if (timer) clearInterval(timer); }
@@ -194,9 +209,12 @@ export async function deployPorts(input: { cliRoot: string; repoRoot: string; re
   return {
     deploy: commit => beating(async () => {
       const inputs = inputsFor(commit), effects = liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json'));
+      // Every redeploy builds with the stamp of the commit it deploys (GY-2167), the rollback's
+      // included: /healthz then names that commit instead of an unstamped `unreleased unknown`.
+      const stamp = releaseOfCommit(cliRoot, commit), environment = { ...process.env, GRAPHYARD_VERSION: stamp.version, GRAPHYARD_BUILD_REVISION: stamp.revision };
       for (const step of upgradePlan(inputs).steps) {
         if (step.id === 'backup' && process.env.DATABASE_URL) await effects.run(step);
-        else if (step.id === 'npm-ci' || step.id === 'redeploy') await run('sh', ['-c', step.command], step.id === 'npm-ci' ? cliRoot : repoRoot);
+        else if (step.id === 'npm-ci' || step.id === 'redeploy') await run('sh', ['-c', step.command], step.id === 'npm-ci' ? cliRoot : repoRoot, environment);
       }
     }),
     health: () => beating(async () => {
@@ -206,7 +224,7 @@ export async function deployPorts(input: { cliRoot: string; repoRoot: string; re
         catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
       }
     }),
-    e2e: () => beating(async () => { await deployedE2e(cliRoot, url, await input.token()); }),
+    e2e: () => beating(async () => { await deployedE2e(cliRoot, url, await readToken(directory, e2ePrincipalId(install.installId))); }),
     schemas: async commit => ({ target: schemaAt(await run('git', ['show', `${commit}:src/release.ts`], cliRoot).catch(() => '')), database: await databaseSchemaOf(url) }),
     pin: commit => pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run),
   };
