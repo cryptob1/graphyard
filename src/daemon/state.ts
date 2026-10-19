@@ -139,7 +139,7 @@ export const deploymentObservationSchema = z.object({
   deployed: z.array(z.string()).max(200).default([]), pending: z.array(z.string()).max(200).default([]),
   /**
    * What the observation cost, so the bound is a reading rather than a claim: GitHub requests made
-   * (never more than `maxDeploymentRequests`, whatever has been delivered), deliveries whose
+   * (zero since the endpoint is the only source; older records may hold more), deliveries whose
    * containment was derived locally this pass, and deliveries answered from `containment`.
    * Absent — never zero — on an observation recorded before the loop measured it.
    */

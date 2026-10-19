@@ -4,7 +4,6 @@ import { probeCandidateConflictsWithBudget } from '../conflicts.js';
 import { agentOwner, buildMasterStatus, type MasterConfig } from '../master.js';
 import { nameOrphanSupervisors } from './status-attention.js';
 import { nameUnresolvedThreads } from '../merge-queue.js';
-import { qualifyTimingFailures, ghCheckAnnotations } from './timing-failures.js';
 import { routedScopeStatus } from './owed-report.js';
 import { speedSections } from '../flow-analytics.js';
 import { timedStep } from '../master/timings.js';
@@ -48,8 +47,8 @@ export async function buildPipelineStatus(
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
   const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState, { mode: master.supervision, operatorLogin: master.operatorLogin }), snapshot.work, agentOwner),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now), daemonState && 'orphans' in daemonState ? daemonState : null));
-  // A check failed on the clock says so, against its budget; a routed scope request, its approver.
-  const status = routedScopeStatus(await timedStep('timing failures', () => qualifyTimingFailures(sessions, snapshot.work, master.repository, ghCheckAnnotations(master.repository))), snapshot.work, cycling?.approvals, master);
+  // A routed scope request names its approver. No check-run annotation is read back (GY-2010).
+  const status = routedScopeStatus(sessions, snapshot.work, cycling?.approvals, master);
   for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
   // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
   // breach attention (GY-1232) and the stage holding each item's time (GY-1382); a failed read marks its section.

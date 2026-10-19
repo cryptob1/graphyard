@@ -1,9 +1,6 @@
-import { conversationProtectionRefusal, failedCheckResults, requiredCheck, requiredCheckPassed, requiredCheckRun, requiredChecksOf, checkRerunStatus } from '../merge-queue.js';
 import type { Gate, Stage, Work } from './work.js';
 import type { MergeLedgerState } from './merge-ledger.js';
 import { escalationRefusals } from './escalation.js';
-import { ciCheckRefusal } from './ci-refusal.js';
-import { requiredCheckFailure } from './required-check-refusal.js';
 import { leadHoldRefusal } from './delegation.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
@@ -46,9 +43,9 @@ export function mergeLedgerRefusals(ledger: MergeLedgerState | null | undefined,
   return { test: trialled ? [] : [trialRefusal(candidate.sha, candidate.baseSha)], merge: pushed ? [] : [pushRefusal(candidate.sha)] };
 }
 
-/** The merge gate's refusal until GitHub has been read at exactly the current candidate. */
+/** The merge gate's refusal until the candidate has been observed at exactly the current head and base tip. */
 export const githubUnobservedRefusal = 'GitHub has not been observed at the current candidate';
-/** The merge gate's refusal while GitHub has not computed a pull request's mergeability (GY-548). */
+/** Kept for pull-request-era records that still name unknown mergeability; gates no longer refuse on it (GY-2010). */
 export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
 
 // ---- Risk lanes (GY-883) -------------------------------------------------------------------------
@@ -124,37 +121,16 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     ...changeRequestHold,
     ...(mechanicalHold ? [mechanicalHold] : []),
   ] : []);
-  // The policy's checks and every other check the base branch's protection requires (GY-430):
-  // GitHub refuses the merge while any of them has not passed, so none is left for it to find.
-  // A head the control plane observed itself (GY-1523) has no GitHub checks and no GitHub
-  // mergeability: the merge writer's ledger stands in for both, and only for that source.
-  const ledger = obs?.source === 'control-plane' ? mergeLedgerRefusals(work.mergeLedger, obs!.candidate) : null;
-  const checkReasons = ledger ? ledger.test : requiredChecksOf(work).flatMap(check => {
-    const run = check.policy ? requiredCheck(work, check.name, ciAppIds) : current ? requiredCheckRun(check, obs!.checks, ciAppIds) : undefined;
-    if (requiredCheckPassed(check, run)) return [];
-    return [!check.policy && run && failedCheckResults.includes(run.result)
-      ? requiredCheckFailure(check.name)
-      : ciCheckRefusal(check.name, current ? checkRerunStatus(work, check.name) : '')];
-  });
+  // GY-2010: gates never read GitHub. The merge writer's ledger stands for the test and merge
+  // gates for every observed candidate — including a document that still carries pull-request-era
+  // checks, PR numbers and mergeability. Those fields load; they do not refuse progression.
+  const ledger = current ? mergeLedgerRefusals(work.mergeLedger, obs!.candidate) : null;
+  const checkReasons = ledger ? ledger.test : current ? [] : [githubUnobservedRefusal];
   gates.push({ name: 'test', ciAppIds: [...ciAppIds], reasons: checkReasons, passed: checkReasons.length === 0 });
-  // GitHub merges (docs/delivery.md): a candidate whose build, review and required checks pass on
-  // its head is GitHub's to merge on its own branch protection. Proofs are no merge gate — unit
-  // tests run in CI and end-to-end ones in UAT before promotion — and nothing here queues the
-  // candidate, reads the observation's age or asks for a merge authorization.
   // A standing escalation or lead hold is a refusal to deliver, and its own reason is reported.
-  // Unresolved review threads are the reviewer's inputs, not merge blockers: the review gate is the
-  // configured reviewer's verdict on this exact head. Only a branch whose protection still requires
-  // conversation resolution — drift from the desired protection — makes a merge GitHub will
-  // refuse; that is named here, thread by thread.
+  // Unresolved review threads are the reviewer's inputs, not merge blockers.
   const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
-  const threads = current ? conversationProtectionRefusal(work) : null;
-  // GitHub's `mergeable: null` is a computation it has not finished, not a refusal (GY-548): it is
-  // named as such and read again on the next observation.
-  const mergeability = obs?.mergeable || obs?.merged ? null
-    : obs?.mergeabilityUnknown ? mergeabilityComputingRefusal
-      : 'Pull request is not mergeable against the current base';
-  add('merge', ledger ? [...(!current ? [githubUnobservedRefusal] : []), ...ledger.merge, ...delivery]
-    : [...(!current ? [githubUnobservedRefusal] : []), ...(mergeability ? [mergeability] : []), ...(threads ? [threads] : []), ...delivery]);
+  add('merge', [...(!current ? [githubUnobservedRefusal] : []), ...(ledger ? ledger.merge : []), ...delivery]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');

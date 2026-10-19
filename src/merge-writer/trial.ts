@@ -12,6 +12,14 @@ import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretSca
 import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master-resources.js';
 
+/** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
+export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
+export type TrialMergeResult = { mergeSha: string; tree: string } | { conflict: string[] };
+
+export const trialAuthor = 'graphyard-merge-writer';
+export const trialRef = (head: string) => `refs/graphyard/trial/${head}`;
+const fullSha = /^[0-9a-f]{40}$/;
+
 // A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
 const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 /**
@@ -33,14 +41,6 @@ export function failingSummary(output: string): string | null {
   while (end < lines.length && (!plain[end]!.trim() || /^\s/.test(plain[end]!) || /^(test at |✖ )/.test(plain[end]!))) end++;
   return lines.slice(start, end).join('\n').replace(/\n+$/, '');
 }
-
-/** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
-export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
-export type TrialMergeResult = { mergeSha: string; tree: string } | { conflict: string[] };
-
-export const trialAuthor = 'graphyard-merge-writer';
-export const trialRef = (head: string) => `refs/graphyard/trial/${head}`;
-const fullSha = /^[0-9a-f]{40}$/;
 const exitOf = (error: unknown) => error as { status?: number | null; stdout?: unknown };
 
 /**
@@ -50,7 +50,7 @@ const exitOf = (error: unknown) => error as { status?: number | null; stdout?: u
  * `refs/graphyard/trial/<head>`. Nothing under `refs/heads/*`, no remote and no checkout is
  * touched. A conflicting merge gives the conflicted paths and writes no commit. Retention: one
  * ref per tried head, overwritten by that head's next trial and never pruned here, so a recorded
- * verdict's mergeSha keeps resolving; a cleanup belongs beside tip-cleanup if the refs ever matter.
+ * verdict's mergeSha keeps resolving, and nothing deletes them.
  */
 export async function trialMerge(git: TrialGit, input: { head: string; baseTip: string }): Promise<TrialMergeResult> {
   const head = input.head.toLowerCase(), baseTip = input.baseTip.toLowerCase();
