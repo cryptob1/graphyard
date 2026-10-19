@@ -659,12 +659,12 @@ export const executorSlotUndeclaredExit = 78;
 /**
  * The declaration as the file may hold it (GY-2163): the kinds list is read as names, because an
  * earlier release may have written a kind this code no longer runs. On the self-upgrade that
- * removes the kind, every slot the fleet restarts onto the new code died in `executorDeclaration`
- * Schema before its first poll — the whole host's executors crash-looped dead for two hours on
- * 19 October 2026 while the queue's dispatch and request-review rows went unserved and the loop
- * filed configuration faults naming a start command that died on the same file. A name the code
- * does not run is dropped — it says nothing about what the slot may claim — and a list that
- * empties serves every runnable kind, the undeclared default. `--install` rewrites the file
+ * removes the kind, every slot the fleet restarts onto the new code died in this module's stored
+ * declaration schema before its first poll — the whole host's executors crash-looped dead for two
+ * hours on 19 October 2026 while the queue's dispatch and request-review rows went unserved and
+ * the loop filed configuration faults naming a start command that died on the same file. A name
+ * the code does not run is dropped — it says nothing about what the slot may claim — and a list
+ * that empties serves every runnable kind, the undeclared default. `--install` rewrites the file
  * clean; every other field still validates exactly as the stored schema says.
  */
 const executorDeclarationRead = executorDeclarationSchema.extend({ kinds: z.array(z.string().min(1)).min(1).nullable().default(null) });
