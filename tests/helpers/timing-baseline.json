@@ -775,6 +775,7 @@
     "tests/unproduced-manual-attestation.test.ts": 537,
     "tests/unit-launcher-quoted-path.test.ts": 700,
     "tests/upgrade-dirty-snapshot.test.ts": 4000,
+    "tests/held-snapshot-owns-checkout.test.ts": 2000,
     "tests/upgrade-slot-restart.test.ts": 1800,
     "tests/upgrade-external-install.test.ts": 2000,
     "tests/upgrade-from-stable.test.ts": 500,
