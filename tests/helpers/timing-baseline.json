@@ -364,6 +364,7 @@
     "tests/every-launch-registered.test.ts": 2975,
     "tests/evidence-reuse-docs.test.ts": 676,
     "tests/evidence-reuse.test.ts": 11928,
+    "tests/executor-declaration.test.ts": 5374,
     "tests/executor-hold-presence-fault.test.ts": 1332,
     "tests/executor-kinds.test.ts": 1792,
     "tests/executor-merge-row.test.ts": 1199,
