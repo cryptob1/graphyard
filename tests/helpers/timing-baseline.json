@@ -1846,7 +1846,7 @@
     "tests/park-requirements-question-refused.test.ts": 6803,
     "tests/park-requirements-question-structural.test.ts": 528,
     "tests/pending-restart-dirty-snapshot.test.ts": 5869,
-    "tests/per-item-locking.test.ts": 50144,
+    "tests/per-item-locking.test.ts": 45289,
     "tests/pi-account-key.test.ts": 2942,
     "tests/pi-graphyard-tools.test.ts": 902,
     "tests/pi-narrow-roles.test.ts": 2760,
