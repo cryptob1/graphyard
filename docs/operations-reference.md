@@ -3,11 +3,11 @@
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. Wakes dismiss autocompact suggestions (`esc`/"Not now"), re-read; unconfirmed/unanswerable dialogs hold (`wake:master:held`). `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`. `daemon.stepStalls`: 3-cycle signatures: one verified remedy (unknown-profile/401/merge-key-reuse), else master wake; 5min retries.
 
 ### Dispatch order
 
-Within a priority: a submitted attempt (returned rework) precedes unsubmitted items, ahead of starvation/cold/scope; `master status`'s schedule follows. At most 4 items are in flight: ready work starts only while fewer than 4 are being built or waiting to merge (`Hotfix: …` items exempt) and otherwise waits in Todo until a merge frees a slot.
+Within a priority, returned rework precedes unsubmitted items, ahead of starvation/cold/scope. At most 4 items are in flight: ready work starts only while fewer than 4 are being built or waiting to merge (`Hotfix: …` exempt); the rest waits in Todo.
 
 ### Perpetual master loop
 
@@ -47,9 +47,9 @@ Graphyard observes no pull request, check run or commit status through GitHub's 
 
 ## Control-plane resources
 
-`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any checkout/worktree unheld/unregistered 24h; <25% free: escalates, naming consumers; foreign-namespace markers judge ownerless, 6h unheld, preview checkouts too, GY-1896); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
+`resources` remedies: ledgers, `graphyard master run --once`; `agent-names:PROFILE`, `herdr pane close PANE`; `session-slots:ROLE`, raise `concurrency`; `database-capacity`, grow volume+`GRAPHYARD_DATABASE_MAX_BYTES` (10GiB); `tmp-inodes[:ROOT]`, per `TMPDIR`/`/tmp` (any checkout/worktree unheld/unregistered 24h; <25% free: escalates, naming consumers; foreign-namespace markers judge ownerless, 6h unheld, preview checkouts too); `loaded-revision`: code moves. No fault: owed restart within bound, pane unowned <10min, `/tmp` >10% free <30min past a ≥25% pass.
 
-Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`). Under max(10% RAM, 4GB) available, launches defer (`escalation:dispatch:memory`; one fault/dip) until 1GB above.
+Session-started `npm test`/`test:browser`/typecheck/`tsc --noEmit` take one of max(2, floor(GB/8)) slots (`GRAPHYARD_VERIFICATION_SLOTS`).
 
 ## Storage retention
 
@@ -94,4 +94,4 @@ Only `admin` grants/revokes, to `producer` principals: exact name, `kind:*` or p
 
 ### Concurrent reconciliation
 
-Reconcile evaluates moved rows, due-past items, and each moved fleet face's item plus readers; empty views, configuration changes, ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× length) run full. Batches evaluate lock-free, write under coordination+row locks; heartbeats lock their item.
+Reconcile evaluates changed and due rows; empty views, configuration changes, ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× length) run full.

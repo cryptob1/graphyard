@@ -16,11 +16,11 @@ No step needs a human.
 
 Hetzner waits (exit 3) for price approval: `--confirm-price`, `--max-monthly` or `--ssh-key`.
 
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity holding intent:create; neither present: exit 2, never the install's worker credential). The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers rebind (declared slots restart); foreign refused; the loop reports its CLI's checkout, never the managed repository's, self-upgrading only when managing its project (same directory, worktree, origin); else `upgrade:refused`; `up` upgrades. Its `.graphyard/held-cli` pin and snapshots live there: `master status` names, `up` lifts, units read.
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity holding intent:create; neither present: exit 2, never the install's worker credential). The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); the loop self-upgrades only when managing its own project, else `upgrade:refused` and `up` upgrades.
 
 ## The Setup page
 
-A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`, valid 10 minutes), waits until green, then a fresh link; [phone access](dashboard.md#from-your-phone). Items:
+A step needing a person prints a Setup-page link (`SERVER/#sign-in=CODE&setup`, valid 10 minutes) and waits until green ([phone access](dashboard.md#from-your-phone)). Items:
 
 | Item | Button
 | --- | ---
@@ -69,7 +69,7 @@ Needs a GitHub `origin` the deploy key can push to over SSH. Install writes no A
 
 ## 8. Agent environments
 
-Connect accounts ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's `workers/` credentials and naming refused ones; account lines wait for both. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
+Connect accounts ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's `workers/` credentials and naming refused ones; account lines wait for both. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 
