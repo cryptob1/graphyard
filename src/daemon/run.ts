@@ -13,7 +13,6 @@ import { carryUndeclared } from './state-cursor.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
-import { diagnosisReport } from './diagnosis.js';
 import { latencyBudget } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
@@ -88,8 +87,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     faults: faultRecurrenceReport(state, faultPolicy, now),
     // Required checks failing on the base head as well as on the candidates they hold (GY-528).
     baseFailures: Object.values(state.baseFailures),
-    // Each diagnosis the diagnostician returned, and the fix item or covering item answering it (GY-439).
-    diagnoses: diagnosisReport(state),
     // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
     invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
     // The pipeline doctor as this cursor holds it (GY-711): whether a run is in flight right now —
@@ -195,7 +192,7 @@ export async function openResearchScratch(source: string, config: MasterConfig, 
       return scratch.directory;
     }
   } catch (error) {
-    log(`[graphyard-master] research, triage and the diagnostician are off: no scratch checkout outside the coordinator checkout could be allocated: ${message(error)}`);
+    log(`[graphyard-master] research and triage are off: no scratch checkout outside the coordinator checkout could be allocated: ${message(error)}`);
     return null;
   }
 }
@@ -259,10 +256,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // code — never from the coordinator checkout: a session that works where it starts rewrites the
     // control plane's own code. A root that cannot hold the scratch leaves the loop without research
     // and triage rather than with sessions working in the coordinator checkout.
-    // The diagnostician reads the repository from the same scratch checkout: it too is a session the
-    // loop launches, and without the scratch it does not run at all.
     // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
-    const needsScratch = Boolean(raw.research) || 'diagnostician' in raw;
+    const needsScratch = Boolean(raw.research);
     // GY-1773: a loop the launcher pinned to a held snapshot (the self-upgrade from a dirty checkout)
     // runs the snapshot's commit, whatever the checkout beside it holds: that is its release.
     // The read tolerates a configuration without a CLI launcher (no root to read under): such a loop runs the checkout.
@@ -271,7 +266,6 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, loadedRelease?.commit ?? null, log) : null;
     const scoped = new Proxy(raw, { get(target, property, receiver) {
       if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
-      if (property === 'diagnostician') { const diagnostician = target.diagnostician; return diagnostician && scratchDirectory ? { ...diagnostician, cwd: scratchDirectory } : undefined; }
       return Reflect.get(target, property, receiver);
     } });
     const effects = boundedPersist(namedEffects(stallHeldEffects(scoped, () => state, now, bound => effects.persist(bound))));

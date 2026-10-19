@@ -151,16 +151,15 @@ function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, ...overrides };
 }
 
-test('unit:system-invariants-checked — the loop checks every invariant each cycle, a violation is one standing fault of its class, a recurring class files one item, and master status prints a line per invariant', async () => {
+test('unit:system-invariants-checked — the loop checks every invariant each cycle, a violation is one standing fault of its class, and master status prints a line per invariant', async () => {
   const parent = item('GY-1', { stage: 'done' });
   let cycle = 0;
   const world = () => {
     const now = clock + cycle * 3 * minute;
     return { now, work: [parent, followUp('GY-2', parent), followUp('GY-3', parent), delivered('GY-5', 31 * minute + cycle * 3 * minute, [session('reviewer-5')]), refreshed('GY-8', cycle),
       // A merge refused by the gate is a recorded refusal; this one is mergeable and nothing refuses it, but GitHub never merges it.
-      mergeable('GY-10'), untriaged('GY-12', 25 * hour), ...(cycle >= 2 ? [leaseLost('GY-14', 5 * minute)] : []), ...standing] };
+      mergeable('GY-10'), untriaged('GY-12', 25 * hour), ...(cycle >= 2 ? [leaseLost('GY-14', 5 * minute)] : [])] };
   };
-  const filed: { title: string; origin: any }[] = [], standing: Work[] = [];
   const state = emptyDaemonState(config());
   state.metrics = metrics(31).map((metric, index) => ({ cycle: index, at: metric.at, durationMs: metric.durationMs, open: 0, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 },
     production: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeploy: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeployFailures: 0 }));
@@ -170,23 +169,14 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
     herdr: () => ({ agents: [{ name: 'reviewer-5', pane_id: 'pane-reviewer-5' }], available: true }),
     controlPlane: async () => ({ build: { commit: index < 2 ? 'build-1' : 'build-2', protocol: 1 } }) as any,
     faultClassPolicy: { threshold: 1, windowHours: 24 },
-    fileFaultClass: async (input: any) => {
-      filed.push(input);
-      const created = item(`GY-${100 + filed.length}`, { title: input.title, origin: input.origin, stage: 'backlog', ready: false, createdAt: iso(cycle * 3 * minute) } as Partial<Work>);
-      standing.push(created);
-      return created;
-    },
   });
   for (; cycle < 6; cycle++) await runCycle(config(), state, loop(cycle), () => clock + cycle * 3 * minute);
   // Seven invariants, each violated: one fault instance each, standing across the cycles rather than reopened.
   const instances = state.faults.instances.filter(instance => instance.kind.startsWith('invariant:'));
   assert.deepEqual(instances.map(instance => instance.kind).sort(), systemInvariants.map(invariantFaultKind).sort(), instances.map(instance => `${instance.kind} ${instance.text}`).join('\n'));
   for (const instance of instances) assert.equal(instance.faultClass, invariantFaultClass[instance.kind.slice('invariant:'.length) as SystemInvariant]);
-  // Recurrence files one item per class: merge-stall and refresh-churn share the merge class, and file one item for it.
-  const classes = new Set(Object.values(invariantFaultClass));
-  const invariantItems = filed.filter(entry => classes.has(entry.origin.faultClass.class) && entry.origin.faultClass.instances.some((instance: { kind: string }) => instance.kind.startsWith('invariant:')));
-  assert.deepEqual(invariantItems.map(entry => entry.origin.faultClass.class).sort(), [...classes].sort(), 'one item per class the invariants report into');
-  assert.equal(new Set(filed.map(entry => entry.origin.faultClass.class)).size, filed.length, 'never a second item for a class');
+  // GY-2186: nothing is filed for a class the invariants report into; the instances stay standing.
+  assert.ok(state.faults.instances.filter(instance => instance.kind.startsWith('invariant:')).every(instance => instance.linkedTo === null), 'no invariant instance is linked to an item');
   // master status: one line per invariant, with its threshold and reading.
   const summary = daemonSummary(state, clock + 6 * 3 * minute, 30_000, 'machine-a');
   assert.equal(summary.invariants.lines.length, systemInvariants.length);

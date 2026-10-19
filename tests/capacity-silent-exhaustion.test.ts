@@ -11,15 +11,12 @@ import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from
 import {
   doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimit, headlessTimeoutLimitCharge, runTimeoutLimit, silentPaneExhaustion, silentPaneExhaustionReason,
 } from '../src/model/capacity.js';
-import { faultClassItem, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import {
   approverProfile, approverRoleHealth, approverSessionName, holdRepeatedLimitAccount, masterConfigSchema, observedExhaustions, recordEnvironmentLog,
   recordObservedExhaustion, repeatedLimitAccount, selectAccount, selectApproverAccount, selectionKey, sessionAccount, type MasterConfig,
 } from '../src/master.js';
-import { clearDiagnoses, diagnosesSettled, diagnosisStep, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { clearDoctorRuns, doctorDue, doctorRunsSettled, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
-import { diagnosticianSettings } from '../src/runner/payloads.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { Principal, Work } from '../src/model.js';
 import type { RunEvent, RunResult, Runner } from '../src/runner/types.js';
@@ -70,7 +67,7 @@ after(async () => {
   await store.close();
   await database.stop();
 });
-afterEach(() => { clearDiagnoses(); clearDoctorRuns(); });
+afterEach(() => clearDoctorRuns());
 
 const limitError = '429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-03 08:27:35"}';/** 2026-10-01T22:22:33.900Z as a millisecond epoch — handed to limit detectors as their fixed now. */
 const limitNow = 1_790_893_353_900;
@@ -119,10 +116,8 @@ test('unit:hold-charged-to-selected-account — sessionAccount and repeatedLimit
   const config = { credentialFile } as Pick<MasterConfig, 'credentialFile'>;
   await recordEnvironmentLog(config, [], [], { key: selectionKey('approver', approverProfile), environment: 'claude-c', kind: 'claude', at: new Date().toISOString(), work: 'GY-1701' });
   await recordEnvironmentLog(config, [], [], { key: selectionKey('doctor', 'doctor'), environment: 'zai-a', kind: 'pi', at: new Date().toISOString(), work: null });
-  await recordEnvironmentLog(config, [], [], { key: selectionKey('diagnostician', 'diagnostician'), environment: 'zai-b', kind: 'pi', at: new Date().toISOString(), work: 'GY-1682' });
   assert.equal((await sessionAccount(root, config, 'approver', approverProfile, { work: 'GY-1701' }))?.environment, 'claude-c');
   assert.equal((await sessionAccount(root, config, 'doctor', 'doctor'))?.environment, 'zai-a');
-  assert.equal((await sessionAccount(root, config, 'diagnostician', 'diagnostician', { work: 'GY-1682' }))?.environment, 'zai-b');
   const base = Date.now();
   const exhaustion = (requestId: string, offsetMs: number) => ({
     at: new Date(base + offsetMs).toISOString(), role: 'approver' as const, account: 'claude-c', profile: approverProfile, reason: 'silent', resetsAt: null, requestId,
@@ -319,163 +314,6 @@ function limitedTimeoutRunner(events: RunEvent[]): Runner {
   return { name: 'pi', start() { return { id: randomUUID(), events, onEvent: () => () => {}, cancel() {}, result: async () => timeoutFailure() }; } };
 }
 
-function diagnosisConfig(): MasterConfig {
-  return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
-    autoMerge: true, mergeMethod: 'merge', workers: [] });
-}
-function diagnosisItem(key: string, at: number, overrides: Partial<Work> = {}): Work {
-  return {
-    id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'backlog', revision: 1, policyRevision: 1,
-    createdAt: new Date(at - 3 * 3_600_000).toISOString(), updatedAt: new Date(at).toISOString(), stageEnteredAt: new Date(at - 3_600_000).toISOString(),
-    ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [],
-    evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides,
-  } as unknown as Work;
-}
-function recurring(key: string, faultClass: FaultClass, at: number) {
-  const recent: FaultInstance[] = [0, 1, 2].map(index => ({ id: `${faultClass}|${key}|${index}`, kind: 'blocker', faultClass, subject: `GY-${index + 1}`, text: 'an instance', at: new Date(at - index * 60_000).toISOString(), lastSeenAt: new Date(at).toISOString(), linkedTo: key }));
-  const input = faultClassItem({ faultClass, recent }, { threshold: 3, windowHours: 24 }, at);
-  return diagnosisItem(key, at, { title: input.title, description: input.description, origin: input.origin } as Partial<Work>);
-}
-
-async function diagnosisRound(account: string | null, held: { account: string; role: string; at?: number }[], eventsFor: (attempt: 'primary' | 'fallback') => RunEvent[] = () => [{ kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError }],
-  options: { elapseAttemptMs?: number; accountFor?: (attempt: 'primary' | 'fallback') => string | null } = {}) {
-  const settings = diagnosticianSettings({ diagnostician: {} });
-  /** 2030-01-01T12:00:00Z as a millisecond epoch — the diagnosis step's fixed clock. */
-  let at = 1_893_499_200_000;
-  const launchAt = at;
-  const elapse = options.elapseAttemptMs ?? 0;
-  const accountFor = options.accountFor ?? (() => account);
-  const diagnostician: DiagnosticianEffects = {
-    settings, cwd: '/checkout',
-    runner: async attempt => {
-      if (elapse) at += elapse;
-      return { runner: limitedTimeoutRunner(eventsFor(attempt)), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account: accountFor(attempt) };
-    },
-    context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
-    file: async () => { throw new Error('no fix'); },
-    decide: async () => ({ id: randomUUID() }),
-  };
-  const state = emptyDaemonState(diagnosisConfig());
-  const work = [recurring('GY-1682', 'scope', launchAt)];
-  const fx = {
-    diagnostician, persist: async () => {},
-    holdAccount: async (name: string, observed: { role: string; at?: string }) => { held.push({ account: name, role: observed.role, at: observed.at ? Date.parse(observed.at) : at }); },
-  } as unknown as DaemonEffects;
-  const cycle = () => ({ config: diagnosisConfig(), state, effects: fx, now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [] as any[],
-    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() }) as unknown as Cycle;
-  await diagnosisStep(cycle()); await diagnosesSettled();
-  await diagnosisStep(cycle()); await diagnosesSettled();
-  return { state, launchAt, settledAt: at };
-}
-
-test('integration:diagnostician-timeout-limit-wait — an all-timeout round whose retries carry a limit waits and holds the registry account', async () => {
-  const held: { account: string; role: string; at?: number }[] = [];
-  const { state } = await diagnosisRound('zai-diag', held);
-  const entry = state.diagnoses['GY-1682'];
-  assert.equal(entry.state, 'waiting', entry.detail);
-  assert.ok(entry.retryAt);
-  assert.equal(held[0]?.account, 'zai-diag');
-  assert.equal(held[0]?.role, 'diagnostician');
-  assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
-});
-
-test('integration:diagnostician-timeout-limit-wait — a primary limit notice with a bare-timeout fallback still waits, never overlong-session', async () => {
-  const held: { account: string; role: string; at?: number }[] = [];
-  const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
-  const { state } = await diagnosisRound('zai-one-notice', held, attempt => attempt === 'primary' ? [retry] : []);
-  assert.equal(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682'].detail);
-  assert.equal(held[0]?.account, 'zai-one-notice');
-  assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
-});
-
-test('integration:diagnostician-timeout-limit-wait — a named primary limit survives a null-account Pi fallback that also reports a limit', async () => {
-  const held: { account: string; role: string; at?: number }[] = [];
-  const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
-  const { state } = await diagnosisRound('zai-primary', held, () => [retry], {
-    accountFor: attempt => attempt === 'primary' ? 'zai-primary' : null,
-  });
-  assert.equal(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682'].detail);
-  assert.deepEqual(held.map(entry => entry.account), ['zai-primary']);
-  assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
-});
-
-test('integration:diagnostician-timeout-limit-wait — the assumed-hour hold starts at settlement after two elapsed timeout bounds', async () => {
-  const held: { account: string; role: string; at?: number }[] = [];
-  const attemptMs = 20 * 60_000;
-  const { state, launchAt, settledAt } = await diagnosisRound('zai-elapsed', held, undefined, { elapseAttemptMs: attemptMs });
-  assert.equal(state.diagnoses['GY-1682'].state, 'waiting');
-  assert.equal(settledAt, launchAt + 2 * attemptMs, 'both timeout bounds elapsed before settlement');
-  assert.equal(Date.parse(state.diagnoses['GY-1682'].retryAt!), settledAt + 3_600_000, 'retryAt is one hour after settlement, not launch');
-  assert.equal(Date.parse(state.diagnoses['GY-1682'].refusedAt!), settledAt);
-  assert.equal(held[0]?.at, settledAt, 'the account hold is stamped at settlement');
-});
-
-test('integration:replay-diagnostician-timeouts — GY-1682 waits for its provider reset then completes without overlong-session', async () => {
-  const held: { account: string; role: string }[] = [];
-  const settings = diagnosticianSettings({ diagnostician: {} });
-  /** 2030-01-01T12:00:00Z as a millisecond epoch — the diagnosis step's fixed clock. */
-  let at = 1_893_499_200_000;
-  const launchAt = at;
-  const attemptMs = 20 * 60_000;
-  let phase: 'limit' | 'ok' = 'limit';
-  const covering = diagnosisItem('GY-99', at, { title: 'Covering fix', stage: 'ready' } as Partial<Work>);
-  const successPayload = {
-    subject: 'GY-1682',
-    cause: 'Scope requests recurse because the planner restates the same ask',
-    evidence: { logLines: ['scope request restated'], commands: ['graphyard status GY-1682'] },
-    faultClass: 'scope' as const,
-    covering: 'GY-99',
-  };
-  const diagnostician: DiagnosticianEffects = {
-    settings, cwd: '/checkout',
-    runner: async attempt => {
-      if (phase === 'limit') {
-        at += attemptMs;
-        const retry: RunEvent = { kind: 'retry', at: new Date(at).toISOString(), attempt: 1, error: limitError };
-        return { runner: limitedTimeoutRunner(attempt === 'primary' ? [retry] : []), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account: 'zai-replay' };
-      }
-      const runner: Runner = {
-        name: 'pi',
-        start<T>(_prompt: string, options: { validate: (payload: unknown) => T; tool?: string }) {
-          const parsed = options.validate(successPayload);
-          return { id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: async () => ({ ok: true as const, tool: options.tool ?? 'diagnose', payload: parsed, payloads: [parsed] }) };
-        },
-      };
-      return { runner, runtime: 'pi', model: 'zai/glm-5.3-flash', account: 'zai-replay' };
-    },
-    context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
-    file: async () => { throw new Error('no fix'); },
-    decide: async () => ({ id: randomUUID() }),
-  };
-  const state = emptyDaemonState(diagnosisConfig());
-  const work = [recurring('GY-1682', 'scope', launchAt), covering];
-  const decisions = new Map<string, { id: string; state: string; action: string; approvedBy?: string }>();
-  const fx = {
-    diagnostician, persist: async () => {},
-    holdAccount: async (name: string, observed: { role: string }) => { held.push({ account: name, role: observed.role }); },
-    decide: async (_work: Work, action: string) => { const id = randomUUID(); decisions.set(id, { id, state: 'applied', action, approvedBy: 'approver' }); return { id }; },
-    decisions: async () => ({ decisions: [...decisions.values()] }),
-    approver: async () => ({ agentName: 'gy-approver', pane: null, account: 'env-b', runtime: 'claude', session: null }),
-  } as unknown as DaemonEffects;
-  const cycle = () => ({ config: diagnosisConfig(), state, effects: fx, now: () => at, snapshot: { work, now: new Date(at).toISOString() }, clock: at, performed: [] as any[],
-    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() }) as unknown as Cycle;
-  await diagnosisStep(cycle()); await diagnosesSettled();
-  await diagnosisStep(cycle()); await diagnosesSettled();
-  assert.equal(state.diagnoses['GY-1682'].state, 'waiting');
-  assert.match(state.diagnoses['GY-1682'].detail, /quota or rate limit/);
-  assert.equal(held[0]?.account, 'zai-replay');
-  assert.equal(Date.parse(state.diagnoses['GY-1682'].retryAt!), launchAt + 2 * attemptMs + 3_600_000, 'elapsed timeout bounds are included in the wait');
-  phase = 'ok';
-  at = Date.parse(state.diagnoses['GY-1682'].retryAt!) + 1;
-  await diagnosisStep(cycle()); await diagnosesSettled();
-  await diagnosisStep(cycle()); await diagnosesSettled();
-  assert.notEqual(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682']?.detail);
-  assert.ok(['closing', 'answered', 'releasing', 'diagnosed'].includes(state.diagnoses['GY-1682'].state), state.diagnoses['GY-1682'].state);
-  assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
-});
-
 test('unit:run-timeout-limit-signal — headlessTimeoutLimitCharge holds every named limit attempt with its own reset', () => {
   const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
   // Fallback-only notice on an unnamed Pi login: do not charge the silent registry primary.
@@ -534,7 +372,8 @@ test('integration:doctor-timeout-account-hold — a no-report timeout round with
   };
   /** 2026-10-11T12:11:26.439Z as a millisecond epoch — the filed doctor no-report clock. */
   const at = 1_791_720_686_439;
-  const config = diagnosisConfig();
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
   const state = emptyDaemonState(config);
   const fx = {
     doctor, persist: async () => {},

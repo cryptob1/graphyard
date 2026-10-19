@@ -1,28 +1,21 @@
-// Concern: fault classification (GY-173) — what the cycle saw standing wrong, classified, and one
-// structural item filed per recurring class.
-import { createHash } from 'node:crypto';
+// Concern: fault classification (GY-173) — what the cycle saw standing wrong, classified; instances recorded; and each recurring class one master-status attention line (GY-2186, no work item filed).
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassItem, faultClassPolicyFromEnv, recurringClasses, releaseOvertakenLinks, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
-import { forgetDoneLinks, linkInstance } from '../model/fault-record.js';
+import { classified, classifyAttention, faultClasses, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClass, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
 import { judgeWorktreeDisk, standingDiskLine, worktreePassOf, worktreeVolumeWording } from '../master/worktree-disk.js';
-import { type DaemonAction, type DaemonState, faultActionKey, message } from './state.js';
+import { type DaemonAction, type DaemonState, message } from './state.js';
 export { unboundedAttemptKey };
 import type { UnsubmittedAttempt } from '../model/attempt-bound.js';
-import { readyToRetry } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { actionableIntervalMs, loopAttention } from './liveness.js';
-import { planeWideRefusal } from '../model/blocker-class.js';
 import { daemonSummary } from './run.js';
 import { baseFailureAttention } from './cycle-base-failures.js';
-import type { Cycle } from './cycle.js';
-import { budgetedPage, docsHeadroom, docsHeadroomText, docsTrimItem, docsWords, openDocsTrimItem, repositoryConfigFile, repositoryDocsBudget, type DocsHeadroom, type DocsWordBudget, type DocsWordCount } from '../model/documentation.js';
+import { budgetedPage, docsHeadroom, docsHeadroomText, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsHeadroom, type DocsWordBudget, type DocsWordCount } from '../model/documentation.js';
 import { agentOwner } from '../master/attention.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { diagnosisStep, standingFaultClassItem } from './diagnosis.js';
-import { candidateKey } from './reconcile.js';
+import type { Cycle } from './cycle.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 import { baseRefreshConflict } from '../merge-queue.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
@@ -335,38 +328,19 @@ export function endFailingRuns(state: Pick<DaemonState, 'actions' | 'faults'>, p
   }
 }
 /**
- * One structural item per recurring class (AC-2). A class whose unaccounted instances in the window
- * reach the threshold, with no open item naming it, gets one backlog item filed as the master's
- * operator-agent identity, listing the instances; while that item is open, every later instance is
- * linked to it instead of filing another. Nothing is filed below the threshold.
+ * One master-status attention line per recurring class (GY-2186). A class whose instances in the
+ * policy window reach the policy threshold reads as one attention line naming the class, the count,
+ * the window and the latest instance. The faults step files no work item for any class, whatever
+ * the count: the master reads the line and removes the cause the instances share.
  */
-export async function fileRecurringFaultClasses(state: DaemonState, effects: DaemonEffects, work: Work[], clock: number, now: () => number, performed: DaemonAction[], budget?: FilingBudget) {
-  const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env);
-  releaseOvertakenLinks(state.faults.instances, work); // GY-1632: a closure applied before this cycle's links overtook them
-  forgetDoneLinks(state.faults, work);
-  for (const recurrence of recurringClasses(state.faults.instances, work, policy, clock, standingFaultClassItem)) {
-    if (recurrence.item) { for (const instance of recurrence.unlinked) linkInstance(state.faults, instance, recurrence.item.key); continue; }
-    if (!recurrence.file || !effects.fileFaultClass) continue;
-    const key = faultActionKey(recurrence.faultClass), previous = state.actions[key];
-    if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) continue;
-    // GY-1357: a filing the step's remaining budget cannot fit is carried, untouched, to the next cycle, which recounts the class and files it then.
-    if (budget && !budget.fits()) { budget.carried.push(`the ${recurrence.faultClass} class filing`); continue; }
-    const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
-    // The same instances always file under the same key, so a retry after a lost reply returns the item already filed.
-    const idempotency = `fault-class:${recurrence.faultClass}:${createHash('sha256').update(recurrence.recent.map(entry => entry.id).sort().join(',')).digest('hex').slice(0, 32)}`;
-    await record(state, key, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item for the recurring ${recurrence.faultClass} fault class: ${recurrence.count} instances in ${policy.windowHours} hours`, attempts, cycle: state.cycle }, now(), effects.persist);
-    try {
-      const filed = await spend(budget, () => effects.fileFaultClass!(faultClassItem(recurrence, policy, clock), idempotency));
-      for (const instance of recurrence.recent) linkInstance(state.faults, instance, filed.key);
-      work.push(filed);
-      performed.push(await record(state, key, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} for the recurring ${recurrence.faultClass} fault class (${recurrence.count} ≥ ${policy.threshold} in ${policy.windowHours} hours), linking ${recurrence.recent.length} instance(s); later instances link to it`, attempts, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      // GY-1344: a control plane that did not answer refused nothing about the filing; it is retried on the backoff and is no loop fault.
-      // GY-1345: nor is any plane-wide refusal (a 502-504 body, a call timed out): the retry files under the same idempotency key.
-      const unanswered = planeWideRefusal(error);
-      performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the item for the recurring ${recurrence.faultClass} fault class${unanswered ? ' (the control plane did not answer, so it is filed on a later cycle)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined));
-    }
-  }
+export function recurringFaultAttention(state: Pick<DaemonState, 'faults'>, policy: FaultClassPolicy, now: number): AttentionItem[] {
+  return recurringClasses(state.faults.instances, policy, now)
+    .filter(recurrence => recurrence.count >= policy.threshold)
+    .map(recurrence => {
+      const latest = recurrence.recent.at(-1)!;
+      return { subject: `fault:${recurrence.faultClass}`, text: `${recurrence.faultClass} recurred ${recurrence.count} times in the last ${policy.windowHours} hours, latest at ${latest.at}: ${latest.text}`.slice(0, 1000),
+        ...agentOwner('master', 'Find and remove the cause the instances share; the loop files no item for a recurring class') };
+    });
 }
 /** The budget a commit configures and its pages' words. */
 export interface DocsBudgetCount { budget: DocsWordBudget; pages: DocsWordCount }
@@ -406,65 +380,28 @@ export async function docsWordCountAt(root: string, ref: string, run: ChildRun =
  * project's graphyard.json configures there: its origin copy when the checkout has one, else the
  * local branch. A project that configures no budget is not monitored. A set within 3% of the budget
  * is an attention line for the master (`master status` and the loop read it through
- * reportedAttention), and the loop files the one trim item for it (fileDocsTrim).
+ * reportedAttention). The loop files nothing for it (GY-2186): the master trims the set by hand.
  */
 export async function docsHeadroomStatus(root: string, baseBranch: string, count: (root: string, ref: string) => Promise<DocsBudgetCount | null> | DocsBudgetCount | null = docsWordCountAt): Promise<{ docs: { base: string; headroom: DocsHeadroom } | null; attention: AttentionItem[] }> {
   for (const ref of [`origin/${baseBranch}`, baseBranch]) {
     const counted = await count(root, ref);
     if (!counted) continue;
     const headroom = docsHeadroom(counted.pages, counted.budget), text = docsHeadroomText(headroom, ref);
-    // GY-1515: inside the band the set is what the budget test holds (no change may add a word to it) and the trim
-    // item restores; that line is attention, never a fault (cycleFaults). Over the budget the band was overrun by
-    // changes merged together and the budget test fails on the base: the set is a resource at its bound.
+    // GY-1515: inside the band the set is what the budget test holds (no change may add a word to it); that line is
+    // attention, never a fault (cycleFaults). Over the budget the band was overrun by changes merged together and the
+    // budget test fails on the base: the set is a resource at its bound.
     const kind = headroom.remaining < 0 ? 'resource-bound' : 'docs-headroom';
-    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind, faultClass: 'resources', ...agentOwner('master', 'The loop files one trim item for it (a docs-trim bug naming the largest pages); dispatch it ahead of items that add documentation') }] : [] };
+    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind, faultClass: 'resources', ...agentOwner('master', 'Trim the set below its budget; the loop files no item for documentation headroom') }] : [] };
   }
   return { docs: null, attention: [] };
 }
-/** The loop's action key for the documentation trim item (GY-574). */
-export const docsTrimActionKey = 'fault:docs-headroom';
-/** The loop's last action for the trim item opened a filing episode that no restoration has closed. */
-const docsTrimEpisodeOpen = (action: DaemonAction | undefined) => action?.state === 'done' && action.detail.startsWith('Filed ');
-/**
- * The documentation within 3% of its word budget on the base branch files one trim item (GY-574),
- * as the operator-agent, naming the largest pages. One saturation episode files once (review finding
- * 1 on 2639e4d6): the filing stands on the loop cursor until the first counted set with its headroom
- * records its restoration, so a trim item that closed or merged and a total that drifted file nothing
- * more — only restored headroom lets a later saturation file again. A set with its headroom files
- * nothing, and neither does a loop without the operator-agent identity.
- */
-export async function fileDocsTrim(state: DaemonState, effects: Pick<DaemonEffects, 'fileFaultClass' | 'persist'>, work: Work[], docs: ReportedAttention['docs'], now: () => number, performed: DaemonAction[], budget?: FilingBudget) {
-  const previous = state.actions[docsTrimActionKey];
-  if (!docs?.headroom.saturated) {
-    if (docs && docsTrimEpisodeOpen(previous))
-      performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'done', detail: `Documentation headroom restored on ${docs.base} (${docs.headroom.total} of ${docs.headroom.budget} words); the next saturation may file again`, attempts: previous!.attempts, cycle: state.cycle }, now(), effects.persist));
-    return;
-  }
-  if (!effects.fileFaultClass || openDocsTrimItem(work) || docsTrimEpisodeOpen(previous)) return;
-  if (previous && previous.state !== 'done' && !readyToRetry(previous, state.cycle)) return;
-  if (budget && !budget.fits()) { budget.carried.push('the documentation trim filing'); return; }
-  const attempts = previous?.state === 'done' ? 1 : (previous?.attempts ?? 0) + 1;
-  // One key per base and total, so a retry after a lost reply returns the item already filed.
-  const idempotency = `docs-headroom:${docs.base}:${docs.headroom.total}`;
-  await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'started', detail: `Filing one item to restore documentation headroom: ${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}`, attempts, cycle: state.cycle }, now(), effects.persist);
-  try {
-    // The trim item goes through the same operator-agent intent route as a fault-class item; it names no class.
-    const filed = await spend(budget, () => effects.fileFaultClass!(docsTrimItem(docs.headroom, docs.base), idempotency));
-    work.push(filed);
-    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: filed.key, principal: null, state: 'done', detail: `Filed ${filed.key} to restore documentation headroom (${docs.headroom.total} of ${docs.headroom.budget} words on ${docs.base}); nothing more is filed until headroom is restored`, attempts, cycle: state.cycle }, now(), effects.persist));
-  } catch (error) {
-    performed.push(await record(state, docsTrimActionKey, { kind: 'fault', work: null, principal: null, state: 'failed', detail: `Could not file the documentation trim item: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist,
-      planeWideRefusal(error) ? null : undefined));
-  }
-}
-/** The recurrences `master status` reports under daemon.faults: per class, the window's count and the item standing for it. */
+/** The recurrences `master status` reports under daemon.faults: per class, the window's count and its latest instance. */
 export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy: FaultClassPolicy, now: number) {
   const instances = state.faults.instances;
-  const linked = (faultClass: string) => [...new Set(instances.filter(entry => entry.faultClass === faultClass && entry.linkedTo).map(entry => entry.linkedTo!))];
   return { policy, recorded: instances.length, standing: Object.keys(state.faults.open).length,
     classes: faultClasses.flatMap(faultClass => {
       const from = now - policy.windowHours * 3_600_000, inWindow = instances.filter(entry => entry.faultClass === faultClass && Date.parse(entry.at) >= from);
-      return inWindow.length ? [{ faultClass, instances: inWindow.length, unlinked: inWindow.filter(entry => !entry.linkedTo).length, items: linked(faultClass), latest: inWindow.at(-1)!.at }] : [];
+      return inWindow.length ? [{ faultClass, instances: inWindow.length, latest: inWindow.at(-1)!.at }] : [];
     }).sort((a, b) => b.instances - a.instances) };
 }
 
@@ -525,52 +462,11 @@ async function withinBudget<T>(owner: object, source: string, read: () => Promis
 }
 const observedWithin = 'The faults step observed every source within its budget';
 /**
- * GY-1357: what one filing or decision request of the faults step is taken to cost before the loop
- * has timed one. On 2026-10-06 each re-read the work snapshot (3.3-4.9s) and some asked for a
- * decision (about 4s), and run after the observation with no bound they held the step at 100-150s.
- */
-export const faultFilingEstimateMs = 10_000;
-/** The recent filings' own costs, per loop state: the slowest of them is what the next one is expected to take. */
-const filingCosts = new WeakMap<object, number[]>();
-/**
- * The rest of the faults step's budget, after the observation: a filing (a recurring class's item,
- * the documentation trim item) or a diagnosis's move (its fix's filing, its decision request, its
- * approver) starts only while what remains fits the slowest recent one — never more than half the
- * budget, so a plane that once answered slowly does not carry every filing for ever. One that does
- * not fit is carried, untouched: the next cycle recounts it from the same records and files it then,
- * under the same idempotency key, so nothing is dropped or filed twice.
- */
-export interface FilingBudget { fits: () => boolean; spend: <T>(body: () => Promise<T>) => Promise<T>; carried: string[] }
-export function filingBudget(owner: object, deadline: number, budgetMs: number, now: () => number): FilingBudget {
-  let costs = filingCosts.get(owner);
-  if (!costs) filingCosts.set(owner, costs = []);
-  const recent = costs, expected = () => Math.min(Math.round(budgetMs / 2), recent.length ? Math.max(...recent) : faultFilingEstimateMs);
-  return { carried: [], fits: () => deadline - now() >= expected(),
-    async spend(body) {
-      const started = now();
-      try { return await body(); } finally { recent.push(Math.max(0, now() - started)); if (recent.length > 8) recent.shift(); }
-    } };
-}
-const spend = <T>(budget: FilingBudget | undefined, body: () => Promise<T>) => budget ? budget.spend(body) : body();
-/**
- * The cycle the diagnoses move on in, inside the faults step's budget: each move runs only while it
- * fits (FilingBudget), and the work snapshot a refused decision is decided afresh from is read at
- * most once per step and shared, never once per class — or, past what the budget fits, is the cycle's own.
- */
-function budgetedCycle(cycle: Cycle, budget: FilingBudget): Cycle {
-  let fresh: ReturnType<DaemonEffects['snapshot']> | undefined;
-  const effects: DaemonEffects = Object.create(cycle.effects, { snapshot: { value: () => fresh ??= budget.fits() ? cycle.effects.snapshot() : Promise.resolve(cycle.snapshot) } });
-  const isolate: Cycle['isolate'] = async (kind, item, name, body) => {
-    if (!budget.fits()) { budget.carried.push(name); return undefined; }
-    return cycle.isolate(kind, item, name, () => budget.spend(body));
-  };
-  return { ...cycle, effects, isolate };
-}
-/**
- * Step 7b: classify what this cycle saw standing wrong and file one item per recurring class.
- * Standing faults are observed at most once per faultObservationIntervalMs; failed actions are noted as
- * they happen, so every cycle still ends silent failing runs and files a class that reached its threshold.
- * A read that fails makes the cycle partial: faults its source would have shown were not
+ * Step 7b: classify what this cycle saw standing wrong and record its instances. Standing faults are
+ * observed at most once per faultObservationIntervalMs; failed actions are noted as they happen, so
+ * every cycle still ends silent failing runs. The step files no work item (GY-2186): a recurring
+ * class is one master-status attention line (recurringFaultAttention), and the loop launches no
+ * diagnostician. A read that fails makes the cycle partial: faults its source would have shown were not
  * observed, so none standing ends this cycle (and none reopens as a new instance next cycle).
  * A Herdr that cannot be read lists no sessions, which would make every live lease a missing
  * session: the kinds read from its inventory are neither opened nor ended that cycle.
@@ -580,11 +476,8 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   // The cadence is the loop's own time, as the reads it spaces out are: the snapshot's clock need not move between cycles.
   const policy = effects.faultClassPolicy ?? faultClassPolicyFromEnv(process.env), last = state.faults.observedAt ? Date.parse(state.faults.observedAt) : Number.NaN, local = now();
   const budgetMs = faultObservationBudgetMs(config.run.intervalSeconds * 1000), deadline = local + budgetMs, unreadSources: string[] = [];
-  const filings = filingBudget(state, deadline, budgetMs, now);
   if (local >= last && local - last < faultObservationIntervalMs) { // a local clock that went back observes again
-    endFailingRuns(state, policy, clock);
-    await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed, filings);
-    return noteCarried(cycle, filings.carried);
+    return endFailingRuns(state, policy, clock);
   }
   const lastObservedAt = state.faults.observedAt;
   state.faults.observedAt = new Date(local).toISOString();
@@ -621,26 +514,6 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const worktreeReclaimable = effects.worktreeReclaimable ? await effects.worktreeReclaimable(snapshot.work, clock).catch(() => null) : undefined;
   trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver, worktreeReclaimable }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
-  // GY-1357: the filings and the diagnoses' moves share what the observation left of the budget.
-  await fileRecurringFaultClasses(state, effects, snapshot.work, clock, now, performed, filings);
-  await fileDocsTrim(state, effects, snapshot.work, reported?.docs, now, performed, filings);
-  // 7c. Each recurring-fault item filed (this cycle included) and each invariant violation past its
-  //     bound gets its diagnosis, and each diagnosis moves on by one decision (GY-439). A plane too slow
-  //     to be observed within the budget would only time out the diagnoses' requests too: they wait for the next cycle.
-  if (!unreadSources.length) await diagnosisStep(budgetedCycle(cycle, filings));
-  await noteCarried(cycle, filings.carried);
-}
-
-const carriedNone = 'The faults step fitted every filing and decision request in its budget';
-/** Record what the step carried to the next cycle, so the journal says it was bounded rather than lost; a cycle that carries nothing supersedes the last carry once. */
-async function noteCarried(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, carried: string[]) {
-  const { state, effects, now, performed } = cycle, key = 'faults:carried', standing = state.actions[key];
-  if (!carried.length) {
-    if (standing && !standing.detail.startsWith(carriedNone)) performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', attempts: standing.attempts + 1, cycle: state.cycle, detail: `${carriedNone}; nothing was carried` }, now(), effects.persist, null));
-    return;
-  }
-  performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', attempts: (standing?.attempts ?? 0) + 1, cycle: state.cycle,
-    detail: `The faults step's budget did not fit ${carried.length} filing(s) or decision request(s), so they are carried to the next cycle rather than run inline: ${carried.slice(0, 8).join('; ')}${carried.length > 8 ? `; and ${carried.length - 8} more` : ''}` }, now(), effects.persist, null));
 }
 
 /** Record a cut observation, so the journal and `master status` say the step was bounded rather than blind; a full one supersedes the last cut once. */
@@ -651,5 +524,5 @@ async function noteObservationBudget(cycle: Pick<Cycle, 'state' | 'effects' | 'n
     return;
   }
   performed.push(await record(state, key, { kind: 'fault', work: null, principal: null, state: 'done', attempts: (standing?.attempts ?? 0) + 1, cycle: state.cycle,
-    detail: `The faults step spent its ${Math.round(budgetMs / 1000)}s observation budget before ${unreadSources.join(' and ')} answered, so the cycle is partial: nothing standing ends on what went unread, the diagnoses wait, and a later cycle takes the answer of the read still in flight once it lands rather than starting another` }, now(), effects.persist, null));
+    detail: `The faults step spent its ${Math.round(budgetMs / 1000)}s observation budget before ${unreadSources.join(' and ')} answered, so the cycle is partial: nothing standing ends on what went unread, and a later cycle takes the answer of the read still in flight once it lands rather than starting another` }, now(), effects.persist, null));
 }
