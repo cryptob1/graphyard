@@ -66,7 +66,7 @@ export const releaseCandidateTests = {
  * trial (`affected`) leaves them out, and the loop runs them once after each merge, filing one chore
  * item per failing file naming it and the merge commit. GitHub's CI selection (`select`) still runs them.
  */
-export const advisoryTests = ['tests/docs-budget.test.ts', 'tests/docs-budget-headroom.test.ts', 'tests/module-budgets.test.ts', 'tests/hotspots.test.ts', 'tests/interventions-hotspot-split.test.ts'];
+export const advisoryTests = ['tests/module-budgets.test.ts', 'tests/hotspots.test.ts', 'tests/interventions-hotspot-split.test.ts'];
 export const isAdvisoryTest = file => advisoryTests.includes(file);
 
 /** The test files the required `test` check runs: every file except the release-candidate suites. */

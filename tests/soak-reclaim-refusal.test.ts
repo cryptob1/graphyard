@@ -5,23 +5,21 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { masterConfigSchema, reclaimIdleMs, reclaimWorktrees, removeReclaimableWorktrees, worktreesDirectory, writeWorktreeInventoryCache, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { cycleFaults, docsHeadroomStatus } from '../src/daemon/faults.js';
 import { worktreeRefusalRetryMs } from '../src/master/worktrees.js';
 import { runChild } from '../src/child-runner.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-1515 (manual:fault-class-resources). The two causes of the recurring resources faults, over
+ * GY-1515 (manual:fault-class-resources). The cause of the recurring resources faults, over
  * three simulated days of the real loop's cycles: the reclaim pass meeting one tree Git refuses
- * (a fresh failed pass, and a resources fault, on every retry) and the documentation set sitting
- * inside its headroom band (a resource-bound fault on every saturation). After every cycle the
+ * (a fresh failed pass, and a resources fault, on every retry). After every cycle the
  * system invariants hold; across the retry boundary a standing refusal is reported once and not
- * again, the docs line is attention only, and the refusal is retried each day but never removed.
+ * again, and the refusal is retried each day but never removed.
  */
 const hour = 3_600_000, minute = 60_000, days = 3, cycleMs = 20 * minute;
 
-test('unit:soak-invariants-hold — over three days a standing worktree refusal is one resources fault and is retried once a day, and the docs set inside its band is never a fault', { timeout: 300_000 }, async () => {
+test('unit:soak-invariants-hold — over three days a standing worktree refusal is one resources fault and is retried once a day', { timeout: 300_000 }, async () => {
   const root = await temporaryDirectory('soak-reclaim'), credentials = await temporaryDirectory('soak-reclaim-credentials');
   try {
     execFileSync('git', ['init', '-q', '-b', 'main', root]);
@@ -62,18 +60,12 @@ test('unit:soak-invariants-hold — over three days a standing worktree refusal 
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
       reclaim } as unknown as DaemonEffects;
 
-    // The documentation set on origin/main stays inside its band (15,639 of 16,000 words) for the whole run.
-    const docs = await docsHeadroomStatus('/repository', 'main', () => ({ budget: { total: 16_000, perPage: 1_200, documentation: ['README.md', 'docs/'], paths: ['README.md', 'docs/'] }, pages: { 'README.md': 15_639 } }));
-    assert.equal(docs.attention.length, 1, 'the master sees the docs line');
-
-    const state = emptyDaemonState(master), violations: string[] = [], docsFaults: string[] = [];
+    const state = emptyDaemonState(master), violations: string[] = [];
     for (let cycle = 0; now < start + days * 24 * hour; cycle++, now += cycleMs) {
       await runCycle(master, state, effects, () => now);
       for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
-      docsFaults.push(...cycleFaults(state, [], now, { config: master, reported: docs.attention }).filter(fault => fault.faultClass === 'resources' && fault.subject === 'docs').map(fault => fault.kind));
     }
     assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
-    assert.deepEqual(docsFaults, [], 'the docs set inside its band is attention, never a resources fault');
     // The refusal: reported by exactly one pass, retried about once a day, never removed, and the other trees drained meanwhile.
     assert.deepEqual(reports.filter(report => report.errors.length).length, 1, `the standing refusal is reported once: ${reports.flatMap(report => report.errors)}`);
     assert.ok(asked.length >= 3 && asked.length <= days + 1, `retried about once a day, not every cycle: ${asked.length}`);

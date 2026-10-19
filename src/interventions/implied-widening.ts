@@ -7,11 +7,12 @@ import type { FollowUpSource } from '../model/scope-companions.js';
  * GY-1719: a requirements revision that widens plannedFiles only by what the revised record itself
  * grounds is no scope decision of the master's. `master requirements` derives plannedFiles from the
  * criteria it posts (derivePlannedFiles: the files a criterion names, the test file its proofs live
- * in, the docs-budget gate beside planned documentation, the timing baseline beside a planned test),
+ * in, the timing baseline beside a planned test),
  * and a worker that asked for any of those would have had it granted by the engine's own rule
  * (`decideScopeRequest`, an approved autoscope) with nobody stepping in. The three review-stage
  * widenings GY-1719 links were each such a revision: GY-1717's AC-3 re-derivation added only the
- * docs-budget gate beside a granted docs page, GY-1700's AC-0 only the test its proof names, and
+ * docs-budget gate beside a granted docs page (a gate this repository no longer carries), GY-1700's
+ * AC-0 only the test its proof names, and
  * GY-1662's AC-4 the timing baseline and docs-budget gate beside its granted test and page, plus the
  * test its duplicate GY-1664 — closed into it — had already planned.
  *

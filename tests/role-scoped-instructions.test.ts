@@ -85,10 +85,7 @@ test('unit:agents-md-worker-block-only — sync regeneration renders the worker 
   assert.doesNotMatch(own, /graphyard-master -->|## Graphyard master agent/);
 });
 
-test('unit:role-instructions-budget — worker, reviewer and memory prompts do not draw on the master instructions, and the docs budget is unaffected', async () => {
+test('unit:role-instructions-budget — worker, reviewer and memory prompts do not draw on the master instructions', async () => {
   const read = (path: string) => readFile(join(repositoryRoot, path), 'utf8');
   for (const source of ['src/master/dispatch.ts', 'src/reviewer.ts', 'src/model/project-memory.ts', 'src/project-memory.ts']) assert.doesNotMatch(await read(source), /master\/instructions|masterInstructions/, `${source} builds its prompt without the master instructions`);
-  const config = JSON.parse(await read('graphyard.json'));
-  const paths: string[] = config.documentation.wordBudget.paths;
-  assert.ok(paths.length && !paths.some(path => 'AGENTS.md'.startsWith(path)), 'AGENTS.md is outside the docs word budget');
 });

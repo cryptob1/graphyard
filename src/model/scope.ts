@@ -206,8 +206,8 @@ export function decideScopeRequest(
     ...(plansDocumentationTree(item.plannedFiles) ? (options.documentationConsumers ?? documentationConsumerScopes).map(scope => ({ scope, kind: 'documentation-consumer' as const, why: `${scope} renders or tests the documentation this item rewrites` })) : []),
     // A change that adds a test file may record its timing line (GY-1023): the baseline is implied by the test.
     ...(addsTestFile(item) ? [{ scope: timingBaselinePath, kind: 'timing-companion' as const, why: `${timingBaselinePath} records the timing line of a test file this item adds or changes` }] : [])];
-  // GY-955: a companion the change inevitably carries — the documentation-budget gate beside a
-  // documentation path, the test file named for a criterion's proofs — is implied as well.
+  // GY-955: a companion the change inevitably carries — the test file named for a criterion's proofs,
+  // the wall-clock gate beside a test — is implied as well.
   const documentation = options.documentation ?? itemDocumentationPaths(item);
   const companion = (path: string): ScopeImplication | null => { const why = companionGround(path, item, paths, documentation, request.reason); return why ? { scope: path, kind: path === timingBaselinePath ? 'timing-companion' : 'companion', why } : null; };
   const matched = paths.map(path => ({ path, by: scopeImplication(path, implied) ?? companion(path) }));

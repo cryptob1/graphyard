@@ -1,5 +1,5 @@
 // Concern: report section assembly, service profiles, ledgers and runtime environment formatting for the master status report.
-import { directMergeLine, docsBudgetAttention, mergeWriterLine } from './status-attention.js';
+import { directMergeLine, mergeWriterLine } from './status-attention.js';
 import { masterBoard } from '../model/board.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { branchReport, mergeProtocolSkew, profileConcurrency, reclaimIdleMs, type AttentionItem, type MasterConfig } from '../master.js';
@@ -158,9 +158,8 @@ export async function assembleReportedAttention(
   const at = Date.parse(snapshot.now);
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }, Number.isFinite(at) ? { now: at } : {}));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
-  const docs = await timedStep('docs budget', () => docsBudgetAttention(root, master.baseBranch, generatedFiles));
   const launches = await timedStep('attention: launches', () => workerLaunchStatus(root, master));
   const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items, ...launches.items];
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
-  return { generatedFiles, docs, overflow, interventions, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
+  return { generatedFiles, overflow, interventions, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }

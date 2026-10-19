@@ -6,7 +6,6 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
-import { docsHeadroom, docsHeadroomText, docsWordBudgetOf } from '../src/model/documentation.js';
 import { defaultChoices, hostDoableAsk, parkRefusal, parkedOnHuman } from '../src/model/human-request.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -15,8 +14,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // ledger records it (`graphyard events GY-N --kind human.requested --kind human.answered`), judged:
 //
 //   - GY-1070 (a6485107) and GY-1292 (0ae1de16), goals-and-priorities: the loop's docs-trim item
-//     demanded both its target and full retention. Removed by GY-1366: the item carries the
-//     operator's answer, so it never asks again (asserted below as the base for this item).
+//     demanded both its target and full retention. Removed by GY-1366; the whole budget behind that
+//     item is gone since GY-2515, so no docs-trim ask can stand again.
 //   - GY-1113 (a8b29a21), goals-and-priorities: "master scope to widen plannedFiles…". A scope
 //     widening is an approver's decision through scope-request, never a human's. The park is refused.
 //   - GY-1384 (6097f31f) and GY-1365 (b9b064b3), money-or-accounts: necessary account actions, each
@@ -34,13 +33,6 @@ const asked = {
   'GY-1384-2': 'Step 1 of docs/setup-from-zero.md for cryptob1/graphyard-install-proof, in two parts. (a) On GitHub, create the repository cryptob1/graphyard-install-proof (it returns 404 today; empty is fine, the worker pushes its default branch, test suite and CI workflow). (b) Press the button below and paste a GitHub token of an admin of that repository, with scopes repo, workflow and admin:repo_hook (or a fine-grained token for that one repository with Administration, Contents, Pull requests, Workflows and Webhooks read-and-write). It is sealed to host vishrog: the resumed worker reads it with `graphyard unseal GY-1384` into a scratch GH_CONFIG_DIR and never prints it. The later HUMAN steps (4-5: Create GitHub App and the reviewer App at http://127.0.0.1:4311 on vishrog; 8: /login in the fresh Claude and Codex environments; 10: a Chrome profile signed in to GitHub) will each park once more, one at a time, when the walk reaches them.',
   'GY-1365': 'Register or choose the revert approver GitHub App (the reviewer App serves; it must differ from the control-plane App), install it on the repository, set GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY (or _PRIVATE_KEY_FILE) on the production control plane via scripts/provision-railway.mjs operator input, and redeploy',
 } as const;
-
-test('manual:intervention-pattern-human-only-decision-build — GY-1070 and GY-1292: the docs attention line carries the answer they parked on', () => {
-  const budget = docsWordBudgetOf({ paths: ['docs/', 'README.md'], wordBudget: { total: 12_000, perPage: 1_200 } })!;
-  const headroom = docsHeadroom({ 'docs/master-agent.md': 959, 'README.md': 10_753 }, budget);
-  assert.ok(headroom.saturated, 'the set is saturated, and the line asks for the trim directly');
-  assert.match(docsHeadroomText(headroom, 'origin/main')!, /Trim to /, 'the line names the trim itself, so no item is filed and no human is asked (GY-2186)');
-});
 
 test('manual:intervention-pattern-human-only-decision-build — each request is judged: a scope widening and a deferred ask are refused, and (GY-1416) so are the account actions the host could do itself', () => {
   assert.match(parkRefusal({ needed: asked['GY-1113'] })!, /scope widening is not a human-only decision: plannedFiles is a plan, not a lock/);
