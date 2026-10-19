@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as documentation from '../src/model/documentation.js';
-import { cycleFaults, docsHeadroomStatus, docsTrimActionKey, fileDocsTrim } from '../src/daemon/faults.js';
+import { cycleFaults, docsHeadroomStatus } from '../src/daemon/faults.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -14,8 +14,8 @@ import type { Work } from '../src/model.js';
  * was never a merge gate — tests/docs-budget.test.ts warned and passed over it — so every change
  * documented itself into the set, main re-saturated within hours of every trim (GY-1503 trimmed it
  * to 14,972 words at 02:12Z; it was 15,766 by 05:00Z), and the set sat over its budget for 25
- * minutes from 01:37Z while seven changes landed green. The one-shot trim item the loop files is
- * then the only remedy, and each saturation it answers was counted as a fault.
+ * minutes from 01:37Z while seven changes landed green. GY-2186: the loop files no trim item; the
+ * attention line asks the master to trim, and the set inside the band is attention, never a fault.
  *
  * The candidate makes the budget self-enforcing: a saturated total fails any change that adds a
  * word to it (docsBudgetJudgement, the judgement tests/docs-budget.test.ts now gives), so each
@@ -44,13 +44,13 @@ test('manual:fault-class-resources — GY-1515 docs: the changes that carried ma
   // A change that adds no word to a saturated set — one that leaves the documentation alone, or trims it — still lands, with the warning.
   const flat = documentation.docsBudgetJudgement(set(15_639), BUDGET, set(15_639));
   assert.equal(flat.failed, null);
-  assert.match(flat.warning!, /this change adds none, so it passes, and the loop's trim item restores the headroom: trim it to 15200 or fewer/);
+  assert.match(flat.warning!, /this change adds none, so it passes, and the master trims the set: trim it to 15200 or fewer/);
   assert.equal(documentation.docsBudgetJudgement(set(15_500), BUDGET, set(15_639)).warning, null, 'a trim that restores the band passes clean');
   assert.match(documentation.docsBudgetJudgement(set(15_639), BUDGET, 'base-branch').warning!, /this is the base branch, where nothing can be refused, so it passes/, 'a push to main is never failed by growth the merges brought');
   assert.equal(documentation.docsHeadroom(set(15_639), BUDGET).band, 15_520, 'the band the budget test holds is the one the loop reports');
 });
 
-test('manual:fault-class-resources — GY-1515 docs: the set inside its band is the trim item\'s attention and no resources fault; over its budget it is one', async () => {
+test('manual:fault-class-resources — GY-1515 docs: the set inside its band is attention and no resources fault; over its budget it is one', async () => {
   const state = emptyDaemonState(config()), now = Date.parse('2026-10-08T04:59:25.667Z');
   const faults = (reported: Awaited<ReturnType<typeof docsHeadroomStatus>>) => cycleFaults(state, [], now, { config: config(), reported: reported.attention }).filter(fault => fault.faultClass === 'resources').map(fault => [fault.kind, fault.subject]);
   // Instance 2 as the loop read it: 15,639 of 16,000 words on origin/main (361 left, within 3%).
@@ -58,10 +58,7 @@ test('manual:fault-class-resources — GY-1515 docs: the set inside its band is 
   assert.equal(inBand.attention.length, 1, 'the master still sees the line');
   assert.deepEqual(faults(inBand), [], 'REPRODUCE: the base counted the set inside its band as a resource-bound resources fault');
   assert.match(inBand.attention[0].text, /^The documentation \(README\.md, docs\/\) on origin\/main is 15639 of its 16000-word budget \(361 left, within 3% of it\): unit:docs-word-budget refuses every change that adds a word to it until the set is under 15520\. Trim to 15200 or fewer/);
-  // The trim item is still filed for it, once.
-  const filed: unknown[] = [], work: Work[] = [];
-  await fileDocsTrim(state, { persist: async () => {}, fileFaultClass: async input => { filed.push(input); return { key: 'GY-1517', title: (input as { title: string }).title, stage: 'backlog' } as unknown as Work; } }, work, inBand.docs, () => now, []);
-  assert.equal(filed.length, 1); assert.equal(state.actions[docsTrimActionKey].work, 'GY-1517');
+  assert.match(inBand.attention[0].next, /the loop files no item for documentation headroom/, 'the line asks the master to trim, never the loop to file');
   // Instance 1 as it stood at 02:00Z: 16,335 words, over the budget — the band was overrun by changes merged together, and that is a fault.
   const over = await docsHeadroomStatus('/repository', 'main', () => counted(16_335));
   assert.match(over.attention[0].text, /is 16335 of its 16000-word budget \(over it by 335\): changes merged together overran the band the docs budget test holds, and the test now fails on the base branch\. Trim to 15200 or fewer/);

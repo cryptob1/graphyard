@@ -38,10 +38,8 @@ import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
-import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
-import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
-import { baseTree } from '../cli/planned-files-intent.js'; import { currentBaseTree } from '../executor.js';
-import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
+import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
+import { currentBaseTree } from '../executor.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
 import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
@@ -62,17 +60,15 @@ import type { ResearchEvent } from '../research.js';
 import type { DecompositionEvent } from '../decomposition.js';
 import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
-import { diagnosticianEffects, diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
-import { diagnosticianSettings } from '../runner/payloads.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
 import { browserFlowChild } from './cycle-remedies.js';
 import { answeredMechanicalReviews } from './mechanical-plan-report.js';
 import { mechanicalFixState, readMechanicalFixState } from '../mechanical-findings.js';
 import { retriedSnapshot } from './snapshot-retry.js';
-import { promptTarget, refusedBodyDetail, type DaemonEffects, type LoopFiledItem } from './effects.js';
+import { promptTarget, refusedBodyDetail, type DaemonEffects } from './effects.js';
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
@@ -373,7 +369,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...readingEffects(current, mutate, asCoordinator, { root, run }), // GY-1779: the loop's own post-deploy readings
+    ...throughputEffects(root, current, run, asCoordinator), ...readingEffects(current, mutate, asCoordinator, { root, run }), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
     readWork: async work => await asCoordinator(`work/${encodeURIComponent(work.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
@@ -418,25 +414,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       // No check-run annotation is read back (GY-2010): stored checks are pull-request-era history.
       return reported;
     },
-    get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnosticianEffects(config, root, asOperatorAgent, run) : undefined; },
     // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
       writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger, hold: recordedHold }) }) : undefined; },
     get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
-    // GY-1706: fault-class filing derives plannedFiles like master create; chores with their own plans are left alone.
-    get fileFaultClass() {
-      return current().operatorAgent ? async (input: LoopFiledItem, key: string) => {
-        const filing = input as LoopFiledItem & { plannedFiles?: readonly string[] };
-        if (!filing.origin?.faultClass) return asOperatorAgent('POST', 'work', input, key) as Promise<Work>;
-        const tree = await baseTree(root, current().baseBranch, run);
-        const derived = derivePlannedFiles(
-          { plannedFiles: filing.plannedFiles ?? [], criteria: filing.criteria, origin: filing.origin, description: filing.description },
-          tree.files,
-        );
-        if (derived.missing.length) throw new Error(plannedFilesRefusal(derived.missing, tree.ref, derived.misnamed));
-        return asOperatorAgent('POST', 'work', { ...filing, plannedFiles: derived.plannedFiles }, key) as Promise<Work>;
-      } : undefined;
-    },
     get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
     get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
     controlPlaneClock: () => readControlPlaneClock(current().url, { fetcher }),
@@ -456,5 +437,5 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
-  }, Object.getOwnPropertyDescriptors(baseFailureEffects(current, asOperatorAgent)));
+  }, {});
 }

@@ -131,7 +131,7 @@ test('unit:worker-text-has-no-scope-rules — the worker launch request, before-
     ['the rework brief', reworkBriefSection({ submission: { epoch: 1, pr: 57 } as any, pipeline: undefined }, rework)],
     ['the force-push remedy', continueAfterDecline('GY-1', { text: 'git push --force origin graphyard/gy-1-1', answer: 'n' }, null)],
     ['the complete help', completeCommand.help.join(' ')],
-    ['the managed AGENTS.md block', managedInstructions('', 'https://graphyard.example')],
+    ['the managed AGENTS.md block', managedInstructions('')],
   ];
   for (const [name, text] of texts) for (const phrase of ['scope-request', '--restore', 'outside plannedFiles']) {
     assert.ok(!text.includes(phrase), `${name} names ${phrase}`);

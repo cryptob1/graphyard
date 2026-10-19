@@ -73,7 +73,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     expect(new Set(cards).size).toBe(cards.length);
     await expect(flow.getByText('Ready', { exact: true })).toBeVisible();
     await expect(flow.getByText('Done', { exact: true })).toBeVisible();
-    for (const heading of ['One trip from setup to Done', 'Who holds which authority', 'Correctness rules']) await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible();
+    for (const heading of ['One trip to Done', 'Who holds which authority', 'Correctness rules']) await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible();
     await expect(page.getByText('Gates are deterministic checks of one candidate', { exact: false })).toBeVisible();
     const bounds = await page.locator('.docs-shell').evaluate(element => ({ width: element.clientWidth, content: element.scrollWidth }));
     expect(bounds.content).toBeLessThanOrEqual(bounds.width);
@@ -126,8 +126,8 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.goto('/docs/operations');
     await expect(page.getByRole('heading', { name: 'Operations and recovery', level: 1 })).toBeVisible();
     for (const heading of ['Daily checklist', 'Incident decision tree', 'Recovery recipes', 'Safety facts that never change', 'Deeper references']) await expect(page.getByRole('heading', { name: heading, level: 2 })).toBeVisible();
-    await expect(page.getByRole('link', { name: 'lost worker' })).toHaveAttribute('href', '/docs/operations-reference#lost-worker-before-submission');
-    await expect(page.getByRole('main').getByRole('link', { name: 'Operations reference', exact: true })).toHaveAttribute('href', '/docs/operations-reference');
+    await expect(page.getByRole('link', { name: 'lost worker' })).toHaveAttribute('href', '#lost-worker-before-submission');
+    await expect(page.getByRole('main').getByRole('link', { name: 'merge bypass', exact: true })).toHaveAttribute('href', '#merge-bypass');
     await expect(page.locator('img.docs-diagram')).toHaveCount(0);
     await fits();
   });

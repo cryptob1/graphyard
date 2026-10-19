@@ -428,3 +428,54 @@ export async function withPipelineTimelines(work: Work[], read: (path: string) =
   const timelines: StoredTimeline[] = Array.isArray(answer?.timelines) ? answer.timelines : [];
   return { read: timelines.length, attached: attachTimelines(work, timelines) };
 }
+
+/** One window of the lead-time trend: the median over its merges, and how many it holds (at most ten). */
+export interface LeadTimeWindow { medianMs: number | null; count: number }
+/** The one speed number (GY-1989): the last 10 merges' median lead time, the previous 10's beside it, and the line both renderers read. */
+export interface LeadTimeReport { line: string | null; last: LeadTimeWindow; previous: LeadTimeWindow }
+/** A lead time as a reader meets it: whole minutes under an hour ("42 min"), seconds under a minute, else hours to one decimal. */
+export const leadTimeSpan = (ms: number) => ms < 60_000 ? `${Math.round(ms / 1000)}s` : ms < 3_600_000 ? `${Math.round(ms / 60_000)} min` : `${Math.round(ms / 360_000) / 10}h`;
+/** The line the dashboard's top bar and the report's first field show (GY-1989): the trend in the words the operator asked for. */
+export function leadTimeLine(last: LeadTimeWindow, previous: LeadTimeWindow): string {
+  const merges = `last ${last.count} merge${last.count === 1 ? '' : 's'}`;
+  return previous.medianMs !== null ? `Lead time ${leadTimeSpan(last.medianMs!)} · ${merges} · was ${leadTimeSpan(previous.medianMs)}` : `Lead time ${leadTimeSpan(last.medianMs!)} · ${merges}`;
+}
+/**
+ * The one speed number (GY-1989): lead time, how long an item took from its release — the first
+ * instant it was made ready for dispatch — to its accepted merge, as the median over the last 10
+ * merges with the previous 10's median beside it as the trend, so queueing, building, rework,
+ * review and merging read as one number. Pure over the work and the release instants the caller
+ * read from the items' own history (`readReadyInstants`, keyed by item id): an item that never
+ * merged, or merged with no recorded release time, is skipped, never guessed. Each window counts
+ * what it holds, so a young pipeline reads as `last 3 merges`, never as ten; with nothing merged
+ * at all the line is null and the renderers show nothing rather than a zero.
+ */
+export function leadTime(work: Work[], releasedAt: ReadonlyMap<string, string | number>): LeadTimeReport {
+  const samples = work.flatMap(item => {
+    const mergedAt = time(acceptedMergeAt(item));
+    const released = releasedAt.get(item.id);
+    const at = typeof released === 'number' ? released : time(released ?? null);
+    return mergedAt !== null && at !== null ? [{ mergedAt, ms: Math.max(0, mergedAt - at) }] : [];
+  }).sort((a, b) => b.mergedAt - a.mergedAt);
+  const window = (from: number): LeadTimeWindow => {
+    const items = samples.slice(from, from + 10);
+    const sorted = items.map(sample => sample.ms).sort((a, b) => a - b), middle = sorted.length >> 1;
+    // The true median: an even window takes the mean of its two middle values, never the lower one.
+    return { medianMs: sorted.length ? (sorted.length % 2 ? sorted[middle] : Math.round((sorted[middle - 1] + sorted[middle]) / 2)) : null, count: items.length };
+  };
+  const last = window(0), previous = window(10);
+  return { line: last.count ? leadTimeLine(last, previous) : null, last, previous };
+}
+/** How far back the release-event read for the lead-time window must reach, less a margin for the clock difference between the plane that stamped the documents and the ledger that recorded the events. */
+export const leadTimeReadMarginMs = 10 * 60_000;
+/**
+ * The release-event read's lower bound for this work: the newest `reach` merges' earliest creation
+ * or merge, less the margin — an item's release never precedes either. Null while nothing has
+ * merged, when there is nothing to read.
+ */
+export function leadTimeSince(work: Work[], reach = 20): string | null {
+  const merged = work.map(item => ({ at: time(acceptedMergeAt(item)), created: time(item.createdAt) }))
+    .filter(entry => entry.at !== null).sort((a, b) => b.at! - a.at!).slice(0, reach);
+  const stamps = merged.flatMap(entry => [entry.at!, entry.created].filter((value): value is number => value !== null && Number.isFinite(value)));
+  return stamps.length ? new Date(Math.min(...stamps) - leadTimeReadMarginMs).toISOString() : null;
+}

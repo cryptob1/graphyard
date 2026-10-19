@@ -82,7 +82,12 @@ export interface E2eReport {
   suspendedPreviews?: { cases: string[] };
   /** GY-1938: set when the delivery probe could not read the install's merger, so every case ran as blocking. */
   deliveryProbe?: 'unreadable';
+  /** GY-2216: every work item the run's cases created by POST /api/work, for the run's cleanup to close when it ends. */
+  created?: CreatedWork[];
 }
+
+/** A work item a run's cases created (GY-2216): what a successful POST /api/work step answered. */
+export interface CreatedWork { id: string; key: string | null; case: string }
 export interface RunOptions {
   url: string; token: string; environment?: string; runId?: string;
   stepTimeoutMs?: number; retries?: number;
@@ -183,7 +188,15 @@ const withTimeout = <T>(work: Promise<T>, ms: number, what: string) => {
   return Promise.race([work, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`${what} did not finish within ${ms} ms`)), ms); })]).finally(() => clearTimeout(timer));
 };
 
+/** The work item a POST /api/work answer created (GY-2216), or null when the answer names none. */
+const createdWork = (parsed: unknown): { id: string; key: string | null } | null => {
+  const body = parsed as Record<string, unknown> | null;
+  return body && typeof body === 'object' && typeof body.id === 'string' ? { id: body.id, key: typeof body.key === 'string' ? body.key : null } : null;
+};
+
 interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; pollMs: number; maxWaitSeconds: number; waitUntil: number; now: () => number; sleep: (ms: number) => Promise<void>; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
+  /** GY-2216: remembers each work item the case's steps created, so the run can close them when it ends. */
+  created: (item: { id: string; key: string | null }) => void;
   secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string; signal?: AbortSignal } }
 
 /** A step's own timeout: a command or agent step declares one; the request and browser steps share the run's, a waiting GET's widened by the wait it may still take. */
@@ -205,12 +218,13 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
   if (step.kind === 'http') {
     const path = substitute(step.path, context.vars);
     const body = step.body === undefined ? undefined : JSON.stringify(substitute(step.body, context.vars));
+    const target = onTarget(path, context.url);
     // A waiting GET asks again until its answer holds, `waitSeconds` pass or the run's shared deadline comes; the last answer's failure is the step's.
     const waitSeconds = Math.min(step.waitSeconds ?? 0, context.maxWaitSeconds), allowed = waitMs(step.waitSeconds ?? 0, context), deadline = context.now() + allowed;
     const waited = !waitSeconds ? '' : allowed < waitSeconds * 1000 ? ` (still, at the run's shared wait deadline after ${Math.round(allowed / 1000)} s)` : ` (still, after waiting ${waitSeconds} s)`;
     let parsed: unknown = undefined;
     for (;;) {
-      const response = await context.fetcher(onTarget(path, context.url), { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
+      const response = await context.fetcher(target, { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
         headers: { Authorization: `Bearer ${context.vars.token}`, 'Content-Type': 'application/json', ...(step.method === 'POST' ? { 'Idempotency-Key': context.idempotency(index) } : {}) }, body });
       const text = await response.text();
       parsed = undefined;
@@ -220,6 +234,9 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
       if (context.now() + context.pollMs > deadline) throw new Error(`${failure}${waited}`);
       await context.sleep(context.pollMs);
     }
+    // GY-2216: the step created a work item — before any later save fails — so the run can close it when it ends; a retried attempt creates another item and each is remembered.
+    const created = step.method === 'POST' && target.pathname === '/api/work' ? createdWork(parsed) : null;
+    if (created) context.created(created);
     for (const [name, at] of Object.entries(step.save ?? {})) {
       const value = valueAt(parsed, at);
       if (value === undefined || value === null || typeof value === 'object') throw new Error(`could not save ${name}: ${at || '(body)'} is ${JSON.stringify(value) ?? 'missing'}`);
@@ -241,7 +258,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
 }
 
 /** Run one case once: its declared secrets resolved first, then its steps in order, stopping at the first that fails. */
-async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number; waitUntil?: number; now: () => number; sleep: (ms: number) => Promise<void> }) {
+async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number; waitUntil?: number; now: () => number; sleep: (ms: number) => Promise<void>; created: (item: { id: string; key: string | null }) => void }) {
   const { definition } = entry;
   const steps: StepRecord[] = [];
   let secrets: Record<string, string>;
@@ -254,7 +271,7 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
   const pageErrors: string[] = [];
   let browser: E2eBrowser | null = null, page: E2ePage | null = null;
   const session = (index: number) => `graphyard-e2e-${options.runId}-${definition.id}-${options.attempt}-${index + 1}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 120);
-  const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, maxWaitSeconds: options.maxWaitSeconds ?? Infinity, waitUntil: options.waitUntil ?? Infinity, now: options.now, sleep: options.sleep, fetcher: options.fetcher, pageErrors, secrets,
+  const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, maxWaitSeconds: options.maxWaitSeconds ?? Infinity, waitUntil: options.waitUntil ?? Infinity, now: options.now, sleep: options.sleep, fetcher: options.fetcher, pageErrors, secrets, created: options.created,
     general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session, signal: options.signal },
     idempotency: index => `e2e:${definition.id}:${options.runId}:${options.attempt}:${index}`,
     page: async () => {
@@ -310,6 +327,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   const startedAt = new Date(now()).toISOString();
   const sha = await readServed(options.url, fetcher, stepTimeoutMs);
   const outcomes: CaseOutcome[] = [];
+  const created: CreatedWork[] = [];
   let stoppedBy: string | null = null;
   for (const entry of cases) {
     const { id, title, required } = entry.definition;
@@ -319,8 +337,8 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     const attemptResults: AttemptResult[] = [];
     do {
       const began = now();
-      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs,
-        // A case whose outcome nothing can serve (pending on the candidate, GY-1802, or on an install that serves neither deliveries nor previews, GY-2217) asks once and never holds the run on a wait.
+      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs, created: item => created.push({ ...item, case: id }),
+        // A case whose outcome nothing can serve — pending on the candidate (GY-1938) or suspended because this install cannot serve it at all (GY-2217) — asks once and never holds the run on a wait, required or not.
         maxWaitSeconds: pendingCases.includes(id) ? 0 : options.maxWaitSeconds, waitUntil: options.waitUntil, now, sleep, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
     } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries && !signal?.aborted);
@@ -334,7 +352,8 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   }
   const tally = (verdict: CaseVerdict) => outcomes.filter(outcome => outcome.verdict === verdict).length;
   return { runId, url: options.url, environment: options.environment ?? new URL(options.url).host, sha, startedAt, finishedAt: new Date(now()).toISOString(),
-    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, ...(options.policy ? { pendingOutcomes: options.policy.e2e.pendingOutcomes } : {}) };
+    passed: tally('passed'), failed: tally('failed'), flaky: tally('flaky'), unrun: tally('unrun'), cases: outcomes, ...(created.length ? { created } : {}),
+    ...(options.policy ? { pendingOutcomes: options.policy.e2e.pendingOutcomes } : {}) };
 }
 
 /** The cases a run treats as pending under the repository's `e2e.pendingOutcomes` (GY-1843): all of them when non-blocking (GY-1802), none when blocking. */
@@ -593,15 +612,44 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
  * the run suspended because this install cannot serve its outcome at all (no deliveries without a
  * UAT or a repository, GY-1938; no declared application previews, GY-2217): those are pending, and
  * the throw names every other failing case with its failing step and reason, never cut short.
+ *
+ * GY-2216: the cases were written for a disposable UAT, but this run is on the install's own board;
+ * pass or fail, the run then closes, as obsolete with a reason naming the run, every work item its
+ * cases created by POST /api/work, so no deploy leaves its batch on the live board.
  */
-export async function deployedE2e(root: string, url: string, token: string, suite: typeof e2eSuite = e2eSuite, options: { uat?: boolean } = {}) {
+export async function deployedE2e(root: string, url: string, token: string, suite: typeof e2eSuite = e2eSuite, options: { uat?: boolean; fetcher?: typeof fetch } = {}) {
   let report: E2eReport | null = null;
   const result = await suite(await loadCases(root), token, { root, contract: await checkoutContract(root), select: () => true, runAll: true, uat: options.uat, report: value => { report = value; } }).run(url, null);
+  const open = await closeCreatedWork(report, url, token, options.fetcher);
   const suspended = new Set([...(report as E2eReport | null)?.suspendedDeliveries?.cases ?? [], ...(report as E2eReport | null)?.suspendedPreviews?.cases ?? []]);
   const failed = (report as E2eReport | null)?.cases.filter(outcome => outcome.verdict === 'failed' && !suspended.has(outcome.id)) ?? [];
   if (!result.passed) throw new Error(result.detail);
   if (failed.length) throw new Error(`${failed.length} E2E case${failed.length === 1 ? '' : 's'} failed: ${failed.map(outcome => outcome.failingStep ? caseFailure(outcome) : `case ${outcome.id} failed at an unreported step`).join('; ')}`);
+  if (open.length) throw new Error(`${open.length} work item${open.length === 1 ? '' : 's'} the run created could not be closed: ${open.map(item => item.key ?? item.id).join(', ')}`);
   return result;
+}
+
+/**
+ * GY-2216: close, as obsolete with a reason naming the run, every work item the run's cases created
+ * by POST /api/work, and return the ones left open. A 409 counts as closed: the case settled the
+ * item itself, or a delivery already merged it, and either way nothing is open. A failed or refused
+ * close leaves the item on the returned list, so a run that cannot clean up after itself does not
+ * pass (`deployedE2e` names the items in its throw).
+ */
+export async function closeCreatedWork(report: E2eReport | null, url: string, token: string, fetcher: typeof fetch = fetch): Promise<CreatedWork[]> {
+  const open: CreatedWork[] = [];
+  for (const item of report?.created ?? []) {
+    try {
+      const response = await fetcher(new URL(`/api/work/${encodeURIComponent(item.id)}/close`, url), {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `e2e-cleanup:${report?.runId}:${item.id}` },
+        body: JSON.stringify({ kind: 'obsolete', reason: `created by E2E run ${report?.runId} (case ${item.case}); the run closes its own work when it ends` }),
+      });
+      if (response.ok || response.status === 409) continue;
+    } catch { /* a failed close leaves the item open, named by the caller */ }
+    open.push(item);
+  }
+  return open;
 }
 
 /**

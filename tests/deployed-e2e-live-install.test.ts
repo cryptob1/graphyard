@@ -23,7 +23,7 @@ import { parseCase, type CaseFile } from '../src/e2e/case.js';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const sha = 'a'.repeat(40);
 
-type Item = { id: string; key: string; title: string; stage: string; preview?: unknown; delivery?: unknown };
+type Item = { id: string; key: string; title: string; stage: string; closure?: { kind: string; reason: string }; preview?: unknown; delivery?: unknown };
 type Install = { url: string; server: Server; status: unknown; items: Item[]; candidates: number };
 
 /** A fake install configured like the live one: a control-plane merger, the repository wired, no UAT, and no declared applications. */
@@ -53,6 +53,15 @@ async function fakeInstall(options: { projectDelivery?: unknown } = {}): Promise
     if (path === '/api/work' && request.method === 'GET') return send(install.items);
     const work = /^\/api\/work\/([^/]+)$/.exec(path);
     if (work && request.method === 'GET') return send(install.items.find(item => item.id === work[1] || item.key === work[1]) ?? {});
+    // The run closes, as obsolete, every work item its cases created (GY-2216): a deploy leaves no batch on the live board.
+    const close = /^\/api\/work\/([^/]+)\/close$/.exec(path);
+    if (close && request.method === 'POST') {
+      const item = install.items.find(entry => entry.id === close[1]);
+      if (!item) return send({ error: 'no such item' }, 404);
+      item.closure = { kind: 'obsolete', reason: 'the run closes its own work when it ends' };
+      item.stage = 'done';
+      return send(item);
+    }
     if (path === '/api/candidates' && request.method === 'POST') return send({ id: `cand-${++install.candidates}` });
     const candidate = /^\/api\/candidates\/([^/]+)$/.exec(path);
     if (candidate && request.method === 'GET') return send({ id: candidate[1], members: [], sourceSha: null, validation: { result: 'fail', cases: [], failed: [] } });
