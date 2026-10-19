@@ -15,7 +15,8 @@ import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
 import type { DeployPorts } from '../daemon/upgrade.js';
 import { pinKnownGood } from '../master/known-good.js';
-import { deployedE2e } from '../e2e/runner.js';
+import { localReleaseVariables } from '../daemon/release-ports.js';
+import { deployedE2e, e2eSuite } from '../e2e/runner.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -224,7 +225,11 @@ export async function deployPorts(input: { cliRoot: string; repoRoot: string; re
         catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
       }
     }),
-    e2e: () => beating(async () => { await deployedE2e(cliRoot, url, await readToken(directory, e2ePrincipalId(install.installId))); }),
+    e2e: () => beating(async () => {
+      // GY-2217: the loop reads its own environment for the UAT the cases' release-candidate outcomes need: an install whose merger is the control plane but whose environment names no UAT (GRAPHYARD_UAT_URL or a static site's GRAPHYARD_UAT_STATIC) can never serve them, so those cases run as pending instead of failing every deploy.
+      const uat = !!(process.env[localReleaseVariables.uatUrl] || process.env[localReleaseVariables.uatStatic]);
+      await deployedE2e(cliRoot, url, await readToken(directory, e2ePrincipalId(install.installId)), e2eSuite, { uat });
+    }),
     schemas: async commit => ({ target: schemaAt(await run('git', ['show', `${commit}:src/release.ts`], cliRoot).catch(() => '')), database: await databaseSchemaOf(url) }),
     pin: commit => pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run),
   };

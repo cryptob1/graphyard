@@ -78,7 +78,7 @@ const deployedAgainst = async (plane: ReturnType<typeof controlPlane>, root: str
   let clock = 0;
   const suite = ((_cases: readonly CaseFile[], token: string, options: Parameters<typeof e2eSuite>[2] = {}) =>
     realSuite(_cases, token, { ...options, fetcher: plane.fetcher, now: () => clock, sleep: async (ms: number) => { clock += ms; } })) as typeof e2eSuite;
-  return deployedE2e(root, url, 'e2e-token', suite, plane.fetcher);
+  return deployedE2e(root, url, 'e2e-token', suite, { fetcher: plane.fetcher });
 };
 
 /** The run id a case baked into its created item's title (`... run <runId>-<attempt>`). */

@@ -115,6 +115,13 @@
     },
     {
       "kind": "browser",
+      "name": "unfold Details, where the criteria fold (GY-2011)",
+      "action": "click",
+      "text": "Details",
+      "exact": true
+    },
+    {
+      "kind": "browser",
       "action": "expectText",
       "text": "The detail page shows this criterion"
     }
