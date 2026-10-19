@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isHotfix, maxInFlight, wipHoldWording } from '../src/model/dispatch.js';
 import { inFlight } from '../src/coordination.js';
 import { actionableSubjects } from '../src/daemon/metrics.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -23,6 +22,8 @@ const workerToken = 'worker-token-'.padEnd(40, 'x');
 const clock = Date.parse('2030-01-01T12:00:00Z');
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const hour = 3_600_000;
+// Loaded per test so that, on a base without the cap, the proof fails as a test case rather than at import.
+const cap = () => import('../src/model/dispatch.js') as Promise<{ isHotfix: (work: { title: string }) => boolean; maxInFlight: number; wipHoldWording: { held: string } }>;
 
 function work(key: string, overrides: Partial<Work> = {}): Work {
   return {
@@ -72,6 +73,7 @@ const queue = () => {
 };
 
 test('unit:wip-limit — with 4 items implementing or waiting to merge the dispatcher starts no ready item but does start a Hotfix; once one merges, the next ready item starts', async () => {
+  const { isHotfix, maxInFlight, wipHoldWording } = await cap();
   assert.equal(maxInFlight, 4, 'the cap is the one constant, 4');
   assert.ok(isHotfix({ title: 'Hotfix: roll the deploy back' }) && !isHotfix({ title: 'hotfix: lower-case is not exempt' }) && !isHotfix({ title: 'Hotfixes: not a hotfix' }) && !isHotfix({ title: 'Feature: anything' }), 'only the exact "Hotfix: …" title is exempt');
 
@@ -100,7 +102,8 @@ test('unit:wip-limit — with 4 items implementing or waiting to merge the dispa
   } finally { await loop.cleanup(); }
 });
 
-test('unit:wip-limit — the measure counts a cap-held item under capacity, not as its own dispatch wait, and master status names the cap', () => {
+test('unit:wip-limit — the measure counts a cap-held item under capacity, not as its own dispatch wait, and master status names the cap', async () => {
+  const { wipHoldWording } = await cap();
   const { ready, hotfix, all } = queue();
   const config = daemonConfig('/outside/coordinator.token', []);
   // The dispatch step's own decision (saturation.wipHeld) retitles the wait, the way fleetHeld does (GY-1890).
@@ -118,7 +121,6 @@ test('unit:wip-limit — the measure counts a cap-held item under capacity, not 
   const profiles = ['one'].map(name => launchProfile(name, '/credentials/worker.token'));
   const status = buildMasterStatus({ work: all, now: iso(0) }, profiles, [], {}, {}, { pending: [], completed: [] });
   assert.equal(status.effectiveConcurrency.inFlight, 4);
-  assert.match(status.effectiveConcurrency.statement, /the dispatcher starts new work while fewer than 4 items are in flight — 4 in flight is the cap, so ready work waits until one merges \(Hotfix items excepted\)$/);
   assert.match(status.effectiveConcurrency.statement, /the dispatcher starts new work while fewer than 4 items are in flight — 4 in flight is the cap, so ready work waits until one merges \(Hotfix items excepted\)$/);
 });
 
