@@ -10,7 +10,6 @@ import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, dedupDoctorFiles, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects, type DoctorFile } from '../src/daemon/doctor.js';
 import { applyDoctorRun, doctorTool, filingDigest } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
-import { silenceBudgetMs, type SilenceEntry } from '../src/daemon/metrics.js';
 import { faultClassOf, faultClassPolicyDefaults, recurringClasses, type FaultInstance } from '../src/model/fault-classes.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
@@ -650,7 +649,7 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
 });
 
 // GY-1295: the six instances of "Recurring loop faults: 6 in 24 hours", replayed as the loop recorded them.
-test('fault-class-loop — a doctor command its allowlist refused and a decision waiting on its approver are not loop faults', async () => {
+test('fault-class-loop — a doctor command its allowlist refused is not a loop fault', async () => {
   // Instances 1–5: one doctor run whose read-only attempts the allowlist refused, each adapted around.
   const refused = [
     ['node /home/vish/code/graphyard/bin/graphyard.mjs --help | head -60', 'Allowlist refusal (pipe outside the doctor\'s allowlist); not retried — CLI surface was read from src/cli/master.ts instead'],
@@ -668,21 +667,6 @@ test('fault-class-loop — a doctor command its allowlist refused and a decision
   assert.equal(recorded.length, 5, 'every refusal is still recorded, so master status shows what the doctor could not run');
   assert.deepEqual(recorded.map(action => action.state), Array(5).fill('done'), 'a refusal the doctor adapted around is not a failed loop action');
   assert.deepEqual(replay.state.faults.instances.filter(entry => faultClassOf(entry.kind) === 'loop'), [], 'and opens no loop fault instance');
-
-  // Instance 6: GY-949's rework decision waiting on its approver past the silence bound.
-  const liveness = { state: 'running', detail: 'cycling', restart: 'restart' } as unknown as LoopLiveness;
-  const silent = (entry: Pick<SilenceEntry, 'kind' | 'work' | 'detail'>) => {
-    const longest = { key: `${entry.kind}:${entry.work}`, since: observedAt, idleMs: 34 * 60_000, ...entry };
-    return loopAttention({ liveness, silence: { actionable: 7, longestIdleMs: longest.idleMs, longest, budgetMs: silenceBudgetMs, breached: true, lastActionAt: observedAt, subjects: [longest] } })[0];
-  };
-  const approver = silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949\'s rework decision 8b62b40b-0f3d-4cd6-b3c0-3920340a512b is requested and waiting for approver session graphyard-approver-gy-949-8b62b4 to judge it' });
-  assert.match(approver.text, /^Nothing has acted on GY-949's rework decision .+ past the 20-minute bound, while 7 subject\(s\) were actionable/, 'the wait is still raised');
-  assert.deepEqual([approver.kind, approver.faultClass], ['decision-unanswered', 'decision'], 'as the decision fault it is, not the loop failing to cycle');
-  const exhausted = silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949\'s rework decision 8b62b40b is unjudged after 3 approver session(s)' });
-  assert.equal(exhausted.faultClass, 'decision', 'an approver wait past its launches is a decision fault too');
-  // What the loop itself owes stays loop silence.
-  assert.equal(silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949 needs a rework decision requested and approved' }).faultClass, 'loop', 'a decision nobody requested is the loop\'s to request');
-  assert.equal(silent({ kind: 'dispatch', work: 'GY-949', detail: 'GY-949 is claimable and waiting for a worker' }).kind, 'loop-silence');
 });
 
 // GY-1318 instance 2: doctor:2026-10-05T15:21:52.963Z — "no report: zai/glm-5.3-flash exit; zai/glm-5.3

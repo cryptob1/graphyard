@@ -692,9 +692,8 @@ test('integration:flow-analytics-drilldown-export', async () => {
   assert.match(await download.text(), /^# metric,evidence/);
 });
 
-// GY-161: the flow route reads the production watch itself on every request, so a merge the watch
-// still reports unserved stays at Deploy in the steps history without any client having polled
-// /api/status in this process (after a restart, or when only the flow report is read).
+// GY-1981: done = merged. Whatever the production watch reports, a merged item leaves the flow at its
+// merge in the steps history; production health is one release-level reading, not a per-item hold.
 test('integration:flow-analytics-production-hold', async () => {
   const slice = 'gy161-hold';
   let work = await submitted(slice);
@@ -713,7 +712,7 @@ test('integration:flow-analytics-production-hold', async () => {
       return ((await response.json()).rows as { workKey: string; detail: string }[]).filter(row => row.workKey === work.key).map(row => row.detail);
     };
     assert.ok((await steps(url)).includes('deploy to outside'), 'with no production watch the merge takes it out of the flow');
-    assert.ok(!(await steps(`http://127.0.0.1:${(watched.address() as any).port}`)).includes('deploy to outside'), 'the watch holds it at Deploy on the flow read alone');
+    assert.ok((await steps(`http://127.0.0.1:${(watched.address() as any).port}`)).includes('deploy to outside'), 'an unserved merge still leaves the flow at its merge');
   } finally { await new Promise<void>(resolve => watched.close(() => resolve())); }
 });
 

@@ -5,6 +5,7 @@ export type DependencyMap = Map<string, string[]>;
 export const defaultShardCount: number;
 export const repositoryRoot: string;
 export const baselinePath: string;
+export const baselineSentinel: string;
 export const speculativeTipSubject: RegExp;
 export function listTestFiles(root?: string): string[];
 export const releaseCandidateTests: Record<string, 'soak' | 'timing-budget'>;

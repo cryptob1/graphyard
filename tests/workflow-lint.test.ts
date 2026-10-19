@@ -66,15 +66,9 @@ const cancelsRunning = (earlier: { group: string }, later: { group: string; canc
 test('unit:ci-cancels-superseded-runs — every pull_request-triggered workflow cancels superseded runs, and runs on main are never cancelled', async () => {
   const directory = join(process.cwd(), '.github', 'workflows');
   const workflows = readdirSync(directory).filter(name => /\.ya?ml$/.test(name)).sort().map(name => ({ path: `.github/workflows/${name}`, text: readFileSync(join(directory, name), 'utf8') }));
-  const byPath = new Map(workflows.map(file => [file.path, file]));
-  assert.ok(byPath.has('.github/workflows/ci.yml'), '.github/workflows/ci.yml exists');
+  assert.ok(!workflows.some(file => file.path.endsWith('/ci.yml')), 'GY-2009: ci.yml is gone');
   const pullRequestWorkflows = workflows.filter(file => readWorkflow(file.text).pullRequest);
-  assert.ok(pullRequestWorkflows.some(file => file.path.endsWith('/ci.yml')), 'ci.yml runs on pull requests');
-  for (const path of ['.github/workflows/ci.yml']) {
-    const { concurrency } = readWorkflow(byPath.get(path)!.text);
-    assert.ok(concurrency?.group?.startsWith('${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}'), `${path} groups its runs per pull request: ${concurrency?.group}`);
-    assert.equal(concurrency?.cancelInProgress, "${{ github.event_name == 'pull_request' }}", `${path} cancels in progress for pull_request events only`);
-  }
+  assert.equal(pullRequestWorkflows.length, 0, 'no remaining workflow runs on pull_request; the merge writer trial is the gate');
   for (const file of pullRequestWorkflows) {
     const workflow = readWorkflow(file.text);
     const name = file.text.match(/^name:\s*(.+)$/m)?.[1].trim() ?? file.path;

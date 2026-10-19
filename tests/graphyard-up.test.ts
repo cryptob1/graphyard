@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { connect } from 'node:net';
+import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createElement } from 'react';
@@ -261,7 +262,7 @@ test('unit:graphyard-up-resumable — a fresh run walks every step in order; an 
   // The publish names the commit it pushed, so the onboarding item can be submitted by head where a pull request number is refused.
   const published = await publishOnboarding(checkout, 'acme/shop', runner(() => '\n'));
   assert.deepEqual(published, { pullRequest: 'https://github.com/acme/shop/pull/1', commit: git(origin, ['rev-parse', 'graphyard/onboarding']).trim() });
-  assert.deepEqual(git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).trim().split('\n'), ['.github/workflows/graphyard.yml', 'AGENTS.md', 'README.md', 'graphyard.json'], 'only the onboarding files, on the base tip');
+  assert.deepEqual(git(origin, ['ls-tree', '-r', '--name-only', 'graphyard/onboarding']).trim().split('\n'), ['AGENTS.md', 'README.md', 'graphyard.json'], 'only the onboarding files, on the base tip: no workflow (GY-2009)');
   assert.equal(git(origin, ['rev-parse', 'graphyard/onboarding^']).trim(), git(origin, ['rev-parse', 'main']).trim());
   assert.deepEqual(gh.find(args => args[1] === 'create')!.slice(0, 8), ['pr', 'create', '--repo', 'acme/shop', '--base', 'main', '--head', 'graphyard/onboarding']);
   assert.equal(git(checkout, ['status', '--porcelain', '--', 'AGENTS.md']).trim(), '?? AGENTS.md', 'the operator\'s index is untouched');
@@ -334,7 +335,8 @@ test('unit:graphyard-up-agent-mode — up --agent reaches a green checklist with
   const covered = world({ app: true, reviewer: true, accounts: true, browserApps: [] });
   const fullyReused = await runUp(request({ agent: true, reuseApps: ['graphyard-acme-shop', 'acme-shop-review-claude'] }), dependencies(covered, await temporaryDirectory('graphyard-up-agent-covered'), []));
   assert.equal(fullyReused.exitCode, 0, fullyReused.next);
-  assert.ok(covered.calls.some(args => args[0] === 'install' && args.includes('--apply') && args.includes('acme-shop-review-claude')), 'both reused Apps reach install');
+  // GY-2009: install registers no App, so no reused App is passed to it (the CLI refuses --reuse-app before up runs).
+  assert.ok(covered.calls.some(args => args[0] === 'install' && args.includes('--apply')) && !covered.calls.some(args => args.includes('--reuse-app')), 'install applies with no reused App');
   // The profile is the one passed, else the one the master recorded.
   assert.equal(upBrowserProfile(bareRoot, request({ agent: true })), null);
   await mkdir(join(bareRoot, '.graphyard'), { recursive: true });
@@ -1014,7 +1016,7 @@ test('unit:onboarding-pr-visible — while the onboarding pull request is open, 
   assert.match(visible(unread), /Checking whether the onboarding change has merged/);
 });
 
-test('unit:onboarding-generates-workflow — onboarding a repository with no CI writes a delivery workflow (build and test for its stack, then Graphyard\'s gate) into the onboarding change, up claims only the workflows the apply wrote, and publishOnboarding refuses naming a file it means to publish that is missing', async () => {
+test('unit:onboarding-generates-workflow — onboarding a repository with no CI writes no delivery workflow and removes a leftover generated one (GY-2009); the workflow helper still renders build, test and gate jobs, up claims only the workflows the apply reported, and publishOnboarding refuses naming a file it means to publish that is missing', async () => {
   const { buildProposal, collectScanInput, deliveryGateJob, deliveryWorkflowFile, detectStack, hasNoCi, renderDeliveryWorkflow, writeDeliveryWorkflow } = await import('../src/onboarding.js');
   const detectStackName = (input: Parameters<typeof detectStack>[0]) => detectStack(input).name;
   const { applyProposal, repositoryScanDifference, saveProposal, scanProposal } = await import('../src/repository-setup.js');
@@ -1036,8 +1038,10 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
   await saveProposal(checkout, proposal);
   const applyDeps = { url: 'https://graphyard.example', githubSetup: async () => ({ appId: 1, slug: 'graphyard-acme-game' }), now: () => new Date('2030-01-01T00:00:00Z') };
   const applied = await applyProposal(checkout, proposal, applyDeps);
-  assert.deepEqual(applied.delivery!.workflows, [deliveryWorkflowFile], 'the apply reports the workflow it wrote');
-  assert.ok(applied.applied.includes(deliveryWorkflowFile));
+  // GY-2009: no Actions gates, so the apply writes no workflow; the helper below still renders one when called directly.
+  assert.ok(!applied.delivery?.workflows?.length, 'the apply writes no workflow');
+  assert.ok(!applied.applied.includes(deliveryWorkflowFile) && !existsSync(join(checkout, deliveryWorkflowFile)));
+  assert.deepEqual(await writeDeliveryWorkflow(checkout, 'main'), { path: deliveryWorkflowFile, state: 'written' });
   const workflow = await readFile(join(checkout, deliveryWorkflowFile), 'utf8');
   assert.equal(workflow, renderDeliveryWorkflow({ name: 'node', frameworks: ['node:test'], commands: proposal.commands }).content);
   assert.match(workflow, /^on:\n  pull_request:\n  push:\n    branches: \["main"\]\n/m);
@@ -1047,7 +1051,10 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
   // The generated workflow is Graphyard's own output: a rescan still sees no CI, and a rerun changes nothing.
   assert.equal(hasNoCi(await collectScanInput(checkout)), true);
   assert.deepEqual(repositoryScanDifference(await scanProposal(checkout, { url: 'https://graphyard.example', runtimes: [] }), proposal), []);
-  assert.ok((await applyProposal(checkout, proposal, applyDeps)).unchanged.includes(deliveryWorkflowFile));
+  // A rerun removes a leftover generated workflow, so no Actions gate remains.
+  assert.ok((await applyProposal(checkout, proposal, applyDeps)).applied.includes(`removed ${deliveryWorkflowFile}: install and CI use no GitHub Actions gates`));
+  assert.ok(!existsSync(join(checkout, deliveryWorkflowFile)));
+  assert.deepEqual(await writeDeliveryWorkflow(checkout, 'main'), { path: deliveryWorkflowFile, state: 'written' });
   assert.deepEqual(await writeDeliveryWorkflow(checkout, 'main'), { path: deliveryWorkflowFile, state: 'unchanged' });
   // A repository with CI of its own gets none.
   const withCi = buildProposal({ files: ['package.json', '.github/workflows/ci.yml'], contents: { 'package.json': '{"scripts":{"test":"vitest"}}', '.github/workflows/ci.yml': 'on: [pull_request]\njobs:\n  unit:\n    runs-on: ubuntu-latest\n' } }, { repository: 'acme/game' });
@@ -1066,14 +1073,13 @@ test('unit:onboarding-generates-workflow — onboarding a repository with no CI 
   assert.deepEqual(buildProposal(botsOnly, { repository: 'acme/game' }).policy.checks, [deliveryGateJob], 'work items wait for the gate job, not checks no pull request reports');
   await writeFile(join(ciRepo, '.github/workflows/ci.yml'), 'on:\n  push:\n');
   assert.deepEqual(await writeDeliveryWorkflow(ciRepo, 'main'), { path: deliveryWorkflowFile, state: 'written' });
-  // An operator's edit to the generated workflow is kept and reported as drift, never overwritten by a rerun.
+  // An operator's edit to the generated workflow is kept, never deleted, and reported as drift to remove by hand.
   const edited = workflow.replace(/- run: npm test\n/, '- run: npm test -- --coverage\n');
   await writeFile(join(checkout, deliveryWorkflowFile), edited);
   const reapplied = await applyProposal(checkout, proposal, applyDeps);
   assert.equal(await readFile(join(checkout, deliveryWorkflowFile), 'utf8'), edited);
-  assert.ok(reapplied.drift.some(line => line.startsWith(`${deliveryWorkflowFile} differs from the generated workflow`)), reapplied.drift.join('; '));
-  assert.ok(!reapplied.applied.includes(deliveryWorkflowFile));
-  assert.deepEqual(reapplied.delivery!.workflows, [deliveryWorkflowFile], 'the kept workflow is still published');
+  assert.ok(reapplied.drift.some(line => line === `${deliveryWorkflowFile} is not the generated workflow; delete it so no Actions gate remains`), reapplied.drift.join('; '));
+  assert.ok(!reapplied.delivery?.workflows?.length, 'no workflow is published');
   await writeFile(join(checkout, deliveryWorkflowFile), workflow);
   // Other stacks still get a build and a test job.
   assert.match(renderDeliveryWorkflow({ name: 'python', frameworks: ['pytest'], commands: [] }).content, /- run: python -m pytest -q\n/);
@@ -1449,6 +1455,7 @@ test('unit:up-mobile-reprompt — a GitHub Mobile prompt that expires unapproved
 
 test('unit:up-help — graphyard up --help and -h print up\'s usage, every option on one line, and exit 0', async () => {
   const { upOptions, upUsage, upHelpRequested } = await up();
+  const { upUsageWithoutAppReuse } = await import('../src/cli/install.js');
   assert.ok(upHelpRequested(['--help']) && upHelpRequested(['--repo', 'acme/shop', '-h']) && !upHelpRequested(['--repo', 'acme/shop']));
   const lines = upUsage.split('\n');
   for (const option of [...Object.keys(upOptions), 'sudo-code', 'help']) {
@@ -1456,7 +1463,8 @@ test('unit:up-help — graphyard up --help and -h print up\'s usage, every optio
   }
   for (const flag of ['--help', '-h']) {
     const printed = execFileSync(process.execPath, [resolve('bin/graphyard.mjs'), 'up', flag], { encoding: 'utf8', env: { ...process.env, GRAPHYARD_URL: '', GRAPHYARD_TOKEN: '' } });
-    assert.equal(printed.trim(), upUsage.trim(), `${flag} prints up's usage and exits 0`);
+    // GY-2009: the CLI prints up's usage without the refused --reuse-app.
+    assert.equal(printed.trim(), upUsageWithoutAppReuse.trim(), `${flag} prints up's usage and exits 0`);
   }
 });
 

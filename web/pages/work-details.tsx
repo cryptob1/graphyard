@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { deliveryState, deploySmokeRequired, isClosed, type Work } from '../../src/model';
+import { deploySmokeRequired, isClosed, type Work } from '../../src/model';
 import { sessionSummary } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanRequestRow } from '../../src/model/human-request';
@@ -85,9 +85,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const admin = status?.actor?.role === 'admin';
   const proofs = proofPreview(item, work);
   const provider = item.policy.reviewProvider ?? 'github';
-  const failedDelivery = deliveryState(item) === 'delivered-with-failure';
   const prUrl = item.candidate ? candidatePrUrl(status?.repository, item.candidate.pr) : undefined;
-  const postDeployment = <PostDeployment item={item} repository={status?.repository} baseBranch={status?.baseBranch ?? 'main'} observedAt={observedAt}/>;
+  const postDeployment = <PostDeployment item={item} repository={status?.repository}/>;
   // The inverted loop, as this item sees it: what the control plane says to do next, which
   // executor has it, who is waiting on a decision, and every session that can be watched or read.
   const sessions = sessionSummary(item, new Date(now));
@@ -118,8 +117,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // A parked request says what it is about once; its card below carries the ask (GY-1408), so neither line restates it.
   const why = group === 'needs-you' && item.humanRequest ? `Waiting on your decision about ${humanDecisionLabel[item.humanRequest.kind]}.`
     : group === 'moving' ? `${steps.label}.`
-      // Merged work blocked at Deploy says what the release lacks, not that it shipped.
-      : group === 'blocked' && steps.current === 'deploy' ? `${steps.detail.replace(/^./, c => c.toUpperCase())}.`
       // Waiting work is described by what it waits for, never by who last held it.
       : group === 'up-next' || group === 'backlog' ? (actor.who === 'Nobody yet' ? actor.does : group === 'backlog' ? 'Not released for work yet.' : item.reworkRequested ? 'Sent back for changes; waiting for a builder.' : 'Released for work; waiting for a builder.')
         : withoutPr(plain.sentence).replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
@@ -162,7 +159,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}
       {item.violations.map(v => <div className="notice danger" key={v}>{shortShas(v)}</div>)}
       {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
-      {failedDelivery && postDeployment}
     </section>
     <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
       {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
@@ -212,7 +208,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{item.blocker}</span></p>}
       <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span>{item.stage}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
       <h3>Ownership</h3><p>{owner.text}</p>{owner.owner && <p className="muted">Worker ID: {owner.owner} · assignment {owner.epoch}</p>}<p>{owner.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
-      {!failedDelivery && postDeployment}
+      {postDeployment}
       <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r === item.blocker ? 'The recorded blocker, above' : shortShas(r)}</p>)}</div>)}
       <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).filter(d => d.message !== item.blocker).map((d, i) => <div className="criterion" key={i}><strong>{shortShas(d.message)}</strong><p>{shortShas(d.next)}</p></div>)}
       {!!item.exclusiveResources?.length && <p>Exclusive resources: {item.exclusiveResources.join(', ')}. Reserved only while an assignment lease is active.</p>}

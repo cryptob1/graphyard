@@ -58,10 +58,12 @@ test('unit:observe-only-repo-scope-suffices — a repo-only gh login passes the 
     const plan = await buildPlan(await prepare('plan'));
     const gh = githubCli(plan);
     assert.equal(gh.ok, true, gh.detail);
-    assert.match(gh.detail, /scopes repo; --observe-only registers no webhook, so it needs no admin:repo_hook/);
+    assert.match(gh.detail, /scopes repo; no install registers a webhook, so none needs admin:repo_hook/);
     assert.ok(plan.preflight.every(item => item.ok), JSON.stringify(plan.preflight.filter(item => !item.ok)));
     const held = plan.actions.filter(action => action.state === 'held').map(action => action.id);
-    for (const id of ['github.app', 'github.protection', 'release.branches', 'release.railway.uat', 'release.railway.production']) assert.ok(held.includes(id), `${id} is not held`);
+    for (const id of ['github.app', 'release.branches', 'release.railway.uat', 'release.railway.production']) assert.ok(held.includes(id), `${id} is not held`);
+    // GY-2009: install never plans a branch-protection write, held or not.
+    assert.ok(!plan.actions.some(action => action.id === 'github.protection'), 'github.protection is not planned');
 
     const session = await prepare('apply');
     const summary = await applyInstall(session, await buildPlan(session));
@@ -95,7 +97,7 @@ test('unit:observe-only-per-pr-refuses-signed-out — install --observe-only on 
     assert.equal(session.delivery.policy.mode, 'per-pr');
     const gh = githubCli(await buildPlan(session));
     assert.equal(gh.ok, true, gh.detail);
-    assert.match(gh.detail, /scopes repo; --observe-only registers no webhook/);
+    assert.match(gh.detail, /scopes repo; no install registers a webhook/);
   } finally { await signedIn.fixture.cleanup(); }
 
   const signedOut = await observeOnly(SIGNED_OUT, 'per-pr');
@@ -114,15 +116,14 @@ test('unit:observe-only-per-pr-refuses-signed-out — install --observe-only on 
   } finally { await signedOut.fixture.cleanup(); }
 });
 
-test('unit:full-install-still-needs-hook-scope — a full Railway install whose gh login lacks admin:repo_hook still fails the GitHub CLI preflight naming the missing scope', async () => {
-  const fixture = await harness({ provider: 'railway', extraResponses: [REPO_ONLY] });
-  try {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps, 'apply');
-    const plan = await buildPlan(session);
-    const gh = githubCli(plan);
-    assert.equal(gh.ok, false);
-    assert.match(gh.detail, /the gh login lacks scope admin:repo_hook \(railway needs repo, admin:repo_hook\)/);
-    assert.equal(gh.fix, 'Run: gh auth refresh --scopes repo,admin:repo_hook');
-    await assert.rejects(applyInstall(session, plan), /Preflight is incomplete; the installer changed nothing/);
-  } finally { await fixture.cleanup(); }
+test('unit:full-install-repo-scope-suffices — a full Railway install whose gh login holds only repo passes the GitHub CLI preflight: no install binds an App or registers a webhook (GY-2009)', async () => {
+  for (const provider of ['railway', 'docker-host', 'hetzner'] as const) {
+    const fixture = await harness({ provider, extraResponses: [REPO_ONLY] });
+    try {
+      const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider }, fixture.deps, 'plan');
+      const gh = githubCli(await buildPlan(session));
+      assert.equal(gh.ok, true, `${provider}: ${gh.detail}`);
+      assert.match(gh.detail, /deploy-key registration with scopes repo; no install registers a webhook, so none needs admin:repo_hook/);
+    } finally { await fixture.cleanup(); }
+  }
 });

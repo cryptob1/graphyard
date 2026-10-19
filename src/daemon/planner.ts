@@ -1,11 +1,10 @@
 // Concern: the planner role (GY-1418) — a goal whose acceptance pull request merged is planned headless
 // into a short architecture note and a dependency-ordered set of work items with file boundaries, the
 // plan is judged headless by the approver identity (never its author), and only then are its items
-// created and released; the goal is delivered once every item is done and production serves it.
+// created and released; the goal is delivered once every item is merged.
 import { z } from 'zod';
 import type { Goal } from '../model/goal.js';
-import { deploySmokeRequired } from '../model/delivery.js';
-import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, servedInProduction, type GoalPlan } from '../model/goal-plan.js';
+import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, mergedItem, type GoalPlan } from '../model/goal-plan.js';
 import { goalDeliveries } from '../release-pending.js';
 import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
@@ -58,7 +57,7 @@ export interface PlannerEffects {
   judge: (goal: Goal, judgement: PlanJudgement) => Promise<Goal>;
   /** Ask the control plane to create and release the approved plan's items in dependency order (POST /api/goals/:key/release). */
   release: (goal: Goal) => Promise<Goal>;
-  /** Record the goal delivered, naming every item of its plan (POST /api/goals/:key/deliver); the control plane checks each is done and served. */
+  /** Record the goal delivered, naming every item of its plan (POST /api/goals/:key/deliver); the control plane checks each is merged. */
   deliver: (goal: Goal, items: string[], reason: string) => Promise<Goal>;
 }
 
@@ -257,28 +256,16 @@ async function releasing(cycle: Cycle, planner: PlannerEffects, goal: Goal, note
   return note(goal, 'done', `Released ${goal.key}'s approved plan: ${(released.items ?? []).map(item => item.key).join(', ')}; the dispatcher launches each only after the items it depends on are delivered`);
 }
 
-/**
- * Delivered once every item of the plan is done and production serves it, read at most once per poll
- * interval. The delivery step records a deployment only for an item whose policy asks for the smoke
- * proof (cycle-delivery.ts 7b), so here the loop's own release observation is recorded for the plan's
- * other done items it found served, and the next read finds them delivered.
- */
+/** Delivered once every item of the plan is merged (GY-1981), read at most once per poll interval. */
 async function delivering(cycle: Cycle, planner: PlannerEffects, goal: Goal, note: Note) {
   const items = goal.items ?? [];
   if (!items.length || !due(cycle, goal, 'deliver')) return;
   later(cycle, goal, 'deliver', planPollMs);
-  const observed = cycle.state.deployment, unrecorded: string[] = [];
-  for (const work of items.map(item => cycle.snapshot.work.find(entry => entry.key === item.key))) {
-    if (!work || work.stage !== 'done' || !work.delivery || work.delivery.deployment || deploySmokeRequired(work.policy)) continue;
-    if (!observed?.sha || observed.source === 'unavailable' || !observed.deployed.includes(work.key)) continue;
-    await cycle.effects.recordDeployment(work, { sha: observed.sha, source: observed.source, observedAt: observed.at }).catch(error => { unrecorded.push(`${work.key}: ${message(error)}`); });
-  }
-  const waiting = items.filter(item => !servedInProduction(cycle.snapshot.work.find(work => work.key === item.key)));
-  if (unrecorded.length) return note(goal, 'failed', `${goal.key} is delivering, but production's deployment could not be recorded for ${unrecorded.join('; ')}; it is recorded again in five minutes`);
-  if (waiting.length) return note(goal, 'waiting', `${goal.key} is delivering: ${waiting.map(item => item.key).join(', ')} ${waiting.length === 1 ? 'is' : 'are'} not yet done and served by production`);
-  try { await planner.deliver(goal, items.map(item => item.key), `Every item of ${goal.key}'s plan is done and served by production`); }
+  const waiting = items.filter(item => !mergedItem(cycle.snapshot.work.find(work => work.key === item.key)));
+  if (waiting.length) return note(goal, 'waiting', `${goal.key} is delivering: ${waiting.map(item => item.key).join(', ')} ${waiting.length === 1 ? 'is' : 'are'} not yet merged`);
+  try { await planner.deliver(goal, items.map(item => item.key), `Every item of ${goal.key}'s plan is merged`); }
   catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `Could not record ${goal.key} delivered: ${message(error)}; it is asked again in five minutes`); }
-  return note(goal, 'done', `${goal.key} is delivered: ${items.map(item => item.key).join(', ')} are done and served by production`);
+  return note(goal, 'done', `${goal.key} is delivered: ${items.map(item => item.key).join(', ')} are merged`);
 }
 
 interface Calls {

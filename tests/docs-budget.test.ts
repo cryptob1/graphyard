@@ -89,7 +89,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/delivery.md', /`release\.onFailure` `hold` \(default `revert`\) names each failing case, step and would-be target or `no map matched`, reverting\/reopening nothing; `release\.revertUnmatched: false` holds an unmatched failure instead of the newest item/],
   // GY-1555 AC-6: setup-from-zero's control-plane merger subsection; steps 5 and 7 fold into step 4, where doctor's fixes point.
   ['docs/setup-from-zero.md', /### Control-plane merger\n\n`up` creates an ed25519 deploy key and registers it read-write on OWNER\/REPO .*no App, no branch protection/],
-  ['docs/setup-from-zero.md', /## 4\. Register the GitHub App\n\n.*Reviewer and revert-approver Apps: /],
+  ['docs/setup-from-zero.md', /## 4\. Register the GitHub App\n\n.*Not required for the control-plane merger.*Reviewer and revert-approver Apps: /],
   // GY-1523 AC-8: the head form of submit, its CLI and the change number it allocates.
   ['docs/protocol/work-commands.md', /`\{"epoch":1,"head":SHA\}` \(`complete GY-N EPOCH --head \[SHA\]`.*allocates one change number per head into `candidate\.pr`\/`submission\.pr`/],
   // GY-1529 AC-5: the Coordinator recovery section names its symptoms, the recover command and how promotion resumes.
@@ -108,8 +108,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures \(empty reply, reset, stall, non-2xx, bodiless 2xx\), else ending `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
   // GY-1844: the release-candidate section states digest promotion: a candidate's recorded build promotes by its exact digests, never a rebuild.
   ['docs/delivery.md', /A recorded build promotes by digest, never rebuilt, once UAT names it/],
-  // GY-1855 AC-2: an uncleared stall's upstream filing, the `upstream` shape and its absence, and the status listing.
-  ['docs/master-agent-reference.md', /a \[stall\]\(operations-reference\.md#master-coordination-loop\) uncleared past six failing cycles files one item per signature with its evidence into `master\.json` `upstream` \(`url`, absolute `credentialFile`\), else this install as operator-agent \(`master autonomy --apply`\), and `master status` lists each stall's signature, count, remedy, owner/],
+  // GY-1855 AC-2, reworded by GY-1980: an uncleared stall wakes the master session once per run and files nothing; the status listing stays.
+  ['docs/master-agent-reference.md', /an unbound \[stall\]\(operations-reference\.md#master-coordination-loop\) wakes the master session once per run at three failing cycles \(bound: remedy refused, unverified or failing at six\); `master status` lists each stall's signature, count, remedy, owner, filing nothing/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
