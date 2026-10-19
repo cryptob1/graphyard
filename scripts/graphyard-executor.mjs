@@ -18,7 +18,10 @@
 // .graphyard/executors.json, and the shipped systemd template examples/master/graphyard-executor@.service
 // starts one instance per slot with `--slot N`: the slot takes its kinds and poll interval from the
 // declaration, claims under a stable name, and answers systemd's watchdog on every poll — whether
-// or not it claims — every settlement and every claim renewal (GY-646). `--install` writes that declaration and enables the units (src/repository-setup.ts
+// or not it claims — every settlement and every claim renewal (GY-646). A declaration naming a kind
+// this code does not run does not stop the slot (GY-2163): the unknown names are dropped — a
+// restart onto a release that removed the kind serves the rest instead of crash-looping the fleet
+// dead — and `--install` rewrites the declaration without them. `--install` writes that declaration and enables the units (src/repository-setup.ts
 // installExecutorSupervision); `graphyard init` does the same on a coordinator host. `--install`
 // reports the unit's restart policy and fails when it lacks Restart=always with a bounded RestartSec (GY-1431). Exactly one
 // component merges (GY-245): where the master loop is installed or running, `--install` declares
