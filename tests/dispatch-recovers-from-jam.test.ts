@@ -40,8 +40,8 @@ function item(key: string, overrides: Partial<Work> = {}): Work {
     ...overrides,
   } as unknown as Work;
 }
-/** Ten attempts the server ended (submitted, awaiting an operator's rework decision): they hold no lease, yet their sessions still hold every profile. */
-const jamItems = () => Array.from({ length: jamSize }, (_, index) => item(`GY-${100 + index}`, { ready: false, submission: { pr: 400 + index, epoch: 1 } as Work['submission'] }));
+/** Ten attempts the server ended (sent back for rework, awaiting the round's decision): they hold no lease, are not in flight under the cap (GY-2097), and their sessions still hold every profile. */
+const jamItems = () => Array.from({ length: jamSize }, (_, index) => item(`GY-${100 + index}`, { ready: false, submission: { pr: 400 + index, epoch: 1 } as Work['submission'], reworkRequested: true }));
 /** The item a freed slot must reach: ready, unassigned, never submitted. */
 const waiting = () => item('GY-110');
 

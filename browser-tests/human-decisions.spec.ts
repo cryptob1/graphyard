@@ -45,7 +45,8 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 375, height: 812 
     await expect(page.getByRole('button', { name: 'Every request and answer →' })).toBeVisible();
     expect(posted[0]).toEqual({ path: '/api/sign-in', body: { code: 'one-time-code-from-graphyard-login' } });
     expect(new URL(page.url()).hash).toBe('');
-    expect(await page.evaluate(() => sessionStorage.getItem('graphyard-token'))).toBe('browser-human');
+    // GY-2171: the human session lasts 30 days, so it is kept beyond this browser session.
+    expect(await page.evaluate(() => localStorage.getItem('graphyard-token'))).toBe('browser-human');
 
     await page.getByRole('button', { name: 'Every request and answer →' }).click();
     await expect(page.getByText('Signed in as')).toContainText('operator · human operator');
@@ -60,6 +61,14 @@ for (const viewport of [{ width: 1280, height: 800 }, { width: 375, height: 812 
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width);
   });
 }
+
+test('integration:sign-in-screen-command the sign-in screen names the one command, graphyard login, that signs the operator in for 30 days', async ({ page }) => {
+  await page.route('**/api/**', route => route.fulfill({ status: 401, json: { error: 'Rejected' } }));
+  await page.goto('/');
+  const line = page.locator('.login-help', { hasText: 'Operator?' });
+  await expect(line).toHaveText('Operator? Run graphyard login on the Graphyard host and open the link it prints to sign in for 30 days.');
+  await expect(line.locator('code')).toHaveText('graphyard login');
+});
 
 test('a refused answer keeps everything the operator typed: the card clears only after the answer succeeds', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
