@@ -215,22 +215,22 @@ test('unit:gates-control-plane-ledger — with observation.source control-plane 
   assert.deepEqual(mergeLedgerRefusals(undefined, { sha, baseSha: base }), { test: [trialRefusal(sha, base)], merge: [pushRefusal(sha)] });
 });
 
-test('unit:gates-github-snapshot — with source undefined every reason string the gates give a submitted, observed github-mode candidate is unchanged', () => {
-  const sha = 'a'.repeat(40);
+test('unit:gates-github-snapshot — with source undefined a pull-request-era observation is judged like any other since GY-2010: the test and merge gates read the merge ledger, and its GitHub checks and mergeability refuse nothing', () => {
+  const sha = 'a'.repeat(40), base = 'b'.repeat(40);
   const snapshot = {
     ready: [],
     build: [],
     review: ['Independent approval of the current commit is required'],
-    test: ['Required CI check test has not passed on the current candidate'],
-    merge: ['Pull request is not mergeable against the current base'],
+    test: [trialRefusal(sha, base)],
+    merge: [pushRefusal(sha)],
   };
   assert.deepEqual(reasonsOf(submittedWork(undefined)), snapshot);
-  // A merge ledger entry changes nothing for a GitHub observation: GitHub's checks and mergeability decide.
-  assert.deepEqual(reasonsOf(submittedWork(undefined, { key: 'GY-41', state: 'reconciled', head: sha, baseTip: 'b'.repeat(40), mergeSha: 'f'.repeat(40), risk: 'routine', intentAt: '2026-10-08T12:10:00.000Z', pushedAt: '2026-10-08T12:20:00.000Z', observedTip: 'f'.repeat(40), refusal: null, events: 3 })), snapshot);
-  assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: true, checks: [{ name: 'test', result: 'success', appId: 15368 }] })), { ...snapshot, test: [], merge: [] });
-  assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: false, mergeabilityUnknown: true })).merge, ['GitHub is computing mergeability against the current base; the next observation reads it again']);
-  const unobserved = submittedWork(undefined); unobserved.candidate = { ...unobserved.candidate!, sha: 'c'.repeat(40) };
-  assert.deepEqual(reasonsOf(unobserved).merge, ['GitHub has not been observed at the current candidate', 'Pull request is not mergeable against the current base']);
+  // The writer's delivery of this head opens both gates, whatever GitHub once answered.
+  const delivered = { key: 'GY-41', state: 'reconciled' as const, head: sha, baseTip: base, mergeSha: 'f'.repeat(40), risk: 'routine', intentAt: '2026-10-08T12:10:00.000Z', pushedAt: '2026-10-08T12:20:00.000Z', observedTip: 'f'.repeat(40), refusal: null, events: 3 };
+  assert.deepEqual(reasonsOf(submittedWork(undefined, delivered)), { ...snapshot, test: [], merge: [] });
+  // GitHub's checks and mergeability, stored on an old record, change nothing.
+  assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: true, checks: [{ name: 'test', result: 'success', appId: 15368 }] })), snapshot);
+  assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: false, mergeabilityUnknown: true, checks: [{ name: 'test', result: 'failure', appId: 15368 }] })), snapshot);
 });
 
 test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, head} with the SHA defaulting to the worktree HEAD, complete GY-N EPOCH PR sends the body it always did, and the command still reports self-verification beside the control plane\'s answer', async () => {
@@ -259,7 +259,7 @@ test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, 
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, pr: 77 } }]);
 });
 
-test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/status: under control-plane it fetches nothing and merges the shared refs/remotes/origin/BASE, listing plannedFiles as before and pointing at complete --head, for a refused file and its --restore as much as for a clean tree; under github or an older server without the field it fetches', async () => {
+test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/status: under control-plane it fetches nothing and merges the shared refs/remotes/origin/BASE, judging only the merge (a file outside plannedFiles reports ok), for a clean tree as much as a changed one; under github or an older server without the field it fetches', async () => {
   const root = await realpath(await temporaryDirectory('sync-control-plane'));
   const cwd = process.cwd();
   try {
@@ -284,26 +284,18 @@ test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/stat
     };
     process.chdir(clone);
     const controlPlaneStatus = { baseBranch: 'main', mergeWriter: { merger: 'control-plane', line: 'The control plane is the merge writer' } };
-    // A file outside plannedFiles no longer matching the base: the refusal and its --restore both hand off to complete --head, never to a push.
-    const refused = await run(controlPlaneStatus);
-    assert.equal(refused.fetched, false); assert.equal(refused.merged, true); assert.equal(refused.ok, false); assert.equal(process.exitCode, 1); process.exitCode = 0;
-    assert.deepEqual(refused.refused.map((line: string) => line.split(':')[0]), ['README.md']);
-    assert.match(refused.next, /^Run sync GY-9 --restore: .* so complete GY-9 EPOCH --head submits it from the shared object store; nothing is pushed; a force push is never needed or allowed\. Do not complete until it reports ok\./);
-    assert.ok(!/plain push|updates the PR|Do not push/.test(refused.next), refused.next);
-    // GY-1528: restore is off under the control-plane merger: it says so, commits nothing and exits 0.
-    const before = git(clone, 'rev-parse', 'HEAD');
-    const restored = await run(controlPlaneStatus, ['--restore']);
-    assert.equal(restored.ok, true); assert.equal(restored.restore, 'off'); assert.deepEqual(restored.restored, []); assert.equal(process.exitCode ?? 0, 0);
-    assert.match(restored.next, /^Restore is off while the control plane is the merge writer: .* complete GY-9 EPOCH --head submits the head as it stands\.$/);
-    assert.equal(git(clone, 'rev-parse', 'HEAD'), before, 'nothing was committed');
-    git(clone, 'checkout', '-q', sharedTip, '--', 'README.md'); git(clone, 'commit', '-q', '-m', 'restore by hand', '--', 'README.md');
-    assert.equal(git(clone, 'rev-parse', 'refs/remotes/origin/main'), sharedTip, 'nothing was fetched for either');
+    // A commit changing README.md outside plannedFiles: sync judges only the merge, reports ok, and offers no --restore.
+    const stray = await run(controlPlaneStatus);
+    assert.equal(stray.fetched, false); assert.equal(stray.merged, true); assert.equal(stray.ok, true); assert.equal(process.exitCode ?? 0, 0); process.exitCode = 0;
+    assert.equal(stray.refused, undefined, 'nothing is refused');
+    assert.equal(stray.files, undefined, 'no out-of-scope finding is listed');
+    assert.ok(!/--restore/.test(stray.next), stray.next);
+    assert.match(stray.next, /^Nothing is pushed: complete GY-9 EPOCH --head submits the commit the shared object store already holds\.$/);
     const controlPlane = await run(controlPlaneStatus);
     assert.equal(controlPlane.fetched, false); assert.equal(controlPlane.merged, true); assert.equal(controlPlane.ok, true);
     assert.equal(controlPlane.baseTip, sharedTip, 'the shared ref was merged as it stood');
     assert.equal(git(clone, 'rev-parse', 'refs/remotes/origin/main'), sharedTip, 'nothing was fetched');
     assert.throws(() => git(clone, 'merge-base', '--is-ancestor', moved, 'HEAD'), 'the moved origin tip is not in HEAD');
-    assert.deepEqual(controlPlane.files.map((finding: any) => [finding.path, finding.kind]), [['src/x.ts', 'in-scope']], 'the plannedFiles listing ran');
     assert.match(controlPlane.next, /Nothing is pushed: complete GY-9 EPOCH --head/);
     assert.ok(!/Push, then/.test(controlPlane.next));
     // The control plane is the only merge writer: whatever the status says, nothing is fetched or pushed.

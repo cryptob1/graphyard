@@ -165,13 +165,15 @@ export const acceptanceJudgementParameters: JsonSchema = {
 
 /** The planner's plan (GY-1418, src/model/goal.ts goalPlanSchema): an architecture note and the items that deliver the goal's approved outcomes. */
 export const planParameters: JsonSchema = {
-  type: 'object', additionalProperties: false, required: ['goal', 'note', 'items'],
+  type: 'object', additionalProperties: false, required: ['goal', 'summary', 'note', 'items'],
   properties: {
     goal: { type: 'string', pattern: '^GOAL-\\d+$', description: 'The goal you were asked to plan, exactly as given' },
+    summary: text(800, 'At most three plain sentences: what the user gets and how it will be built; no file paths, commit shas or internal terms'),
     note: text(6000, 'The architecture note, at most 400 words: stack, module layout, data and deploy approach'),
-    items: { type: 'array', minItems: 1, maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['ref', 'title', 'outcomes', 'cases', 'criteria', 'plannedFiles'],
+    items: { type: 'array', minItems: 1, maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['ref', 'title', 'plain', 'outcomes', 'cases', 'criteria', 'plannedFiles'],
       properties: {
         ref: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,39}$', description: 'A short id for this item within the plan' }, title: text(200, 'The item title'),
+        plain: text(400, 'One plain sentence a non-engineer understands'),
         description: text(20000, 'What to build and why'), type: { type: 'string', enum: ['feature', 'bug', 'chore'] }, priority: { type: 'integer', minimum: 0, maximum: 4 },
         outcomes: { type: 'array', minItems: 1, maxItems: 30, items: text(100, 'An approved outcome id this item serves') },
         cases: { type: 'array', minItems: 1, maxItems: 30, items: text(100, 'A required case id this item must make pass') },
@@ -258,7 +260,7 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   if (role === 'diagnostician') return [tool('graphyard_diagnose', 'Graphyard diagnose', 'Record your diagnosis of the recurring fault or invariant violation you were asked to diagnose: its cause, the log lines and commands it rests on, its fault class, and either the existing open item that covers it or the fix item to file. Call it exactly once; it is your result.', diagnoseParameters, params => `diagnosis ${params.subject}`, true)];
   if (role === 'acceptance') return [tool('graphyard_acceptance', 'Graphyard acceptance', 'Record the acceptance draft for the goal you were asked to draft: each customer outcome in plain language with its criteria and the one required uat E2E case that proves it. Call it exactly once; it is your result.', acceptanceParameters, params => `acceptance ${params.goal}`, true)];
   if (role === 'acceptance-judge') return [tool('graphyard_acceptance_judgement', 'Graphyard acceptance judgement', 'Record your verdict on the acceptance draft you were asked to judge: approve, or refuse naming what the next draft must change. Call it exactly once; it is your result.', acceptanceJudgementParameters, params => `judgement ${params.goal}`, true)];
-  if (role === 'planner') return [tool('graphyard_plan', 'Graphyard plan', 'Record the plan for the goal you were asked to plan: an architecture note of at most 400 words and the work items that deliver its approved outcomes, each with the cases it must make pass, its criteria, planned files and dependencies. Call it exactly once; it is your result.', planParameters, params => `plan ${params.goal}`, true)];
+  if (role === 'planner') return [tool('graphyard_plan', 'Graphyard plan', 'Record the plan for the goal you were asked to plan: a plain summary of at most three sentences, an architecture note of at most 400 words and the work items that deliver its approved outcomes, each with a one-sentence plain description, the cases it must make pass, its criteria, planned files and dependencies. Call it exactly once; it is your result.', planParameters, params => `plan ${params.goal}`, true)];
   if (role === 'plan-judge') return [tool('graphyard_plan_judgement', 'Graphyard plan judgement', 'Record your verdict on the plan you were asked to judge: approve, or refuse naming what the next plan must change. Call it exactly once; it is your result.', planJudgementParameters, params => `plan judgement ${params.goal}`, true)];
   if (role === 'decomposition') return [tool('graphyard_decompose', 'Graphyard decompose', 'Record how the broad item you were asked to split divides into small child items, each with the parent criterion IDs it takes, its planned files and the earlier children it lands after; or an empty children list to keep it whole. Call it exactly once; it is your result.', decomposeParameters, () => 'the split', true)];
   if (role === 'doctor') return [tool(doctorReportToolName, 'Graphyard doctor report', 'Record the report of your doctor run: one entry per finding (what was stuck, under which check bound, and whether you could act), one per sanctioned command you ran and what it changed, and one per fault item to file for a finding no open item covers. Call it exactly once; it is your result.', doctorReportParameters, () => 'the doctor report', true)];
@@ -273,7 +275,9 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
  * The master subcommands the doctor's operator-agent identity may run: the sanctioned intents and
  * two-party requests, and `checkout-restore` (GY-1658), which asks the loop to save a dirty
  * coordinator checkout under a named ref and restart — never `merge`, `dispatch`, an evidence
- * submission, a lease command or a direct checkout mutation. A
+ * submission, a lease command or a direct checkout mutation. Item creation stays sanctioned but is
+ * held to its stated code-change reason at the gate itself (GY-2005): a `master create` with
+ * nothing stated past the file is refused, so a notice never files an item. A
  * command the allowlist refuses is recorded in the doctor's report, never run.
  */
 export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
@@ -356,9 +360,18 @@ export const doctorReasonLimit = 2000;
  */
 export function doctorCommandVerdict(line: string, context: DoctorGuardContext = { cwd: process.cwd(), cli: process.env.GRAPHYARD_DOCTOR_CLI }): GuardVerdict & { command?: string } {
   const verdict = doctorLineAllowed(line, context);
-  // An allowed line can still mangle its reason: two apostrophes in a single-quoted reason pair up,
-  // so the shell runs it with the quotes dropped and the prose split; it runs as one prose argument too.
-  return verdict.allow ? doctorProseReason(line, context, true) ?? verdict : doctorProseReason(line, context, false) ?? verdict;
+  if (verdict.allow) {
+    // GY-2005: a line inside the grammar is still held to create's stated reason before it runs.
+    const segments = shellWords(line);
+    for (const [index, words] of segments.entries()) {
+      const refusal = createReasonRefusal(words, { segment: index + 1, line });
+      if (refusal) return refusal;
+    }
+    // An allowed line can still mangle its reason: two apostrophes in a single-quoted reason pair up,
+    // so the shell runs it with the quotes dropped and the prose split; it runs as one prose argument too.
+    return doctorProseReason(line, context, true) ?? verdict;
+  }
+  return doctorProseReason(line, context, false) ?? verdict;
 }
 function doctorLineAllowed(line: string, context: DoctorGuardContext): GuardVerdict {
   const { open, redirect } = doctorScan(line);
@@ -600,12 +613,29 @@ function doctorCommandWords(cliWords: ShellWord[], segment: ShellWord[] = cliWor
   return refuse(name ? `graphyard ${isMaster ? 'master ' : ''}${name}` : 'that command', isMaster ? cliWords[1] ?? cliWords[0] : cliWords[at]);
 }
 /**
+ * GY-2005: item creation is held to its stated code-change reason at the gate itself. A
+ * `master create` whose grammar carries nothing stated past the file — no reason word after the
+ * file and its flags — is refused before it runs, so a notice can never spend a round filing an
+ * item; whether the reason names a code change stays the charter's judgement, and the CLI's own
+ * REASON requirement stays the second gate. `words` are one segment's words; null when the
+ * segment is not a master create, or a reason is stated.
+ */
+function createReasonRefusal(words: ShellWord[], place: DoctorPlace): GuardVerdict | null {
+  const values = words.map(word => word.value);
+  const at = values.indexOf('create');
+  if (at < 1 || values[at - 1] !== 'master') return null;
+  const stated = values.slice(at + 1).filter(value => !value.startsWith('-'));
+  if (stated.length >= 2) return null;
+  return { allow: false, reason: doctorRefusal('master create with no reason stated past the file (an item is filed only for a code change judged needed, saying why)', 'create-reason', doctorWhere(words, words[at + 1] ?? words[words.length - 1], place)) };
+}
+/**
  * The rules of the doctor's allowlist, each named in the refusal it gives (GY-1653), so a refusal
  * says which rule denied which word rather than calling a phrase an unsanctioned command.
  */
 export const doctorRules = {
   'program-first': 'the segment names its program first: no assignment or wrapper before it',
   'no-expansion': 'no word the shell would expand: no variable, command substitution or glob',
+  'create-reason': 'item creation states the code change judged needed: a reason is stated past the file',
   'bare-program-name': 'programs run by their bare name, never a path to a script',
   'node-runs-cli-only': 'node runs only the Graphyard CLI script, with no node options',
   'sanctioned-commands': 'the Graphyard subcommand is a sanctioned master command or a read-only one',

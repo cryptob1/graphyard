@@ -9,7 +9,7 @@ import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
 import { doctorSettingsSchema } from './doctor-settings.js';
-import { candidateSettingsSchema, mergeWriterSettingsSchema, shadowGateSettingsSchema } from './merge-writer-settings.js';
+import { candidateSettingsSchema, mergeWriterSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
@@ -70,7 +70,12 @@ function tolerateSchema(schema: unknown, seen: Map<unknown, unknown>): any {
     case 'pipe': rebuilt = (schema as any).clone({ ...def, in: tolerateSchema(def.in, seen) }); break;
     case 'lazy':
       // Registered before its getter can run, so a recursive schema reaches itself through the map.
-      rebuilt = (schema as any).clone({ ...def, getter: () => tolerateSchema(def.getter(), seen) });
+      // zod memoizes the getter's result on the def itself (`_cachedInner`), and resolving any lazy
+      // property while rebuilding earlier nodes can fill that memo on the original before this clone
+      // is made; the spread would then carry the stale original inner into the clone, whose parse
+      // would refuse keys the schema retired (GY-2160). Clear it so the clone resolves afresh
+      // through the tolerant getter.
+      rebuilt = (schema as any).clone({ ...def, getter: () => tolerateSchema(def.getter(), seen), _cachedInner: undefined });
       seen.set(schema, rebuilt);
       return rebuilt;
     default: return schema; // leaves (strings, numbers, literals) have nothing to keep
@@ -352,12 +357,11 @@ export const masterRunSchema = z.object({
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
   decomposition: decompositionSettingsSchema.optional(), // splitting broad items before first dispatch (GY-1126): size bounds and run time limit; it runs on run.research's account
-  // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (10 by default).
+  // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (5 by default).
   doctor: doctorSettingsSchema.optional(),
   // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
   // cause and fix item — its model, fallback, time limit, bound and log-reading commands.
   diagnostician: diagnosticianSettingsSchema.optional(),
-  shadowGate: shadowGateSettingsSchema.optional(),
   mergeWriter: mergeWriterSettingsSchema.optional(), // the control-plane merge executor's deploy key and re-trial bound (GY-1524)
   candidates: candidateSettingsSchema.optional(), // when the loop cuts release candidates itself in control-plane mode (GY-1526): every N merges or M idle minutes
 }).strict();
@@ -485,19 +489,14 @@ export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | nul
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
 }
 
-/**
- * The master config's githubAppId while the install's App step is still pending (GY-1413): the
- * master's local configuration (`master environments`, `master harness`) is usable before a human
- * confirms the App, bound to a server that reports no App either. Any real id stays strict.
- */
+/** The master config's githubAppId on an install that registered no GitHub App (GY-1413); since GY-2010 none binds one. */
 export const APP_PENDING = 0;
 
+/** The master is bound to the control plane serving its repository and base branch; a recorded App id is history and binds nothing (GY-2010). */
 export function assertMasterBinding(config: MasterConfig, status: any) {
   if (status.actor?.role !== 'coordinator') throw new Error('Master commands require the configured coordinator identity');
-  const appBound = config.githubAppId === APP_PENDING ? status.githubAppId === null || status.githubAppId === undefined : status.githubAppId === config.githubAppId;
-  if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch || !appBound) throw new Error(config.githubAppId === APP_PENDING && Number.isSafeInteger(status.githubAppId)
-    ? `The control plane now has GitHub App ${status.githubAppId} but this master was configured while the App step was pending; rerun graphyard install --apply (or master init) to bind it`
-    : 'The Graphyard repository, managed base branch, or GitHub App changed; rerun master init before continuing');
+  if (typeof status.repository !== 'string' || status.repository.toLowerCase() !== config.repository.toLowerCase() || status.baseBranch !== config.baseBranch)
+    throw new Error('The Graphyard repository or managed base branch changed; rerun master init before continuing');
 }
 
 // ---- The coordinator checkout guard (GY-857) -----------------------------------------------------

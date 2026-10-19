@@ -9,16 +9,19 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { actionId, claimAction, openActions, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
+import { actionId, claimAction, openActions, reconcileActions, settleAction, type ActionRecord, type ActionRow } from '../src/model/actions.js';
 import { actionIdleMs, actionRetryDelay, actionRetryMaxMs, actionRetryMinMs, actionStall, actionStallDelay, actionStallLatencyMs, actionStallMaxMs, actionStallRecheckMs, actionStallThreshold, claimable, queueSnapshot, stalledActions } from '../src/model/action-progress.js';
 import { sweepDirectMerges, type DirectMergeWindow } from '../src/direct-merge.js';
 import { assertDispatchable } from '../src/master.js';
 import { actionReport, stalledActionAttention } from '../src/cli/master-status.js';
 import { plainStatus, stalledStep } from '../src/model/plain-status.js';
+import { classifyAttention } from '../src/model/fault-classes.js';
+import { credential401Remedy, recordStallRemedy } from '../src/stall-remedies.js';
 import WorkCard from '../web/components/work-card.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merge are past inside an open-ended window; new Date() judges live DB rows.
+import { deliverThroughLedger } from './helpers/ledger-delivery.js';
+// Time-bomb allowance (GY-1694): the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merge are past inside an open-ended window; the 2026-10-18 GY-2014 fixtures pass their own fixed ISO clocks into stalledActionAttention and recordStallRemedy; Date.now()/new Date() only stamp live DB rows in the integration cases.
 
 /**
  * GY-110: an action that keeps failing for the same reason is a stall, not a retry.
@@ -416,24 +419,21 @@ async function queuedCandidate() {
 /** What a delivered item must look like after any path delivered it: nothing left to retry. */
 function assertSettled(item: Work, path: string) {
   assert.equal(item.stage, 'done', `${path}: delivered`);
-  assert.ok(item.nextAction === null || item.nextAction?.kind === 'verify-deployment', `${path}: the next action is the deployment it owes or nothing, not ${item.nextAction?.kind}`);
-  // GY-1824: the verify-deployment row a delivery owes until its serving release is recorded is not
-  // a leftover; every other row is.
-  assert.deepEqual(pendingRows(item).filter(row => row.kind !== 'verify-deployment').map(row => row.kind), [], `${path}: no pending row is left to retry`);
+  assert.equal(item.nextAction ?? null, null, `${path}: a delivered item owes nothing, not ${item.nextAction?.kind}`);
+  assert.deepEqual(pendingRows(item).map(row => row.kind), [], `${path}: no pending row is left to retry`);
   assert.ok(item.actionQueue!.history.some(row => row.kind === 'dispatch' && /no longer needs this action|now needs/.test(row.resolution ?? '')), `${path}: the leftover row was retired with a reason`);
   assert.equal((item as { queue?: unknown }).queue ?? null, null, `${path}: the legacy merge-queue entry is cleared`);
 }
 
 test('integration:done-retires-actions — an item delivered by the gated merge observation or by the direct-merge sweep has its next action recomputed, its pending rows retired and its queue entry cleared in the same transaction', async () => {
-  // The gated path: a merge GitHub made of a candidate passing every gate, observed. A queue entry
-  // left from before GY-1235 is seeded so its clearing is still checked.
-  const { work: queued, observation } = await queuedCandidate();
-  assert.deepEqual(queued.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate passes every gate');
-  assert.equal(queued.nextAction ?? null, null, 'and nobody owes its merge: GitHub makes it');
+  // The gated path: the merge writer's trial, push and reconcile of a candidate whose review and
+  // proofs passed (GY-2010). A queue entry left from before GY-1235 is seeded so its clearing is still checked.
+  const { work: queued } = await queuedCandidate();
+  assert.deepEqual(queued.gates.filter(gate => !gate.passed).map(gate => gate.name), ['test', 'merge'], 'only the merge writer\'s trial and push stand');
+  assert.equal(queued.nextAction ?? null, null, 'and nobody owes its merge: the merge writer makes it');
   await seed(queued, [leftover(queued, 'dispatch', 'dispatch:0')], { queue: queueEntry(8999) });
-  const committed = await reload(queued);
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  const merged = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  const merged = await deliverThroughLedger(engine, queued.id, 'e'.repeat(40), mergedAt);
   assertSettled(merged, 'gated merge observation');
   assertSettled(await reload(queued), 'gated merge observation, as stored');
 
@@ -453,15 +453,11 @@ test('integration:done-retires-actions — an item delivered by the gated merge 
 test('integration:done-rows-never-claimed — a done item\'s pending dispatch and merge rows are never offered, reconcile retires them and its queue entry, and a row failing for one unchanged reason is not claimed again before a backoff that grows with each failure', async () => {
   // A delivered item as production held 44 of them: a pending dispatch and a pending merge, a
   // queue entry, and a next action from before its delivery.
-  const { work: queued, observation } = await queuedCandidate();
-  const committed = await reload(queued);
+  const { work: queued } = await queuedCandidate();
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  const done = await engine.observe(queued.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'c'.repeat(40) });
+  const done = await deliverThroughLedger(engine, queued.id, 'c'.repeat(40), mergedAt);
   assert.equal(done.stage, 'done');
-  // GY-1824: its serving release is recorded, as the executor's verify-deployment row records it, so
-  // the delivery owes nothing and only the leftovers below are left to settle.
-  const recorded = { ...done.delivery, deployment: { sha: 'd'.repeat(40), mergeSha: 'c'.repeat(40), source: 'endpoint', observedAt: mergedAt, covers: 'exact', at: mergedAt, observer: 'executor-1' } };
-  await store.pool.query("UPDATE work_items SET document=(jsonb_set(document,'{actionQueue,actions}','[]'::jsonb) || $2::jsonb) WHERE id=$1", [done.id, JSON.stringify({ delivery: recorded, nextAction: null })]);
+  // The delivery owes nothing (GY-1981: done = merged); only the leftovers below are left to settle.
   const dispatch = leftover(done, 'dispatch', 'dispatch:0'), merge = leftover(done, 'merge', 'merge:stale');
   await seed(done, [dispatch, merge], { queue: queueEntry(9001), nextAction: { kind: 'merge', work: done.id, key: done.key, gate: 'merge', refusal: null, reason: 'stale', inputs: merge.inputs, llmRole: null, binding: 'merge:stale' } });
 
@@ -571,4 +567,53 @@ test('integration:idle-claim-lock-free — a claim poll with nothing claimable t
   assert.ok(claiming.some(entry => /pg_advisory_xact_lock/.test(entry.text)), 'under the coordination lock');
   const loaded = claiming.filter(entry => /SELECT document FROM work_items/.test(entry.text)).flatMap(entry => entry.rows);
   assert.deepEqual(loaded.map(row => row.document.id), [item.id], 'loading only the item that holds it');
+});
+
+// ---- GY-2014: permanent reasons raise installation-level setup attention -------------------------
+
+/** A stalled row of `kind` on `reason` at a fixed clock — no DB. */
+function fixtureStall(key: string, kind: ActionRow['kind'], reason: string, at = '2026-10-18T03:00:00.000Z') {
+  const id = randomUUID(), shift = (iso: string, ms: number) => new Date(Date.parse(iso) + ms).toISOString();
+  const failures = actionStallThreshold, first = shift(at, -failures * 60_000);
+  const history: ActionRecord[] = [{ at: shift(first, -60_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: `${key} needs ${kind}` }];
+  for (let n = 0; n < failures; n++) {
+    const failed = shift(first, (n + 1) * 60_000);
+    history.push({ at: shift(failed, -10_000), event: 'claimed', requester: 'graphyard', executor: 'x', result: null, reason: `attempt ${n + 1}` },
+      { at: failed, event: 'failed', requester: 'graphyard', executor: 'x', result: 'failed', reason });
+  }
+  const row: ActionRow = { id: actionId(kind, id, `${kind}:1`), kind, work: id, key, inputs: { kind } as ActionRow['inputs'], gate: 'build', refusal: null, reason: `${key} needs ${kind}`, binding: `${kind}:1`,
+    requestedBy: 'graphyard', requestedAt: history[0].at, state: 'pending', claim: null, attempts: failures, retryAt: shift(at, 60_000), resolvedAt: at, result: 'failed', resolution: reason, history };
+  row.stall = actionStall(row)!;
+  const work = { id, key, stage: 'build', actionQueue: { actions: [row], history: [] } } as unknown as Work;
+  return { work, row, at };
+}
+
+test('unit:stalled-actions-claim-credential-attention — a dispatch row on the refused claim credential names the credential-401 remedy, not the generic instruction', () => {
+  const reason = 'Command failed: node bin/graphyard.mjs claim GY-1994\n{"error":"A valid Graphyard bearer token is required"}';
+  const { work, row, at } = fixtureStall('GY-1994', 'dispatch', reason);
+  const raised = stalledActionAttention({ work: [work], now: at });
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].kind, 'setup');
+  assert.equal(raised[0].subject, 'setup');
+  assert.match(raised[0].next, /credential-401/);
+  assert.match(raised[0].next, new RegExp(credential401Remedy.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 40)));
+  assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
+  recordStallRemedy(work, row.id, { remedy: 'credential-401', reason, outcome: 'applied', detail: 'the fresh credential authenticates', flows: [] }, 'graphyard-master', new Date(at));
+  const after = stalledActionAttention({ work: [work], now: at })[0];
+  assert.match(after.next, /the loop applied the credential-401 remedy/);
+  assert.equal(classifyAttention([after])[0].faultClass, 'configuration');
+});
+
+test('unit:stalled-actions-reviewer-launch-attention — a request-review row on the refused reviewer launch raises the reviewer-identity setup line, not a stalled-action instance', () => {
+  const reason = 'The control plane refused the reviewer launch of GY-1998 (400): Invalid input';
+  const { work, at } = fixtureStall('GY-1998', 'request-review', reason);
+  const raised = stalledActionAttention({ work: [work], now: at });
+  assert.equal(raised.length, 1);
+  assert.equal(raised[0].kind, 'setup');
+  assert.equal(raised[0].subject, 'setup');
+  assert.match(raised[0].text, /reviewer identity is refused at launch/);
+  assert.match(raised[0].next, /GY-2008|reviewer setup|reviewer bind/);
+  assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
+  assert.equal(classifyAttention(raised)[0].faultClass, 'configuration');
+  assert.notEqual(classifyAttention(raised)[0].faultClass, 'stalled-gate');
 });

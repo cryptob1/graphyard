@@ -1,4 +1,5 @@
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -6,14 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { fakeTransport, type BundleFileRecord, type Transport } from '../src/install/transport.js';
 import type { InstallDependencies } from '../src/install/index.js';
 import type { Provider } from '../src/install/types.js';
-import { controlPlanePermissions, requiredPermissions } from '../src/github-permissions.js';
+import { ensureDeployKey } from '../src/install/deploy-key.js';
 import { installUnitsFile, legacyInstallUnits, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only; Date.now() is the install's handed clock and stamps tokens and deliveries nothing ages.
+// Time-bomb allowance (GY-1694): the 2024-01-01 deprecation announcement is Hetzner server-type fixture data the pricing reads for presence only; Date.now() is the install's handed clock and stamps records nothing ages.
 
 export const REPOSITORY = 'owner/project';
-export const GRAPHYARD_APP_ID = 200_001;
-export const CI_APP_ID = 15_368;
 export const HEAD_SHA = 'a'.repeat(40);
 /** The Graphyard source every harness install uploads: this checkout, never the managed repository, at a fixed commit (GY-1864). */
 export const GRAPHYARD_SOURCE = fileURLToPath(new URL('..', import.meta.url));
@@ -27,10 +26,19 @@ export async function temporaryRepository(repository = REPOSITORY) {
   return root;
 }
 
-export const appKey = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
-export const WEBHOOK_SECRET = 'webhook-secret-for-tests-0123456789';
+/** An ed25519 public key as an OpenSSH line, the form ssh-keygen writes and `gh repo deploy-key list` answers (GY-2010). */
+export function openSshPublicKey(comment: string) {
+  const raw = generateKeyPairSync('ed25519').publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
+  const field = (value: Buffer) => { const length = Buffer.alloc(4); length.writeUInt32BE(value.length); return Buffer.concat([length, value]); };
+  return `ssh-ed25519 ${Buffer.concat([field(Buffer.from('ssh-ed25519')), field(raw)]).toString('base64')} ${comment}`;
+}
+/** The key pair the fake ssh-keygen writes on this machine; the private half is a placeholder ensureDeployKey never reads. */
+export const DEPLOY_PUBLIC_KEY = openSshPublicKey('graphyard-merge-writer-install-test-host');
+/** The key the fixture host's ssh-keygen prints: its own, generated there. */
+export const HOST_DEPLOY_PUBLIC_KEY = openSshPublicKey('graphyard-merge-writer-graphyard-host');
 
-export interface FakeState { installed: boolean; protection: any | null; deliveries: any[]; hookConfig: { url: string; secret?: string } | null }
+/** `deployKeys`: the deploy keys GitHub lists for the repository, which `gh repo deploy-key add` appends to. */
+export interface FakeState { installed: boolean; deployKeys: { id: number; key: string; title: string }[] }
 
 export const RAILWAY_WORKSPACES = [{ id: 'ws-graphyard-0001', name: 'Graphyard' }, { id: 'ws-personal-0002', name: "Installer's Projects" }];
 
@@ -67,6 +75,8 @@ export function hostResponses(files: Map<string, BundleFileRecord>, state: { ins
     { match: 'id -g graphyard', result: '1001' },
     { match: 'systemctl --version', result: 'systemd 255 (255.4-1ubuntu8)' },
     { match: 'hostname', result: 'graphyard-host' },
+    // The merge writer's deploy key, generated on the host (GY-2010): only its public half is printed.
+    { match: 'ssh-keygen -q -t ed25519', result: `${HOST_DEPLOY_PUBLIC_KEY}\n` },
     { match: 'command -v', result: (line: string) => `/usr/bin/${line.split(' ').pop()}` },
     // Herdr on the host (GY-1511): its servers running, and the default instance's graphyard plugin
     // configured where Herdr keeps it, so a host whose plugin another install holds is a written file.
@@ -110,8 +120,8 @@ export function providerResponses(provider: Provider, state: { installed: boolea
       ...compose,
     ];
   }
-  // App bind (GY-1908) lists deployments so it can refuse a newer failed latest and wait for the
-  // redeployed id; a single SUCCESS is both serving and latest until redeploy prepends another.
+  // A redeploy lists deployments so it can refuse a newer failed latest and wait for the redeployed
+  // id (GY-1908); a single SUCCESS is both serving and latest until redeploy prepends another.
   let deployments: { id: string; status: string }[] = [{ id: 'dep-serving', status: 'SUCCESS' }];
   return [
     { match: 'railway --version', result: 'railway 3.11.0' },
@@ -131,42 +141,18 @@ export function providerResponses(provider: Provider, state: { installed: boolea
   ];
 }
 
-export function githubResponses(state: FakeState, repository = REPOSITORY, branch = 'main') {
+/** The gh login's transcript: authenticated, and the repository's deploy keys (GY-2010). Nothing else on GitHub is read or written. */
+export function githubResponses(state: FakeState, repository = REPOSITORY) {
   return [
     { match: 'gh auth status', result: `Logged in to github.com account installer` },
-    { match: `gh api repos/${repository}/commits/${branch}/check-runs`, result: JSON.stringify({ check_runs: [{ name: 'test', app: { id: CI_APP_ID, slug: 'github-actions' } }, { name: 'typecheck', app: { id: CI_APP_ID, slug: 'github-actions' } }] }) },
-    { match: `gh api repos/${repository}/commits/${branch}`, result: JSON.stringify({ sha: HEAD_SHA }) },
-    { match: '--method PUT', result: '{}' },
-    { match: `gh api repos/${repository}/branches/${branch}/protection`, result: state.protection ? JSON.stringify(state.protection) : { stdout: '', stderr: 'Branch not protected', code: 1 } },
-    // The repository itself, as --reuse-app and app bind read it with the host's gh login (GY-1877) and the
-    // protection record reads it with its rulesets (GY-1870); any other line under them answers empty, as an unmatched one does.
-    { match: `gh api repos/${repository}`, result: (line: string) => line === `gh api repos/${repository}` ? JSON.stringify({ id: REPOSITORY_ID, full_name: repository, owner: { login: repository.split('/')[0], type: 'User' }, allow_auto_merge: false })
-      : line.startsWith(`gh api repos/${repository}/rulesets?includes_parents=false`) ? '[]' : '' },
+    { match: `gh repo deploy-key list -R ${repository}`, result: () => JSON.stringify(state.deployKeys) },
+    { match: 'gh repo deploy-key add ', result: (line: string) => {
+      const [, file, title] = /deploy-key add (\S+) .*--title (\S+)/.exec(line) ?? [];
+      state.deployKeys.push({ id: state.deployKeys.length + 1, key: readFileSync(file, 'utf8').trim(), title });
+      return '';
+    } },
   ];
 }
-/** The managed repository's GitHub id, as `gh api repos/OWNER/NAME` reports it. */
-export const REPOSITORY_ID = 9001;
-
-/** An App whose key is saved on the host (`app import`, GY-1877), as GitHub's App endpoints answer the App itself. */
-export interface FakeApp { appId: number; slug: string; installationId: number; account?: string; repositorySelection?: 'all' | 'selected'; permissions?: Record<string, string>;
-  /** The repository is not among its selected repositories (GY-1877); GitHub's GET /repos/{repo}/installation answers 404. */
-  deselected?: boolean }
-/** The App a JWT names (`iss`), read without verifying its signature: the harness checks flows, not keys. */
-const appOfJwt = (apps: FakeApp[], authorization: string) => {
-  try { return apps.find(app => String(app.appId) === String(JSON.parse(Buffer.from(authorization.replace(/^Bearer /, '').split('.')[1], 'base64url').toString()).iss)) ?? null; } catch { return null; }
-};
-
-export const satisfiedProtection = (appId: number | null, reviewCount = 1) => ({
-  // `strict` off is part of a satisfied branch: a candidate merges on the base it was built on (GY-191).
-  required_status_checks: { strict: false, checks: [{ context: 'test', app_id: null }, { context: 'typecheck', app_id: null }, ...(appId ? [{ context: 'Graphyard / merge', app_id: appId }, { context: 'graphyard/landable', app_id: appId }] : [])] },
-  enforce_admins: { enabled: true },
-  // Conversation resolution off: the reviewer's verdict is the review gate, threads are its inputs.
-  required_conversation_resolution: { enabled: false },
-  required_pull_request_reviews: { required_approving_review_count: reviewCount, dismiss_stale_reviews: true, require_last_push_approval: true },
-  allow_force_pushes: { enabled: false },
-  allow_deletions: { enabled: false },
-});
-
 export interface Harness {
   root: string;
   configHome: string;
@@ -184,18 +170,16 @@ export interface Harness {
 export interface HarnessOptions {
   provider: Provider;
   installed?: boolean;
-  protection?: any | null;
   serverUrl?: string;
   envFile?: string;
   service?: string;
   workdir?: string;
-  /** GET /api/status's body, or a function answering it per request (GY-1877: a server that reports the App once it is written). */
+  /** GET /api/status's body, or a function answering it per request. */
   statusBody?: unknown;
   healthy?: boolean;
   /** The commit /healthz reports; the pinned Graphyard source's by default, so a Railway upload is served. */
   servedCommit?: string | null;
   repository?: string;
-  deliveries?: any[];
   /** Reuse a previous harness's checkout and credential home to exercise a re-run. */
   root?: string;
   configHome?: string;
@@ -209,8 +193,8 @@ export interface HarnessOptions {
   extraResponses?: { match: string; result: string | { stdout: string; stderr: string; code: number } | ((line: string, input?: string) => string | { stdout: string; stderr: string; code: number }) }[];
   /** The agent registry the fake server holds (GET /api/agent-registry/document). */
   registry?: any;
-  /** Apps GitHub knows, for `/app`, `/app/installations` and the repository read as the App (GY-1877); none by default. */
-  apps?: FakeApp[];
+  /** Deploy keys GitHub already lists for the repository. */
+  deployKeys?: FakeState['deployKeys'];
 }
 
 /**
@@ -237,11 +221,11 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   const installId = repository.replace('/', '-');
   const service = options.service ?? `graphyard-${installId}`;
   const workdir = options.workdir ?? (options.provider === 'compose' ? `${configHome}/${installId}/compose` : `/opt/graphyard/${installId}`);
-  const state: FakeState = { installed: !!options.installed, protection: options.protection ?? null, deliveries: options.deliveries ?? [], hookConfig: null };
+  const state: FakeState = { installed: !!options.installed, deployKeys: options.deployKeys ?? [] };
   // One file store per remote host, shared with its fixture responses, so a host reads back what was written to it.
   const hostFiles = options.hostFiles ?? new Map<string, BundleFileRecord>();
   const selfContained = options.provider === 'host' || !!options.selfContained;
-  const responses = [...(options.extraResponses ?? []), ...(selfContained ? hostResponses(hostFiles, { installed: state.installed }, repository) : []), ...providerResponses(options.provider === 'host' ? 'docker-host' : options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces }), ...githubResponses(state, repository)];
+  const responses = [...(options.extraResponses ?? []), ...githubResponses(state, repository), ...(selfContained ? hostResponses(hostFiles, { installed: state.installed }, repository) : []), ...providerResponses(options.provider === 'host' ? 'docker-host' : options.provider, { installed: state.installed, workdir, service, envFile: options.envFile, workspaces: options.workspaces })];
   const transport = fakeTransport({ responses });
   const remotes = new Map<string, ReturnType<typeof fakeTransport>>();
   const ssh = (host: string) => {
@@ -260,20 +244,8 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     // The served roster (GET /api/principals), as the control plane lists it: ids, roles, kinds and grants, never tokens.
     if (url.endsWith('/api/principals')) return json(200, { principals: deployedRoster(transport, remotes).map(principal => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [], leases: [] })) });
     if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
-    if (url.endsWith('/api/status')) return json(200, typeof options.statusBody === 'function' ? options.statusBody() : options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
-    if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return json(201, { token: 'installation-token-for-tests', expires_at: new Date(Date.now() + 3_600_000).toISOString() });
-    const app = appOfJwt(options.apps ?? [], String((init.headers ?? {}).Authorization ?? ''));
-    if (app && url.endsWith('/app')) return json(200, { id: app.appId, slug: app.slug, owner: { login: app.account ?? repository.split('/')[0] }, permissions: app.permissions ?? requiredPermissions(controlPlanePermissions) });
-    if (app && url.includes('/app/installations')) return json(200, [{ id: app.installationId, account: { login: app.account ?? repository.split('/')[0] }, permissions: app.permissions ?? requiredPermissions(controlPlanePermissions), repository_selection: app.repositorySelection ?? 'selected', suspended_at: null }]);
-    if (app && url.endsWith(`/repos/${repository}/installation`)) return app.deselected ? json(404, { message: 'Not Found' }) : json(200, { id: app.installationId });
-    if (url.endsWith(`/repos/${repository}`)) return json(200, { id: REPOSITORY_ID, full_name: repository, owner: { login: repository.split('/')[0] } });
-    if (url.endsWith('/app/hook/config') && method === 'PATCH') { state.hookConfig = JSON.parse(String(init.body)); return json(200, state.hookConfig); }
-    if (url.endsWith('/app/hook/config')) return json(200, state.hookConfig ?? { url: '', content_type: 'json' });
-    if (url.includes('/app/hook/deliveries')) return json(200, state.deliveries);
-    if (url.includes('/check-runs') && method === 'POST') {
-      state.deliveries = [{ id: 1, event: 'check_run', status_code: 202, delivered_at: new Date().toISOString() }, ...state.deliveries];
-      return json(201, { id: 99 });
-    }
+    if (url.endsWith('/api/status')) return json(200, typeof options.statusBody === 'function' ? options.statusBody() : options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository });
+    // Nothing else is served: a request to GitHub's API is recorded and refused, so a test can prove there was none.
     return json(404, { message: 'unexpected request' });
   }) as unknown as typeof fetch;
 
@@ -281,9 +253,13 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     transport: transport as Transport, ssh, fetch: fetchImpl, configHome, sourceRoot: GRAPHYARD_SOURCE, sourceCommit: GRAPHYARD_SOURCE_SHA,
     cliPath: join(root, 'package.json'), hostId: 'install-test-host',
     wait: async () => {}, now: () => Date.now(), log: () => {},
-    githubApp: async request => request.reviewer
-      ? { appId: GRAPHYARD_APP_ID + 1, slug: `${request.reviewer}-app`, installationId: 501, privateKey: appKey, webhookSecret: '', botUserId: 900_001 }
-      : { appId: GRAPHYARD_APP_ID, slug: 'graphyard-owner-project', installationId: 500, privateKey: appKey, webhookSecret: WEBHOOK_SECRET },
+    // The real deploy-key step, with ssh-keygen replaced by one that writes a fixed pair; gh is the recording transport's.
+    ensureDeployKey: (installDir, repo, gh) => ensureDeployKey(installDir, repo, gh, { hostname: 'install-test-host', keygen: async args => {
+      const file = args[args.indexOf('-f') + 1];
+      await writeFile(file, 'placeholder private key: never read by the installer\n', { mode: 0o600 });
+      await writeFile(`${file}.pub`, `${DEPLOY_PUBLIC_KEY}\n`, { mode: 0o600 });
+      return { stdout: '', stderr: '', code: 0 };
+    } }),
     detectRuntimes: async () => [{ kind: 'claude', program: 'claude', path: '/usr/bin/claude', authenticated: true, reason: 'test runtime' }],
     detectHerdr: async () => ({ available: true, version: 'herdr 0.7.1', reason: 'available' }),
     registerProfiles: async request => ({

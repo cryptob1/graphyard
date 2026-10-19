@@ -16,6 +16,7 @@ import { actionSettleMs } from '../src/model/action-progress.js';
 import { coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit, coordinationSnapshot as trimInProcess, coordinationViewHeader, coordinationWork, deliverySettled, type CoordinationOmissions } from '../src/server/work-view.js';
 import { coordinationRecords, coordinationSessions, coordinationTail } from '../src/store/coordination-sql.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { mergeDelivered, mergeIntent } from './helpers/merge-ledger.js';
 
 /**
  * GY-203: migrations and backups take their own advisory locks, and the coordination snapshot is
@@ -208,7 +209,7 @@ const noOmissions = (): CoordinationOmissions => ({ evidence: 0, dispatchHistory
 /** The index row a document must project to, computed from the document in TypeScript. */
 function expectedIndex(work: Work, position: number) {
   const actions = Array.isArray(work.actionQueue?.actions) ? work.actionQueue!.actions : [];
-  const due = actions.filter(row => work.stage !== 'done' || row.kind === 'verify-deployment').map(row => {
+  const due = actions.filter(row => work.stage !== 'done' || (row.kind as string) === 'verify-deployment').map(row => {
     const times = [time(row.requestedAt), time(row.retryAt), row.state === 'done' ? time(row.resolvedAt) + actionSettleMs : NaN,
       row.state !== 'pending' && row.claim && typeof row.claim === 'object' ? time(row.claim.expiresAt) : NaN].filter(Number.isFinite);
     return times.length ? Math.max(...times) : 0;
@@ -279,15 +280,14 @@ test('integration:index-matches-documents — the index equals the documents aft
   w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   await check('evidenced');
   w = await engine.observe(w.id, (await reload(w)).revision, observation()); await check('reobserved');
-  const committed = { revision: (await engine.store.workItem(w.id))!.revision }; await check('merge committed');
+  // The merge writer's trial, push and reconciliation deliver it (GY-2010).
+  w = await mergeIntent(engine, w, 'e'.repeat(40)); await check('merge intended');
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  w = await engine.observe(w.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  w = await mergeDelivered(engine, w, 'e'.repeat(40));
   assert.equal(w.stage, 'done'); await check('delivered');
   assert.equal((await store.pool.query('SELECT pr_state FROM work_index WHERE id=$1', [w.id])).rows[0].pr_state, 'merged');
-  // Writes that bypass the engine are indexed all the same: its deployment verified, then a
-  // session running on it, then that session finished. GY-1824: the delivery holds the
-  // verify-deployment row it owes until its serving release is recorded, so it is not settled yet.
-  assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, false, 'a delivery holding its verify-deployment row is not settled');
+  // Writes that bypass the engine are indexed all the same: a deployment recorded, then a
+  // session running on it, then that session finished. A merged item owes nothing (GY-1981).
   await store.pool.query('UPDATE work_items SET document = jsonb_set(jsonb_set(document || \'{"nextAction": null}\', \'{actionQueue,actions}\', \'[]\'), \'{delivery,deployment}\', $2::jsonb) WHERE id=$1', [w.id, JSON.stringify({ sha: 'd'.repeat(40), mergeSha: 'e'.repeat(40), source: 'endpoint', observedAt: mergedAt, covers: 'exact', at: new Date().toISOString(), observer: 'executor-1' })]);
   await check('deployment verified');
   assert.equal((await store.pool.query('SELECT settled FROM work_index WHERE id=$1', [w.id])).rows[0].settled, true, 'a delivery owing nothing is settled');
@@ -418,8 +418,7 @@ function boardItem(index: number, now: Date, kind: 'settled' | 'active' | 'fresh
     actionQueue: { actions: [], history: resolvedRows },
     sessions, pipeline: { attempts: Array.from({ length: 20 }, (_, n) => ({ attempt: n, startedAt: at, endedAt: at, outcome: 'rework' })) },
     nextAction: delivered ? null : { kind: 'request-review', work: id, key, gate: 'review', refusal: null, reason: 'waiting on review', inputs: { kind: 'request-review' }, llmRole: null, binding: 'review:1' },
-    // GY-1824: a delivery's serving release is recorded, as the executor's verify-deployment row
-    // records it moments after delivery, so the board's settled shape carries it.
+    // A delivery recorded with its serving release, as older deliveries carry it.
     ...(delivered ? { delivery: { mergeSha: 'f'.repeat(40), mergedAt: at, deployment: { sha: 'd'.repeat(40), mergeSha: 'f'.repeat(40), source: 'endpoint', observedAt: at, covers: 'exact', at, observer: 'executor-1' } } } : {}),
   } as unknown as Work;
 }

@@ -1,8 +1,10 @@
 import { releaseInfo, schemaVersion } from '../../release.js';
-import { planeVerdict, probeWrites, readDatabaseCapacity, readGitHubBudget } from '../../master-resources.js';
+import { planeVerdict, probeWrites, readDatabaseCapacity } from '../../master-resources.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
 import { demand } from '../../model.js';
 import { humanSignIn } from '../auth.js';
+import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 /**
  * The plane's own health; no token required. Health names the release, schema generation and
@@ -62,9 +64,22 @@ function startProbe(pool: any): DatabaseProbe {
   outstandingProbes.set(pool, probe);
   return probe;
 }
+/**
+ * Why the checkout the server observes submitted heads from (GRAPHYARD_REPOSITORY_ROOT) cannot be
+ * read, or null when it is unset or readable. A compose server once mounted a linked worktree that a
+ * rework later reclaimed (GY-2054): every observation then refused as a commit missing from the
+ * object store while health stayed green, so the outage is a health cause instead.
+ */
+export async function repositoryRootCause(root = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim()): Promise<string | null> {
+  if (!root) return null;
+  if (!existsSync(root)) return `repository root ${root} (GRAPHYARD_REPOSITORY_ROOT) is missing; submitted heads cannot be observed`;
+  const inside = await new Promise<string | null>(resolve => execFile('git', ['-C', root, 'rev-parse', '--is-inside-work-tree'], { encoding: 'utf8', timeout: healthCheckWaitMs }, (error, stdout) => resolve(error ? null : String(stdout).trim())));
+  return inside === 'true' ? null : `repository root ${root} (GRAPHYARD_REPOSITORY_ROOT) is not a readable Git work tree; submitted heads cannot be observed`;
+}
 export const healthRoutes = defineRoutes('health', [
   { method: '*', path: '/healthz', handle: async ({ services, send, url }) => {
     const pool = services.engine.store.pool;
+    const repository = repositoryRootCause();
     // Even the reachability probe is bounded: on a fresh process the reconciliation step can hold
     // every pooled connection for minutes, and an unbounded SELECT 1 then fails the deploy's health check.
     // Only a probe queued behind a full pool is that busy pool: one that held or was opening a
@@ -85,21 +100,25 @@ export const healthRoutes = defineRoutes('health', [
     // not started through main() has none to wait for. `?ready` answers 503 until then, for a
     // readiness probe that must keep traffic off a replica refusing mutations.
     const readiness = (services as Services & { readiness?: boolean }).readiness ?? true;
-    if (!readiness && url.searchParams.has('ready')) return send(503, { ok: true, healthy: true, readiness, causes: ['startup validation has not completed'], ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol });
-    if (!reachable) return { ok: true, healthy: true, readiness, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
-      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
+    const repositoryCause = await repository;
+    const observable = (body: { healthy: boolean; causes: string[] } & Record<string, unknown>) => repositoryCause ? { ...body, ok: false, healthy: false, causes: [...body.causes, repositoryCause] } : body;
+    // `?strict` answers 503 for every unhealthy verdict, including the busy-pool answers an unreadable root made unhealthy.
+    const answer = (body: { healthy: boolean } & Record<string, unknown>) => body.healthy || !url.searchParams.has('strict') ? body : send(503, body);
+    if (!readiness && url.searchParams.has('ready')) return send(503, observable({ ok: true, healthy: true, readiness, causes: ['startup validation has not completed'], ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol }));
+    if (!reachable) return answer(observable({ ok: true, healthy: true, readiness, writable: null, causes: [`database probe did not finish within ${healthCheckWaitMs} ms; the pool is busy`], resources: null,
+      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol }));
     // Liveness must not wait on a pool the reconciliation jobs have filled: a probe that queued
     // behind them failed every deployment's health check (2026-09-23). The resource checks get a
     // bounded wait; past it the plane answers alive and names the checks it could not finish.
-    const checks = Promise.all([probeWrites(pool), readDatabaseCapacity(pool), readGitHubBudget(services.github)]);
+    const checks = Promise.all([probeWrites(pool), readDatabaseCapacity(pool)]);
     const settled = await Promise.race([checks, new Promise<null>(resolve => setTimeout(() => resolve(null), healthCheckWaitMs).unref())]);
-    if (!settled) return { ok: true, healthy: true, readiness, writable: null, causes: [`resource checks did not finish within ${healthCheckWaitMs} ms; the database pool is busy`], resources: null,
-      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
-    const [writeError, database, github] = settled;
-    const verdict = planeVerdict(writeError, { database, github });
-    const body = { ok: verdict.healthy, healthy: verdict.healthy, readiness, writable: verdict.writable, causes: verdict.causes, resources: { database, github },
-      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol };
-    return verdict.healthy || !url.searchParams.has('strict') ? body : send(503, body);
+    if (!settled) return answer(observable({ ok: true, healthy: true, readiness, writable: null, causes: [`resource checks did not finish within ${healthCheckWaitMs} ms; the database pool is busy`], resources: null,
+      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol }));
+    const [writeError, database] = settled;
+    const verdict = planeVerdict(writeError, { database });
+    const body = observable({ ok: verdict.healthy, healthy: verdict.healthy, readiness, writable: verdict.writable, causes: verdict.causes, resources: { database },
+      ...releaseInfo(), schema: schemaVersion, commit: services.build.commit, protocol: services.build.protocol });
+    return answer(body);
   } },
   // Opening a sign-in link (GY-738) is the other route answered without a token: the link is the credential.
   {

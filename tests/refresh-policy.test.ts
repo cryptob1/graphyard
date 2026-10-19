@@ -26,7 +26,9 @@ function evidence(item: Work): Evidence {
   return { id: `e-${item.key}`, proof: 'unit:policy', sha: item.candidate!.sha, baseSha: item.candidate!.baseSha,
     policyRevision: item.policyRevision, producer: 'ci-runner', trusted: true, result: 'pass', executed: 4, skipped: 0, at: now.toISOString() } as Evidence;
 }
-function work(key: string, head: string, overrides: Partial<Observation> = {}): Work {
+/** The merge writer's record of a head (GY-2010: the test and merge gates read it): `intent` trialled it, `reconciled` pushed it, `refused` failed its trial. */
+type Ledger = 'intent' | 'reconciled' | 'refused' | null;
+function work(key: string, head: string, overrides: Partial<Observation> = {}, ledger: Ledger = 'intent'): Work {
   const item = {
     id: key.toLowerCase(), key, title: key, description: '', type: 'feature', priority: 2, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:policy'] }], policy: { checks: ['test'], review: true },
@@ -39,6 +41,8 @@ function work(key: string, head: string, overrides: Partial<Observation> = {}): 
   } as unknown as Work;
   item.observation = observation(item, overrides);
   item.evidence = [evidence(item)];
+  if (ledger) item.mergeLedger = { key, state: ledger, head, baseTip: main, mergeSha: ledger === 'reconciled' ? commit('d0') : null, risk: null, intentAt: now.toISOString(),
+    pushedAt: ledger === 'reconciled' ? now.toISOString() : null, observedTip: null, refusal: ledger === 'refused' ? { kind: 'merge', reason: 'trial failed: tests/policy.test.ts' } : null, events: 2 };
   return item;
 }
 /** The evaluation the engine stores after every observation. */
@@ -88,18 +92,18 @@ test('unit:refresh-only-head-and-conflicts — main moving under three candidate
   assert.equal(baseRefreshNeeded(unknown), null);
 });
 
-test('unit:queue-validation-is-merge-substate — a candidate running CI on its own head is Checking, reaches merge once CI passes, and stays Checking when it fails; no queue validation substate remains', () => {
-  const running = evaluated(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'in_progress', appId: 15368 }] }), []);
+test('unit:queue-validation-is-merge-substate — a candidate the merge writer has not trialled is Checking (at test), passes merge once the writer pushed it, and returns to test when its trial fails; no queue validation substate remains', () => {
+  const running = evaluated(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'in_progress', appId: 15368 }] }, null), []);
   assert.equal(running.stage, 'test', 'stage comes from the candidate\'s own gates');
   assert.equal(prSteps(running, now.getTime()).current, 'checking');
   assert.equal(prSteps(running, now.getTime()).label, 'Checking · 0 of 1 checks done');
   assert.deepEqual(checkStates(running, ciAppIds), [{ name: 'test', state: 'running' }]);
 
-  const passed = evaluated(work('GY-1', commit('c1')), []);
+  const passed = evaluated(work('GY-1', commit('c1'), {}, 'reconciled'), []);
   assert.deepEqual([passed.stage, gate(passed, 'merge').passed, gate(passed, 'merge').reasons], ['merge', true, []]);
 
-  const failed = evaluated(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'failure', appId: 15368 }] }), []);
+  const failed = evaluated(work('GY-1', commit('c1'), {}, 'refused'), []);
   assert.equal(failed.stage, 'test');
-  assert.deepEqual(gate(failed, 'test').reasons, ['Required CI check test has not passed on the current candidate']);
-  assert.equal(refusalAction(failed, 'test', gate(failed, 'test').reasons[0]) === 'merge', false, 'a failing check is a refusal someone acts on');
+  assert.deepEqual(gate(failed, 'test').reasons, [`merge writer has not trialled ${commit('c1').slice(0, 12)} on ${main.slice(0, 12)}`]);
+  assert.equal(refusalAction(failed, 'test', gate(failed, 'test').reasons[0]), 'merge', 'the merge writer answers it: its refused trial requests the rework itself');
 });

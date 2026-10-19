@@ -12,7 +12,7 @@ import { escalationTriggers, type Evidence, type Observation, type Work } from '
 import { nameUnobtainableReviews, requestAttemptLimit, settledAnswerGraceMs, unansweredRequest, type DispatchRequest, type RequestProgress } from '../src/model/dispatch.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { agentOwner, buildMasterStatus, controlPlaneAttention, installationSources, masterConfigSchema, workAttentionCauses, type AttentionItem, type MasterConfig } from '../src/master.js';
-import { containmentSettleWaitBoundMs, cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, onceAnnotations, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, timingFaultAttention, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { containmentSettleWaitBoundMs, cycleFailureAttentionAfter, cycleFaults, daemonActionFaultKind, daemonActionKinds, daemonEffects, daemonSummary, emptyDaemonState, endFailingRuns, fileRecurringFaultClasses, herdrFaultKinds, loopAttention, loopLiveness, noteConfigReload, noteCycleFailure, noteWatchdog, faultObservationIntervalMs, deploymentObservationSchema, pruneDaemonState, reconcilePendingActions, retainedActions, runCycle, storeAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { attributeAttention, derivedAttention, faulted } from '../src/master-status.js';
 import { sessionRetries } from '../src/producer.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from '../src/cli/unanswered-requests.js';
@@ -79,7 +79,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['installation attention sources', installationSources],
     ['escalation triggers', escalationTriggers.map(escalationFaultKind)],
     ['failed loop actions', daemonActionKinds.map(daemonActionFaultKind)],
-    ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
+    ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
     ['master status builders', ['disk-pressure', 'resource-bound', 'docs-headroom', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'request-remedy', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless',
@@ -242,7 +242,7 @@ test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action i
   assert.equal(faultClassOf('action:diagnosis'), 'unclassified');
   assert.ok(isFaultKind('action:fault') && isFaultKind('action:diagnosis'), 'still catalogued, under unclassified');
   // Every kind main's loop entry listed, but the two moved out; later additions to the entry are allowed.
-  const mainLoopKinds = ['loop-liveness', 'loop-cost', 'loop-failures', 'loop-silence', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped'];
+  const mainLoopKinds = ['loop-liveness', 'loop-cost', 'loop-failures', 'delivery-budget', 'loop-cursor', 'dispatch-failures', 'retry-stopped'];
   for (const kind of mainLoopKinds) assert.equal(faultClassOf(kind), 'loop', `${kind} stays loop`);
   assert.ok(!(faultCatalogue.loop as readonly string[]).some(kind => kind === 'action:fault' || kind === 'action:diagnosis'));
   // Three failed actions of the moved kinds, each its own run, reach no loop recurrence threshold.
@@ -586,31 +586,6 @@ test('unit:recurring-class-item — attention master status adds after buildMast
   assert.equal(Object.keys(tracked.faults.open).length >= 3, true, 'they still stand, so provisioning the identity later opens no spurious recurrence');
 });
 
-test('unit:recurring-class-item — a required check red on the clock reaches recurrence tracking as the timing-failure class, whatever its name', async () => {
-  // A policy check name may hold spaces; master status names the failure with it verbatim.
-  const check = 'Integration / test';
-  const red = (key: string, id: number) => item(key, { stage: 'test', policy: { checks: [check], review: true }, candidate: { sha: `${id}`.padStart(40, 'a'), pr: id },
-    observation: { at: iso(0), candidate: { sha: `${id}`.padStart(40, 'a'), pr: id }, checks: [{ name: check, result: 'failure', id, attempt: 1 }], reviews: [] },
-    gates: [{ name: 'test', passed: false, reasons: [`Required CI check ${check} has not passed on the current candidate`] }] } as unknown as Partial<Work>);
-  const work = [red('GY-1', 7001), red('GY-2', 7002), red('GY-3', 7003)];
-  const timing = { name: 'snapshot.p95', test: 'integration:snapshot', statistic: 'p95', measuredMs: 2092, budgetMs: 2000, comparison: '<', samples: 100, warmupDiscarded: 5, otherFailures: 0 };
-  const reads: number[] = [];
-  const annotations = onceAnnotations(async id => { reads.push(id); return [{ message: `graphyard-timing:${JSON.stringify(timing)}` }]; });
-  const items = await timingFaultAttention(work, 'owner/project', annotations);
-  assert.deepEqual(classifyAttention(items).map(entry => [entry.subject, entry.kind, entry.faultClass]),
-    [['GY-1', 'timing-failure', 'proof'], ['GY-2', 'timing-failure', 'proof'], ['GY-3', 'timing-failure', 'proof']], `a check name with spaces is still a timing failure: ${JSON.stringify(items)}`);
-  const state = emptyDaemonState(config());
-  trackFaults(state.faults, cycleFaults(state, work, clock, { config: config(), reported: items }), iso(0));
-  assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'timing-failure').map(entry => entry.subject), ['GY-1', 'GY-2', 'GY-3']);
-  assert.deepEqual(recurringClasses(state.faults.instances, work, policy, clock).filter(entry => entry.file).map(entry => entry.faultClass), ['proof'], 'three timing failures in the window file the proof item');
-  // A completed run's annotations are read once however many cycles look; a failed read is read again.
-  await timingFaultAttention(work, 'owner/project', annotations);
-  assert.deepEqual(reads, [7001, 7002, 7003]);
-  let failures = 0;
-  const flaky = onceAnnotations(async () => { if (failures++ === 0) throw new Error('GitHub answered 502'); return []; });
-  await assert.rejects(flaky(1)); assert.deepEqual(await flaky(1), []); assert.equal(failures, 2);
-});
-
 test('unit:recurring-class-item — review conflicts and the other lines status derives after buildMasterStatus reach the loop', async () => {
   const conflicted = (key: string, sha: string): Work => item(key, { stage: 'review', reviewConflict: { state: 'conflicted', key, pr: 7, sha, baseSha: 'b'.repeat(40), policyRevision: 1, reviewer: 'graphyard-reviewer[bot]', requestId: null, at: iso(-hour), reason: 'two verdicts',
     verdicts: [{ id: 1, reviewer: 'graphyard-reviewer[bot]', state: 'APPROVED', submittedAt: iso(-hour), observedAt: iso(-hour), requestId: null }, { id: 2, reviewer: 'graphyard-reviewer[bot]', state: 'CHANGES_REQUESTED', submittedAt: iso(-hour), observedAt: iso(-hour), requestId: null }] } } as Partial<Work>);
@@ -914,13 +889,12 @@ test('unit:recurring-class-item — a starved reviewer or producer role reaches 
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'concurrency-starved').map(entry => entry.faultClass), ['capacity'], 'the starved role is a tracked capacity instance');
 });
 
-test('unit:recurring-class-item — the loop tracks its own cost, silence and delivery-budget lines', async () => {
+test('unit:recurring-class-item — the loop tracks its own cost and delivery-budget lines', async () => {
   const state = emptyDaemonState(config());
-  const lines = loopAttention({ liveness: { state: 'running', detail: 'ok', restart: 'restart' } as never, budget: { met: false, reasons: ['approval→merge p90 is 3h, over 1h'] } as never,
-    silence: { breached: true, budgetMs: 30 * 60_000, actionable: 2, longest: { work: 'GY-9', detail: 'GY-9 merge', idleMs: 45 * 60_000 } } as never });
-  assert.deepEqual(lines.map(line => line.kind).sort(), ['delivery-budget', 'loop-silence']);
+  const lines = loopAttention({ liveness: { state: 'running', detail: 'ok', restart: 'restart' } as never, budget: { met: false, reasons: ['approval→merge p90 is 3h, over 1h'] } as never });
+  assert.deepEqual(lines.map(line => line.kind).sort(), ['delivery-budget']);
   trackFaults(state.faults, cycleFaults(state, [], clock, { config: config(), loop: lines }), iso(0));
-  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]).sort(), [['delivery-budget', 'loop'], ['loop-silence', 'loop']]);
+  assert.deepEqual(state.faults.instances.map(entry => [entry.kind, entry.faultClass]).sort(), [['delivery-budget', 'loop']]);
   // The running loop passes them itself: a latency budget it misses is a loop instance without any report read.
   const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }), faultClassPolicy: policy, persist: async () => {} } as unknown as DaemonEffects;

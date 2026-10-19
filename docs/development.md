@@ -11,7 +11,7 @@ CLI `src/cli/`, routes `src/server/routes/`, rules `src/model/`, tables `src/sto
 npm ci && npm run build && npm test
 ```
 
-`npm test` hides `GRAPHYARD_*`/`HERDR_*`; worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); PRs run affected tests (`scripts/ci-tests.mjs`); long suites run on [release candidates](delivery.md#pre-merge-gate-and-release-candidate-validation). Trusted CI runs only protected source: land a harness and `scripts/contracts.mjs` entry before requiring its proof. Control-plane mode switches off plannedFiles refusals, sync restore, the scope hook, producer sessions, budget-test blockers and normal-risk rework approvers.
+`npm test` hides `GRAPHYARD_*`/`HERDR_*`; worktrees need [bubblewrap](install.md#preconditions). On a tmpfs the runner redirects `TMPDIR`/`TMP`/`TEMP` to short, sticky on-disk `~/.gy/tmp`. Under the test runner the checkout the suite itself runs from is never a judged coordinator checkout, so a launcher a fixture passes never makes the suite's tree a test's code root (`loopCodeRoot`). CI's `test` aggregates shards balanced by `tests/helpers/timing-baseline.json` (top-level `tests/*.test.ts`); PRs run affected tests (`scripts/ci-tests.mjs`); long suites run on [release candidates](delivery.md#pre-merge-gate-and-release-candidate-validation). Trusted CI runs only protected source: land a harness and `scripts/contracts.mjs` entry before requiring its proof. Control-plane mode switches off plannedFiles refusals, sync restore, the scope hook, producer sessions, budget-test blockers and normal-risk rework approvers.
 
 ### Verification maps
 
@@ -19,7 +19,7 @@ npm ci && npm run build && npm test
 
 ### Base failures
 
-A required check failing on base head too: no rework (waits while base log is unreadable); one attention entry, P0 repair item per failing test and base head. Once base passes, failed jobs rerun and blocked candidates get a Graphyard base merge (`refresh`) keeping approval; a failure the base tip already passes refreshes at once (trigger `base breakage`).
+A merge trial whose failing tests fail on the base tip too: no rework; the writer holds the head (`base failure`), one attention entry, one P0 repair item per failing set. Nothing is rerun or refreshed: after 30 min the writer trials the held head afresh on the then tip, and the record clears once the item no longer shows it.
 
 ## Documentation
 

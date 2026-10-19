@@ -5,10 +5,11 @@ import { foldDecisions } from '../model/approval.js';
 import { assembleEscalationContext, canonical, contextBudget, escalationAction, intentLedgerKinds, contextLadder, routineLedgerKinds, rulesRef, type ContextInputs, type LedgerKindCount, type LedgerRow, type PrecedentDecision, type RulesSource } from '../model/escalation-context.js';
 import type { Services } from './routes.js';
 import { lockedWork } from '../store/locked-read.js';
+import { gitRunnerFor } from '../merge-writer/local-observation.js';
 
 /**
  * `GET /api/work/:id/context?trigger=&budget=`: the assembled escalation context (GY-90). The
- * rules layer is read from the repository under review through the control plane's own App —
+ * rules layer is read from the repository under review from the control plane's own checkout —
  * `AGENTS.md` at the base tip the item was last observed against — never from a template, so an
  * installation managing another codebase escalates against that codebase's rules. Every ledger
  * read runs in one repeatable-read snapshot so the four layers describe the same graph state; the
@@ -18,19 +19,18 @@ export const rulesPath = 'AGENTS.md';
 const querySchema = z.object({ trigger: z.enum(escalationTriggers).optional(), budget: z.string().regex(/^\d{1,7}$/).optional() }).strict();
 
 async function readRules(services: Services, work: Work): Promise<RulesSource> {
-  const { github } = services;
-  if (!github) return { path: rulesPath, ref: rulesRef(work, ''), sha: null, text: null, unavailable: `GitHub integration is not configured, so ${rulesPath} of ${services.repository} cannot be read; the handler decides without the repository's rules and must say so` };
-  const ref = rulesRef(work, github.config.base);
-  try {
-    const entry = await github.request(`/contents/${rulesPath}?ref=${encodeURIComponent(ref)}`);
-    demand(entry && !Array.isArray(entry) && entry.type === 'file' && typeof entry.sha === 'string', `${rulesPath} at ${ref} is not a readable file`, 502);
-    const text = entry.encoding === 'base64' && typeof entry.content === 'string' ? Buffer.from(entry.content.replace(/\s+/g, ''), 'base64').toString('utf8') : typeof entry.content === 'string' ? entry.content : null;
-    demand(text !== null, `GitHub returned no readable content for ${rulesPath} at ${ref}`, 502);
-    return { path: rulesPath, ref, sha: entry.sha, text, unavailable: null };
-  } catch (error) {
-    if (error instanceof Refusal && /\(404\)/.test(error.message)) return { path: rulesPath, ref, sha: null, text: null, unavailable: `${services.repository} has no ${rulesPath} at ${ref}; the repository states no operating rules there` };
-    return { path: rulesPath, ref, sha: null, text: null, unavailable: `${rulesPath} at ${ref} could not be read: ${error instanceof Error ? error.message : String(error)}` };
-  }
+  const { engine } = services;
+  if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
+  const git = engine.gitRunner;
+  const ref = rulesRef(work, engine.baseBranch);
+  if (!git) return { path: rulesPath, ref, sha: null, text: null, unavailable: `The control plane has no checkout, so ${rulesPath} of ${services.repository} cannot be read; the handler decides without the repository's rules and must say so` };
+  // Read from the checkout the control plane shares with the merge writer: a sha names itself, a branch is its remote-tracking ref.
+  const object = /^[0-9a-f]{40}$/i.test(ref) ? ref : `refs/remotes/origin/${ref}`;
+  const blob = await git(['rev-parse', '--verify', '--quiet', `${object}:${rulesPath}`]);
+  if (blob.status !== 0) return { path: rulesPath, ref, sha: null, text: null, unavailable: `${services.repository} has no ${rulesPath} at ${ref}; the repository states no operating rules there` };
+  const content = await git(['show', `${object}:${rulesPath}`]);
+  if (content.status !== 0) return { path: rulesPath, ref, sha: null, text: null, unavailable: `${rulesPath} at ${ref} could not be read: ${content.stderr.trim().split('\n')[0] ?? 'git show failed'}` };
+  return { path: rulesPath, ref, sha: blob.stdout.trim(), text: content.stdout, unavailable: null };
 }
 
 const detailsColumn = "CASE WHEN payload ? 'details' THEN payload->'details' ELSE payload - 'work' - 'delta' END AS details";

@@ -1,10 +1,10 @@
-// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, verify-deployment, main-watch.
+// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, main-watch.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
 import { handSettlementRefusal } from '../../model/containment.js';
 import { dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { observeDeployment, readDaemonState } from '../../master-daemon.js';
-import { localPostDeployChecks, verificationEffects, verifyDeployment, type PostDeployChecksInput } from '../../master-verification.js';
+import { localPostDeployChecks, type PostDeployChecksInput } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
 import { assertHandDispatch } from '../hand-actions.js';
@@ -12,7 +12,6 @@ import { unhandled, type MasterSession } from './session.js';
 import { masterHarnessDrift } from './fleet.js';
 import { readSecretFromStdin } from '../context.js';
 import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.js';
-import { shadowGateSummary } from '../../daemon/cycle-shadow.js';
 import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../../child-runner.js';
 import { installDirectory } from '../../install/secrets.js';
@@ -43,7 +42,7 @@ const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart
 /**
  * `master post-deploy-checks` (GY-1732): this checkout's decision of a delivered item's post-deploy
  * checks and the follow-ups they file, printed as JSON from a `PostDeployChecksInput` on stdin.
- * verify-deployment runs it from the observed release's isolated checkout, so a follow-up's text and
+ * The loop's readings run it from the observed release's isolated checkout, so a follow-up's text and
  * observation window are the serving release's, not those of a coordinator checkout behind it.
  */
 export async function postDeployChecksCommand(stdin: AsyncIterable<string | Buffer> = process.stdin, write: (text: string) => void = text => process.stdout.write(text)) {
@@ -53,7 +52,7 @@ export async function postDeployChecksCommand(stdin: AsyncIterable<string | Buff
   write(`${JSON.stringify(await localPostDeployChecks(input))}\n`);
 }
 
-/** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
+/** Reading status and acting on one item: settle a quarantine, dispatch, merge, record a reading. */
 export async function operationsCommand(session: MasterSession, effects: RecoverEffects = recoverEffects): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
   if (id === 'status') {
@@ -66,26 +65,13 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
     const harness = await masterHarnessDrift(root, master);
     // GY-1519: each commit on the base branch the main watch cannot explain is one attention line, report-only.
-    type Standing = { key: string; head: string; baseTip: string; outcome: 'shadow-only-fail' | 'shadow-missed'; mergeSha: string | null; build: 'pass' | 'fail'; tests: { passed: number; failed: string[]; files: number }; conflict?: string[]; at: string; explained: boolean; cause?: string | null };
-    const shadowStatus = await masterApi('shadow-disagreements').then(
-      (body: { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }) => body ?? {},
-      () => ({} as { explanations?: { key: string; head: string; baseTip: string }[]; disagreements?: Standing[] }),
-    );
-    const explanations = shadowStatus.explanations ?? [];
-    const standing = shadowStatus.disagreements ?? [];
     // GY-1603: a loop holding the lock outside this install's unit, which the unit's own run is refused on.
     const refusal = await readLockRefusal(root);
     const holder = refusal && state?.lock ? unsupervisedHolderAttention({ refusal, lock: state.lock, hostId: master.hostId, unit: await supervisingUnit(root, master, { host: effects.host }).catch(() => null) }) : null;
     const added = [...(harness ? [harness] : []), ...(holder ? [holder] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch)];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
-    // `shadowGate`: outcome counts and trial times from the cursor; unexplained/explained counts from the ledger so eviction cannot hide a standing pair.
     // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
-    const shadowGate = {
-      ...shadowGateSummary(state?.shadow ?? [], explanations),
-      unexplainedDisagreements: standing.filter(entry => !entry.explained).length,
-      explainedDisagreements: standing.filter(entry => entry.explained).length,
-    };
-    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, shadowGate, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
   }
   // GY-1658: the loop restores a dirty coordinator checkout to a named ref and restarts itself; this files the request and reports the outcome.
   if (id === 'checkout-restore') return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master')));
@@ -190,15 +176,6 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const proof = named ?? proofs.find(candidate => loopReadingOn(work, candidate, served.sha as string)?.result !== 'pass') ?? proofs[0];
     const reading = { proof, sha: served.sha, baseSha: request ? parent.delivery.mergeSha : served.sha, policyRevision: work.policyRevision, result, detail: detail.slice(0, 2000) };
     return print(await masterMutation(`work/${work.id}/reading`, reading));
-  }
-  if (id === 'verify-deployment') {
-    if (!args[0]) throw new Error('Use master verify-deployment GY-N');
-    const snapshot = await masterApi('work-snapshot');
-    const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-    if (!work) throw new Error(`Unknown work item ${args[0]}`);
-    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, read: path => masterApi(path) }));
-    if (result.result === 'refused') process.exitCode = 1;
-    return print(result);
   }
   return unhandled;
 }

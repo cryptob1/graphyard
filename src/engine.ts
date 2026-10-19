@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, deploymentBackfillPerPass, deploymentUnrecorded, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { readInterventionReport } from './interventions/report.js';
 import { interventionPolicyFromEnv } from './model/interventions.js';
@@ -20,9 +20,8 @@ import { containmentAttestation, containmentSettlementRefusals, containmentVerif
 import { containmentPhase } from './model/containment.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { unauthorizedMergeViolation } from './merge-queue.js';
-import { conflictSince, requestedBaseRefresh, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
+import { conflictSince, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
 import { docsSyncCarry } from './model/docs-sync.js';
-import { githubFromEnv } from './github.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { regressionRefusals } from './regression-guard.js';
@@ -180,9 +179,6 @@ const commands = {
     ciRun: ciRunBindingSchema.optional(),
     // GY-135: the same proof run against a tree with its criterion's behaviour removed.
     exercise: proofExerciseSchema.optional() }).strict(),
-  // The coordinator's observation of the running release covering a delivered merge. It names the
-  // serving commit and where it was read; whether it is exact is derived, never asserted.
-  deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
   // GY-1779: the loop's own reading of a loop-owned observation item's proof on the serving release,
   // recorded through the coordinator by its deployment-verification step: `sha` is the release the
   // control plane observed serving the parent delivery's merge `baseSha`; `detail` names the measured values.
@@ -197,7 +193,6 @@ const commands = {
   // The coordinator — the master loop's operator-agent identity — asking the control plane to merge
   // the base tip it names into a candidate a repaired base failure held (GY-528). The reconciliation
   // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
-  refresh: z.object({ reason: z.string().trim().min(1).max(2000), base: sha }).strict(),
   // No `mergerefused`: GitHub merges on every passing gate (GY-1235) and Graphyard keeps no guarded
   // merge (GY-1236), so nothing reports a merge refusal and none sends a candidate back (GY-1391).
   // GY-1849: one existing pull request adopted into this item on its same branch and head; the live
@@ -234,7 +229,7 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', refresh: 'intent:unblock', window: 'intent:unblock', adopt: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', window: 'intent:unblock', adopt: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
   const capability = operatorCapabilitiesByCommand[command];
@@ -972,21 +967,14 @@ export class Engine {
   controlPlaneAppId?: number;
   /**
    * GY-1849: reads the pull request an adoption names, outside any coordination transaction. Left
-   * undefined, the deployment's GitHub App (from the environment) reads it; null reads none, and
+   * undefined, none is read, and
    * every adoption is refused as unverifiable, since a binding without its live head binds nothing.
    */
   adoptionObserver: ((pr: number) => Promise<AdoptedPull>) | null | undefined = undefined;
-  /** The reader `adoptionObserver` stands for while undefined: the deployment's own GitHub App, or none. */
+  /** The reader `adoptionObserver` stands for while undefined: none, since Graphyard reads no GitHub API. */
   private async adoptionReader(): Promise<((pr: number) => Promise<AdoptedPull>) | null> {
     if (this.adoptionObserver !== undefined) return this.adoptionObserver;
-    const github = await githubFromEnv();
-    this.adoptionObserver = github ? async pr => {
-      const pull = await github.request(`/pulls/${pr}`);
-      return { head: String(pull.head.sha), branch: String(pull.head.ref), state: pull.state === 'open' ? 'open' as const : 'closed' as const, draft: pull.draft === true,
-        headRepository: typeof pull.head.repo?.full_name === 'string' ? pull.head.repo.full_name : null,
-        baseRepository: typeof pull.base?.repo?.full_name === 'string' ? pull.base.repo.full_name : null,
-        baseRef: typeof pull.base?.ref === 'string' ? pull.base.ref : null };
-    } : null;
+    this.adoptionObserver = null;
     return this.adoptionObserver;
   }
   /**
@@ -1121,7 +1109,7 @@ export class Engine {
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
     if (data.head !== undefined) return this.observeSubmittedHead(actor, id, { epoch: data.epoch, head: data.head }, key);
-    if (this.submissionObserver === undefined) { const github = await githubFromEnv(); this.submissionObserver = github ? (probe, peers) => github.observe(probe, peers) : null; }
+    if (this.submissionObserver === undefined) this.submissionObserver = null;
     if (!this.submissionObserver || !id) return null;
     // A replayed submission returns its receipt; it must not depend on the provider again.
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
@@ -1149,8 +1137,9 @@ export class Engine {
     // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
     const work = (await lockedWork(this.store.leasePool, [id])).find(w => w.id === id || w.key === id);
     const workspace = work?.workspaces.find(w => w.epoch === data.epoch);
-    // GY-1849: an adopted item never completes as a head (the transaction refuses it), so no git is read for one.
-    if (!work || work.stage === 'done' || !workspace || work.prAdoption) return null;
+    // GY-2010: an item a stored adoption (GY-1849) still names completes as a head like any other:
+    // its replacement commit is read from the shared object store, never from the pull request.
+    if (!work || work.stage === 'done' || !workspace) return null;
     if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
     demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
@@ -1176,7 +1165,7 @@ export class Engine {
     // after submission passes the review gate; control-plane verdicts are kept beside them.
     const pr = work.submission?.pr;
     if (pr && !(await this.store.pool.query('SELECT 1 FROM change_numbers WHERE work_id=$1 AND number=$2', [work.id, pr])).rowCount) {
-      if (this.pullReviewReader === undefined) { const github = await githubFromEnv(); this.pullReviewReader = github ? number => github.pullReviews(number) : null; }
+      if (this.pullReviewReader === undefined) this.pullReviewReader = null;
       // An unreadable pull request keeps what was recorded: the head is still observed and handed on.
       const live = this.pullReviewReader ? await this.pullReviewReader(pr).catch(() => null) : null;
       if (live) {
@@ -1502,9 +1491,9 @@ export class Engine {
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
-      // The only commands a delivered item still accepts: containment cleanup, and the two
-      // post-deployment facts that extend the delivery snapshot without reopening the merge.
-      const postDeployment = command === 'deployment' || command === 'evidence' && data.proof === deploySmokeProof;
+      // The only commands a delivered item still accepts: containment cleanup, and the
+      // post-deployment smoke fact that extends the delivery snapshot without reopening the merge.
+      const postDeployment = command === 'evidence' && data.proof === deploySmokeProof;
       const containmentCleanup = ['settle', 'recover', 'autosettle'];
       const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
       // Ending a session handle an item still carries is the third thing a delivered item accepts,
@@ -1537,20 +1526,6 @@ export class Engine {
         // every superseded exhaustion record for this candidate.
         work.reviewFailovers = (work.reviewFailovers ?? []).filter(failover => failover.sha !== work.candidate?.sha
           || failover.baseSha !== work.candidate?.baseSha || failover.policyRevision !== work.policyRevision);
-      }
-      if (command === 'refresh') {
-        if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        demand(work.submission && !work.observation?.merged && work.stage !== 'done' && !work.reworkRequested, 'Open submitted work is required');
-        const candidate = work.candidate, observation = work.observation;
-        demand(candidate && observation?.candidate.sha === candidate.sha && observation.prState === 'open' && observation.draft === false, 'An open pull request observed at the current head is required');
-        demand(observation!.baseTip === data.base, `The base branch tip last observed for ${work.key} is ${observation!.baseTip?.slice(0, 12) ?? 'unknown'}, not ${data.base.slice(0, 12)}; retry once it is observed`, 409);
-        demand(observation!.baseTipContained === false, `${work.key} head ${candidate!.sha.slice(0, 12)} already contains base branch tip ${data.base.slice(0, 12)}; there is nothing to merge in`);
-        const refresh = work.baseRefresh;
-        demand(!(refresh && refresh.from.sha === candidate!.sha && refresh.base === data.base && refresh.policyRevision === work.policyRevision),
-          `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} onto ${data.base.slice(0, 12)} is already recorded`);
-        demand(!requestedBaseRefresh(work), `A refresh of ${work.key} head ${candidate!.sha.slice(0, 12)} is already requested; the reconciliation job runs it`);
-        // Beside `baseRefresh`, not in it: an approval an earlier refresh carried onto this head still binds until the merge runs.
-        work.baseRefreshRequest = { head: candidate!.sha, base: data.base, policyRevision: work.policyRevision, by: actor.id, at: now.toISOString(), reason: data.reason };
       }
       if (command === 'adopt') {
         // The master's own non-weakening intent — an adoption rewrites no criterion: the operator-agent
@@ -2051,9 +2026,8 @@ export class Engine {
         // hands it to the merge writer.
         let observed = observation, number: number;
         if (data.head !== undefined) {
-          // GY-1849: an adoption binds its pull request's own number, and that binding outlives a later
-          // switch of the merge writer: a head would complete it as a newly allocated change instead.
-          demand(!work.prAdoption, `${work.key} adopted pull request #${work.prAdoption?.pr} and completes only as that pull request, never as a head: complete ${work.key} ${data.epoch} ${work.prAdoption?.pr}`, 409);
+          // GY-2010: a stored adoption (GY-1849) binds nothing here. Graphyard observes no pull request,
+          // so an adopted item's replacement head completes as a change of its own, like a rework's.
           demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane; complete ${work.key} ${data.epoch} --head again`, 409);
           // One change number per (item, head), allocated under the item lock this transaction holds:
           // the candidate, the submission and the number commit together, and a retried or repeated
@@ -2069,12 +2043,12 @@ export class Engine {
         }
         // GY-1849: the adopted head is verified against a live observation or not at all, so an
         // unobserved completion of an adopted item is refused rather than recorded unchecked.
-        demand(!work.prAdoption || observed, `${work.key} adopted pull request #${work.prAdoption?.pr}, whose live head could not be observed; complete is refused until it can be verified against the adopted head`, 503);
+        demand(data.head !== undefined || !work.prAdoption || observed, `${work.key} adopted pull request #${work.prAdoption?.pr}, whose live head could not be observed; complete is refused until it can be verified against the adopted head`, 503);
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
           // GY-1849: the binding is exact-head, so the head observed now is compared to the adopted
           // one; a moved head is refused naming both shas, and the master re-adopts at the live head.
-          if (work.prAdoption && observed!.candidate.sha !== work.prAdoption.head)
+          if (data.head === undefined && work.prAdoption && observed!.candidate.sha !== work.prAdoption.head)
             demand(false, `${work.key} adopted pull request #${work.prAdoption.pr} at head ${work.prAdoption.head.slice(0, 12)}, but its live head is ${observed!.candidate.sha.slice(0, 12)}; adopt naming the live head, then complete again`, 409);
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
           // GY-1528: a control-plane observation is refused nothing on plannedFiles (regressionRefusals answers none for it).
@@ -2119,17 +2093,6 @@ export class Engine {
         demand(!work.observationWindow || Date.parse(work.observationWindow.notBefore) <= now.getTime(), `${work.key}'s reading can first exist at ${work.observationWindow?.notBefore}; one taken before then is not recorded`, 409);
         const evidence: Evidence = { id: randomUUID(), proof: data.proof, sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, producer: actor.id, trusted: true, result: data.result, executed: 1, skipped: 0, at: now.toISOString(), reading: { detail: data.detail } };
         work.evidence.push(evidence);
-      }
-      if (command === 'deployment') {
-        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        demand(work.stage === 'done' && !!work.delivery, 'A deployment observation is recorded only for delivered work');
-        demand(data.mergeSha === work.delivery!.mergeSha, 'Deployment observation names another merge commit');
-        // One observation per delivery: the smoke proof binds to exactly this serving commit, so a
-        // later rollout cannot quietly move the target the proof was made against.
-        demand(!work.delivery!.deployment, 'Delivery already has a recorded deployment observation');
-        demand(Date.parse(data.observedAt) <= now.getTime() + 60_000 && Date.parse(data.observedAt) >= Date.parse(work.delivery!.mergedAt) - 60_000, 'Deployment observation time must fall between the merge and now');
-        work.delivery!.deployment = { sha: data.sha, mergeSha: data.mergeSha, source: data.source, observedAt: data.observedAt,
-          covers: data.sha === data.mergeSha ? 'exact' : 'descendant', at: now.toISOString(), observer: actor.id };
       }
       if (command === 'evidence') {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
@@ -2216,8 +2179,7 @@ export class Engine {
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
       // append its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup && !postDeployment && !deliveredSessionClosure) this.evaluate(work, all, now);
-      // A delivered item's gates are an immutable snapshot, but what it still owes — a deployment
-      // carrying the merge — is not; its queue is reconciled without re-evaluating the delivery.
+      // A delivered item's gates are an immutable snapshot; its queue is settled without re-evaluating the delivery.
       else settleDelivered(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
@@ -3009,8 +2971,6 @@ export class Engine {
    * planned, so the count bounds how much one surprise at write time sends back for evaluation.
    */
   reconcileBatchWrites = 8;
-  /** GY-1824: settled deliveries owing their deployment record that one full pass raises a row for. */
-  reconcileDeploymentBackfill = deploymentBackfillPerPass;
   /**
    * How long a batch with writes waits in line for the coordination lock (GY-1115, GY-1290), never
    * more than half the server's `deadlock_timeout` (`coordinationLockWithin`); it holds no row while
@@ -3365,12 +3325,7 @@ export class Engine {
             // How many items the moved faces made evaluated (GY-1898), for the slow-tick warning.
             if (!full) tick.readers = live.filter(id => due.has(id) && (moved.some(move => move.id === id) || faceReaches.some(reach => readsFace(fleet.get(id)!, reach)))).length;
             if (full) this.reconcileConfig = config;
-            // GY-1824: a full pass also takes in a few settled deliveries still owing their deployment
-            // record, newest item first: nothing else re-evaluates one, and a bounded share per pass
-            // backfills the delivery history without sweeping it into the queue at once.
-            const backfill = full ? [...fleet].filter(([, entry]) => entry.settled && deploymentUnrecorded(entry.work))
-              .sort(([, a], [, b]) => b.number - a.number).slice(0, this.reconcileDeploymentBackfill).map(([id]) => id) : [];
-            candidates = [...live.filter(id => due.has(id)), ...backfill]; tick.candidates = candidates.length;
+            candidates = live.filter(id => due.has(id)); tick.candidates = candidates.length;
             this.reconcileOwed.clear();
             for (const id of candidates) this.reconcileOwed.add(id);
             decided = true;
@@ -3524,14 +3479,11 @@ export class Engine {
   private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date, { dryRun = false }: { dryRun?: boolean } = {}): Promise<{ wrote: boolean; due: number | null }> {
     // A delivered item is not re-evaluated, but one still holding rows, a merge-queue entry (stored
     // before GY-1236) or an action from before its delivery — every item delivered before GY-185 —
-    // is settled here once, and the check that finds nothing to settle costs no evaluation.
-    // GY-1824: a delivery still owing its deployment record (`deploymentUnrecorded`) — one done
-    // before the unattended verify-deployment path shipped, which the full pass's backfill brings
-    // here — is settled too, and `settleDelivered` raises the row the executor records, exactly as
-    // the delivery transaction raises a fresh delivery's.
+    // is settled here once, and the check that finds nothing to settle costs no evaluation. A
+    // verify-deployment row or action left from before done-at-merge (GY-1981) is such a leftover.
     if (work.stage === 'done') {
-      const leftover = !!(work as Work & { queue?: unknown }).queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
-      if ((!leftover && !deploymentUnrecorded(work)) || !settleDelivered(work, all, now)) return { wrote: false, due: null };
+      const leftover = !!(work as Work & { queue?: unknown }).queue || !!work.actionQueue?.actions.length || !!work.nextAction;
+      if (!leftover || !settleDelivered(work, all, now)) return { wrote: false, due: null };
       this.reconcileWrites.set(work, { delivered: true });
       if (!dryRun) await this.writeReconciled(db, work, all, now);
       return { wrote: true, due: null };

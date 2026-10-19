@@ -11,15 +11,13 @@ import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ChildRun } from './child-runner.js';
+import { blockingFindings, findingLocation } from './review-cap.js';
 import { canonicalThreadIds, listedThreadLimit, parseFollowUpThreads, parseOverriddenThreads, parseResolvedThreads, threadAliasLimit, unaccountedThreads } from './review-threads.js';
 
 /** The file, in the session's GH_CONFIG_DIR, that binds a reviewer session to its launch. */
 export const reviewBindingFile = 'review-binding.json';
 export const reviewEvents = ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] as const;
 export type ReviewEvent = typeof reviewEvents[number];
-/** How often, and for how long, review post waits for GitHub to recompute an UNKNOWN mergeable. */
-export const mergeablePollMs = 5_000, mergeablePollBoundMs = 120_000;
-
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 /** The verdict token a control-plane launch binds: 32 random bytes, hex; only its sha256 is kept anywhere but the binding. */
 export const verdictTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
@@ -35,9 +33,12 @@ export const reviewBindingSchema = z.object({
   mode: z.enum(reviewBindingModes).optional(),
   /** Control-plane mode: the head and base tip the session judges (the item's candidate, or a delivered merge commit and its first parent) and the one-time verdict token. */
   head: sha.optional(), baseTip: sha.optional(), verdictToken: verdictTokenSchema.optional(),
+  /** A control-plane re-review (GY-1988): the earlier head this round deltas from, and the paths its findings named — the session's own launch context for the unchanged-code check. */
+  previousHead: sha.optional(), earlierPaths: z.array(z.string().min(1).max(1000)).max(10).optional(),
 }).strict().refine(binding => !(binding.threadReadFailure && binding.threadsListed), 'A binding records either the listed threads or the failed read, never both')
   .refine(binding => binding.mode !== 'control-plane' || (!!binding.head && !!binding.baseTip && !!binding.verdictToken), 'A control-plane binding carries head, baseTip and verdictToken')
-  .refine(binding => binding.mode === 'control-plane' || (binding.head === undefined && binding.baseTip === undefined && binding.verdictToken === undefined), 'Only a control-plane binding carries head, baseTip or verdictToken');
+  .refine(binding => binding.mode === 'control-plane' || (binding.head === undefined && binding.baseTip === undefined && binding.verdictToken === undefined), 'Only a control-plane binding carries head, baseTip or verdictToken')
+  .refine(binding => binding.mode === 'control-plane' || (binding.previousHead === undefined && binding.earlierPaths === undefined), 'Only a control-plane binding carries previousHead or earlierPaths');
 export type ReviewPostBinding = z.infer<typeof reviewBindingSchema>;
 
 /** Written once, private, before the session's runtime starts; a launch that cannot write it starts nothing. */
@@ -87,6 +88,47 @@ export function threadLineRefusals(event: ReviewEvent, body: string, binding: Pi
   return refusals;
 }
 
+/** The path a `+++` header names, C-unquoted when git quoted it for special characters. */
+const unquoted = (path: string): string => /^".*"$/.test(path) ? (() => { try { return JSON.parse(path) as string; } catch { return path; } })() : path;
+
+/** The hunks the new head changes, by file, read from `git diff -U0 PREVIOUS HEAD`: each file's new-side [first line, last line] ranges. */
+export function changedHunks(diff: string): Map<string, Array<[number, number]>> {
+  const hunks = new Map<string, Array<[number, number]>>();
+  let path: string | null = null;
+  for (const line of diff.split('\n')) {
+    const file = /^diff --git a\/(\S+) b\/(\S+)$/.exec(line);
+    if (file) { path = file[2]!; continue; }
+    // The `+++` header names the file unambiguously (spaces, quotes, renames), where the `diff --git` line's bare words do not.
+    const plus = /^\+\+\+ b\/(.+)$/.exec(line);
+    if (plus) { path = unquoted(plus[1]!); continue; }
+    const hunk = path ? /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line) : null;
+    if (!hunk) continue;
+    const start = Number(hunk[3]!), count = hunk[4] === undefined ? 1 : Number(hunk[4]);
+    // A hunk that only deletes lines (`@@ -40,3 +39,0 @@`) changes the code around its position: a finding
+    // on the deleted lines names one of them, so it counts as [max(1, start), start + 1]; when nothing
+    // remains on the new side (+0,0, a wholly deleted file), the lines it lost are its old-side ones.
+    const first = Number(hunk[1]!), lost = (hunk[2] === undefined ? 1 : Number(hunk[2]!)) - 1;
+    const deleted: [number, number] | null = count === 0 ? (start > 0 ? [Math.max(1, start), start + 1] : [first, first + lost]) : null;
+    hunks.set(path!, [...(hunks.get(path!) ?? []), deleted ?? [start, start + count - 1]]);
+  }
+  return hunks;
+}
+
+/**
+ * The BLOCKING findings a re-review may not request changes for (GY-1988): each naming a PATH:LINE no hunk
+ * of the diff since the earlier head changes, on a path no earlier finding named, with no acceptance
+ * criterion named. A finding re-raising an earlier round's path, naming a changed line, or citing an
+ * unmet AC-N stands; anything else on unchanged code belongs on a Nit: line.
+ */
+export function unchangedCodeFindings(body: string, binding: Pick<ReviewPostBinding, 'previousHead' | 'earlierPaths'>, diff: string): string[] {
+  const hunks = changedHunks(diff), earlier = new Set(binding.earlierPaths ?? []);
+  return blockingFindings(body).filter(finding => {
+    const location = findingLocation(finding);
+    if (!location || /\bAC-\d+\b/.test(finding) || earlier.has(location.path)) return false;
+    return !(hunks.get(location.path) ?? []).some(([first, last]) => location.line >= first && location.line <= last);
+  });
+}
+
 /** A correct invocation for this session, printed after every refusal. */
 export function reviewPostExample(cliPath: string, event: ReviewEvent, binding?: Pick<ReviewPostBinding, 'threadsListed'> | null) {
   const listed = binding?.threadsListed ?? [];
@@ -100,7 +142,7 @@ export interface ReviewPostDependencies {
   run: ChildRun;
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
-  /** How a control-plane verdict reaches the API; global fetch by default. Never called in github mode. */
+  /** How a control-plane verdict reaches the API; global fetch by default. */
   fetch?: typeof fetch;
 }
 
@@ -129,6 +171,14 @@ export async function postReview(input: { event: string | undefined; body: strin
   // Control-plane mode (GY-1525): the verdict goes to the API as the launch's one-time token, bound
   // to the registered head; nothing here runs gh, and the server judges the rest.
   if (bound.mode === 'control-plane') {
+    // A re-review (GY-1988) judges only what changed since the previous head: a BLOCKING: line on
+    // code no hunk since that head changes, on a path no earlier finding named, naming no unmet
+    // criterion, is refused — it belongs on a Nit: line, which stays advisory.
+    if (event === 'REQUEST_CHANGES' && bound.previousHead) {
+      const diff = await Promise.resolve().then(() => dependencies.run('git', ['diff', '-U0', bound.previousHead!, bound.head!])).then(String, (error: unknown) => refuse(`git diff -U0 ${bound.previousHead} ${bound.head} failed (${error instanceof Error ? error.message : String(error)}), so this change request cannot be checked against what changed since the earlier head; run git fetch in the checkout and post again`));
+      const unchanged = unchangedCodeFindings(body, bound, diff);
+      if (unchanged.length) refuse(`${unchanged.map(finding => `"${finding}"`).join('; ')} name${unchanged.length === 1 ? 's' : ''} code unchanged since the earlier head ${bound.previousHead} this round deltas from, and no earlier finding named ${unchanged.length === 1 ? 'its path' : 'their paths'}; this round judges only what changed: move it to a "Nit: PATH:LINE — FINDING" line, or name the acceptance criterion (AC-N) it leaves unmet`);
+    }
     const base = input.environment.GRAPHYARD_URL;
     if (!base) refuse('GRAPHYARD_URL is unset; a control-plane reviewer session is launched with the control plane\'s address');
     const post = dependencies.fetch ?? fetch;
@@ -142,21 +192,6 @@ export async function postReview(input: { event: string | undefined; body: strin
     if (!response.ok) refuse(`the control plane refused the verdict (${response.status}): ${answer?.error ?? 'no reason given'}`);
     return { reviewId: answer.reviewId ?? null, event: event!, key: bound.key, pr: bound.pr, sha: bound.head!, recorded: 'control-plane' as const };
   }
-  const sleep = dependencies.sleep ?? (ms => new Promise<void>(done => setTimeout(done, ms)));
-  const now = dependencies.now ?? Date.now;
-  const env = { ...input.environment };
-  const started = now();
-  for (;;) {
-    let state: { mergeable?: unknown; mergeStateStatus?: unknown; headRefOid?: unknown };
-    try { state = JSON.parse(String(await dependencies.run('gh', ['pr', 'view', String(bound.pr), '--repo', bound.repository, '--json', 'mergeable,mergeStateStatus,headRefOid'], { env }))); }
-    catch (error) { refuse(`gh pr view ${bound.pr} could not be read (${(error instanceof Error ? error.message : String(error)).split('\n')[0]}); retry the same command`); }
-    if (state!.headRefOid !== bound.sha) refuse(`pull request #${bound.pr} head is ${String(state!.headRefOid)}, not ${bound.sha} this session was launched to review; post nothing for a different commit, and stop`);
-    if (state!.mergeable !== 'UNKNOWN') break;
-    if (now() - started + mergeablePollMs > mergeablePollBoundMs) refuse(`GitHub still reports mergeable UNKNOWN for pull request #${bound.pr} after ${mergeablePollBoundMs / 1000} seconds, and a verdict posted before it recomputes is dismissed; wait a minute and run the same command again`);
-    await sleep(mergeablePollMs);
-  }
-  const output = await dependencies.run('gh', ['api', '--method', 'POST', `repos/${bound.repository}/pulls/${bound.pr}/reviews`, '-f', `commit_id=${bound.sha}`, '-f', `event=${event}`, '-f', `body=${body}`], { env });
-  const review = JSON.parse(String(output));
-  if (typeof review?.id !== 'number') throw new Error(`GitHub answered the review post without a review id: ${String(output).slice(0, 200)}`);
-  return { reviewId: review.id as number, event: event!, key: bound.key, pr: bound.pr, sha: bound.sha };
+  // A github-mode binding (pull-request era) posts nothing: Graphyard reads and writes no GitHub review.
+  return refuse('this binding is a pull-request-era GitHub binding, and Graphyard no longer posts GitHub reviews; the loop launches the review again against the control plane');
 }

@@ -40,8 +40,9 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   // authorized, a principal added by graphyard principal add is reconciled in by install itself, and nothing reverts to defaults.
   const fleet = redeployArguments({ ...record, reviewPolicy: 'agent', noGithubApp: true, principals: [...record.principals, principal('worker-2', 'worker'), principal('worker-3', 'worker'),
     principal('ci', 'producer', { proofs: ['e2e:checkout', 'unit:pay'] }), principal('observer', 'producer', { grants: ['delivery:observe-sha'], source: 'principal' })] }, 'img');
-  assert.deepEqual(fleet.slice(fleet.indexOf('--review-policy'), fleet.indexOf('--image')), ['--review-policy', 'agent', '--workers', '3', '--producer-proof', 'e2e:checkout', '--producer-proof', 'unit:pay', '--no-github-app']);
-  assert.deepEqual((({ workers, producerProofs, reviewPolicy, noGithubApp }) => ({ workers, producerProofs, reviewPolicy, noGithubApp }))(installRequestFromArgs(fleet).request), { workers: 3, producerProofs: ['e2e:checkout', 'unit:pay'], reviewPolicy: 'agent', noGithubApp: true }, 'install parses the recorded choices back');
+  // A record from before GY-2010 that chose no App redeploys with no App flag: install registers none.
+  assert.deepEqual(fleet.slice(fleet.indexOf('--review-policy'), fleet.indexOf('--image')), ['--review-policy', 'agent', '--workers', '3', '--producer-proof', 'e2e:checkout', '--producer-proof', 'unit:pay']);
+  assert.deepEqual((({ workers, producerProofs, reviewPolicy }) => ({ workers, producerProofs, reviewPolicy }))(installRequestFromArgs(fleet).request), { workers: 3, producerProofs: ['e2e:checkout', 'unit:pay'], reviewPolicy: 'agent' }, 'install parses the recorded choices back');
   const observed = redeployArguments({ ...record, noGithubApp: true, principals: record.principals.filter(entry => entry.role !== 'worker') }, 'img');
   assert.ok(observed.includes('--observe-only') && !observed.includes('--workers'), 'an installation with no installer worker redeploys observation-only');
   assert.equal(installRequestFromArgs(observed).request.observeOnly, true);

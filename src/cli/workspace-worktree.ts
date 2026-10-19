@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { runChild } from '../child-runner.js';
-import { releaseUnderFailure, reserveReleasingHold, submittedBranchRefusal, workspaceFailure } from '../master/worktrees.js';
+import { releaseUnderFailure, registeredReworkHead, reserveReleasingHold, workspaceFailure, failureText } from '../master/worktrees.js';
 import { assertRepository, discover } from '../onboarding.js';
 import { gitOrThrow, reclaimBranchHolders, type ReclaimedHolder } from '../worktree-holders.js';
 import type { CliContext } from './context.js';
@@ -51,32 +51,27 @@ export async function createWorktree(context: CliContext, work: any) {
   const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);
   let startPoint = args[1] ?? 'HEAD';
   if (work.submission) {
-    const remoteBranch = `refs/remotes/origin/${branch}`;
-    // GY-860 AC-2: an unfetchable or moved PR branch is a workspace failure, so no attempt is spent.
-    const refused = await submittedBranchRefusal(root, branch, remoteBranch, work.candidate?.sha, runChild);
-    if (refused) { await releaseUnderFailure(mutate, epoch, refused); throw new Error(`${refused}. The claim was released as a workspace failure, so the attempt costs nothing.`); }
-    startPoint = remoteBranch;
-  } else if (work.prAdoption) {
-    // GY-1849: an adopted item's attempt works the adopted pull request's own branch from its
-    // existing commits: it starts where origin carries that branch, never from this checkout's
-    // HEAD. A branch that cannot be fetched, or that no longer lives at the adopted head, is a
-    // workspace failure that costs no attempt: the master re-adopts naming the live head, and
-    // the next dispatch starts there.
-    const remoteBranch = `refs/remotes/origin/${branch}`;
-    let refused: string | null = null;
-    try {
-      await runChild('git', ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${branch}:${remoteBranch}`], { cwd: root });
-      const remoteSha = String(await runChild('git', ['rev-parse', '--verify', remoteBranch], { cwd: root })).trim();
-      if (remoteSha !== work.prAdoption.head) refused = `the adopted branch ${branch} lives at ${remoteSha.slice(0, 12)}, not the adopted head ${work.prAdoption.head.slice(0, 12)}; adopt naming the live head, then dispatch again`;
-    } catch (error) {
-      refused = `fetching it failed: ${error instanceof Error ? error.message : String(error)}`;
+    // GY-2017: a control-plane rework starts from the head Graphyard registered at the last
+    // submission, read from the shared object store: no pull-request observation and no fetch or
+    // push of the worker branch, whether origin lacks it or holds a stale one from the legacy
+    // flow — only the merge writer pushes. A start object nothing registered, or the store does
+    // not hold, is a workspace failure that costs no attempt.
+    try { startPoint = await registeredReworkHead(root, branch, work.candidate?.sha, runChild); }
+    catch (error) {
+      const refusal = `Git worktree creation failed while resolving the registered start head of ${branch}: ${failureText(error)}`;
+      await releaseUnderFailure(mutate, epoch, refusal);
+      throw new Error(`${refusal}. The claim was released as a workspace failure, so the attempt costs nothing.`);
     }
-    if (refused) {
-      const failure = `Git worktree creation failed for the adopted pull request's branch: ${refused}`;
+  } else if (work.prAdoption) {
+    // GY-1849: an adopted item's attempt starts at the adopted head. Since GY-2010 it is read from
+    // the shared object store like a rework's: no fetch of the pull request's branch, and an
+    // adopted head the store does not hold is a workspace failure that costs no attempt.
+    try { startPoint = await registeredReworkHead(root, branch, work.prAdoption.head, runChild); }
+    catch (error) {
+      const failure = `Git worktree creation failed for the adopted pull request's head: ${failureText(error)}`;
       await releaseUnderFailure(mutate, epoch, failure);
       throw new Error(`${failure}. The claim was released as a workspace failure, so the attempt costs nothing.`);
     }
-    startPoint = remoteBranch;
   }
   // GY-860: an earlier attempt's hold is recorded with the reservation and released; the branch never moves.
   const now = Date.parse(status.now ?? '') || Date.now();

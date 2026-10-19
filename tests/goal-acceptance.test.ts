@@ -10,7 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { acceptanceDraftSchema, applyGoalCommand, draftFiles, goalSummary, maxDraftRounds, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
+import { acceptanceDraftSchema, applyGoalCommand, draftFiles, maxDraftRounds, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
 import { registryRoles, roleSchema } from '../src/model/registry.js';
 import { checkContract, parseCase, parseContract } from '../src/e2e/case.js';
 import { goalCommands } from '../src/cli/goal.js';
@@ -132,42 +132,10 @@ function stubRunner(respond: (prompt: string) => unknown, prompts: string[], too
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main',
   githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-goals', autoMerge: true, mergeMethod: 'merge', workers: [] });
 
-/**
- * GitHub as the control plane's land route sees it: each pull request's state, the check runs the App
- * publishes, and a head-bound merge GitHub refuses until CI passed and both App-bound Graphyard checks
- * stand on that head, as a managed base branch requires.
- */
-function fakeGitHub() {
+/** The acceptance pull requests the PR-era draft step opens: each one's state and head. */
+function fakePulls() {
   const pulls = new Map<number, { state: 'open' | 'closed'; merged: boolean; head: string; branch: string; mergeable: boolean | null; ciPassed: boolean; mergeSha: string | null }>();
-  const runs: { id: number; name: string; head_sha: string; conclusion: string; external_id: string; output: { title: string; summary: string }; app: { id: number } }[] = [];
-  const comments: { pr: number; body: string }[] = [], deleted: string[] = [], merges: { pr: number; head: string }[] = [];
-  const view = (pr: number) => { const pull = pulls.get(pr)!; return { number: pr, node_id: `PR_${pr}`, state: pull.state, merged: pull.merged, merge_commit_sha: pull.mergeSha, head: { sha: pull.head, ref: pull.branch }, base: { ref: 'main' }, mergeable: pull.mergeable, mergeable_state: pull.mergeable === false ? 'dirty' : 'clean' }; };
-  const reviews: { pr: number; sha: string; state: string; by: string }[] = [];
-  const github = {
-    config: { base: 'main', appId: 15368 },
-    async approveAcceptance(pr: number, head: string, _body: string) { reviews.push({ pr, sha: head, state: 'APPROVED', by: 'app:graphyard-approver' }); return 'approved' as const; },
-    async request(path: string, method = 'GET', body?: any) {
-      const pr = Number(path.match(/^\/(?:pulls|issues)\/(\d+)/)?.[1]);
-      if (method === 'GET' && path.startsWith('/pulls/')) return view(pr);
-      if (method === 'PATCH' && path.startsWith('/pulls/')) { pulls.get(pr)!.state = body.state; return view(pr); }
-      if (path.startsWith('/issues/')) { comments.push({ pr, body: body.body }); return {}; }
-      if (method === 'DELETE') { deleted.push(path); return {}; }
-      if (path === '/check-runs') { runs.push({ ...body, id: runs.length + 1, app: { id: 15368 } }); return {}; }
-      if (path.startsWith('/check-runs/')) { Object.assign(runs.find(run => run.id === Number(path.split('/')[2]))!, body); return {}; }
-      throw new Error(`unexpected GitHub call ${method} ${path}`);
-    },
-    async pages(path: string) { const [, head, name] = path.match(/^\/commits\/([0-9a-f]+)\/check-runs\?check_name=([^&]+)/)!; return runs.filter(run => run.head_sha === head && run.name === decodeURIComponent(name)); },
-    async upsertLandable(body: any) { const existing = runs.find(run => run.head_sha === body.head_sha && run.name === body.name); if (existing) Object.assign(existing, body); else runs.push({ ...body, id: runs.length + 1, app: { id: 15368 } }); },
-    async graphql(_query: string, variables: { id: string; head: string }) {
-      const pr = Number(variables.id.slice(3)), pull = pulls.get(pr)!;
-      if (pull.head !== variables.head) throw new Error('Head branch was modified');
-      for (const name of ['Graphyard / merge', 'graphyard/landable']) if (!runs.some(run => run.head_sha === pull.head && run.name === name && run.conclusion === 'success')) throw new Error(`Required status check "${name}" is expected`);
-      if (!pull.ciPassed) throw new Error('Required status check "test" is expected');
-      merges.push({ pr, head: variables.head }); pull.merged = true; pull.state = 'closed'; pull.mergeSha = 'c'.repeat(40);
-      return {};
-    },
-  };
-  return { github, pulls, runs, comments, deleted, merges, reviews };
+  return { pulls };
 }
 
 test('unit:acceptance-role-drafts-and-approval — the loop launches the acceptance role on an open goal, opens its draft as one pull request, and only an approver who did not author it approves', async () => {
@@ -183,8 +151,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   const prompts: string[] = [], tools: string[] = [], opened: { goal: string; draft: unknown }[] = [], closes: number[] = [], lands: string[] = [];
   let respond: (prompt: string) => unknown = () => draftOf(goal.key, 'goal-signup');
   let verdict: { verdict: 'approve' | 'refuse'; reason: string } = { verdict: 'refuse', reason: 'The case checks the board, not the sign-up the customer asked for' };
-  const fake = fakeGitHub();
-  (http as any).services.github = fake.github;
+  const fake = fakePulls();
   const focus = new Set([goal.id]);
   let failOpen = 1, failPost = 1, reads = 0;
   const fx: AcceptanceEffects = {
@@ -266,31 +233,11 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   current = await read();
   assert.equal(current.stage, 'accepted'); assert.equal(current.approval?.by, approver.id); assert.equal(current.approval?.head, '2'.repeat(40));
 
-  // The control plane lands the approved pull request: it publishes both App-bound Graphyard checks on exactly the approved head,
-  // and GitHub refuses the head-bound merge until CI passed; landing is asked at most once per poll interval.
-  await cycle();
-  assert.deepEqual(lands, [`702@${'2'.repeat(40)}`]);
+  // GY-2010: Graphyard no longer lands an acceptance pull request; the merge writer lands acceptance changes
+  // (tests/ssh-origin-delivery.test.ts), so an approved pull request is refused at the land route, naming why.
+  const refusedLanding = await call(master, 'POST', `goals/${goal.key}/land`, {});
+  assert.equal(refusedLanding.status, 422); assert.match(refusedLanding.text, /no longer lands pull requests/);
   assert.equal((await read()).stage, 'accepted');
-  assert.deepEqual(fake.runs.filter(run => run.head_sha === '2'.repeat(40)).map(run => [run.name, run.conclusion, run.external_id]).sort(), [['Graphyard / merge', 'success', goal.id], ['graphyard/landable', 'success', goal.id]]);
-  assert.match(state.actions[`acceptance:${goal.id}`].detail, /asked GitHub to merge it: GitHub has not merged #702 yet: Required status check "test" is expected/);
-  await cycle(60_000); await cycle(60_000);
-  assert.equal(lands.length, 1, 'landing is asked at most once per poll interval');
-  assert.equal(fake.runs.length, 2, 'a standing verdict is not published again');
-  fake.pulls.get(702)!.ciPassed = true;
-  await cycle();
-  assert.deepEqual(fake.merges, [{ pr: 702, head: '2'.repeat(40) }], 'merged at exactly the approved head');
-  assert.equal(fake.runs.length, 2);
-  // Merged, the goal is the planner's (GY-1418): its cases are protected from here on.
-  const delivering = await read();
-  assert.equal(delivering.stage, 'planning');
-  assert.deepEqual(delivering.protected, { cases: ['repository-signup'], outcomes: ['repository-signup'] });
-  const kinds = (await ok(master, 'GET', `goals/${goal.key}`)).history.map((entry: any) => `${entry.kind}:${entry.actor}`);
-  assert.deepEqual(kinds, ['goal.recorded:goal-master', 'goal.draft:acceptance-author', 'goal.refuse:goal-approver', 'goal.draft:acceptance-author', 'goal.approve:goal-approver', 'goal.merged:goal-master']);
-  assert.equal(new Set(Object.keys(state.actions)).size, 1, 'one action per goal, its detail replaced as it moves');
-  // A later goal cannot claim the cases this one protects.
-  const other: Goal = await ok(master, 'POST', 'goals', goalInput('Another goal'));
-  const taken = await call(author, 'POST', `goals/${other.key}/draft`, { ...draftOf(other.key, 'repository-signup'), goal: undefined, pr: 900, branch: 'graphyard/other', head: 'e'.repeat(40) });
-  assert.equal(taken.status, 422); assert.match(taken.text, new RegExp(`belongs to ${goal.key}`));
 
   // An approved pull request closed unmerged is not left accepted: the goal goes back to drafting with the reason, and the loop stops after its draft rounds.
   const third: Goal = await ok(master, 'POST', 'goals', goalInput('A third goal'));
@@ -302,49 +249,6 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   }
   const held = (await ok(master, 'GET', 'goals?open=1&view=summary')).goals.find((entry: any) => entry.key === third.key);
   assert.match(held.next.who, new RegExp(`${maxDraftRounds} acceptance drafts were refused or closed`));
-
-  // Concurrent goals edit the same contract: an approved pull request that conflicts once another merged is closed by the control plane
-  // (with a comment, its branch deleted) and recorded closed, and the loop opens the same outcomes again from the current base — no new run.
-  const fourth: Goal = await ok(master, 'POST', 'goals', goalInput('A fourth goal drafted beside another'));
-  focus.clear(); focus.add(fourth.id);
-  respond = () => draftOf(fourth.key, 'fourth-outcome');
-  await cycle(); await cycle();
-  assert.equal((await read(fourth.key)).acceptance?.pr, 703);
-  await cycle(); await cycle();
-  assert.equal((await read(fourth.key)).stage, 'accepted');
-  const drafted = tools.filter(entry => entry.startsWith(acceptanceTool)).length;
-  fake.pulls.get(703)!.mergeable = false;
-  await cycle();
-  let moved = await read(fourth.key);
-  assert.equal(moved.stage, 'acceptance-drafting'); assert.match(moved.refusal?.reason ?? '', /#703 conflicts with main/);
-  assert.equal(fake.pulls.get(703)!.state, 'closed'); assert.match(fake.comments.at(-1)!.body, /Closed by Graphyard: acceptance pull request #703 conflicts with main/);
-  assert.deepEqual(fake.deleted, [`/git/refs/heads/graphyard/${fourth.key.toLowerCase()}-acceptance-1`]);
-  assert.equal(fake.merges.length, 1, 'a conflicting pull request is never merged');
-  await cycle();
-  moved = await read(fourth.key);
-  assert.equal(moved.stage, 'awaiting-approval'); assert.equal(moved.acceptance?.pr, 704);
-  assert.deepEqual(moved.acceptance?.outcomes.map(outcome => outcome.id), ['fourth-outcome']);
-  assert.equal(tools.filter(entry => entry.startsWith(acceptanceTool)).length, drafted, 'the same outcomes were reopened without another draft run');
-  assert.ok(!closes.includes(703), 'the loop does not close again what the control plane closed');
-  // Approved again, an unmerged pull request a day after its approval is the master's.
-  await cycle(); await cycle();
-  assert.equal((await read(fourth.key)).stage, 'accepted');
-  clock = Date.now() + 25 * 60 * 60_000;
-  await cycle(0);
-  assert.equal(state.actions[`acceptance:${fourth.id}`].state, 'failed');
-  assert.match(state.actions[`acceptance:${fourth.id}`].detail, /has not merged: GitHub has not merged #704 yet.*The master decides/);
-  const stuck = goalSummary(await read(fourth.key), Date.now() + 25 * 60 * 60_000);
-  assert.match(stuck.next!.who, /^master: acceptance pull request #704 was approved/);
-  fake.pulls.get(704)!.ciPassed = true;
-  await cycle();
-  assert.equal((await read(fourth.key)).stage, 'planning');
-
-  // Without a GitHub App the control plane cannot land, and says so.
-  (http as any).services.github = null;
-  await ok(author, 'POST', `goals/${third.key}/draft`, { outcomes: draftOf(third.key, 'third-late').outcomes, pr: 990, branch: 'graphyard/third-late', head: 'f'.repeat(40) });
-  await ok(approver, 'POST', `goals/${third.key}/approve`, { reason: 'Right' });
-  const unlanded = await call(master, 'POST', `goals/${third.key}/land`, {});
-  assert.equal(unlanded.status, 503); assert.match(unlanded.text, /No GitHub App/);
 
   // A registry role at its concurrency defers the goal: no fallback run starts, so the operator's limit holds; it is launched again after the poll interval.
   const fifth: Goal = await ok(master, 'POST', 'goals', goalInput('A fifth goal drafted while the role is full'));
@@ -402,31 +306,35 @@ async function claimed(plannedFiles: string[]) {
 }
 const changed = (path: string, status: 'modified' | 'removed' | 'added' = 'modified') => ({ path, status, sha: status === 'removed' ? null : 'c'.repeat(40), additions: 1, deletions: 1, binary: false, baseSha: status === 'added' ? null : 'd'.repeat(40) });
 
-test('unit:required-cases-protected — after the acceptance PR merges, a candidate that modifies or deletes a required case or binding is refused at complete, and only an independently approved case change lets it through', async () => {
-  // A goal whose acceptance pull request merged: drafted by its author, approved by another identity.
+test('unit:required-cases-protected — after the acceptance change merges, a candidate that modifies or deletes a required case or binding is refused at complete, and only an independently approved case change lets it through', async () => {
+  // GY-2010: an acceptance change is the merge writer's: the land route records it merged only once
+  // the base's first-parent history holds a merge of exactly the approved head. Its git, as read here.
+  const merges = new Map<string, string>([['c'.repeat(40), 'a'.repeat(40)], ['f'.repeat(40), 'e'.repeat(40)]]);
+  engine.gitRunner = (async (args: string[]) => {
+    if (args[0] === 'fetch') return { status: 0, stdout: '', stderr: '' };
+    if (args[0] === 'rev-parse') { const merged = merges.get(args.at(-1)!.replace(/\^2$/, '')); return merged ? { status: 0, stdout: `${merged}\n`, stderr: '' } : { status: 1, stdout: '', stderr: 'unknown revision' }; }
+    if (args[0] === 'rev-list') return { status: 0, stdout: [...merges.keys()].join('\n'), stderr: '' };
+    throw new Error(`unexpected git ${args.join(' ')}`);
+  }) as never;
+  engine.baseBranch = 'main';
+  // A goal whose acceptance change merged: drafted by its author, approved by another identity.
   const recorded: Goal = await ok(master, 'POST', 'goals', goalInput('Operators can sign up a repository from the setup page'));
-  await ok(author, 'POST', `goals/${recorded.key}/draft`, { outcomes: draftOf(recorded.key, 'setup-signup').outcomes, pr: 811, branch: 'graphyard/setup-signup', head: 'a'.repeat(40) });
+  await ok(author, 'POST', `goals/${recorded.key}/draft`, { outcomes: draftOf(recorded.key, 'setup-signup').outcomes, pr: null, branch: 'graphyard/setup-signup', head: 'a'.repeat(40) });
   await ok(approver, 'POST', `goals/${recorded.key}/approve`, { reason: 'The case checks the outcome the customer asked for' });
-  // Merged is never a client's say-so: there is no route that records it, only the land route reading GitHub.
+  // Merged is never a client's say-so: there is no route that records it, only the land route reading the base.
   assert.equal((await call(master, 'POST', `goals/${recorded.key}/merged`, { pr: 811 })).status, 404);
   assert.equal((await ok(master, 'GET', `goals/${recorded.key}`)).goal.stage, 'accepted');
-  const fake = fakeGitHub();
-  (http as any).services.github = fake.github;
-  fake.pulls.set(811, { state: 'open', merged: false, head: 'a'.repeat(40), branch: 'graphyard/setup-signup', mergeable: true, ciPassed: true, mergeSha: null });
-  const landed = await ok(master, 'POST', `goals/${recorded.key}/land`, {});
+  const landed = await ok(master, 'POST', `goals/${recorded.key}/land`, { mergeSha: 'c'.repeat(40) });
   assert.equal(landed.landing.state, 'merged');
   const goal: Goal = landed.goal;
   assert.deepEqual(goal.protected, { cases: ['setup-signup'], outcomes: ['setup-signup'] });
-  // A pull request GitHub merged at a head no approver judged (an administrative bypass) protects nothing: the goal is drafted again.
+  // A merge of a head no approver judged protects nothing: the land route refuses it and records nothing.
   const bypassed: Goal = await ok(master, 'POST', 'goals', goalInput('Operators can audit a repository from the setup page'));
-  await ok(author, 'POST', `goals/${bypassed.key}/draft`, { outcomes: draftOf(bypassed.key, 'setup-audit').outcomes, pr: 812, branch: 'graphyard/setup-audit', head: 'b'.repeat(40) });
+  await ok(author, 'POST', `goals/${bypassed.key}/draft`, { outcomes: draftOf(bypassed.key, 'setup-audit').outcomes, pr: null, branch: 'graphyard/setup-audit', head: 'b'.repeat(40) });
   await ok(approver, 'POST', `goals/${bypassed.key}/approve`, { reason: 'Right' });
-  fake.pulls.set(812, { state: 'closed', merged: true, head: 'e'.repeat(40), branch: 'graphyard/setup-audit', mergeable: true, ciPassed: true, mergeSha: 'f'.repeat(40) });
-  const unapproved = await ok(master, 'POST', `goals/${bypassed.key}/land`, {});
-  assert.equal(unapproved.landing.state, 'unapproved');
-  assert.equal(unapproved.goal.stage, 'acceptance-drafting'); assert.deepEqual(unapproved.goal.protected, { cases: [], outcomes: [] });
-  assert.match(unapproved.goal.refusal.reason, /not its approved head bbbbbbbbbbbb on main, yet GitHub merged it/);
-  assert.deepEqual(fake.merges.map(merge => merge.pr), [811], 'the land route merged nothing more');
+  const unapproved = await call(master, 'POST', `goals/${bypassed.key}/land`, { mergeSha: 'f'.repeat(40) });
+  assert.equal(unapproved.status, 422); assert.match(unapproved.text, /is not a merge of the approved head bbbbbbbbbbbb/);
+  assert.deepEqual((await ok(master, 'GET', `goals/${bypassed.key}`)).goal.protected, { cases: [], outcomes: [] });
   const casePath = 'e2e/cases/setup-signup.json';
   const { work, pr, observe } = await claimed([casePath, 'e2e/contract.json', 'e2e/cases/new-case.json', 'src/feature.ts']);
   const submit = (files: ReturnType<typeof changed>[]) => engine.execute(worker, 'submit', work.id, { epoch: 1, pr }, randomUUID(), { observation: observe(files as never) }).then(() => null, (error: Error) => error.message);

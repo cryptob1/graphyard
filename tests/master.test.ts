@@ -31,11 +31,10 @@ function work(overrides: Partial<Work> = {}) {
 test('master instructions carry the operating loop the master guide prints first', () => {
   const first = masterInstructions;
   assert.match(first, /dedicated, visible master-agent session/);
-  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub\nmerged, then deployment verification/);
-  assert.match(first, /both conditions hold:\n\(1\) every in-scope item is Done or has a genuinely external blocker recorded in\nGraphyard; and \(2\) every merged change is deployed and live-verified against the exact\ndeployed release, or a genuinely external deployment blocker is recorded in Graphyard/);
-  assert.match(first, /Delivered work is immutable, so a deployment blocker is recorded as a follow-up work\nitem naming the delivered item, its merge commit, and the external cause/);
-  assert.match(first, /An observed merge alone does not end the loop/);
-  assert.match(first, /Verify each delivery with `graphyard master verify-deployment GY-N`: it refuses a\nstale or local-only observation and records only the exact deployed release it observed/);
+  assert.match(first, /Keep cycling: status, dispatch ready work, shepherd review, record what the merge\nwriter's trial and push landed\. Repeat until both conditions hold/);
+  assert.match(first, /\(1\) every in-scope item is Done or has a genuinely external blocker recorded in\nGraphyard; and \(2\) the release health line in `master status` is healthy, or a\ngenuinely external deployment blocker is recorded in Graphyard as a follow-up work item/);
+  assert.match(first, /An item is delivered at merge; release health is one status line/);
+  assert.doesNotMatch(first, /verify-deployment/);
   for (const condition of ['Ordinary review', 'rework', 'idle workers', 'proof setup', 'Close finished agent\\s+sessions']) assert.match(first, new RegExp(condition));
   assert.ok(!first.includes('graphyard-master -->'), 'the instructions are no AGENTS.md block');
 });
@@ -143,7 +142,8 @@ test('master commands refuse a changed repository or managed base binding', () =
   assert.doesNotThrow(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'OWNER/project', baseBranch: 'main', githubAppId: 1234 }));
   assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/other', baseBranch: 'main', githubAppId: 1234 }), /rerun master init/);
   assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'release', githubAppId: 1234 }), /rerun master init/);
-  assert.throws(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 9999 }), /rerun master init/);
+  // GY-2010: the control plane serves no GitHub App, so a master configured with one still binds.
+  assert.doesNotThrow(() => assertMasterBinding(config, { actor: { role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main' }));
 });
 
 test('dispatch launches through watch, with the instruction on the supervised command line, and accepts a session already working on it', async () => {

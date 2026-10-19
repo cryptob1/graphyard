@@ -1,4 +1,4 @@
-// Concern: the pipeline doctor (GY-711) — the loop's ten-minute remedy worker; the deterministic remedies it would apply live beside it in ./remedies.ts.
+// Concern: the pipeline doctor (GY-711) — the loop's five-minute remedy worker; the deterministic remedies it would apply live beside it in ./remedies.ts.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -9,7 +9,7 @@ import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { doctorCoverNote, faultClassIsCovered, faultClassPolicyDefaults, faultClassPolicyFromEnv, type FaultClassPolicy, type FaultInstance } from '../model/fault-classes.js';
-import { workerSubmissionBoundMs } from '../model/attempt-bound.js';
+import { workerReclaimBoundMs, workerSubmissionBoundMs } from '../model/attempt-bound.js';
 import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
 import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
@@ -28,6 +28,9 @@ import { z } from 'zod';
 import type { Runner } from '../runner/types.js';
 import { readyToRetry } from './sessions.js';
 import { stoppedStates, record } from './effects.js';
+import { cycleCost, loopAttention, loopLiveness } from './liveness.js';
+import { latencyBudget, silenceReport } from './metrics.js';
+import { baseFailureAttention } from './cycle-base-failures.js';
 import { maxApproverLaunches } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
 import { message, touchStanding, type DaemonAction, type DaemonState } from './state.js';
@@ -38,16 +41,19 @@ import { routineRemedies } from './remedies.js';
 export { settleSubmittedContainment, coveredScopePaths, clearCoveredBlockers, unansweredDecisionMs, relaunchUnansweredApprovers, decisionCheckMs, applyHarnessContract, routineRemedies } from './remedies.js';
 
 // ---------------------------------------------------------------------------
-// All day a master session ran a ten-minute monitor by hand and repeatedly applied the same
-// sanctioned actions. Here the loop does it. Every `run.doctor.intervalMinutes` (10 by default)
-// it launches one doctor: a headless session on the registry's doctor role, else Pi, with the
-// master's read access and the operator-agent identity's sanctioned commands only — scope,
-// requirements, unblock, decide + approver, settle-containment, close, create, release and
-// checkout-restore (GY-1658: the loop saves a dirty coordinator checkout to a named ref) — never
-// merge, dispatch, evidence or lease commands (the shipped allowlist guard in integrations/pi
-// blocks the rest and the doctor records the refusal). Its prompt is the shipped template below,
-// naming every check bound. The remedies that need no judgement at all the loop applies itself,
-// every cycle, in `routineRemedies`.
+// GY-2003 / GY-2004: the loop's resolver. All day a master session ran a ten-minute monitor by
+// hand and repeatedly applied the same sanctioned actions; here the loop does it, and the session
+// is a resolver, not a checklist reader. Every `run.doctor.intervalMinutes` (5 by default) — and
+// at once when the loop's progress watchdog fires (GY-2005: cycle.ts marks a run due when the
+// watchdog's lines begin standing) — it
+// launches one: a headless session on the registry's doctor role, else Pi, with the master's read
+// access and the operator-agent identity's sanctioned commands only — scope, requirements,
+// unblock, decide + approver, settle-containment, close, create, release and checkout-restore
+// (GY-1658: the loop saves a dirty coordinator checkout to a named ref) — never merge, dispatch,
+// evidence or lease commands (the shipped allowlist guard in integrations/pi blocks the rest and
+// records the refusal). Its prompt is the short charter below: act on what has stalled, never ask
+// a person, file an item only for a code change judged needed. The remedies that need no judgement
+// at all the loop applies itself, every cycle, in `routineRemedies`.
 // ---------------------------------------------------------------------------
 
 export const doctorRole = 'doctor';
@@ -121,13 +127,13 @@ export const doctorEffects = (config: MasterConfig, root: string, post: Operator
   };
 };
 
-/** The fault bounds of the doctor's checks, in minutes, as the shipped template states them. */
+/** The fault bounds of the doctor's checks, in minutes: the one declaration the soak worlds and the evidence share. The resolver's charter cites only the stall rules it acts on; the rest name the bounds the report's checks are judged past. */
 export const doctorBounds = {
   blockedMinutes: 10, workerMinutes: workerSubmissionBoundMs / 60_000, ciMinutes: 20, reviewRequestMinutes: 5, launchMinutes: 2,
   proofsMinutes: 30, mergeableMinutes: 5, decisionMinutes: 10,
 } as const;
 
-/** The sanctioned master commands the doctor may run, in the order the template names them. */
+/** The sanctioned master commands the resolver may run, the list the allowlist guard in integrations/pi shares. */
 export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
 
 export interface DoctorEffects {
@@ -158,58 +164,68 @@ export interface DoctorInput {
   items: string[];
   /** The fault instances the loop has standing, newest first: what its own classification saw. */
   faults: string[];
+  /** The loop's failed actions, newest first: steps that threw or were refused, with their reasons. */
+  failedActions?: string[];
+  /** The loop's attention lines, which master status puts first: its own health and the base failures. */
+  attention?: string[];
 }
 
 /** The interval one doctor run waits for, from the settings in force. */
 export const doctorIntervalMs = (settings: Pick<DoctorSettings, 'intervalMinutes'>) => settings.intervalMinutes * 60_000;
-/** Whether a doctor run is due: none is in flight, no provider-limit hold stands (GY-1705), and the last one started past the interval. */
-export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock: number, settings: Pick<DoctorSettings, 'intervalMinutes' | 'enabled'>) {
+/** Whether a doctor run is due: none is in flight, no provider-limit hold stands (GY-1705), and the last one started past the interval — or the loop's progress watchdog marked one due (GY-2005). */
+export function doctorDue(state: { doctor: { runs: DoctorRunRecord[]; watchdogDue?: boolean } }, clock: number, settings: Pick<DoctorSettings, 'intervalMinutes' | 'enabled'>) {
   if (!settings.enabled) return false;
   if (state.doctor.runs.some(entry => entry.state === 'running')) return false;
   if (doctorLimitRetryAt(state.doctor.runs, clock)) return false;
+  if (state.doctor.watchdogDue) return true;
   const last = state.doctor.runs.at(-1);
   return !last || clock - Date.parse(last.at) >= doctorIntervalMs(settings);
 }
 
 /**
- * The shipped doctor prompt: what this session is, the checks and their fault bounds, the
- * sanctioned commands and nothing else, and the evidence to read. Every bound the module's
- * `doctorBounds` carries is named here, and the test holds the two together.
+ * The shipped resolver prompt (GY-2004): a short act-don't-ask charter — what has stalled, the
+ * master CLI action that clears each kind, never a person, an item filed only for a needed code
+ * change — over the evidence to act on: the open items, the standing faults, the loop's failed
+ * actions and its attention lines. The shared simplicity paragraph joins it when GY-1993 lands.
  */
 export function doctorPrompt(config: { repository: string; cliPath: string; merger?: MergerMode }, input: DoctorInput) {
-  const cli = config.cliPath.startsWith('node ') ? config.cliPath : `node ${config.cliPath}`, b = doctorBounds;
+  const cli = config.cliPath.startsWith('node ') ? config.cliPath : `node ${config.cliPath}`;
   // GY-1835: the read list follows the recorded merger. Under the control-plane merger an item's
   // pull request, its reviews and its checks are the control plane's own records, so the request
   // names no `gh pr view`; with GitHub the merger it names the pull-request read as before.
   const reads = config.merger === 'control-plane'
     ? `${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N`
     : `${cli} status GY-N, ${cli} master status, ${cli} master decisions GY-N, gh pr view`;
-  const checklist = [
-    `- blocked: an item blocked for more than ${b.blockedMinutes} min; a blocker naming the master-role refusal ('.graphyard/master.json does not exist', 'no master role') is a step only a master-role identity can take: run the master command it names from this checkout yourself — you hold the master role, and checkout-restore is sanctioned — then ${cli} master unblock GY-N with a quoted reason`,
-    `- worker: an attempt holding its lease for more than ${b.workerMinutes} min without a submission`,
-    `- ci: required checks not settled for more than ${b.ciMinutes} min`,
-    `- review-request: a review request standing more than ${b.reviewRequestMinutes} min after green CI`,
-    `- launch: a session launch not acknowledged for more than ${b.launchMinutes} min`,
-    `- proofs: proof requests unanswered for more than ${b.proofsMinutes} min`,
-    `- mergeable: a candidate reported mergeable for more than ${b.mergeableMinutes} min without merging`,
-    `- decision: a requested decision unanswered for more than ${b.decisionMinutes} min`,
-    `- containment: a lapsed containment quarantine holding an item claimable`,
-    `- refusal: stale refusal text standing on an item whose state has moved past it`,
-    `- overdue: items overdue in any step, by the stage clocks the evidence shows`,
-    `- checkout: escalation:dirty-checkout standing — the loop refuses its own dirty coordinator checkout; run ${cli} master checkout-restore with a quoted reason, which saves every dirty path under a named ref and restarts the loop, discarding nothing; the same request, filed without a human answer, serves an escalation naming a diverged HEAD (neither on the base branch nor a descendant of the commit the loop runs), saving that HEAD under refs/graphyard/checkout-restore/diverged-* and moving the checkout to the serving release`,
+  return [
+    `You are the Graphyard resolver for ${config.repository} (the loop's doctor): you keep work moving, and you never ask a person.`,
+    `Read the evidence below and the control plane (${reads}).`,
+    `Act on what has stalled — or leave it with one line saying why it is fine to wait:`,
+    `- an unreleased backlog item idle 20 minutes or more: release it (${cli} master release GY-N) and the loop dispatches it; release refuses any other item`,
+    `- an attempt holding its lease for more than ${doctorBounds.workerMinutes} min without a submission: the loop ends it past ${workerReclaimBoundMs / 60_000} min and dispatches the item again, so leave it with a finding; a head it submitted that cannot land goes back for rework`,
+    `- an item ready with no worker: read ${cli} master status for why nothing launched, and clear that`,
+    `- a blocked item whose blocker no longer holds: ${cli} master unblock GY-N with a quoted reason`,
+    `- a parked item, an escalation, a stale refusal, a lapsed containment quarantine (${cli} master settle-containment GY-N): decide within the item's intent with ${cli} master decide GY-N ACTION and a quoted reason`,
+    `- a head that cannot land: send it back for rework with a concrete reason (${cli} master decide GY-N rework REASON)`,
+    `- work that will never be delivered: close it with a reason (${cli} master close GY-N --obsolete, or --duplicate-of GY-M)`,
+    `- a scope or requirements ask within the item's intent: decide it (${cli} master scope GY-N, ${cli} master requirements GY-N FILE); never weaken a requirement`,
+    `- every failed action and attention line below: take the simplest action that clears it; an escalation:dirty-checkout line is yours to run (${cli} master checkout-restore with a quoted reason)`,
+    `Never approve a decision you requested yourself: request it with ${cli} master decide, then ${cli} master approver GY-N DECISION launches an independent approver.`,
+    `A human-only decision (goals and priorities, money or accounts, credentials for people) is never asked for in chat: mark its finding unactionable and move on.`,
+    `File an item only for a code change you judge needed, quoting the why after the file (${cli} master create FILE 'why' — the guard refuses a create with no reason stated, so a notice never files an item); everything else is an action or a finding, never an item.`,
+    `Run each command by its bare program name with literal arguments. Put a free-text reason last, enclosed in one pair of quotes: your allowlist refuses every other mutation — never merge, dispatch, evidence or lease — and records the refusal.`,
+    `Then call the ${doctorTool} tool exactly once: one finding per item you judged, one action entry per command you ran and what it changed, one filed entry per item you asked filed. Stop after the call.`,
+    ``,
+    `The evidence, as JSON:`,
+    JSON.stringify(boundedInput(input)),
   ].join('\n');
-  return `You are the Graphyard pipeline doctor for ${config.repository}. Find stuck and overdue work and fix it through your sanctioned commands, doing what the master would have done by hand. Read the evidence below and the control plane (${reads}). `
-    + `Act only where a check below has passed its fault bound; leave what is merely moving. Your sanctioned commands are ${doctorSanctionedCommands.map(name => `${cli} master ${name}`).join(', ')}, as the master's operator-agent identity; every other mutation is refused by your command allowlist — never merge, dispatch, submit evidence or touch a lease — and a refused command is recorded in your report, never retried. Run each command by its bare program name with literal arguments: no variables, command substitution, redirection, wrappers or node options, and read only paths inside this checkout. Put a free-text reason last, enclosed in one pair of quotes: the allowlist judges only the command's grammar, and the reason runs as one prose argument, never read as a command, whatever words, apostrophes or punctuation it holds. A refusal names the rule that denied the command and the word it denied. Never weaken a requirement; never approve a decision you requested yourself (request it, then ${cli} master approver GY-N DECISION for an independent approver). `
-    + `A finding you cannot act on — a human-only decision (goals and priorities, money or accounts, credentials for people), or a fault class with no item to act through — mark unactionable; for the latter name the fault item to file, which the loop files at P0/P1 only if no open or delivered cover already accounts for it. `
-    + `Then call the ${doctorTool} tool exactly once: one finding per stuck or overdue item under its check, one action entry per sanctioned command you ran and what it changed, and one filed entry per fault item you are asking the loop to file. Stop after the call.\n\nThe checks and their bounds:\n${checklist}\n\nThe evidence, as JSON:\n${JSON.stringify(boundedInput(input))}`;
 }
 
 /** The evidence within 100,000 characters, dropping whole lines from the end and saying how many, so it is always valid JSON. */
 export function boundedInput(input: DoctorInput, limit = 100_000): DoctorInput & { omitted?: string } {
-  const items = [...input.items], faults = [...input.faults];
+  const items = [...input.items], faults = [...input.faults], failedActions = [...input.failedActions ?? []], attention = [...input.attention ?? []];
   let dropped = 0;
-  const shaped = () => ({ items, faults, ...(dropped ? { omitted: `${dropped} line(s) left out to fit the evidence bound; read them with master status` } : {}) });
-  while (JSON.stringify(shaped()).length > limit && (faults.length || items.length)) { (faults.length ? faults : items).pop(); dropped++; }
+  const shaped = () => ({ items, faults, failedActions, attention, ...(dropped ? { omitted: `${dropped} line(s) left out to fit the evidence bound; read them with master status` } : {}) });
+  while (JSON.stringify(shaped()).length > limit && (faults.length || items.length || failedActions.length || attention.length)) { (faults.length ? faults : items.length ? items : failedActions.length ? failedActions : attention).pop(); dropped++; }
   return shaped();
 }
 
@@ -503,8 +519,9 @@ export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pend
 
 /**
  * Step 7c: the doctor. The deterministic remedies run every cycle; the doctor itself every
- * `run.doctor.intervalMinutes`. A run settles beside the loop and applies its own report (events
- * per item, the summary) when it ends, so no cycle ever waits on a model.
+ * `run.doctor.intervalMinutes`, and at once when the progress watchdog marked a run due (GY-2005).
+ * A run settles beside the loop and applies its own report (events per item, the summary) when it
+ * ends, so no cycle ever waits on a model.
  */
 export async function doctorStep(cycle: Cycle) {
   const { state, effects, now, snapshot, clock } = cycle;
@@ -532,17 +549,34 @@ export async function doctorStep(cycle: Cycle) {
   const pendingFile = state.doctor.pendingFiles.find(entry => readyToRetry(state.actions[entry.key], state.cycle));
   if (pendingFile) await retryDoctorFile(cycle, doctor, pendingFile, now);
   if (!doctorDue(state, clock, doctor.settings)) return;
+  // Launched on whichever trigger fired — the interval or the watchdog mark — so the mark never
+  // outlives the run it started.
+  state.doctor.watchdogDue = false;
   const run = doctorRunRecordSchema.parse({ at: new Date(clock).toISOString(), state: 'running', runs: [], findings: [], actions: [], filed: [], detail: '' });
   state.doctor.runs = [...state.doctor.runs, run].slice(-retainedRuns);
   // Every open item is evidence, oldest stage first: an item that has held its stage longest is the
   // likeliest stuck one, so it leads, and `boundedInput` — not a newest-100 slice — is what bounds
-  // the list, saying how many lines it left out.
+  // the list, saying how many lines it left out. Beside the standing faults, the loop's own signals
+  // reach the resolver (GY-2004): its failed actions, newest first, and its attention lines as
+  // master status puts them first — the loop's health read as cycling (it is), and the base
+  // failures beside them.
+  const intervalMs = cycle.config.run.intervalSeconds * 1000;
   const input: DoctorInput = {
     items: snapshot.work.filter(item => item.stage !== 'done' && !isClosed(item))
       .sort((left, right) => Date.parse(left.stageEnteredAt) - Date.parse(right.stageEnteredAt))
       .map(item =>
         `${item.key} [${item.stage} since ${item.stageEnteredAt}${item.lease ? `, lease ${item.lease.owner} epoch ${item.lease.epoch} until ${item.lease.expiresAt}` : ', unclaimed'}]${item.blocker ? ` blocker: ${item.blocker.slice(0, 200)}` : ''}${item.candidate ? ` candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : ''}`),
     faults: state.faults.instances.slice(-40).reverse().map(instance => `${instance.at} ${instance.kind} on ${instance.subject}: ${instance.text}`),
+    failedActions: Object.entries(state.actions).filter(([, action]) => action.state === 'failed')
+      .sort((left, right) => Date.parse(right[1].at) - Date.parse(left[1].at)).slice(0, 40)
+      .map(([key, action]) => `${action.at} ${action.kind} on ${action.work ?? key}: ${action.detail}`),
+    attention: [...loopAttention({
+      liveness: { ...loopLiveness(state, clock, intervalMs, cycle.config.hostId), state: 'running' },
+      silence: silenceReport(state.silence, clock),
+      budget: latencyBudget(state.latency),
+      cost: cycleCost(state.metrics?.at(-1) ?? null, intervalMs),
+    }), ...baseFailureAttention(Object.values(state.baseFailures), cycle.config.baseBranch)]
+      .map(line => `${line.subject}: ${line.text}`),
   };
   // GY-1835: the doctor reads the merger its reads serve: under the control-plane merger its
   // request names no `gh pr view`, and the session environment names the merger too, so the Pi

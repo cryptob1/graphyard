@@ -1,9 +1,9 @@
-// Concern: cycle steps 5–7 — shepherd reviews, reconcile what GitHub merged, deployment verification.
+// Concern: cycle steps 5–7 — shepherd reviews, escalate merges the gates never authorized, the release-level deployment reading.
 import { createHash } from 'node:crypto';
-import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
+import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
-import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, maxProofAttempts, message, retainedActions, storeAction } from './state.js';
+import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, message, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { canonicalJson } from '../onboarding.js';
 import { decisionInput } from '../master.js';
@@ -11,9 +11,7 @@ import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, standingVerdict, type RoutineDecision } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
-import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
-import { mainGuardAttention } from '../main-guard.js';
-import { promotionFreeze } from './main-watch.js';
+import { defaultDeploymentReuseMinutes, deploymentDetail, deploymentStepBudgetMs, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { readingDueNow, readingsStep } from './cycle-readings.js';
 import { openThroughputOwner, throughputAnsweredAt, throughputClaim, throughputDecisionCause, throughputDecisionRelease, throughputHandAsked, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputSelfAsked, throughputStallText, type ThroughputStall } from '../throughput.js';
 
@@ -51,10 +49,9 @@ export async function shepherdStep(cycle: Cycle) {
 }
 
 /**
- * Step 6: reconcile what GitHub merged. GitHub merges a candidate whose build, review and required
- * checks passed on its head (docs/delivery.md); the merged observation records the delivery. The
- * loop runs no merge of its own: it names, once, a merge whose gates had not passed — held as a
- * violation until a two-party decision reconciles it — and a revert the main guard abandoned.
+ * Step 6: the control-plane merge writer's trial, push and merge ledger are authoritative for what
+ * landed (docs/delivery.md); this step merges nothing. It names, once, a merge whose gates had not
+ * passed on its head — held as a violation until a two-party decision reconciles it.
  */
 export async function mergeStep(cycle: Cycle) {
   const { state, effects, now, performed, isolate, open } = cycle;
@@ -63,33 +60,12 @@ export async function mergeStep(cycle: Cycle) {
     if (state.actions[key]?.state === 'done') return;
     performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
-  //    A revert the main guard abandoned (GY-1250) is raised as one attention line naming the
-  //    merge, the failing check and the revert PR; nothing waits on it. One abandoned while main's
-  //    check failed (`red`, GY-1332) is raised every cycle until main's latest run of each failing
-  //    check passes, then once more as recovered; an older record is raised once. Once the cursor
-  //    holds as many resolved rows as pruneDaemonState keeps, a revert abandoned before the oldest of
-  //    them may have had its row retired, so it is not raised again unless its row is still held
-  //    (`mainGuardAttention`'s `since`); a red line's row is re-recorded every cycle, so it is.
-  const abandoned = (cycle.snapshot?.work ?? []).filter(item => item.mainGuardReverts?.some(revert => revert.state === 'abandoned'));
-  if (abandoned.length) {
-    const resolved = Object.entries(state.actions).filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key]);
-    const since = resolved.length >= retainedActions ? Math.min(...resolved.map(([, action]) => Date.parse(action.at))) : -Infinity;
-    for (const line of mainGuardAttention(abandoned, since, key => Boolean(state.actions[key]))) {
-      const previous = state.actions[line.key];
-      const raise = async (detail: string) => { performed.push(await record(state, line.key, { kind: 'escalation', work: line.work, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); };
-      // Without a reader of main's check runs the loop cannot tell when main is green again, so it raises the line once.
-      if (!line.red.length || !effects.baseCheck) { if (!previous) await raise(line.text); continue; }
-      if (previous?.detail === line.recovered) continue;
-      // A check whose run on main cannot be read is not known to pass: main is still red.
-      const passed = await Promise.all(line.red.map(check => effects.baseCheck!(check).then(base => base.state === 'passed', () => false)));
-      await raise(passed.every(Boolean) ? line.recovered : line.text);
-    }
-  }
+  // GY-2010: Main guard attention (revert PRs via the GitHub App) is gone with the API client.
 }
 
-/** Step 7: verify what is actually deployed, and request the smoke proofs deliveries ask for. */
+/** Step 7: observe what is actually deployed, as one release-level reading; a merged item is already done (GY-1981). */
 export async function deploymentStep(cycle: Cycle) {
-  const { config, state, effects, now, snapshot, performed, isolate } = cycle;
+  const { config, state, effects, now, snapshot, performed } = cycle;
   // 7. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
   //    marked the work Done on an observed merge, and a lagging rollout must stay visible as lag.
   const delivered = snapshot.work.filter(item => item.stage === 'done' && item.delivery)
@@ -125,28 +101,7 @@ export async function deploymentStep(cycle: Cycle) {
   //      publication is retried next cycle and holds nothing else back.
   if (effects.publishProductionEnvironment) await effects.publishProductionEnvironment().catch(() => undefined);
 
-  // 7a''. Promotion is the loop's, not GitHub's cron, which is best-effort and on 2026-10-05 dropped
-  //       four scheduled runs in a row (GY-1302): as soon as the base branch has moved past the last
-  //       promoted SHA and the last cut, no candidate is in validation and the run.promoteEveryMinutes
-  //       minimum gap has passed since the last dispatch (GY-1488), the release-candidate workflow is
-  //       dispatched with promote=true.
-  //       A failed read or dispatch is recorded under one key and retried with backoff, and the
-  //       cycle's read and dispatch stamps are kept, so a failure never repeats every cycle.
-  const promotion = effects.promotion, promotionFailure = 'promotion:failed';
-  if (promotion && readyToRetry(state.actions[promotionFailure], state.cycle)) {
-    const checked = await withinDeploymentBudget(state, 'promotion', () => promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes, intervalMs: config.run.intervalSeconds * 1000, ...promotionFreeze(effects.mainWatch?.freeze ?? false, state.mainWatch) }), deadline, now);
-    if (checked === stillVerifying) deferred.push('the promotion check');
-    else {
-      if (!checked.ok) throw checked.error;
-      const result = checked.value;
-      state.promotion = result.state;
-      if (result.failure) {
-        const detail = `Promotion could not be checked or dispatched: ${result.failure}`;
-        performed.push(await record(state, promotionFailure, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[promotionFailure]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      } else if (state.actions[promotionFailure]) delete state.actions[promotionFailure];
-      if (result.dispatched) performed.push(await record(state, `promotion:${result.state.mainSha}`, { kind: 'deployment', work: null, principal: null, state: 'done', detail: result.state.reason ?? `Dispatched ${promotionWorkflow}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-    }
-  }
+  // 7a''. GY-1982: no promotion drive: the between-cycles self-upgrade deploys each new base tip itself.
 
   // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
   //        the loop records a measurement for the release the control plane serves, with its own
@@ -186,54 +141,7 @@ export async function deploymentStep(cycle: Cycle) {
     await throughputOwnerStep(cycle, verified.sha, snapshot.work, stall);
   }
 
-  // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
-  //     the observation on Graphyard once the release serves its merge, ask the provider to run the
-  //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
-  //     rollback guidance. The loop never produces the verdict: the workflow's producer does.
   const served = state.deployment;
-  let smokeDeferred = 0;
-  for (const item of delivered.filter(candidate => deploySmokeRequired(candidate.policy))) await isolate('smoke', item, item.key, async () => {
-    // Past the budget nothing more is started: every record and request below is keyed, so the next cycle resumes where this one stopped.
-    if (now() >= deadline) { smokeDeferred++; return; }
-    const delivery = item.delivery!;
-    if (!delivery.deployment) {
-      if (served?.source === 'unavailable' || !served?.sha || !served.deployed.includes(item.key)) return;
-      const key = `deployment:record:${item.id}:${served.sha}`;
-      if (state.actions[key] && state.actions[key].state !== 'failed') return;
-      if (!readyToRetry(state.actions[key], state.cycle)) return;
-      const attempts = (state.actions[key]?.attempts ?? 0) + 1;
-      await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'started', detail: `Recording that ${served.sha.slice(0, 12)} from ${served.source} serves ${item.key}`, attempts, cycle: state.cycle }, now(), effects.persist);
-      try {
-        await effects.recordDeployment(item, { sha: served.sha, source: served.source as 'endpoint' | 'github-deployment', observedAt: served.at });
-        performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'done', detail: `Recorded deployment ${served.sha.slice(0, 12)} (${served.source}) covering ${item.key} merge ${delivery.mergeSha.slice(0, 12)}; the smoke proof may now be requested`, attempts, cycle: state.cycle }, now(), effects.persist));
-      } catch (error) {
-        performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'failed', detail: `Could not record the deployment for ${item.key}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
-      }
-      return;
-    }
-    const outcome = deliveryState(item);
-    if (outcome === 'delivered-with-failure') {
-      const key = `escalation:smoke:${item.id}:${delivery.smoke!.evidenceId}`;
-      if (state.actions[key]?.state !== 'done') performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: rollbackGuidance(item, config.baseBranch)!, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    if (outcome !== 'awaiting-smoke') return;
-    const key = `smoke:${item.id}:${delivery.deployment.sha}`;
-    const previous = state.actions[key];
-    if (previous && (previous.state === 'done' || previous.attempts >= maxProofAttempts || !readyToRetry(previous, state.cycle))) return;
-    if (!config.run.smokeWorkflow) {
-      if (previous?.state !== 'failed') performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'failed', detail: `${item.key} is deployed at ${delivery.deployment.sha.slice(0, 12)} and needs its post-deployment smoke proof; configure master init --smoke-workflow so the loop can request it from the trusted producer workflow`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'started', detail: `Requesting ${config.run.smokeWorkflow} for ${item.key} at ${delivery.deployment.sha.slice(0, 12)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-    try {
-      await effects.requestSmoke(item);
-      performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'done', detail: `Requested trusted smoke workflow ${config.run.smokeWorkflow} for ${item.key} against deployed ${delivery.deployment.sha.slice(0, 12)} (merge ${delivery.mergeSha.slice(0, 12)})`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'failed', detail: `Could not request ${config.run.smokeWorkflow} for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    }
-  });
-  if (smokeDeferred) deferred.push(`${smokeDeferred} deliveries' deployment records and smoke requests`);
   // 7c. GY-1779: the loop's own due readings of loop-owned observation items on the release verified above
   //     (cycle-readings.ts). An observation still in flight verifies nothing this cycle: the due readings
   //     are deferred with it, never taken on the release the last cycle observed.

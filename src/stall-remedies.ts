@@ -28,11 +28,20 @@ import type { Work } from './model/work.js';
  *   agent registry, or a live session of the role ending.
  * - `installation-suspended` — the App's installation is suspended, which only the account that
  *   owns it can reinstate: a human decision.
+ * - `installation-setup` — the configured deployment endpoint answers 4xx (a standing condition of
+ *   `run.deploymentUrl`). The installation's setup owns it; `stalledActionAttention` raises the
+ *   installation-level setup line rather than a per-item stalled-action (GY-2014).
+ * - `credential-401` — a dispatched worker's claim was refused with the control plane's own 401
+ *   ("A valid Graphyard bearer token is required"). The same lever the step-stall registry names
+ *   for 401s; one attempt may be recorded per unchanged run via `recordStallRemedy` (GY-2014).
+ * - `reviewer-identity` — the control plane refused a reviewer launch with a 4xx. The master owns
+ *   the reviewer-identity remedy (the condition GY-2008 clears); attention raises that line rather
+ *   than a per-item stalled-action (GY-2014).
  *
  * A reason no entry recognises keeps the generic instruction. Pure: nothing here runs a remedy.
  */
 
-export const stallRemedyKinds = ['installation-accept', 'capacity', 'installation-suspended'] as const;
+export const stallRemedyKinds = ['installation-accept', 'capacity', 'installation-suspended', 'installation-setup', 'credential-401', 'reviewer-identity'] as const;
 export type StallRemedyKind = typeof stallRemedyKinds[number];
 /** The master browser flows a loop-applied remedy may run, in the order it may run them. */
 export const remedyFlows = ['installation-accept', 'app-permissions'] as const;
@@ -48,6 +57,9 @@ export interface BoundRemedy {
   /** What the attention names as the next step while no attempt of the remedy is recorded. */
   next: string;
 }
+
+/** The credential-401 lever shared by the action-row registry and the step-stall registry (GY-1854, GY-2014). */
+export const credential401Remedy = 'renew the refused host-owned credential — a worker or producer profile\'s from the credential the install issued for its principal, or the merge writer\'s deploy key — then verify it authenticates; the coordinator\'s own credential is the operator\'s to rotate';
 
 const installationAccept = (app: string, permission: string, url: string): BoundRemedy => ({
   kind: 'installation-accept', applies: 'loop', owner: 'master',
@@ -83,8 +95,28 @@ export const stallRemedyRegistry: readonly { kind: StallRemedyKind; bind: (reaso
         next: `Role ${role} is full (${live} of ${limit} live), and retrying moves nothing: it is a capacity decision the master owns — ${lever}. The row is escalated to that decision with this lever named if it keeps failing, and is claimed within one recheck of a slot freeing` };
     },
   },
+  {
+    // observeDeployment (src/daemon/deployment.ts) words a 4xx from the configured deploymentUrl this way.
+    kind: 'installation-setup',
+    bind: reason => /Deployment endpoint answered 4\d\d\b/.test(reason) ? { kind: 'installation-setup', applies: 'decision', owner: 'master',
+      remedy: 'fix the installation\'s configured deploymentUrl (graphyard master init --deployment-url) so the endpoint answers 2xx with the build SHA at deploymentShaField, or clear the misconfigured URL',
+      next: 'Fix the installation\'s configured deploymentUrl so the endpoint answers 2xx with the build SHA (graphyard master init --deployment-url), or clear the misconfigured URL; the setup path already raises this, and each verify-deployment row\'s recheck picks the repaired endpoint up' } : null,
+  },
+  {
+    // demand (src/server/auth.ts) refuses every claim whose bearer resolves to no principal this way; GY-1998 owns the condition.
+    kind: 'credential-401',
+    bind: reason => /A valid Graphyard bearer token is required/.test(reason) ? { kind: 'credential-401', applies: 'loop', owner: 'master',
+      remedy: credential401Remedy,
+      next: `Nothing to run by hand: renew the refused host-owned credential once for this unchanged run (the credential-401 remedy the step-stall registry names for 401s) — ${credential401Remedy} — and record the attempt on the row; the row's recheck picks a working credential up` } : null,
+  },
+  {
+    // launchReview (src/reviewer.ts) surfaces a control-plane 4xx this way; GY-2008 owns the reviewer-identity condition.
+    kind: 'reviewer-identity',
+    bind: reason => /The control plane refused the reviewer launch of \S+ \(4\d\d\):/.test(reason) ? { kind: 'reviewer-identity', applies: 'decision', owner: 'master',
+      remedy: 'repair the reviewer identity the control plane registers for launches (graphyard master reviewer setup or graphyard master reviewer bind); the condition GY-2008 clears',
+      next: 'Repair the reviewer identity the control plane registers for launches (graphyard master reviewer setup or graphyard master reviewer bind) — the condition GY-2008 clears; each request-review row\'s recheck picks the repaired identity up' } : null,
+  },
 ];
-
 /** The remedy a stall reason binds to, or null when no entry recognises it. */
 export function stallRemedy(reason: string): BoundRemedy | null {
   for (const entry of stallRemedyRegistry) { const bound = entry.bind(reason); if (bound) return bound; }
@@ -226,7 +258,7 @@ export const stepStallRemedyRegistry: readonly { kind: StepStallRemedyKind; bind
     // src/master/dispatch.ts readMergeWriter); stallSignature keeps 401 as its own <unauthorized> token.
     kind: 'credential-401',
     bind: signature => /<unauthorized>|unauthorized/i.test(signature)
-      ? { kind: 'credential-401', remedy: 'renew the refused host-owned credential — a worker or producer profile\'s from the credential the install issued for its principal, or the merge writer\'s deploy key — then verify it authenticates; the coordinator\'s own credential is the operator\'s to rotate' }
+      ? { kind: 'credential-401', remedy: credential401Remedy }
       : null,
   },
   {

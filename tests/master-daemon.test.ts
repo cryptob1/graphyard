@@ -329,66 +329,25 @@ test('a failed launch puts its profile in cool-off so the next cycle uses anothe
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('the loop records the observed deployment, requests the trusted smoke proof, escalates a failed verdict with rollback guidance, and measures post-deploy time', async () => {
+test('the loop records no per-item deployment and requests no per-item smoke proof: a merged item is delivered (GY-1981)', async () => {
   const { directory, token } = await privateDirectory();
   try {
     const mergeSha = 'c'.repeat(40), serving = 'd'.repeat(40);
-    const delivered = (overrides: Partial<Work['delivery']> = {}, extra: Partial<Work> = {}) => work({ id: 'smoky', key: 'GY-50', stage: 'done', createdAt: iso(-5 * hour),
-      policy: { checks: ['test'], review: true, deploySmoke: true }, delivery: { mergedAt: iso(-2 * hour), mergeSha, authorizationRevision: 5, ...overrides }, ...extra });
+    const smoky = work({ id: 'smoky', key: 'GY-50', stage: 'done', createdAt: iso(-5 * hour), policy: { checks: ['test'], review: true, deploySmoke: true }, delivery: { mergedAt: iso(-2 * hour), mergeSha, authorizationRevision: 5 } });
     const plain = work({ id: 'plain', key: 'GY-51', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: 'e'.repeat(40), authorizationRevision: 6 } });
-    const pending = delivered({}, { id: 'pending', key: 'GY-52' });
     const log: string[] = [];
-    let snapshot: Work[] = [delivered(), plain, pending];
     const deps = effects({
-      snapshot: async () => ({ work: snapshot, now: iso(0) }),
-      observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(-hour), reason: null, deployed: ['GY-50', 'GY-51'], pending: ['GY-52'] }),
+      snapshot: async () => ({ work: [smoky, plain], now: iso(0) }),
+      observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(-hour), reason: null, deployed: ['GY-50', 'GY-51'], pending: [] }),
     }, log);
-    const unconfigured = config(token, { run: { intervalSeconds: 20, deploymentShaField: 'commit' } });
-    const state = emptyDaemonState(unconfigured);
-    // Cycle 1: the release serves GY-50, so its deployment is recorded on Graphyard. GY-51 asks for no
-    // smoke proof and GY-52 is not yet served, so neither is touched.
-    let result = await runCycle(unconfigured, state, deps, () => clock);
-    assert.deepEqual(log, ['record:GY-50:dddd']);
-    assert.ok(result.actions.some(action => action.kind === 'deployment' && action.work === 'GY-50' && action.state === 'done'));
-    assert.equal(result.metrics.postDeploy.count, 2, 'both smoke-policy deliveries are still inside their post-deploy window');
-    assert.equal(result.metrics.postDeployFailures, 0);
-    // Cycle 2: Graphyard now holds the observation. Without a smoke workflow the loop can only say so.
-    log.length = 0;
-    const observation = { sha: serving, mergeSha, source: 'endpoint' as const, observedAt: iso(-hour), covers: 'descendant' as const, at: iso(-hour), observer: 'master' };
-    snapshot = [delivered({ deployment: observation }), plain, pending];
-    result = await runCycle(unconfigured, state, deps, () => clock + 20_000);
-    assert.deepEqual(log, [], 'the loop never re-records a deployment Graphyard already holds');
-    const unconfiguredSmoke = result.actions.find(action => action.kind === 'smoke')!;
-    assert.equal(unconfiguredSmoke.state, 'failed'); assert.match(unconfiguredSmoke.detail, /--smoke-workflow/);
-    assert.equal(result.metrics.production.count, 1, 'PR-to-production latency is measured from the recorded observation');
-    assert.equal(result.metrics.production.p50Ms, 4 * hour);
-    // With the workflow configured the request names the exact deployed and merge commits, once.
     const configured = config(token, { run: { intervalSeconds: 20, deploymentShaField: 'commit', smokeWorkflow: 'deploy-smoke.yml' } });
-    delete state.actions[`smoke:smoky:${serving}`];
-    result = await runCycle(configured, state, deps, () => clock + 40_000);
-    assert.deepEqual(log, ['smoke:GY-50']);
-    assert.match(result.actions.find(action => action.kind === 'smoke')!.detail, /deploy-smoke\.yml for GY-50 against deployed dddddddddddd \(merge cccccccccccc\)/);
-    log.length = 0;
-    await runCycle(configured, state, deps, () => clock + 60_000);
-    assert.deepEqual(log, [], 'one smoke request per deployed commit');
-    // Cycle 3: the trusted producer reported a failure. The loop escalates with rollback guidance and
-    // the failure shows up in the flow analytics; it never requests the proof again or clears it.
-    const smoke = { evidenceId: 'ev-1', result: 'fail' as const, sha: serving, mergeSha, producer: 'smoke-runner', at: iso(-30 * 60_000), executed: 3, skipped: 0 };
-    snapshot = [delivered({ deployment: observation, smoke }), plain, pending];
-    result = await runCycle(configured, state, deps, () => clock + 80_000);
-    assert.deepEqual(log, []);
-    const escalation = result.actions.find(action => action.kind === 'escalation' && action.work === 'GY-50')!;
-    assert.match(escalation.detail, /delivered with a failed post-deployment smoke proof/);
-    assert.ok(escalation.detail.includes(serving) && escalation.detail.includes(mergeSha) && /revert .* on main/.test(escalation.detail));
-    assert.equal(result.metrics.postDeployFailures, 1);
-    assert.equal(result.metrics.postDeploy.p50Ms, 90 * 60_000, 'post-deploy time runs from merge to the verdict');
-    const again = await runCycle(configured, state, deps, () => clock + 100_000);
-    assert.equal(again.actions.filter(action => action.kind === 'escalation').length, 0, 'an escalation is recorded once per verdict');
-    // A record interrupted mid-flight is resolved against Graphyard, not the cursor.
+    const state = emptyDaemonState(configured);
+    const result = await runCycle(configured, state, deps, () => clock);
+    assert.deepEqual(log, [], 'nothing is recorded on an item and no smoke workflow is requested');
+    assert.ok(!result.actions.some(action => action.kind === 'smoke' || (action.kind === 'deployment' && action.work)), 'no per-item deployment or smoke action');
+    // A per-item record a loop from before GY-1981 left interrupted resumes as done: nothing retries it.
     state.actions['deployment:record:smoky:x'] = { kind: 'deployment', work: 'GY-50', principal: null, epoch: null, state: 'started', detail: 'Recording', attempts: 1, cycle: 0, at: iso(0) };
-    state.actions['deployment:record:pending:x'] = { kind: 'deployment', work: 'GY-52', principal: null, epoch: null, state: 'started', detail: 'Recording', attempts: 1, cycle: 0, at: iso(0) };
-    const resumed = reconcilePendingActions(state, snapshot, clock);
-    assert.deepEqual(resumed.map(action => `${action.work}:${action.state}`), ['GY-50:done', 'GY-52:failed']);
+    assert.deepEqual(reconcilePendingActions(state, [smoky, plain], clock).map(action => `${action.work}:${action.state}`), ['GY-50:done']);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -421,24 +380,21 @@ test('deployment verification reports the served commit and which delivered item
     const run = (command: string, args: string[]) => {
       calls.push(`${command} ${args.join(' ')}`);
       if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      if (args[1] === 'graphql') { assert.match(args[3], /nodes\(ids: \["DE_9"\]\)/); return JSON.stringify({ data: { nodes: [{ databaseId: 9, latestStatus: { state: 'SUCCESS' } }] } }); }
-      if (args[1].includes('/deployments?')) return JSON.stringify([{ id: 9, node_id: 'DE_9', sha: head, ref: 'main', environment: 'production' }]);
       throw new Error(`unexpected ${args.join(' ')}`);
     };
-    const fromProvider = await observeDeployment(config(token), delivered, run, fetch, () => clock, { root: checkout });
-    assert.equal(fromProvider.source, 'github-deployment');
-    assert.equal(fromProvider.sha, head);
-    assert.deepEqual(fromProvider.deployed, ['GY-1', 'GY-2']);
-    assert.deepEqual(fromProvider.pending, ['GY-3'], 'a merge the running release does not contain is not deployed');
-    assert.equal(calls.filter(entry => entry.includes('/compare/')).length, 0, 'containment is local ancestry, never a compare per delivery');
-    assert.equal(fromProvider.requests, 2);
-    assert.deepEqual(fromProvider.containment, { release: head, settled: { 'GY-1': head, 'GY-2': head } }, 'what the release was shown to serve is retained for the next cycle');
+    const unconfigured = await observeDeployment(config(token), delivered, run, fetch, () => clock, { root: checkout });
+    assert.equal(unconfigured.source, 'unavailable', 'without an endpoint no release is read, from GitHub or anywhere else');
+    assert.deepEqual(unconfigured.pending, ['GY-1', 'GY-2', 'GY-3']);
+    assert.equal(calls.filter(entry => entry.startsWith('gh ')).length, 0);
 
     const endpoint = config(token, { run: { intervalSeconds: 20, deploymentUrl: 'https://app.example/version', deploymentShaField: 'build.commit' } });
     const fetcher = (async () => new Response(JSON.stringify({ build: { commit: head.toUpperCase() } }))) as typeof fetch;
     const fromEndpoint = await observeDeployment(endpoint, delivered, run, fetcher, () => clock, { root: checkout });
     assert.equal(fromEndpoint.source, 'endpoint');
     assert.equal(fromEndpoint.sha, head);
+    assert.deepEqual(fromEndpoint.deployed, ['GY-1', 'GY-2']);
+    assert.deepEqual(fromEndpoint.pending, ['GY-3'], 'a merge the running release does not contain is not deployed');
+    assert.deepEqual(fromEndpoint.containment, { release: head, settled: { 'GY-1': head, 'GY-2': head } }, 'what the release was shown to serve is retained for the next cycle');
     assert.equal(fromEndpoint.requests, 0);
 
     const silent = (async () => new Response(JSON.stringify({ ok: true }))) as typeof fetch;
@@ -626,7 +582,6 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     assert.equal(state.deployment!.pending.length, 200, 'the newest 200 deliveries are kept');
     assert.equal(state.deployment!.pending.at(-1), 'GY-1249');
     assert.ok(state.deployment!.reason!.length <= 500 && state.deployment!.reason!.endsWith('…'));
-    assert.ok(Object.values(state.silence.subjects).every(subject => subject.detail.length <= 500), 'every silence subject fits its bound');
     // The failed observation keeps every delivery pending: the catch path is bounded too.
     observe = async () => { throw new Error(reason); };
     const again = await runCycle(master, state, deps, () => clock + 20_000);

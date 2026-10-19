@@ -77,6 +77,22 @@ export function owedPostMergeReviews(work: readonly Work[]): Work[] {
 export const postMergeRequestId = (key: string, mergeSha: string) => `post-merge:${key}:${mergeSha.slice(0, 12)}`;
 
 /**
+ * How long a launch refusal that has reached the attempt limit stands before the loop probes its
+ * request again (GY-2075). A post-merge request has no hand recovery — the item is delivered, so
+ * no pre-merge request stands for `master review` to answer, and a system-driven item refuses the
+ * command — while its refusal's cause usually lives in the served control plane rather than in the
+ * item, so the loop probes instead of stranding: one launch attempt per standstill hour. A probe
+ * that meets the cause still standing is refused again and waits another hour; the first one past
+ * the cause's repair launches, and the launch that succeeds clears the refusal record.
+ */
+export const postMergeRefusalProbeMs = 3_600_000;
+/** Whether `failure` — a request the loop stopped relaunching at `limit` attempts — is due its hourly probe at `now`. */
+export function launchRefusalProbeDue(failure: { attempts: number; at: string } | undefined, limit: number, now: number): boolean {
+  const at = failure ? Date.parse(failure.at) : NaN;
+  return !!failure && failure.attempts >= limit && Number.isFinite(at) && at + postMergeRefusalProbeMs <= now;
+}
+
+/**
  * One blocking finding of a post-merge verdict, with the first repository file it names and that
  * file's line, and every file it names (`paths`, in order, the first one first): a token with an extension (`src/a.ts:12`, `.gitignore`), one followed
  * by a line (`Dockerfile:12`, `Makefile:3-9`), or a well-known extensionless file named alone.

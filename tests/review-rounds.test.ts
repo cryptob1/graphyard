@@ -224,14 +224,11 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   assert.ok(!cappedRework({ binding: cappedReworkBinding('c'.repeat(40), reviewer) }, standing), 'not the current head');
   assert.ok(!cappedRework({ binding: round.binding }, { ...standing, observation: { ...standing.observation!, reviews: [] } }), 'no change request stands');
   assert.equal(neededDecision({ ...changed(3, 'BLOCKING: AC-1 is not met'), reworkRequested: true }, config), null, 'once the round is applied the item needs a worker, not a second decision');
-  // A failed required check or proof is a mandatory ground ahead of the capped round (GY-1389 review): the
-  // round is keyed on its own binding, so an approver's refusal of it, which the loop then never re-asks,
-  // can hold neither the check's rework on this head nor one for a check that fails after the refusal.
+  // A stored failed check grounds nothing since GY-2010 (the merge writer's trial is the only test):
+  // the capped round is asked on its own binding whatever the pull-request-era checks say.
   const failing = changed(3, 'BLOCKING: AC-1 is not met');
   failing.observation!.checks = [{ name: 'test', result: 'failure', appId: 15368 }] as Observation['checks'];
-  const ciRound = neededDecision(failing, config)!;
-  assert.deepEqual([ciRound.action, ciRound.binding], ['rework', `${H}:ci:test`]);
-  assert.notEqual(ciRound.binding, round.binding, 'a refusal of the capped round names another binding');
+  assert.equal(neededDecision(failing, config)?.binding, round.binding, 'a red stored check neither replaces nor holds the capped round');
   failing.observation!.checks = [{ name: 'test', result: 'success', appId: 15368 }] as Observation['checks'];
   assert.equal(neededDecision(failing, config)?.binding, round.binding, 'with every check green the capped round is asked as before');
   // A loop without the decision effects still escalates it for a master to request.
@@ -270,26 +267,3 @@ test('unit:review-rounds-capped — the reviewer launched for an item past its c
   } finally { await master.cleanup(); }
 });
 
-test('unit:review-rounds-capped — on the coordination view the loop reads, which drops the pipeline timeline, a change request withdrawn past the cap is reopened for the same head\'s re-review, and one within it is not', async () => {
-  // GY-1389 review: the cap readers read only work.pipeline, so the loop's reconciliation saw every head
-  // in round 1 and the withdrawal GY-1118 pairs with a re-review left the request answered by nothing.
-  const master = await boundMaster();
-  try {
-    const config = await loadMasterConfig(master.root);
-    const requestId = randomUUID(), at = new Date().toISOString();
-    const viewed = (rounds: number) => {
-      const item = work();
-      item.pipeline = pipeline(rounds) as Work['pipeline'];
-      item.autoDispatch = { review: { id: requestId, kind: 'review', pr: 64, sha: H, baseSha: B, policyRevision: 1, provider: 'github', state: 'requested', reason: 'review', requestedAt: at }, producers: [], history: [] } as unknown as Work['autoDispatch'];
-      const view = coordinationWork(item, { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 });
-      assert.equal(view.pipeline, undefined, 'the view drops the timeline');
-      return view;
-    };
-    for (const [rounds, reopened] of [[2, false], [3, true]] as const) {
-      await updateReviewLedger(master.root, ledger => { ledger.reviews = [settled(H, 'CHANGES_REQUESTED', at, { requestId })]; });
-      const withdrawn = { state: 'DISMISSED', reviewer, reviewId: 4242, submittedAt: at };
-      const [record] = (await reconcileReviews(master.root, config, { run: herdrRun, observe: () => withdrawn, work: [viewed(rounds)] })).reviews;
-      assert.deepEqual([record.state, record.verdict!.state], reopened ? ['failed', 'DISMISSED'] : ['completed', 'CHANGES_REQUESTED'], `${rounds} rework rounds`);
-    }
-  } finally { await master.cleanup(); }
-});

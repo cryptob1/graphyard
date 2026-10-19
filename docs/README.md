@@ -14,7 +14,6 @@ Start with the numbered path; the other pages are references to open when a task
 ## Operate Graphyard
 
 - [Deployment](deployment.md) — variables, backups.
-- [GitHub enforcement](github.md) — App, protection.
 - [Reading the dashboard](dashboard.md) — pages.
 - [Master-agent operating mode](master-agent.md) — loop, merges.
 - [Delivery redesign](delivery-redesign.md) — merge writer, rollout.

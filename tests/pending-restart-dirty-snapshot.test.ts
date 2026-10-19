@@ -441,52 +441,6 @@ test('unit:dirty-launcher-restarts-from-snapshot-launcher — a checkout whose o
   assert.match(bothNamed[0].text, /the loop and the executors start the launcher held in the snapshot, so their starts never run those edits; every command started through the checkout's launcher still runs its edited bin\/graphyard\.mjs before the pin redirects any module, so return it to the commit first\.$/);
 });
 
-test('unit:moved-dirty-checkout-hold-keeps-served-pin — a checkout-loaded loop on the served release whose checkout is moved by hand onto an unserved merged commit and dirtied there holds the restart with the launcher pinned to the served release, so no command it starts loads the unserved dirty tree; a dirty checkout still at the loaded commit holds with no pin, as before; the hold completes onto a snapshot once the commit is served', async () => {
-  // Served A, loaded A; the operator moves the checkout onto B, merged but not served, and edits it.
-  const w = await world('moved-dirty-hold');
-  git(w.root, 'fetch', '-q', 'origin');
-  git(w.root, 'checkout', '-q', '--detach', w.tip);
-  const before = await dirtied(w.root);
-  const state = emptyDaemonState(w.master);
-  state.release = { commit: w.loaded, dirty: false };
-  state.deployment = verified(w.loaded);
-  state.upgrade.alignedRelease = w.loaded;
-  const { calls, deps } = recording(w.root);
-  const held = await performSelfUpgrade(w.master, state, deps());
-  assert.equal(held.outcome, 'pending', JSON.stringify(held));
-  assert.match('reason' in held ? held.reason : '', new RegExp(`^restart held: production serves release ${short(w.loaded)}, which does not contain ${short(w.tip)} yet`));
-  assert.equal(state.upgrade.stalled?.cause, 'release-lagged');
-  assert.equal(readHeldCli(w.root), w.loaded, 'the launcher is pinned to the served release while the hold stands');
-  assert.equal(w.launch('watch', 'GY-1', '1').release, 'A', 'a command the checkout\'s launcher starts loads the served release, not the unserved dirty tree');
-  assert.deepEqual(calls, { executors: [], self: 0 }, 'nothing restarts');
-  assert.deepEqual([git(w.root, 'rev-parse', 'HEAD'), status(w.root)], [w.tip, before], 'the checkout is untouched');
-  assert.deepEqual(state.upgrade.pending, { from: w.loaded, to: w.tip, code: true });
-  // The same hold on a later pass pins nothing new: one snapshot, the same pin.
-  const second = await performSelfUpgrade(w.master, state, deps());
-  assert.equal(second.outcome, 'pending', JSON.stringify(second));
-  assert.equal(readHeldCli(w.root), w.loaded);
-  // B served: the hold completes onto a held snapshot of B, the dirty checkout left where it stands.
-  state.deployment = verified(w.tip);
-  const completed = await performSelfUpgrade(w.master, state, deps());
-  assert.deepEqual(completed, { outcome: 'upgraded', from: w.loaded, to: w.tip, code: true, executors: restarted(w.tip), self: true, left: { checkout: w.tip, dirty: ['README.md'] } });
-  assert.equal(readHeldCli(w.root), w.tip, 'the pin moves to the snapshot of B');
-  assert.equal(w.launch('watch', 'GY-1', '1').release, 'B');
-  assert.deepEqual(state.upgrade.snapshot, { at: iso(), commit: w.tip, checkout: w.tip, dirty: ['README.md'] });
-
-  // Unmoved: the checkout dirty where the loop loaded it, B merged and unserved. What its launcher
-  // starts already speaks the served protocol, so the hold places no pin (GY-1773).
-  const u = await world('unmoved-dirty-hold');
-  await dirtied(u.root);
-  const unmoved = emptyDaemonState(u.master);
-  unmoved.release = { commit: u.loaded, dirty: true };
-  unmoved.deployment = verified(u.loaded);
-  const unmovedHeld = await performSelfUpgrade(u.master, unmoved, recording(u.root).deps());
-  assert.equal(unmovedHeld.outcome, 'pending', JSON.stringify(unmovedHeld));
-  assert.equal(unmoved.upgrade.stalled?.cause, 'release-lagged');
-  assert.equal(readHeldCli(u.root), null, 'no pin: the checkout still holds the commit the loop runs');
-  assert.equal(git(u.root, 'rev-parse', 'HEAD'), u.loaded);
-});
-
 test('unit:executor-unit-render-idempotent — rendering an executor unit the pin already rendered is byte-identical, the alignment then writes nothing and reloads nothing, and the lift removes the handed-checkout line it added', async () => {
   // Imported here, not at the top: neither export exists on the base this file is exercised against,
   // and the exercise must see these cases fail as test cases, never the file fail to load.

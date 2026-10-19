@@ -1,9 +1,9 @@
-import { deliveryState, isClosed, type Gate, type Work } from '../model.js';
+import { isClosed, type Gate, type Work } from '../model.js';
 import { latestCheck } from '../merge-queue.js';
-import { leftFlowAt, noRelease, servedFor, type ReleaseView } from './release.js';
+import { noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
-import { ciCheckName } from './ci-refusal.js';
+import { ciCheckName, mergeWriterTrialPattern } from './ci-refusal.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
 
@@ -19,20 +19,20 @@ export type StateId = typeof stateIds[number];
 export const stateLabel: Record<StateId, string> = { todo: 'Todo', doing: 'Doing', checking: 'Checking', done: 'Done' };
 
 /**
- * The recorded flow's own steps (GY-161): Build, Validate, Test, Review, Prove, Merge, Deploy, in
- * the order a change travels. The board and the item page no longer draw them — items show the
+ * The recorded flow's own steps (GY-161): Build, Validate, Test, Review, Prove, Merge, in the
+ * order a change travels; they end at the merge (GY-1981). The board and the item page no longer draw them — items show the
  * four states above — but the recorded step history keeps this vocabulary: the gate facts, the
  * steps drill-down, the Insights Flow panel and the replay (src/flow-analytics.ts `flowSteps`)
  * all read and write these names, so a recorded move says exactly which gate changed.
  */
-export const stepIds = ['build', 'validate', 'test', 'review', 'prove', 'merge', 'deploy'] as const;
+export const stepIds = ['build', 'validate', 'test', 'review', 'prove', 'merge'] as const;
 export type StepId = typeof stepIds[number];
 /** One recorded move of an item between recorded steps, as the Insights Flow replay (web/flow-replay.ts) plays it. */
 export interface StepTransition { key: string; from: StepId | null; to: StepId | null; at: string }
 export type StepState = 'done' | 'current' | 'pending';
-export const stepLabel: Record<StepId, string> = { build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge', deploy: 'Deploy' };
+export const stepLabel: Record<StepId, string> = { build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge' };
 /** The verb the recorded step's live label starts with: "Testing · 3 of 5 checks done". */
-export const stepVerb: Record<StepId, string> = { build: 'Building', validate: 'Validating', test: 'Testing', review: 'Reviewing', prove: 'Proving', merge: 'Merging', deploy: 'Deploying' };
+export const stepVerb: Record<StepId, string> = { build: 'Building', validate: 'Validating', test: 'Testing', review: 'Reviewing', prove: 'Proving', merge: 'Merging' };
 /** The gate each recorded step after Build reads. */
 export const stepGate: Partial<Record<StepId, string>> = { validate: 'build', test: 'test', review: 'review', prove: 'acceptance', merge: 'merge' };
 /** The recorded steps folded into the Checking state, in the order the control plane evaluates them. */
@@ -73,6 +73,12 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
   const gate = work.gates.find(entry => entry.name === 'test');
   const reasons = gate?.reasons ?? [];
   const named = (name: string) => !gate || reasons.some(reason => ciCheckName(reason) === name);
+  // GY-2010: the merge writer's trial builds and tests the merge commit; until it records a passing
+  // trial of this head every check is running, and a refused trial of this head failed them.
+  if (reasons.some(reason => mergeWriterTrialPattern.test(reason))) {
+    const refused = work.mergeLedger?.state === 'refused' && !!work.candidate && work.mergeLedger.head === work.candidate.sha;
+    return (work.policy.checks ?? []).map(name => ({ name, state: refused ? 'failed' : 'running' }));
+  }
   return (work.policy.checks ?? []).map(name => {
     if (!named(name)) return { name, state: 'passed' };
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name && !!ciAppIds?.includes(check.appId));
@@ -161,17 +167,6 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       const stuck = reasons.map(reason => plainReason(reason, 'merge')).find(plain => plain.stuck);
       return stuck ? { detail: stuck.text.replace(/^./, c => c.toLowerCase()), who: 'Builder agent' } : { detail: 'Graphyard is merging it', who: 'Graphyard (automatic)' };
     }
-    // The Deploy step is gone from the items (GY-1979): the release line on the board's top bar
-    // carries the deployment. The recorded flow keeps the step, so a merged change the release
-    // does not serve yet still names what it waits on — the smoke check, a deployment that has
-    // not appeared, or a failed one — never one fixed string for every state.
-    case 'deploy': {
-      const state = deliveryState(work);
-      return state === 'delivered-with-failure' ? { detail: 'the check after deploying failed', who: 'Master agent' }
-        : release.failed.has(work.key) ? { detail: 'production has not deployed it', who: 'Master agent' }
-        : state === 'awaiting-smoke' ? { detail: 'checking the live release', who: 'Prover agent' }
-          : { detail: 'waiting for the live release to serve it', who: 'Graphyard (automatic)' };
-    }
   }
 }
 
@@ -218,7 +213,7 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
 }
 
 /**
- * The item's place in the recorded flow (the seven steps the step history keeps), as the Insights
+ * The item's place in the recorded flow (the six steps the step history keeps), as the Insights
  * Flow panel's Now view and the replay read it (web/flow-replay.ts, web/step-moves.ts). This is
  * the reading the recorded gate facts are written against — src/flow-analytics.ts `gateFactStep`
  * is its recorded counterpart — not the four states the board and the item page draw.
@@ -226,11 +221,7 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
 export function flowStep(work: Work, now: number, release: ReleaseView = noRelease): { current: StepId | null; label: string; detail: string; who: string } {
   const make = (current: StepId | null, detail: string, who: string) => ({ current, label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who });
   if (isClosed(work)) return make(null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
-  if (work.stage === 'done') {
-    if (!work.delivery || leftFlowAt(work, release)) return servedFor(work, release) ? make(null, 'Live', 'Nobody — it is live') : make(null, 'Merged', 'Nobody — it has merged');
-    const { detail, who } = waitsOn('deploy', undefined, work, now, release);
-    return make('deploy', detail, who);
-  }
+  if (work.stage === 'done') return servedFor(work, release) ? make(null, 'Live', 'Nobody — it is live') : make(null, 'Merged', 'Nobody — it has merged');
   const readyRefused = work.gates.some(gate => gate.name === 'ready' && !gate.passed);
   const handedIn = !!work.submission && !work.reworkRequested && !changesRequested(work) && !readyRefused;
   if (!handedIn) {
@@ -239,8 +230,8 @@ export function flowStep(work: Work, now: number, release: ReleaseView = noRelea
   }
   const byName = new Map(work.gates.map(gate => [gate.name, gate]));
   // A gate the item does not carry has nothing to refuse, so its step reads done.
-  const passed = (id: StepId) => id === 'build' || (id !== 'merge' && id !== 'deploy' && byName.get(stepGate[id]!)?.passed !== false);
-  const current = stepIds.find(id => id !== 'deploy' && !passed(id)) ?? 'merge';
+  const passed = (id: StepId) => id === 'build' || (id !== 'merge' && byName.get(stepGate[id]!)?.passed !== false);
+  const current = stepIds.find(id => !passed(id)) ?? 'merge';
   const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now, release);
   return make(current, detail, who);
 }

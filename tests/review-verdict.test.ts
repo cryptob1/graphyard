@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFile, rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -13,8 +13,8 @@ import type { Principal, Work } from '../src/model.js';
 import { evaluate } from '../src/model/gates.js';
 import { sensitiveReviewRefusal, postMergeReviewMark } from '../src/model/post-merge-review.js';
 import { postReview, readReviewBinding, reviewBindingFile, reviewBindingSchema, ReviewPostRefusal, writeReviewBinding, type ReviewPostBinding } from '../src/review-post.js';
-import { independenceRefusal, headRefusal, secondVerdictRefusal, tokenRefusal, tokenRegistered } from '../src/server/review-verdict.js';
-import { launchReview, readReviewLedger, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
+import { independenceRefusal, headRefusal, reviewLaunchBodySchema, secondVerdictRefusal, tokenRefusal, tokenRegistered } from '../src/server/review-verdict.js';
+import { bindReviewer, launchReview, readReviewLedger, reviewPrompt, reviewStandard, saveReviewerProfile } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -156,22 +156,19 @@ test('unit:review-post-control-plane-api — the binding gains mode, head, baseT
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
-test('unit:review-post-github-snapshot — a github-mode binding and review post are unchanged: no mode fields, gh pr view then the review POST, the same result', async () => {
+test('unit:review-post-github-snapshot — a pull-request-era github binding still writes and reads unchanged, and its review post is refused naming the control plane, running no gh and calling no API (GY-2010)', async () => {
   const directory = await temporaryDirectory('review-verdict-github');
   try {
     const binding = bindingOf();
     await writeReviewBinding(directory, binding);
     assert.deepEqual(JSON.parse(await readFile(join(directory, reviewBindingFile), 'utf8')), binding, 'the github binding carries no control-plane field');
     const gh: string[][] = [];
-    const run = async (_command: string, args: string[]) => { gh.push(args); return args[0] === 'pr' ? JSON.stringify({ mergeable: 'MERGEABLE', mergeStateStatus: 'CLEAN', headRefOid: H }) : JSON.stringify({ id: 9001 }); };
-    const fetcher = (async () => { throw new Error('github mode never calls the API'); }) as unknown as typeof fetch;
+    const run = async (_command: string, args: string[]) => { gh.push(args); return ''; };
+    const fetcher = (async () => { throw new Error('a github binding never calls the API'); }) as unknown as typeof fetch;
     const body = 'AC-1 met.\nResolved threads: none\nFollow-up threads: none\nOverridden threads: none';
-    const posted = await postReview({ event: 'APPROVE', body, cliPath: launcher, environment: { GH_CONFIG_DIR: directory, GRAPHYARD_REVIEW: `GY-7@${H}`, GRAPHYARD_URL: 'https://graphyard.example' } }, { run, fetch: fetcher, sleep: async () => {} });
-    assert.deepEqual(posted, { reviewId: 9001, event: 'APPROVE', key: 'GY-7', pr: 7, sha: H });
-    assert.deepEqual(gh, [
-      ['pr', 'view', '7', '--repo', 'owner/project', '--json', 'mergeable,mergeStateStatus,headRefOid'],
-      ['api', '--method', 'POST', 'repos/owner/project/pulls/7/reviews', '-f', `commit_id=${H}`, '-f', 'event=APPROVE', '-f', `body=${body}`],
-    ]);
+    await assert.rejects(postReview({ event: 'APPROVE', body, cliPath: launcher, environment: { GH_CONFIG_DIR: directory, GRAPHYARD_REVIEW: `GY-7@${H}`, GRAPHYARD_URL: 'https://graphyard.example' } }, { run, fetch: fetcher, sleep: async () => {} }),
+      /pull-request-era GitHub binding, and Graphyard no longer posts GitHub reviews; the loop launches the review again against the control plane/);
+    assert.deepEqual(gh, [], 'no gh ran');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -316,4 +313,151 @@ test('integration:review-verdict-recorded-once — the verdict is appended to ob
   // A github-observed item has no API verdict: its review posts through gh.
   const github = await insert(item('GY-9006', { observation: { at: now(), candidate: { sha: H, baseSha: B, pr: 7, branch: 'b', author: 'w' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false } }));
   assert.equal((await request(tokenOf(coordinator), `work/${github.id}/review-launch`, launchBody(freshToken()))).status, 409);
+});
+
+// ——— GY-1987 AC-1: the reviewer's judging text is what reviewStandard builds, byte for byte. ———
+// The request below is the exact text controlPlaneReviewPrompt produced before the judging part was
+// factored into reviewStandard: fixed binding, criteria, documentation obligation and verification
+// maps, no memory, history, research or checkout. The factoring must not have moved a byte, and the
+// request must carry reviewStandard's output verbatim, so the worker's review self reads exactly
+// what the independent reviewer is asked. The pinned text carries GY-2000's blocking standard and
+// repetition rule, both part of the shared standard reviewStandard builds.
+const standardCriteria = [{ id: 'AC-1', text: 'The change works at its head', proofs: ['unit:works'] }];
+// A criterion whose proof is declared post-deploy: the review request gains the post-deploy rule,
+// and where that rule sits pins the factoring for criteria the first fixture does not cover (the
+// rework finding: the rule once moved to after the repetition section, and review self then
+// printed a standard without the post-deploy guidance the reviewer judges by).
+const standardPostDeployCriteria = [...standardCriteria, { id: 'AC-2', text: 'The restarted loop serves the change', proofs: ['manual:post-deploy/loop-serves-change'] }];
+const standardDocumentation = { obligation: { id: 'DOCS' as const, text: "Documentation reflects this change: the diff updates this repository's documentation for any user-visible behaviour it changes, or the worker states at submission that it alters no documented behaviour.", paths: ['docs/', 'README.md', 'AGENTS.md'], changelog: null }, files: ['src/master/dispatch.ts', 'docs/x.md'] };
+const standardVerification = { maps: [{ path: 'verification/master.md', paths: ['src/master/'], sections: { Tests: 'tests/master.test.ts covers dispatch.', Drive: 'node bin/graphyard.mjs master status reads the loop.', Invariants: 'A failed launch releases its claim.', Gotchas: 'src/master.ts only re-exports.' } }], plannedFiles: ['src/master/dispatch.ts'] };
+const controlPlaneRequestThroughReviewStandard = "You are the independent Graphyard reviewer for owner/repo. Review head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa against base bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb under policy revision 1, for work item GY-9: the control plane observed it from the shared object store, and there is no pull request. Read the change with: git diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (both commits are in this session's object store; git show --stat aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa lists its files). Verification maps for the areas this item plans to change: verification/master.md: Invariants: A failed launch releases its claim. Gotchas: src/master.ts only re-exports. Review against the acceptance criteria of GY-9: [AC-1] The change works at its head [DOCS] Documentation reflects this change: the diff updates this repository's documentation for any user-visible behaviour it changes, or the worker states at submission that it alters no documented behaviour.. Judge each acceptance criterion met or unmet at head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, and state that judgement for every criterion in the review body. Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: a real defect a user or operator would hit with this change, an acceptance criterion not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. The same worker fixes BLOCKING findings on this pull request; nothing is deferred to another item. FOLLOW-UP: nits only — style, naming, hypotheticals and suggestions not worth a round; mention them briefly and move on. APPROVE when every criterion is met and no finding or thread is BLOCKING; mention the FOLLOW-UP nits in the body instead of requesting changes for them. Graphyard files no backlog item for a nit. REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. A change to a file outside plannedFiles is not a finding by itself; judge the change. End the review body with three lines, exactly of the forms \"Resolved threads: ID1 ID2\", \"Follow-up threads: ID3 ID4\" and \"Overridden threads: ID5 ID6\": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP; the third names the threads whose finding you judged wrong, with the reason for each earlier in the body. Write \"none\" after a line's colon when it names nothing. Graphyard records these lines with your verdict and resolves no GitHub thread; nits are not filed as backlog items. Name each nit on its own \"Nit: PATH:LINE — FINDING\" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. A BLOCKING finding must name a real defect a user or operator would hit with this change, a criterion that is not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. Documentation check (the standard criterion \"Documentation reflects this change\"): confirm the diff updates this repository's documentation paths (docs/, README.md, AGENTS.md) for what it changes, or, when the worker stated the change alters no documented behaviour, that the statement is true. Request changes when user-visible behaviour, commands, configuration or APIs changed without a matching documentation update; a stale or contradicted page counts as missing. The worker made no no-docs statement at submission. Documentation files in the diff: docs/x.md. This change touches src/master/dispatch.ts, which run on every loop cycle: ask what it does when repeated across many cycles, heads and items: one follow-up per approval becomes 170 for 40 parents, one refresh per merge becomes one per merge for every open candidate, one session per decision stays open unless something closes it. Ask whether that repeated behaviour stays bounded; never require new soak-suite coverage of it — lacking tests/soak-*.test.ts coverage is at most a Nit. This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project's build, tests, or servers, do not claim Graphyard work, and do not submit evidence. Post exactly one verdict, only through Graphyard, with the review body on standard input: node /srv/graphyard/bin/graphyard.mjs review post --event APPROVE <<'EOF' … EOF (use --event REQUEST_CHANGES instead only when a BLOCKING finding stands); the body ends with the three thread lines. It binds the verdict to the head this session was launched for and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. Never post a review any other way. Judge whether this diff meets what GY-9 requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. review post sends the verdict to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR; it names no pull request and runs no gh. Once it has posted, stop; Graphyard closes this session once it observes your verdict. Decide and act on your own: post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff. Never stop to ask a human for confirmation, never end your turn with a question, and never offer a menu of options to choose from; choose what the criteria and these instructions support and carry it out. If a command you need is refused or cannot succeed, record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:), naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.";
+
+// The same request with a declared post-deploy criterion: the exact text controlPlaneReviewPrompt
+// produced before the factoring, with the post-deploy rule where it sat — directly after the
+// criteria rule, before the BLOCKING/Nit rule — not after the repetition section.
+const controlPlaneRequestThroughReviewStandardWithPostDeploy = "You are the independent Graphyard reviewer for owner/repo. Review head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa against base bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb under policy revision 1, for work item GY-9: the control plane observed it from the shared object store, and there is no pull request. Read the change with: git diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (both commits are in this session's object store; git show --stat aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa lists its files). Verification maps for the areas this item plans to change: verification/master.md: Invariants: A failed launch releases its claim. Gotchas: src/master.ts only re-exports. Review against the acceptance criteria of GY-9: [AC-1] The change works at its head [AC-2] The restarted loop serves the change [DOCS] Documentation reflects this change: the diff updates this repository's documentation for any user-visible behaviour it changes, or the worker states at submission that it alters no documented behaviour.. Judge each acceptance criterion met or unmet at head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa, and state that judgement for every criterion in the review body. Classify each finding, and each open review thread, as BLOCKING or FOLLOW-UP. BLOCKING: a real defect a user or operator would hit with this change, an acceptance criterion not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. The same worker fixes BLOCKING findings on this pull request; nothing is deferred to another item. FOLLOW-UP: nits only — style, naming, hypotheticals and suggestions not worth a round; mention them briefly and move on. APPROVE when every criterion is met and no finding or thread is BLOCKING; mention the FOLLOW-UP nits in the body instead of requesting changes for them. Graphyard files no backlog item for a nit. REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. A change to a file outside plannedFiles is not a finding by itself; judge the change. End the review body with three lines, exactly of the forms \"Resolved threads: ID1 ID2\", \"Follow-up threads: ID3 ID4\" and \"Overridden threads: ID5 ID6\": the first names the review thread IDs you verified fixed, or no longer applicable, at this head; the second names the unresolved threads you judged FOLLOW-UP; the third names the threads whose finding you judged wrong, with the reason for each earlier in the body. Write \"none\" after a line's colon when it names nothing. Graphyard records these lines with your verdict and resolves no GitHub thread; nits are not filed as backlog items. AC-2 is a declared post-deploy verification: the live install can only show its outcome after this change is merged and deployed. Judge each on this head's pre-merge evidence — the change that should produce the outcome, and what the head shows before merge — and never request changes or hold the merge because the live install or deployed release has not shown it yet; it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. Name each nit on its own \"Nit: PATH:LINE — FINDING\" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. A BLOCKING finding must name a real defect a user or operator would hit with this change, a criterion that is not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. Documentation check (the standard criterion \"Documentation reflects this change\"): confirm the diff updates this repository's documentation paths (docs/, README.md, AGENTS.md) for what it changes, or, when the worker stated the change alters no documented behaviour, that the statement is true. Request changes when user-visible behaviour, commands, configuration or APIs changed without a matching documentation update; a stale or contradicted page counts as missing. The worker made no no-docs statement at submission. Documentation files in the diff: docs/x.md. This change touches src/master/dispatch.ts, which run on every loop cycle: ask what it does when repeated across many cycles, heads and items: one follow-up per approval becomes 170 for 40 parents, one refresh per merge becomes one per merge for every open candidate, one session per decision stays open unless something closes it. Ask whether that repeated behaviour stays bounded; never require new soak-suite coverage of it — lacking tests/soak-*.test.ts coverage is at most a Nit. This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project's build, tests, or servers, do not claim Graphyard work, and do not submit evidence. Post exactly one verdict, only through Graphyard, with the review body on standard input: node /srv/graphyard/bin/graphyard.mjs review post --event APPROVE <<'EOF' … EOF (use --event REQUEST_CHANGES instead only when a BLOCKING finding stands); the body ends with the three thread lines. It binds the verdict to the head this session was launched for and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. Never post a review any other way. Judge whether this diff meets what GY-9 requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. review post sends the verdict to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR; it names no pull request and runs no gh. Once it has posted, stop; Graphyard closes this session once it observes your verdict. Decide and act on your own: post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff. Never stop to ask a human for confirmation, never end your turn with a question, and never offer a menu of options to choose from; choose what the criteria and these instructions support and carry it out. If a command you need is refused or cannot succeed, record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:), naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.";
+
+test('unit:review-standard-shared-with-reviewer — the control-plane request keeps its exact pre-factoring text and carries reviewStandard\'s output verbatim', () => {
+  const prompt = reviewPrompt({ repository: 'owner/repo', cliPath: '/srv/graphyard/bin/graphyard.mjs' }, { key: 'GY-9', pr: 7, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, standardCriteria, undefined, standardDocumentation, undefined, null, null, null, standardVerification, { head: H, baseTip: B });
+  assert.equal(prompt, controlPlaneRequestThroughReviewStandard, 'the request changed when the judging text moved into reviewStandard');
+  const standard = reviewStandard({ key: 'GY-9', head: H, base: B }, standardCriteria, standardDocumentation, standardVerification);
+  assert.ok(prompt.includes(standard), 'the request contains reviewStandard verbatim, so review self reads what the reviewer reads');
+  // The same fixed inputs with a declared post-deploy criterion: byte-identical to the
+  // pre-factoring request too, with the post-deploy rule inside the shared standard.
+  const declared = reviewPrompt({ repository: 'owner/repo', cliPath: '/srv/graphyard/bin/graphyard.mjs' }, { key: 'GY-9', pr: 7, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, standardPostDeployCriteria, undefined, standardDocumentation, undefined, null, null, null, standardVerification, { head: H, baseTip: B });
+  assert.equal(declared, controlPlaneRequestThroughReviewStandardWithPostDeploy, 'the request with a declared post-deploy criterion changed when the judging text moved into reviewStandard');
+  const declaredStandard = reviewStandard({ key: 'GY-9', head: H, base: B }, standardPostDeployCriteria, standardDocumentation, standardVerification);
+  assert.ok(declared.includes(declaredStandard), 'the request contains reviewStandard verbatim for post-deploy criteria too');
+  const at = (needle: string) => declaredStandard.indexOf(needle);
+  assert.ok(at('is a declared post-deploy verification') >= 0, 'reviewStandard carries the post-deploy rule, so review self prints the guidance the reviewer judges by');
+  assert.ok(at('Review against the acceptance criteria of GY-9') < at('is a declared post-deploy verification') && at('is a declared post-deploy verification') < at('Name each nit on its own "Nit: PATH:LINE'), 'the post-deploy rule sits directly after the criteria rule, before the BLOCKING/Nit rule, as in the request before the factoring');
+});
+
+// ——— GY-2008: the launcher and the route, together, with the reviewer App bound. ———
+// An installation that retains its reviewer App after switching to control-plane merging launches
+// under the App's bot identity `${slug}[bot]`; the launch route must take exactly that shape. Both
+// regressions drive the real `launchReview` with no injected registration, so its default POST
+// runs against this file's in-process server: against the base these fail on the route's 400
+// Invalid input for the bracketed identity, and nothing is launched.
+const reviewerApp = 'graphyard-reviewer';
+const botIdentity = `${reviewerApp}[bot]`;
+const herdrStub = (calls: string[][]) => (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
+const tabsOf = (calls: string[][]) => calls.filter(args => args[0] === 'tab' && args[1] === 'create');
+/** A master root with a reviewer profile and the reviewer App bound, as an App-retaining installation is configured. */
+async function reviewerAppMaster(label: string) {
+  const root = await temporaryDirectory(label), credentials = await temporaryDirectory(`${label}-credentials`);
+  try {
+    execFileSync('git', ['init', '-q', root]);
+    execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
+    await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'workspace-graphyard' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
+    const bound = await bindReviewer(root, { appId: 99, installationId: 555, slug: reviewerApp, privateKey, credentialDirectory: credentials }, async () => ({ repository, permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
+    assert.equal(bound.identity, botIdentity);
+    return { root, credentials };
+  } catch (error) { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); throw error; }
+}
+
+test('integration:control-plane-reviewer-app-launch — with a reviewer App configured, the real launcher registers its bot identity through the real review-launch route and starts exactly one session on the requested head and base; a malformed identity is still a 400', async () => {
+  const master = await reviewerAppMaster('review-app-launch');
+  try {
+    const calls: string[][] = [];
+    const work = await insert(item('GY-9007'));
+    const launched = await launchReview(master.root, work, 'reviewer-claude', [], now(), { run: herdrStub(calls) }) as { reviewer: string; mode?: string; launch: string | null; sha: string; baseSha: string };
+    assert.equal(launched.reviewer, botIdentity, 'the configured App identity, not the profile agent name');
+    assert.deepEqual([launched.mode, launched.sha, launched.baseSha], ['control-plane', H, B], 'one launch on the requested head and base');
+    assert.ok(launched.launch, 'the real route registered the launch');
+    assert.equal(tabsOf(calls).length, 1, 'exactly one session started');
+    const [record] = (await readReviewLedger(master.root)).reviews;
+    assert.equal(record!.launch, launched.launch, 'the session record carries the launch the route allocated');
+    const registered = await stored(work.id);
+    assert.deepEqual([registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester, registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.verdict], [botIdentity, coordinator.id, H, B, null]);
+    assert.ok(tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), 'the launch token authenticates the bot identity');
+    // The widening is the `[bot]` suffix alone: every other shape stays a refusal, so independent
+    // review is not weakened to let the launch through.
+    for (const bad of ['review claude', 'reviewer[deputy]', 'sla[bot]ug', `${botIdentity} extra`])
+      assert.equal((await request(tokenOf(coordinator), `work/${work.id}/review-launch`, launchBody(freshToken(), { reviewer: bad }))).status, 400, bad);
+  } finally { await rm(master.root, { recursive: true, force: true }); await rm(master.credentials, { recursive: true, force: true }); }
+});
+
+test('integration:control-plane-reviewer-app-independence — the launched reviewer session posts its verdict with its own launch token; wrong head, wrong token, implementer-as-reviewer, requester-as-reviewer and a second verdict are still refused, each with its refusal recorded', async () => {
+  const master = await reviewerAppMaster('review-app-independence');
+  try {
+    const calls: string[][] = [];
+    const work = await insert(item('GY-9008'));
+    await launchReview(master.root, work, 'reviewer-claude', [], now(), { run: herdrStub(calls) });
+    const [tab] = tabsOf(calls);
+    assert.equal(tabsOf(calls).length, 1);
+    const binding = JSON.parse(await readFile(join(tab!.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length), reviewBindingFile), 'utf8')) as ReviewPostBinding;
+    assert.deepEqual([binding.mode, binding.head, binding.baseTip], ['control-plane', H, B]);
+    const token = binding.verdictToken!;
+    const registered = await stored(work.id);
+    assert.equal(hashOf(token), registered.reviewLaunch!.tokenHash, 'the session holds the one token the launch registered');
+    // Wrong token: an unregistered token authenticates nobody, and a registered caller offering
+    // another token is refused by name; a wrong head records nothing.
+    const stranger = freshToken();
+    assert.equal((await request(stranger, `work/${work.id}/review-verdict`, verdict(stranger, 'APPROVE'))).status, 401);
+    const forged = await request(tokenOf(coordinator), `work/${work.id}/review-verdict`, verdict(stranger, 'APPROVE'));
+    assert.deepEqual([forged.status, forged.body.error], [403, tokenRefusal]);
+    const wrongHead = await request(token, `work/${work.id}/review-verdict`, verdict(token, 'APPROVE', undefined, M));
+    assert.deepEqual([wrongHead.status, wrongHead.body.error], [409, headRefusal(M, H)]);
+    assert.deepEqual((await stored(work.id)).observation!.reviews, [], 'nothing recorded for the refused verdicts');
+    // The session's own verdict, with its own launch token, lands under the bot identity.
+    const approved = await request(token, `work/${work.id}/review-verdict`, verdict(token, 'APPROVE'));
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    assert.equal(approved.body.reviewer, botIdentity);
+    const [review] = (await stored(work.id)).observation!.reviews as { reviewer: string; state: string }[];
+    assert.deepEqual([review!.reviewer, review!.state], [botIdentity, 'APPROVED']);
+    // One launch yields one verdict; the spent token is withdrawn.
+    const second = await request(tokenOf(coordinator), `work/${work.id}/review-verdict`, verdict(token, 'APPROVE'));
+    assert.deepEqual([second.status, second.body.error], [409, secondVerdictRefusal('GY-9008', H)]);
+    assert.equal(tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), false);
+    // The bot identity implementing the item: the launcher refuses before anything starts, and the
+    // route refuses the verdict with review.independence-refused recorded and the token withdrawn.
+    const implemented = await insert(item('GY-9009', { implementers: [botIdentity], workspaces: [] }));
+    await assert.rejects(launchReview(master.root, implemented, 'reviewer-claude', [], now(), { run: herdrStub(calls) }), /graphyard-reviewer\[bot\] implemented GY-9009/);
+    assert.equal(tabsOf(calls).length, 1, 'no session for a reviewer of its own work');
+    const own = freshToken();
+    assert.equal((await request(tokenOf(coordinator), `work/${implemented.id}/review-launch`, launchBody(own, { reviewer: botIdentity }))).status, 200);
+    const refused = await request(own, `work/${implemented.id}/review-verdict`, verdict(own, 'APPROVE'));
+    assert.deepEqual([refused.status, refused.body.error], [403, independenceRefusal(botIdentity, 'implemented', 'GY-9009')]);
+    assert.equal((await events(implemented.id, 'review.independence-refused')).length, 1);
+    assert.equal(tokenRegistered(http.services, hashOf(own)), false);
+    assert.equal((await request(own, `work/${implemented.id}/review-verdict`, verdict(own, 'APPROVE'))).status, 401);
+    // The launch's requester as its reviewer: refused the same way.
+    const requested = await insert(item('GY-9010'));
+    const self = freshToken();
+    assert.equal((await request(tokenOf(coordinator), `work/${requested.id}/review-launch`, launchBody(self, { reviewer: coordinator.id }))).status, 200);
+    const selfRefused = await request(self, `work/${requested.id}/review-verdict`, verdict(self, 'APPROVE'));
+    assert.deepEqual([selfRefused.status, selfRefused.body.error], [403, independenceRefusal(coordinator.id, 'requested', 'GY-9010')]);
+    assert.equal((await events(requested.id, 'review.independence-refused')).length, 1);
+  } finally { await rm(master.root, { recursive: true, force: true }); await rm(master.credentials, { recursive: true, force: true }); }
+});
+
+test('unit:review-launch-bot-identity — the launch body takes the configured App\'s bot login (SLUG[bot]) beside principal names and refuses every other shape', () => {
+  const base = { head: H, baseTip: B, tokenHash: 'e'.repeat(64), expiresAt: now() };
+  assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: 'review-claude-1' }).reviewer, 'review-claude-1');
+  assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: botIdentity }).reviewer, botIdentity);
+  for (const bad of ['', 'review claude', '[bot]', 'reviewer[deputy]', 'sla[bot]ug', `${botIdentity} extra`])
+    assert.throws(() => reviewLaunchBodySchema.parse({ ...base, reviewer: bad }), Error, bad);
 });

@@ -169,6 +169,23 @@ test('unit:loop-reports-cli-checkout-commit — loopCodeRoot names the launcher\
   assert.equal(loopCodeRoot(launcher, '/srv/repo'), '/srv/repo');
 });
 
+test('unit:checkout-guard-never-judges-the-suite-checkout — a suite standing under a temporary directory is still never a test\u2019s code root (GY-2018)', async () => {
+  // GY-2018: the merge writer's trial runs this suite from a short checkout on a durable root —
+  // /var/tmp here, which the guard's own gate names a temporary directory. At 9bc46db8 that gate
+  // judged the suite's own checkout, so every fixture config's launcher resolved to the suite's
+  // tree instead of the fixture it injected, and eight proofs across loop-code-root, loop-faults,
+  // loop-self-upgrade and executor-supervision failed on the base tip itself. A trial-shaped
+  // checkout held to the rule through the seam the fix carries fails there and passes here.
+  const trialCheckout = await temporaryDirectory('gy-2018-trial');
+  assert.equal(loopCodeRoot(join(trialCheckout, 'bin', 'graphyard.mjs'), '/srv/repo', trialCheckout), '/srv/repo', 'the suite checkout standing under a temporary directory is its own, never a judged one');
+  // The process's own working directory is what a bare launcher name resolves to; under the trial
+  // that is the trial checkout, and the default seam names it so it is refused here too.
+  assert.equal(loopCodeRoot('graphyard', '/srv/repo'), '/srv/repo');
+  // The exclusion is the suite's checkout alone: a fixture under a temporary directory is still judged.
+  const fixtureCheckout = await temporaryDirectory('gy-2018-fixture');
+  assert.equal(loopCodeRoot(join(fixtureCheckout, 'bin', 'graphyard.mjs'), '/srv/repo', trialCheckout), fixtureCheckout);
+});
+
 test('unit:upgrade-acts-on-cli-checkout-only — the upgrade fetches, diffs and moves the CLI checkout and leaves the managed repository\u2019s HEAD and working tree untouched', async () => {
   // GY-1958: the managed repository is another clone of the checkout's own origin — the fork shape
   // the upgrade still aligns — so the pass fetches and moves the CLI checkout, and the managed
@@ -374,48 +391,6 @@ test('unit:upgrade-acts-on-cli-checkout-only — a dirty-checkout upgrade pins a
   assert.equal(await readFile(unitPath, 'utf8'), loopUnitText({ ...unitInput, heldLauncher: null }), 'the loop unit goes back to the checkout’s launcher');
   assert.equal(state.upgrade.snapshot, undefined);
   assert.equal(self, 1, 'the lift restarts nothing: the code is the same');
-  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
-});
-
-test('unit:upgrade-acts-on-cli-checkout-only — a restart held for the served release pins the served release under the CLI checkout and completes onto it when production catches up', async () => {
-  const cli = await cliCheckout();
-  const tip2 = await cli.advance(2);
-  const managed = await managedCloneOf(cli.origin, cli.loaded);
-  const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'));
-  const state = emptyDaemonState(master);
-  state.release = { commit: cli.loaded, dirty: false };
-  // Production serves the release the loop already runs, which does not contain the merged tip.
-  state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: cli.loaded, at, reason: null, deployed: ['GY-1'], pending: [] });
-  const executorEntries: (string | null)[] = [];
-  let executors: string[] = [], self = 0;
-  const deps: SelfUpgradeDeps = {
-    root: managed.root, run, now: () => now, persist: async () => {},
-    alignUnit: async () => ({ wrote: 'updated', reason: null }),
-    alignExecutorUnits: async script => { executorEntries.push(script); return { wrote: 'updated', reason: null }; },
-    restartExecutors: async to => { executors.push(to); return { result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
-    restartSelf: async () => { self += 1; state.release = await startupRelease(managed.root, master); },
-  };
-  const held = await performSelfUpgrade(master, state, deps);
-  assert.equal(held.outcome, 'pending', JSON.stringify(held));
-  assert.equal(state.upgrade.stalled?.cause, 'release-lagged');
-  // The pin holds the SERVED release, under the CLI checkout: the moved checkout's launcher speaks
-  // the served protocol until the plane catches up, and the managed repository holds nothing.
-  assert.equal(readHeldCli(cli.checkout), cli.loaded);
-  assert.ok(!existsSync(heldCliPointer(managed.root)));
-  assert.equal(git(cli.checkout, 'rev-parse', 'HEAD'), tip2, 'the checkout moved; only the restart is held');
-  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
-  assert.equal(state.release.commit, cli.loaded, 'the loop still runs the served release');
-  // Production catches up: the held restart completes onto the checkout, the pin lifts, the
-  // executor units return, and the loop re-executes onto the commit it now reports.
-  state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: tip2, at, reason: null, deployed: ['GY-1'], pending: [] });
-  const served = await performSelfUpgrade(master, state, deps);
-  assert.equal(served.outcome, 'upgraded', JSON.stringify(served));
-  assert.equal(served.code, true);
-  assert.equal(readHeldCli(cli.checkout), null, 'the pin is lifted once the plane serves the move');
-  assert.deepEqual(executorEntries, [null], 'the executor units return to the checkout’s entry');
-  assert.deepEqual(executors, [tip2]);
-  assert.equal(self, 1);
-  assert.deepEqual(state.release, { commit: tip2, dirty: false }, 'the restarted loop reports the checkout it runs');
   assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
 });
 

@@ -157,7 +157,7 @@ test('unit:post-deploy-criteria — the reviewer judges a declared criterion on 
   assert.match(section, /^AC-3 is a declared post-deploy verification/);
   assert.match(section, /on this head's pre-merge evidence/);
   assert.match(section, /never request changes or hold the merge because the live install or deployed release has not shown it yet/);
-  assert.match(section, /master verify-deployment checks it on the serving release after delivery and files a follow-up naming the delivered item when it fails/);
+  assert.match(section, /it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item/);
   // GitHub mode and control-plane mode both carry it; an item with none keeps its request byte-identical.
   const plain = reviewPrompt(config, binding, undefined, undefined, ordinary);
   assert.equal(plain, reviewPrompt(config, binding, undefined, undefined, ordinary.map(({ id, text }) => ({ id, text }))));
@@ -176,8 +176,8 @@ function delivered(overrides: Partial<Work> = {}): Work {
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], delivery: { mergedAt: at, mergeSha, authorizationRevision: 2 }, ...overrides } as Work;
 }
 
-test('unit:post-deploy-criteria — master verify-deployment checks a declared criterion on the serving release and reports it owed when it fails', async () => {
-  const { createSchema, postDeployChecks, verifyDeployment } = await modules();
+test('unit:post-deploy-criteria — the post-deploy check reads a declared criterion on the serving release and reports it owed when it fails', async () => {
+  const { createSchema, postDeployChecks } = await modules();
   const checks = postDeployChecks(delivered(), release);
   assert.equal(checks.length, 1);
   const [owed] = checks;
@@ -221,27 +221,6 @@ test('unit:post-deploy-criteria — master verify-deployment checks a declared c
   const twice = postDeployChecks(longWork, release);
   assert.equal(twice[0].followUp!.title, twice[1].followUp!.title, 'the titles are cut alike');
   assert.notEqual(twice[0].followUp!.requestId, twice[1].followUp!.requestId);
-  // Through verifyDeployment: the record is written and the owed check is reported; nothing is filed.
-  const now = Date.now();
-  const work = [delivered()];
-  const records: unknown[] = [];
-  const effects = {
-    snapshot: async () => ({ work, now: new Date(now).toISOString() }),
-    observe: async () => ({ source: 'endpoint' as const, sha: release, at: new Date(now).toISOString(), reason: null, deployed: ['GY-42'], pending: [] }),
-    // A launcher checkout of another repository emits nothing: the served merge is the whole check.
-    release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
-    emit: async () => assert.fail('nothing is emitted'), repository: 'owner/project', now: () => now,
-    record: async (_work: Work, data: unknown) => { records.push(data); },
-  };
-  const verified = await verifyDeployment(work[0], effects);
-  assert.equal(verified.result, 'verified', verified.refusals.join('; '));
-  assert.equal(records.length, 1);
-  assert.deepEqual(verified.postDeploy, [{ criterion: 'AC-3', proof: 'manual:post-deploy/harness-drift-cleared', result: 'owed' }]);
-  // A refused verification checks nothing and files nothing.
-  const refused = await verifyDeployment(work[0], { ...effects, observe: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'no endpoint', deployed: [], pending: [] }) });
-  assert.equal(refused.result, 'refused');
-  assert.deepEqual(refused.postDeploy, []);
-  assert.equal(records.length, 1);
 });
 
 // The linked instances of GY-1685's pattern, as their criteria were written when each item blocked, each run below
@@ -362,7 +341,7 @@ test('unit:post-deploy-criteria — an item of nothing but declared post-deploy 
   assert.equal(createSchema.safeParse(intent(only)).success, false);
   assert.equal(decisionInputs.requirements.safeParse(revision(only)).success, false, 'a requirements decision cannot leave an item with only declared verifications');
   assert.equal(decisionInputs.requirements.safeParse(revision([buildable, ...only])).success, true);
-  const plan = { ref: 'verify', title: 'Verify', outcomes: ['o1'], cases: ['c1'], plannedFiles: ['src/x.ts'], criteria: only };
+  const plan = { ref: 'verify', title: 'Verify', plain: 'Checks the live rate.', outcomes: ['o1'], cases: ['c1'], plannedFiles: ['src/x.ts'], criteria: only };
   assert.equal(planItemSchema.safeParse(plan).success, false, 'a goal plan item of only declared verifications is refused');
   assert.equal(planItemSchema.safeParse({ ...plan, criteria: [buildable, ...only] }).success, true);
   // master create and master requirements refuse it before reading the tree or posting, like an undeclared observation.

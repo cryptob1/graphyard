@@ -1,7 +1,7 @@
-import { deliveryState, observationWindowHold, type Gate, type Work } from '../model.js';
+import { observationWindowHold, type Gate, type Work } from '../model.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
-import { ciCheckRefusalPattern } from './ci-refusal.js';
+import { ciCheckRefusalPattern, mergeWriterPushPattern, mergeWriterTrialPattern } from './ci-refusal.js';
 import { formatAge, statusDuration, type StatusDuration } from './duration.js';
 import { blockerView, classifyBlocker, type BlockerClass } from './blocker-class.js';
 import { deliveryOutcome } from './format.js';
@@ -64,6 +64,8 @@ export function plainReason(reason: string, gate: string, now = Date.now(), work
     [/^Bootstrap obligation inherited from (\S+) (\S+): (\S+) needs/, m => `Owes the proof ${m[3]} that ${m[1]} put off`],
     [/^Trusted (\S+) evidence from (\S+) is no longer independent/, m => `The ${m[1]} proof no longer counts: ${m[2]} later worked on this item`, true],
     [/^GitHub has not been observed at the current candidate$/, () => 'Graphyard is re-checking GitHub'],
+    [mergeWriterTrialPattern, () => 'Waiting for Graphyard to build and test the merge'],
+    [mergeWriterPushPattern, () => 'Waiting for Graphyard to merge it'],
     [/^Required Graphyard check and merge-queue branch protection/, () => 'GitHub merge protection is not confirmed yet', true],
     [/^Pull request is not mergeable against the current base$/, () => 'The pull request conflicts with the main branch', true],
     [/^Unresolved (\S+) escalation requires operator resolution: (.*)$/s, m => `Needs a decision about ${trigger[m[1]] ?? 'a problem'}: ${m[2]}`, true],
@@ -149,7 +151,7 @@ const stepWords: Record<string, string> = {
   dispatch: 'handing it to a builder', 'request-review': 'asking for a review',
   'request-rework': 'sending it back for changes', 'approve-scope': 'deciding which files it may touch',
   resync: 're-reading it from GitHub', reclaim: 'freeing it from its last builder', merge: 'merging it',
-  'verify-deployment': 'checking the deployment that carries it', escalate: 'getting somebody to decide it',
+  escalate: 'getting somebody to decide it',
 };
 
 /**
@@ -204,13 +206,7 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   // Closed without delivery (src/model/closure.ts): terminal, never "shipped".
   if (work.closure) return make(`Closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''}: ${work.closure.reason}`, 'shipped');
   if (phase === 'shipped') {
-    const state = deliveryState(work);
-    const merged = link ? `Shipped in ${link}` : 'Shipped';
-    if (state === 'delivered-with-failure') return make(`Deployed with a failure — the check after deploying failed${link ? ` (${link})` : ''}`, 'stuck', 'The check after deploying failed');
-    if (state === 'awaiting-deployment') return make(`${merged} — waiting to be deployed`, 'waiting', 'Waiting to be deployed');
-    if (state === 'awaiting-smoke') return make(`Deployed, awaiting verification${link ? ` — ${link}` : ''}`, 'waiting', 'Waiting for the check after deploying');
-    if (state === 'smoke-passed') return make(`Production verified${link ? ` — ${link}` : ''}`, 'shipped');
-    return make(merged, 'shipped');
+    return make(link ? `Shipped in ${link}` : 'Shipped', 'shipped');
   }
   if (work.violations.length) return make(`Stuck: ${work.violations[0]}`, 'stuck', work.violations[0]);
   const gate = work.gates.find(g => !g.passed);

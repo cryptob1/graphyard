@@ -24,7 +24,7 @@ export const parkCommand: CliCommand = {
     '                                agents: ASK and STEP refuse them.',
     '                                NEEDED is the exact thing the human must provide: every human',
     '                                step the item still needs, never one at a time (a scope',
-    '                                widening is refused: use scope-request). The item',
+    '                                widening is refused: edit the file you need and submit). The item',
     '                                parks without a lease and nothing else waits on it. Each',
     '                                --choice is a button the human presses (--choice-text asks for',
     '                                their words too, --choice-secret for a value sealed to this',

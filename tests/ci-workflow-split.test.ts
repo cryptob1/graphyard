@@ -4,7 +4,6 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isReleaseCandidateTest, listTestFiles, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
-import { commitVerdict } from '../src/main-guard.js';
 import { policySchema } from '../src/model/policy.js';
 import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -49,37 +48,15 @@ const longSuiteMarkers: [string, RegExp][] = [
   ['release-candidate test files', /ci-tests\.mjs release-candidate/],
 ];
 
-test('unit:fast-gate-required-set — the required CI checks exclude the soak, container-acceptance, container-recovery, chart and timing-budget suites, and the required set is bounded under ten minutes', async () => {
-  const ci = read(ciPath), jobs = jobsOf(ci);
+test('unit:fast-gate-required-set — GY-2009 removes Actions PR gates; pre-merge selection still excludes release-candidate suites', async () => {
+  assert.ok(!existsSync(join(repositoryRoot, ciPath)), 'ci.yml is gone; the merge writer trial is the gate');
+  assert.ok(!existsSync(join(repositoryRoot, '.github/workflows/acceptance.yml')));
+  assert.ok(!existsSync(join(repositoryRoot, '.github/workflows/deploy-smoke.yml')));
   const required = policySchema.parse({}).checks;
   assert.deepEqual(required, ['test', 'typecheck'], 'the default required checks are test and typecheck');
-  // Every workflow that runs on a pull request: only ci.yml (and the trusted acceptance harness,
-  // which certifies an item's own proofs and is not a branch-protection check) may.
-  const workflows = ['ci.yml', 'acceptance.yml', 'deploy-smoke.yml', 'release.yml', 'release-candidate.yml', 'release-candidate-soak.yml'].map(name => `.github/workflows/${name}`).filter(path => existsSync(join(repositoryRoot, path)));
-  assert.ok(!existsSync(join(repositoryRoot, '.github/workflows/helm.yml')), 'the chart no longer has a pull-request workflow of its own');
-  for (const path of workflows.filter(path => path !== ciPath && path !== '.github/workflows/acceptance.yml'))
+  for (const path of [candidatePath, soakPath, '.github/workflows/release.yml'])
     assert.equal(readWorkflow(read(path)).pullRequest, false, `${path} never runs on a pull request`);
 
-  // The required set: each required check's job and everything it needs, transitively.
-  const set = new Set<string>(), visit = (id: string) => {
-    if (set.has(id)) return;
-    assert.ok(jobs.has(id), `${ciPath} defines job ${id}`);
-    set.add(id); jobs.get(id)!.needs.forEach(visit);
-  };
-  required.forEach(visit);
-  assert.deepEqual([...set].sort(), ['test', 'test-browser', 'test-shard', 'typecheck']);
-  for (const id of set) for (const [suite, marker] of longSuiteMarkers) assert.doesNotMatch(jobs.get(id)!.text, marker, `required job ${id} runs no ${suite}`);
-  for (const id of ['container-acceptance', 'container-recovery', 'chart', 'soak']) assert.ok(!jobs.has(id), `${ciPath} has no ${id} job`);
-  for (const [suite, marker] of longSuiteMarkers) assert.doesNotMatch(ci, marker, `${ciPath} runs no ${suite}`);
-
-  // Bounded: every required job declares a timeout, and the longest chain of them is under ten minutes.
-  const chain = (id: string): number => jobs.get(id)!.timeout! + Math.max(0, ...jobs.get(id)!.needs.map(chain));
-  for (const id of set) assert.ok(jobs.get(id)!.timeout, `required job ${id} declares timeout-minutes`);
-  const longest = Math.max(...required.map(chain));
-  assert.ok(longest < 10, `the required set completes in under ten minutes: its longest chain of timeouts is ${longest}`);
-
-  // The shards run only pre-merge files: the selection for a full run (a push to main, a queue tip)
-  // names every test file except the release-candidate suites.
   const kinds = new Set(Object.values(releaseCandidateTests));
   assert.deepEqual([...kinds].sort(), ['soak', 'timing-budget']);
   for (const file of Object.keys(releaseCandidateTests)) assert.ok(existsSync(join(repositoryRoot, file)), `${file} exists`);
@@ -89,17 +66,8 @@ test('unit:fast-gate-required-set — the required CI checks exclude the soak, c
   const selected = readFileSync(out, 'utf8').split('\n').filter(Boolean);
   assert.deepEqual(selected, preMergeTestFiles());
   assert.deepEqual(selected, listTestFiles().filter(file => !(file in releaseCandidateTests)));
-  // A test whose verdict is a wall-clock budget through the timing helper is a release-candidate
-  // suite; the helper's own tests (synthetic samples, no clock) stay.
   for (const file of listTestFiles().filter(file => file !== 'tests/timing-stability.test.ts'))
     if (/\bassertTiming\(/.test(read(file))) assert.ok(isReleaseCandidateTest(file), `${file} asserts a timing budget, so it runs on the release candidate`);
-
-  // The recorded per-file durations fit each shard's bound even run one file after another.
-  const shard = jobs.get('test-shard')!;
-  const shardCount = (shard.text.match(/shard: \[([^\]]*)\]/)?.[1] ?? '').split(',').filter(entry => entry.trim()).length;
-  assert.ok(shardCount >= 4, 'the test-shard matrix lists its shards');
-  const shards = shardFiles(preMergeTestFiles(), readDurations(), shardCount);
-  for (const entry of shards) assert.ok(entry.durationMs < shard.timeout! * 60_000, `a shard's recorded files take ${Math.round(entry.durationMs / 1000)}s in series, within its ${shard.timeout}-minute bound`);
 });
 
 test('unit:long-suites-on-candidate — the excluded suites run in release-candidate.yml (the soak in the release-candidate-soak.yml it dispatches) against a pinned SHA, by dispatch with a sha input or on push of an rc tag, never on a pull request', () => {
@@ -189,45 +157,6 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   for (const id of [...jobs.keys(), ...soakJobs.keys()]) assert.ok(!required.includes(id), `${id} is not a required check`);
 });
 
-test('unit:ci-bubblewrap-install-resilient — the shards install bubblewrap with bounded, retried apt calls that fall back to other mirrors, and an install that fails every attempt concludes the shard timed out, which the main guard reruns and never reverts', () => {
-  const shard = jobsOf(read(ciPath)).get('test-shard')!;
-  const start = shard.text.indexOf('      - name: Install bubblewrap'), end = shard.text.indexOf('\n      - ', start + 1);
-  assert.ok(start >= 0 && end > start, 'test-shard installs bubblewrap');
-  const step = shard.text.slice(start, end);
-  // Retried, each attempt bounded, the later ones on a fallback mirror.
-  assert.match(step, /for attempt in 1 2 3; do/, 'three attempts');
-  const bounds = [...step.matchAll(/sudo timeout (\d+) apt-get (update|install)/g)];
-  assert.deepEqual(bounds.map(match => match[2]), ['update', 'install'], 'both apt calls of an attempt are bounded');
-  const attempt = bounds.reduce((sum, match) => sum + Number(match[1]), 0) + Number(step.match(/^ +sleep (\d+)$/m)?.[1] ?? NaN);
-  const mirrors = step.match(/mirrors=\(''((?: https?:\/\/\S+)+)\)/)?.[1].trim().split(' ') ?? [];
-  assert.equal(mirrors.length, 2, 'attempts 2 and 3 each switch to a fallback mirror');
-  assert.match(step, /sed -i -E "s#\^URIs: \.\*#URIs: \$mirror#" \/etc\/apt\/sources\.list\.d\/ubuntu\.sources/, 'the fallback rewrites only Ubuntu\'s own sources');
-  assert.match(step, /command -v bwrap >\/dev\/null && installed=true/, 'a preinstalled bubblewrap skips apt');
-  assert.match(step, /\[\[ \$installed == true \]\] \|\| exit 1/, 'an install that failed every attempt fails the step');
-  // The step is bounded, and neither its failure nor its timeout fails the job: the next step then
-  // outwaits the job's own timeout, so the shard concludes timed out rather than failed.
-  const stepTimeout = Number(step.match(/^ {8}timeout-minutes: (\d+)$/m)?.[1]);
-  assert.ok(stepTimeout > 0 && 3 * attempt < stepTimeout * 60, `the three attempts (${3 * attempt}s) fit the step's ${stepTimeout}-minute bound`);
-  assert.match(step, /^ {8}id: bubblewrap$/m);
-  assert.match(step, /^ {8}continue-on-error: true$/m, 'a failed or timed-out install never fails the job by itself');
-  const holdStart = shard.text.indexOf('      - name: Hold an exhausted bubblewrap install'), hold = shard.text.slice(holdStart, shard.text.indexOf('\n      - ', holdStart + 1));
-  assert.equal(holdStart, end + 1, 'the hold step follows the install');
-  assert.match(hold, /^ {8}if: steps\.bubblewrap\.outcome == 'failure'$/m, 'it runs only when the install failed or timed out');
-  assert.doesNotMatch(hold, /timeout-minutes/, 'the job timeout, not a step timeout, ends it');
-  assert.match(hold, /::error title=Infrastructure failure, not a test failure::/);
-  assert.ok(Number(hold.match(/^ +sleep (\d+)$/m)?.[1]) > shard.timeout! * 60, 'it waits past the job timeout');
-
-  // The guard's classification of such a run: the shard timed out, the aggregate test check failed
-  // because of it, so main is a cancelled run to rerun, not a culprit to revert.
-  const ci = [15368], required = ['test', 'typecheck'];
-  const checks = [
-    { name: 'typecheck', result: 'success', appId: 15368, id: 1 },
-    { name: 'test shard 1', result: 'success', appId: 15368, id: 2 },
-    { name: 'test shard 2', result: 'timed_out', appId: 15368, id: 3 },
-    { name: 'test-browser', result: 'success', appId: 15368, id: 4 },
-    { name: 'test', result: 'failure', appId: 15368, id: 5 },
-  ];
-  assert.deepEqual(commitVerdict(checks, required, ci), { verdict: 'cancelled', failing: ['test'], checkRun: 3 });
-  // A step that failed the shard outright is a failing test, which is why the step never fails on its own.
-  assert.deepEqual(commitVerdict(checks.map(check => check.id === 3 ? { ...check, result: 'failure' } : check), required, ci), { verdict: 'fail', failing: ['test'] });
+test('unit:ci-bubblewrap-install-resilient — GY-2009 removed the Actions shards, so no bubblewrap install step remains to bound', () => {
+  assert.ok(!existsSync(join(repositoryRoot, ciPath)), 'ci.yml is gone');
 });

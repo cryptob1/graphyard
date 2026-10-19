@@ -7,11 +7,12 @@ import { createHash } from 'node:crypto';
 import { hostname } from 'node:os';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
 import { installDirectory } from '../src/install/secrets.js';
-import { fakeTransport, type Transport } from '../src/install/transport.js';
-import { githubResponses, harness, REPOSITORY } from './install-harness.js';
+import type { Transport } from '../src/install/transport.js';
+import { harness, REPOSITORY } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-const PROTECTION_READ = `gh api repos/${REPOSITORY}/branches/main/protection`;
+/** The apply's deploy-key read (GY-2010), where the first apply is held while the second tries the lock. */
+const DEPLOY_KEY_READ = `gh repo deploy-key list -R ${REPOSITORY} --json id,key,title`;
 
 test('unit:install-apply-exclusive-lock — a second install --apply on one installation directory refuses on the first one\'s lock, naming its pid, and writes nothing while it is held; a lock left by a process that is gone is reclaimed', async () => {
   // Loaded when the test runs, so a checkout without the lock fails here as a test case.
@@ -19,13 +20,13 @@ test('unit:install-apply-exclusive-lock — a second install --apply on one inst
   assert.equal(typeof applyLockFile, 'function', 'src/install/index.ts exports no apply lock');
   const fixture = await harness({ provider: 'railway' });
   try {
-    // The recording transport, held at the first apply's protection read until released.
+    // The recording transport, held at the first apply's deploy-key read until released.
     let gated = false, entered!: () => void, release!: () => void;
     const reached = new Promise<void>(accept => { entered = accept; });
     const held = new Promise<void>(accept => { release = accept; });
     const recording = fixture.transport;
     const transport: Transport = { ...recording, async exec(program, args, options) {
-      if (gated && [program, ...args].join(' ') === PROTECTION_READ) { gated = false; entered(); await held; }
+      if (gated && [program, ...args].join(' ') === DEPLOY_KEY_READ) { gated = false; entered(); await held; }
       return recording.exec(program, args, options);
     } };
     const deps = { ...fixture.deps, transport };
@@ -166,34 +167,6 @@ test('unit:install-partial-apply-lock — install --herdr-only and --profiles-on
   }
   assert.deepEqual(touched, [], 'a partial apply wrote on the host while another apply held the lock');
   assert.equal(await readFile(applyLockFile(directory), 'utf8'), live);
-});
-
-test('unit:protection-record-no-replace — a protection record that appears between the existence check and the publish is kept byte-for-byte and read back, never replaced', async () => {
-  const { recordProtectionOnce, protectionRecordFile } = await import('../src/install/github.js') as any;
-  const fixture = await harness({ provider: 'railway' });
-  try {
-    const directory = installDirectory('owner-project', fixture.configHome);
-    const file = protectionRecordFile(directory);
-    const { prepareInstallDirectory } = await import('../src/install/secrets.js');
-    await prepareInstallDirectory(directory, fixture.root);
-    // The faster apply's record: the branch's true protection before Graphyard wrote any.
-    const baseline = { format: 'graphyard-protection-record-v1', repository: REPOSITORY, branch: 'main', recordedAt: new Date(0).toISOString(),
-      protection: { url: `https://api.github.com/repos/${REPOSITORY}/branches/main/protection`, enforce_admins: { enabled: false } }, allowAutoMerge: false, mergeQueueRuleset: null };
-    const text = `${JSON.stringify(baseline, null, 2)}\n`;
-    // GitHub as the slower apply reads it, after the faster one's protection write: the record
-    // appears during that read, after recordProtectionOnce found none.
-    const recording = fakeTransport({ responses: githubResponses({ installed: false, protection: { enforce_admins: { enabled: true } }, deliveries: [], hookConfig: null }) });
-    let wrote = false;
-    const gh = async (args: string[], options: { allowFailure?: boolean } = {}) => {
-      if (!wrote && ['gh', ...args].join(' ') === PROTECTION_READ) { wrote = true; await writeFile(file, text, { mode: 0o600, flag: 'wx' }); }
-      return recording.exec('gh', args, { allowFailure: options.allowFailure });
-    };
-    const answered = await recordProtectionOnce(gh, { directory, repository: REPOSITORY, branch: 'main', now: 1_000, assertClean: (value: string) => value });
-    assert.ok(wrote, 'the record was not created between the check and the publish');
-    assert.equal(await readFile(file, 'utf8'), text, 'the standing record was replaced');
-    assert.deepEqual(answered, baseline, 'the standing record was not read back');
-    assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('protection-record.json.')), [], 'the unpublished record was left behind');
-  } finally { await fixture.cleanup(); }
 });
 
 async function snapshot(directory: string): Promise<Record<string, string>> {

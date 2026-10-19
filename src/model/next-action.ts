@@ -2,10 +2,10 @@ import { dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { attestationWait } from './unproduced-attestation.js';
 import { standingEscalations } from './escalation.js';
 import { proofStep } from './action-proof-step.js';
-import { deliveryState, deploymentUnrecorded } from './delivery.js';
 import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
+import { mergeWriterRefusal } from './ci-refusal.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, type Work } from './work.js';
 import { observationPass } from './loop-observation.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
@@ -96,8 +96,8 @@ export function nextAction(work: Work, all: Work[], now: Date): OpenAction | nul
  * long the item has held it.
  *
  * The order is the order a delivery actually unblocks in: a typed request an agent left behind
- * first, because a session gave up its lease waiting for that answer; then the deployment a
- * delivered item still owes; then an assignment nobody holds any more; then a live worker blocked
+ * first, because a session gave up its lease waiting for that answer; then a delivered item, which
+ * owes nothing; then an assignment nobody holds any more; then a live worker blocked
  * on a scope answer; then the first refusing gate; and finally the merge a fully proven candidate
  * is authorized for. A standing escalation is not in that order at all: it refuses delivery, the
  * merge gate carries its refusal like any other, and `carriedAction` (concerns.ts) decides what it
@@ -137,18 +137,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     { kind: 'escalate', trigger: 'decision', detail: decision.decider.command ?? decision.reason }, `request:${decision.id}`);
 
   if (work.stage === 'done' && work.closure) return waits({ kind: 'settled', on: null, detail: `${key} was closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''} by ${work.closure.by}: ${work.closure.reason}` });
-  if (work.stage === 'done') {
-    const state = deliveryState(work);
-    // GY-1824: a delivery whose serving release is unrecorded owes the verify-deployment path
-    // whatever its smoke policy says and however old its merge — the executor records it exactly as
-    // it records a smoke item's, filing and releasing any owed post-deploy follow-up first. Done
-    // items are evaluated only on delivery and by the reconciliation pass, which pulls older settled
-    // deliveries in a few at a time (`deploymentBackfillPerPass`), so the backfill stays bounded.
-    if (work.delivery && (state === 'awaiting-deployment' || (state === 'delivered' && deploymentUnrecorded(work))))
-      return make('verify-deployment', `${key} merged as ${short(work.delivery.mergeSha)} and no deployment carrying it has been observed`,
-        { kind: 'verify-deployment', mergeSha: work.delivery.mergeSha, mergedAt: work.delivery.mergedAt, state }, `delivery:${work.delivery.mergeSha}`);
-    return waits({ kind: 'settled', on: null, detail: `${key} is delivered (${state}); its gates are history and no gate refuses it` });
-  }
+  // Done = merged (GY-1981): a delivery owes nothing more, whatever its smoke policy or deployment record.
+  if (work.stage === 'done') return waits({ kind: 'settled', on: null, detail: `${key} is delivered; its gates are history and no gate refuses it` });
 
   // A running decomposition holds dispatch: an item mid-split is not offered to workers.
   if (decompositionHold(work, now.getTime())) return waits({ kind: 'session', on: 'decomposition', detail: `${key} is being split into child items before dispatch` }, 'ready', 'Splitting into child items before dispatch');
@@ -215,6 +205,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     // An unfinished dependency is the dependency's dispatch, not this item's; nothing waits here.
     const dependency = failing.name === 'ready' ? refusal.match(/^Dependency (.+) is unfinished$/) : null;
     if (dependency) return waits({ kind: 'dependency', on: dependency[1], detail: `${key} waits on ${dependency[1]}: ${refusal}` }, failing.name, refusal);
+    // GY-2010: the merge writer trials and pushes every candidate it admits, so a refusal it alone
+    // answers is a wait on it, never a row an executor claims or an escalation.
+    if (mergeWriterRefusal(failing.name, refusal)) return waits({ kind: 'session', on: 'merge-writer', detail: `${key} is queued for the merge writer, which trials and pushes it: ${refusal}` }, failing.name, refusal);
     const kind = refusalAction(work, failing.name, refusal, all, now);
     const binding = `${failing.name}:${work.policyRevision}:${short(work.candidate?.sha)}:${short(work.candidate?.baseSha)}:${refusal}`;
     if (kind === 'dispatch') {
@@ -292,10 +285,9 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
 
   if (work.violations.length) return make('escalate', `${key} carries ${work.violations.length} violation(s): ${work.violations[0]}`,
     { kind: 'escalate', trigger: 'violation', detail: work.violations[0] }, `violation:${work.violations[0]}`);
-  // GitHub merges a candidate whose every gate passed on its head (docs/delivery.md): no executor
-  // step runs it, and the merged observation records the delivery.
-  if (work.candidate && !work.observation?.merged) return waits({ kind: 'session', on: 'github', detail: `${key} has passed every gate on ${short(work.candidate.sha)}; GitHub merges it on its branch protection and the merged observation records the delivery` });
-  if (work.candidate) return waits({ kind: 'settled', on: null, detail: `${key} merged as ${short(work.observation?.mergeSha)} and no gate refuses it; the delivery record follows on the next reading` });
+  // Every gate passed: the merge writer pushed and reconciled the head (GY-2010), and its
+  // reconciled record delivers the item; nothing is left for an executor.
+  if (work.candidate) return waits({ kind: 'settled', on: null, detail: `${key} has passed every gate on ${short(work.candidate.sha)}; the merge writer merged it${work.mergeLedger?.mergeSha ? ` as ${short(work.mergeLedger.mergeSha)}` : ''} and its delivery record follows` });
   // Open, released, nothing refusing and no candidate: the gates have not been evaluated at all.
   // Every other path above named something, so there is no rule left to reach — the item would
   // simply sit here, which is precisely what must never happen quietly.

@@ -2,7 +2,7 @@ import { demand, type Principal } from '../../model.js';
 import { flagPathRefusal, RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
-import { ciRunBindingSchema, isCiProducer, observeCiCheckRun, type CiRunObservation } from '../../model/ci-proofs.js';
+import { boundCiRun, ciRunBindingSchema, isCiProducer, type CiRunObservation } from '../../model/ci-proofs.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { approveDecision, requestDecision } from '../decisions.js';
 import { listDecisions } from '../decision-ledger.js';
@@ -14,15 +14,12 @@ import { closeWork } from '../close.js';
 import { recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 import { recordDecomposition } from '../../decomposition.js';
-import { recordShadowVerdict } from '../shadow-verdict.js';
 import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
 import { applyPreviewRecord, previewRecordBodySchema, previewSiteByteLimit, previewSiteFileLimit } from '../../project-previews.js';
 import type { Services } from '../routes.js';
-import { issuePushCredential } from '../push-credential.js';
-import { controlPlaneSyncPush } from '../../sync.js';
 
 /** Whether a request is a lease command (store/pools.ts `leaseCommands`), which authenticates and runs on the lease pool (GY-558). */
 export const leaseCommandRequest = (method: string | undefined, pathname: string) => {
@@ -119,14 +116,6 @@ export const workRoutes = defineRoutes('work', [
       return judgeClosedQuestion(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
-  // The shadow merge gate's verdict for a head (GY-1522): an observation recorded by the loop's coordinator identity only.
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/shadow-verdict$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'shadow-verdict');
-      return recordShadowVerdict(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
-    },
-  },
   // Review by risk in control-plane mode (GY-1525): the coordinator registers each reviewer launch
   // with its token hash, and the launched session posts its one verdict as that token.
   {
@@ -150,22 +139,6 @@ export const workRoutes = defineRoutes('work', [
       return recordMergeEvent(context.services, context.actor, target, data, context.idempotencyKey());
     },
   },
-  // A worker session's short-lived push credential (GY-999), for the lease holder only.
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/push-credential$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'push-credential');
-      return issuePushCredential(context.services, context.actor, decodeURIComponent(id), await parseJson(context));
-    },
-  },
-  // A base sync carrying the base branch's workflow changes, pushed by the control plane (GY-1098).
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/sync-push$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'sync-push');
-      return controlPlaneSyncPush(context.services, context.actor, decodeURIComponent(id), await parseJson(context, 64 * 1024 * 1024));
-    },
-  },
   {
     method: 'POST', path: /^\/api\/work(?:\/([^/]+)\/([a-z]+))?$/,
     async handle(context, [id, command]) {
@@ -187,17 +160,12 @@ export const workRoutes = defineRoutes('work', [
         }
       }
       const input = JSON.parse(raw.toString() || '{}');
-      // CI-produced evidence is verified against the job GitHub reports, read here with the
-      // control plane's own App so provider I/O stays outside the coordination transaction.
-      // The engine repeats every judgement; this only supplies the observation it needs.
+      // CI-produced evidence is judged by the engine against the CI producer's own run binding, recorded
+      // as Graphyard's record of the job (GY-2010): nothing is read back from GitHub.
       let ciRun: CiRunObservation | null | undefined;
       if (attempted === 'evidence' && id && isCiProducer(actor as Principal)) {
-        const { services: { github, repository } } = context;
-        demand(github, 'GitHub integration is required to verify CI-produced evidence', 503);
         const binding = ciRunBindingSchema.safeParse(input?.ciRun);
-        // A job GitHub cannot report (unknown id, a refused read) leaves nothing to verify against;
-        // the engine then refuses the record as unobserved rather than answering a server error.
-        try { ciRun = binding.success ? observeCiCheckRun(repository, await github.request(`/check-runs/${binding.data.jobId}`)) : null; } catch { ciRun = null; }
+        ciRun = binding.success && typeof input.sha === 'string' && typeof input.proof === 'string' && (input.result === 'pass' || input.result === 'fail') ? boundCiRun(binding.data, input) : null;
       }
       try { return await engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey(), ciRun === undefined ? {} : { ciRun }); }
       catch (error) {

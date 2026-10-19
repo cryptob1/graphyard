@@ -10,13 +10,13 @@ import type { SettledReviewSession } from './model/dispatch.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from './auto-dispatch.js';
 import { agentRequestAttention } from './cli/loop-report.js';
 import { owedAttention, scopeRequestAttention } from './cli/owed-report.js';
+import type { MergeWriterSummary } from './daemon/cycle-merge-writer.js';
 import { executorFleet } from './cli/executor-report.js';
 import { stuckRequestReport } from './cli/stuck-requests.js';
 import { stalledItemAttention } from './cli/status-attention.js';
 import { stalledActionAttention } from './cli/stalled-actions.js';
 import { actorlessAttention } from './cli/actorless-submissions.js';
 import { overlongSessionAttention } from './cli/overlong-sessions.js';
-import { githubBudgetAttention } from './cli/github-budget-attention.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './cli/unanswered-requests.js';
 import { consentHoldItems } from './cli/consent-holds.js';
 import { untriagedAttention } from './triage.js';
@@ -192,7 +192,9 @@ export function faulted(items: AttentionItem[]) {
  * the setup and the dispatcher, which the report reads before everything else.
  */
 export async function derivedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
-  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof scopeRequestAttention>[1] }) {
+  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof scopeRequestAttention>[1];
+    /** GY-2015: the merge writer's own summary, so the owed lines it holds read as its motion; absent, the readers behave as before. */
+    mergeWriter?: MergeWriterSummary | null }) {
   const reviews = summarizeReviews(observed.reviews), now = Date.parse(snapshot.now);
   const rows = observed.rows ?? buildMasterStatus(snapshot, master.workers, observed.runtime.available ? observed.runtime.agents : [], {}, {}, reviews, master.baseBranch, coordinator ?? undefined,
     // The retry schedule of every settled session (GY-533): without it a failed session whose next
@@ -210,10 +212,9 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const conflicted = reviewConflictAttention(snapshot.work, observed.reviews).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere.
   const stalled = stalledActionAttention(snapshot);
-  // What waits on a judgment rather than on capacity, named once and counted apart (GY-104).
-  const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], scopeRequests);
-  // The GitHub budget (GY-117): a pause as one incident, an exhaustion ahead, a silent webhook.
-  const budget = githubBudgetAttention(coordinator);
+  // What waits on a judgment rather than on capacity, named once and counted apart (GY-104); the
+  // merge writer's own summary lets a trial refusal it holds read as its motion (GY-2015).
+  const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], scopeRequests, observed.mergeWriter);
   const overlong = overlongSessionAttention(snapshot, { ...observed.runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   const stuck = stuckRequestReport({ reviews: observed.reviews, producers: observed.producers }, now).attentionItems;
   // A machine-filed item no triage has judged within a day of filing (GY-402).
@@ -229,12 +230,13 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   if (observed.standalone) {
     const cursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
     const dispatch = 'error' in cursor ? cursor : dispatchSummary(cursor, now, master.run.dispatchIntervalSeconds * 1000, [], snapshot.work, Date.parse(snapshot.now) || now);
-    host.push(...dispatchFailureAttention(dispatch), ...(await setupHealth(root, master, undefined, coordinator)).attention);
+    host.push(...dispatchFailureAttention(dispatch), ...(await setupHealth(root, master)).attention);
     // A starved reviewer or producer role (GY-107), which the report's own buildMasterStatus raises from the role profiles.
     const sessions = { producers: summarizeProducers(observed.producers), failures: 'error' in dispatch ? [] : dispatch.failures, retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] };
     host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)])
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
-  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog,
-    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items] };
+  // GY-2010: no GitHub budget attention — the App request budget is gone with the API client.
+  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
+    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...triage, ...owed.items] };
 }

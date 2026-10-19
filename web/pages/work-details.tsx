@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { deliveryState, deploySmokeRequired, isClosed, type Work } from '../../src/model';
+import { deploySmokeRequired, isClosed, type Work } from '../../src/model';
 import { sessionSummary } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanRequestRow } from '../../src/model/human-request';
@@ -60,19 +60,16 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
 }
 
 /**
- * One work item's page (GY-161). Its first screen answers, without scrolling or a click: what
- * state it is in (its group's badge), why (one plain sentence), who acts next (a role, never a
- * code name), where it is in the seven pull-request steps, and its pull request, linked once in
- * the header. A decision only the human may make is answered right here. Below it (GY-171), each
- * section answers one question, in this order: What is left (one plain line per unmet
- * requirement, grouped by step, naming who clears it; gate reasons only through `plainReason`),
- * Requirements (one line per criterion with its met or pending mark, the full text on expand),
- * Pull request (link, commit, changed files, checks, review), Test cases (the e2e cases linked to
- * the pull request, with their result on its head, GY-162) and Activity (the latest events, the
- * full history on expand). Everything technical — gate internals, sessions and their attach
+ * One work item's page (GY-161). Its first screen answers, without scrolling or a click: the plain
+ * summary sentence (GY-2011; or the title when none), what state it is in (its group's badge), why
+ * (one plain sentence), who acts next (a role, never a code name), where it is in the seven
+ * pull-request steps, and its pull request, linked once in the header. A decision only the human
+ * may make is answered right here. Below it (GY-171): What is left, then Details (the full
+ * description and criteria, folded), Pull request, Tests (every test proof the criteria name with
+ * its result on the head — `unit:`/`integration:` from the merge trial, `e2e:` from the evidence,
+ * GY-162/GY-2091) and Activity. Everything technical — gate internals, sessions and their attach
  * commands, review provider, next action and executors, agent requests, evidence — is in one
- * collapsed "Technical details" section, in the control plane's own vocabulary, and policy
- * changes are in the admin Edit menu.
+ * collapsed "Technical details" section, and policy changes are in the admin Edit menu.
  */
 export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -88,9 +85,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const admin = status?.actor?.role === 'admin';
   const proofs = proofPreview(item, work);
   const provider = item.policy.reviewProvider ?? 'github';
-  const failedDelivery = deliveryState(item) === 'delivered-with-failure';
   const prUrl = item.candidate ? candidatePrUrl(status?.repository, item.candidate.pr) : undefined;
-  const postDeployment = <PostDeployment item={item} repository={status?.repository} baseBranch={status?.baseBranch ?? 'main'} observedAt={observedAt}/>;
+  const postDeployment = <PostDeployment item={item} repository={status?.repository}/>;
   // The inverted loop, as this item sees it: what the control plane says to do next, which
   // executor has it, who is waiting on a decision, and every session that can be watched or read.
   const sessions = sessionSummary(item, new Date(now));
@@ -143,12 +139,16 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // policy the control plane serves on /api/status, the one its gates use (GY-1843).
   const risk = shownRisk(item, status?.repositoryPolicy);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
+  // GY-2011: open on the plain sentence (or the title) and the state; description and criteria fold under Details.
+  const plainSentence = typeof item.summary === 'string' ? item.summary.trim() : '';
+  const plainLead = plainSentence || item.title;
   return <article className="item-page" aria-label={item.title}>
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
     <div className="item-head">
       <div className="item-title">
         <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}<span>{item.type.replace(/^./, c => c.toUpperCase())} · priority {item.priority}</span>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
-        <h1 data-title>{item.title}</h1>
+        <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
+        {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
       </div>
       {item.candidate && <span className="pr-button"><CandidatePr repository={status?.repository} candidate={item.candidate} workKey={item.key}/> on GitHub ↗</span>}
     </div>
@@ -160,16 +160,18 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         answer={(text, post) => action(row.id, row.answer.post.command, { ...post, [row.answer.post.field]: text })} send={body => action(row.id, row.answer.post.command, body)}/>)}
       {item.violations.map(v => <div className="notice danger" key={v}>{shortShas(v)}</div>)}
       {!item.ready && admin && <button type="button" disabled={busy} onClick={() => action(item.id, 'ready')}>Release to ready</button>}
-      {failedDelivery && postDeployment}
     </section>
     <section className="panel" aria-label="What is left"><h2>What is left <small>{leftCount ? `${leftCount} ${leftCount === 1 ? 'thing' : 'things'}` : 'nothing blocks it'}</small></h2>
       {currentLeft ? leftGroup(currentLeft) : <p className="muted">When something blocks a step it is listed here in plain words, with who clears it.</p>}
       {laterLeft.length > 0 && <details className="later-steps"><summary>Later steps ({laterLeft.length})</summary>{laterLeft.map(leftGroup)}</details>}</section>
-    <section className="panel requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
-      {item.criteria.map(ac => { const own = proofs.filter(p => p.criterion === ac.id); const met = own.length > 0 && own.every(p => p.status === 'passed');
-        return <div className={`criterion ${met ? 'criterion-met' : 'criterion-pending'}`} key={ac.id}>
-          <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
-          <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
+    <details className="panel item-details-fold" aria-label="Details"><summary>Details</summary>
+      {item.description ? <p className="item-description">{item.description}</p> : <p className="muted">No description.</p>}
+      <section className="requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
+        {item.criteria.map(ac => { const own = proofs.filter(p => p.criterion === ac.id); const met = own.length > 0 && own.every(p => p.status === 'passed');
+          return <div className={`criterion ${met ? 'criterion-met' : 'criterion-pending'}`} key={ac.id}>
+            <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
+            <ul className="proof-markers">{own.map(p => <li key={p.proof} className={`marker-${marker[p.status]?.tone ?? 'pending'}`}>{marker[p.status]?.symbol ?? '○'} <Term term="proof">{p.proof}</Term> {marker[p.status]?.word ?? p.status}</li>)}</ul></div>; })}</section>
+    </details>
     <section className="panel" aria-label="Pull request"><h2>Pull request</h2>
       {item.candidate ? <dl className="facts">
         {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`Pull request on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
@@ -199,7 +201,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     {/* Everything technical, one click down, in the control plane's own vocabulary. */}
     <details className="more-details" aria-label="Technical details"><summary>Technical details</summary>
       <h3>About this item</h3>
-      <p>{item.description}</p>
       <dl className="facts">
         <div><dt>Owner</dt><dd className="assignment-details">{owner.active ? owner.label : owner.owner ? owner.text : 'Nobody yet'}</dd></div>
       </dl>
@@ -208,7 +209,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{item.blocker}</span></p>}
       <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span>{item.stage}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
       <h3>Ownership</h3><p>{owner.text}</p>{owner.owner && <p className="muted">Worker ID: {owner.owner} · assignment {owner.epoch}</p>}<p>{owner.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
-      {!failedDelivery && postDeployment}
+      {postDeployment}
       <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r === item.blocker ? 'The recorded blocker, above' : shortShas(r)}</p>)}</div>)}
       <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).filter(d => d.message !== item.blocker).map((d, i) => <div className="criterion" key={i}><strong>{shortShas(d.message)}</strong><p>{shortShas(d.next)}</p></div>)}
       {!!item.exclusiveResources?.length && <p>Exclusive resources: {item.exclusiveResources.join(', ')}. Reserved only while an assignment lease is active.</p>}

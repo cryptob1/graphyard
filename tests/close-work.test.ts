@@ -87,7 +87,6 @@ test('integration:close-obsolete — a stuck item closed as obsolete is terminal
   const status = buildMasterStatus({ work: snapshot.work, now: snapshot.now }, [], []);
   assert.equal(status.counts.closed, 1);
   assert.ok(!status.work.some(row => row.key === work.key), 'master status lists it in no active row');
-  assert.ok(!status.delivered.some(row => row.key === work.key), 'nor as a delivery');
   assert.deepEqual(status.closed.map(row => [row.key, row.kind]), [[work.key, 'obsolete']]);
   // The dashboard: nothing under Shipped, one row in the closed history below it.
   const page = renderToStaticMarkup(createElement(ShippedPage, { work: snapshot.work, status: null, observedAt: Date.parse(snapshot.now), setSelected: () => {} } as unknown as Dashboard));
@@ -121,13 +120,19 @@ test('integration:close-superseded — only a landed commit or a delivered item 
   const open = await released('still open');
   assert.equal((await call(coordinator, `work/${work.id}/close`, { kind: 'superseded', reason: 'Replaced', ref: open.key })).status, 422, 'an undelivered item supersedes nothing');
   assert.equal((await call(coordinator, `work/${work.id}/close`, { kind: 'superseded', reason: 'Replaced', ref: 'not-a-sha' })).status, 422);
-  assert.equal((await call(coordinator, `work/${work.id}/close`, { kind: 'superseded', reason: 'Replaced', ref: 'c'.repeat(40) })).status, 503, 'ancestry is never assumed without GitHub');
-  // Ancestry as GitHub reports it: the base tip contains the landed commit and not the other one.
+  const runner = engine.gitRunner;
+  engine.gitRunner = null;
+  assert.equal((await call(coordinator, `work/${work.id}/close`, { kind: 'superseded', reason: 'Replaced', ref: 'c'.repeat(40) })).status, 503, 'ancestry is never assumed without a checkout');
+  // Ancestry as the plane's checkout reports it (GY-2010): the base tip contains the landed commit and not the other one.
   const tip = 'f'.repeat(40), landed = 'd'.repeat(40), unlanded = 'e'.repeat(40);
-  const github = { baseBranch: async () => ({ tip, tree: '0'.repeat(40) }), contains: async (base: string, head: string) => head === tip && base === landed };
-  const services = { engine, github, repository, principals: [] } as unknown as Services;
-  await assert.rejects(closeWork(services, coordinator, work.id, { kind: 'superseded', reason: 'Replaced', ref: unlanded }, randomUUID()), /not an ancestor of the base branch/);
-  const closed = await closeWork(services, coordinator, work.id, { kind: 'superseded', reason: 'Replaced by the rewrite', ref: landed }, randomUUID()) as Work;
+  engine.gitRunner = (async (args: string[]) => args[0] === 'rev-parse' ? { status: 0, stdout: `${tip}\n`, stderr: '' }
+    : { status: args[0] === 'merge-base' && args[2] === landed ? 0 : 1, stdout: '', stderr: '' }) as NonNullable<Engine['gitRunner']>;
+  const services = { engine, repository, principals: [] } as unknown as Services;
+  let closed: Work;
+  try {
+    await assert.rejects(closeWork(services, coordinator, work.id, { kind: 'superseded', reason: 'Replaced', ref: unlanded }, randomUUID()), /not an ancestor of the base branch/);
+    closed = await closeWork(services, coordinator, work.id, { kind: 'superseded', reason: 'Replaced by the rewrite', ref: landed }, randomUUID()) as Work;
+  } finally { engine.gitRunner = runner; }
   assert.deepEqual([closed.closure!.kind, closed.closure!.ref, closed.stage], ['superseded', landed, 'done']);
   // A delivered item supersedes too; a closed one does not, because it delivered nothing.
   assert.equal((await call(coordinator, `work/${open.id}/close`, { kind: 'superseded', reason: 'Replaced', ref: work.key })).status, 422);

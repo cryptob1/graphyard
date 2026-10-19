@@ -111,7 +111,7 @@ test('unit:local-provider-plan — install --provider local --plan lists Node 24
     assert.equal(core.HOST, '127.0.0.1');
     assert.equal(core.PORT, String(port));
     assert.equal(core.DATABASE_URL, REDACTED, 'the cluster password never reaches the plan');
-    assert.match(action('github.webhook').title, /^Skipped: a local install registers no App webhook/);
+    assert.match(action('github.deploy-key').title, /register it read-write on owner\/project through the gh login/);
     assert.equal(plan.provider, 'local');
     assert.deepEqual(await readdir(fixture.configHome), [], 'a plan creates nothing');
 

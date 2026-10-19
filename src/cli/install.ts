@@ -1,33 +1,25 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
 import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
-import { appPageBusy, appPagePortFree, startGithubSetup, updateAppPermissions } from '../github-setup.js';
 import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
-import { acquireApplyLock, appCommand, applyInstall, applyRosterChange, appStepWait, buildPlan, InstallPaused, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
-import { installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
-import { runManifestFlow } from '../install/manifest.js';
+import { acquireApplyLock, applyInstall, applyRosterChange, buildPlan, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
+import { importPrincipalToken, installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
 import { delegationLimitAssignments } from '../install/limits.js';
 import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { runDoctor } from './install-doctor.js';
 
-const interactiveGithubSetup = (root: string) => async (repository: string, deployment: string) => {
-  const setup = await startGithubSetup(root, repository, deployment);
-  console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in .graphyard/github-app.json; do not share that file. Setup finishes automatically once the App is installed; press Ctrl+C to finish later and rerun init --scan --apply.`);
-  for (;;) {
-    await new Promise(accept => setTimeout(accept, 1000));
-    try {
-      const app = JSON.parse(await readFile(resolve(root, '.graphyard/github-app.json'), 'utf8'));
-      if (Number.isSafeInteger(app.appId) && app.appId > 0 && typeof app.slug === 'string' && app.slug && Number.isSafeInteger(app.installationId) && app.installationId > 0) {
-        await new Promise<void>(accept => setup.http.close(() => accept()));
-        return { appId: app.appId, slug: app.slug };
-      }
-    } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  }
-};
+/** GY-2009: install registers no GitHub App, so `up --reuse-app` would reuse nothing; it is refused rather than silently ignored. */
+export const upAppReuseRefusal = 'graphyard up --reuse-app is refused: install registers no GitHub App and the merge writer\'s deploy key is its only GitHub access (GY-2009); rerun without --reuse-app';
+export function refuseUpAppReuse(args: readonly (string | undefined)[]): void {
+  if (args.some(arg => arg === '--reuse-app' || arg?.startsWith('--reuse-app='))) throw new Error(upAppReuseRefusal);
+}
+/** up's usage without the refused --reuse-app line. */
+export const upUsageWithoutAppReuse = upUsage.split('\n').filter(line => !line.trimStart().startsWith('--reuse-app')).join('\n');
+
 /**
  * The capacity variables that accompany the principals `init --apply` registers: derived from
  * the roster in .graphyard/principals.json, and — when the operator credential reaches the
@@ -49,17 +41,19 @@ export async function capacityForPrincipals(principalsFile: string, status: () =
 /**
  * `graphyard principal add|remove` (GY-1879): one entry of this host's installation roster. The
  * install.json record is the roster; `add` judges the entry as the planner judges its own
- * (`rosterEntry`: a producer needs an explicit grant), and `applyRosterChange` writes its
- * credential, hands the deployment GRAPHYARD_PRINCIPALS alone and reads the served roster back.
- * The installer's own principals are refused: `install --apply` plans them. Repeating either
- * command changes nothing and only reads the roster back.
+ * (`rosterEntry`: a producer needs an explicit lane grant or proof seed), and `applyRosterChange`
+ * writes its credential, hands the deployment GRAPHYARD_PRINCIPALS alone and reads the served
+ * roster back. `--token-file` restores a former credential so existing dispatcher files keep
+ * working (GY-1998); `--proof` reads back the producer's recorded grant, which a roster edit never widens.
+ * The installer's own principals are refused: `install --apply` plans them.
+ * Repeating either command changes nothing and only reads the roster back.
  */
 export async function principalCommand(args: string[], dependencies: InstallDependencies & { cwd: string }) {
   const [action, id, ...rest] = args;
-  const { values } = parseArgs({ args: rest, options: { role: { type: 'string' }, 'session-kind': { type: 'string' }, grant: { type: 'string', multiple: true }, repo: { type: 'string' } }, allowPositionals: false });
-  if ((action !== 'add' && action !== 'remove') || !id) throw new Error('Use principal add ID --role ROLE [--session-kind ai|human] [--grant NAME]... [--repo OWNER/NAME], or principal remove ID [--repo OWNER/NAME]');
-  if (action === 'remove' && (values.role || values['session-kind'] || values.grant?.length)) throw new Error('principal remove takes only ID and --repo');
-  const entry = action === 'add' ? rosterEntry({ id, role: values.role, sessionKind: values['session-kind'], grants: values.grant }) : null;
+  const { values } = parseArgs({ args: rest, options: { role: { type: 'string' }, 'session-kind': { type: 'string' }, grant: { type: 'string', multiple: true }, proof: { type: 'string', multiple: true }, 'token-file': { type: 'string' }, repo: { type: 'string' } }, allowPositionals: false });
+  if ((action !== 'add' && action !== 'remove') || !id) throw new Error('Use principal add ID --role ROLE [--session-kind ai|human] [--grant NAME]... [--proof PATTERN]... [--token-file PATH] [--repo OWNER/NAME], or principal remove ID [--repo OWNER/NAME]');
+  if (action === 'remove' && (values.role || values['session-kind'] || values.grant?.length || values.proof?.length || values['token-file'])) throw new Error('principal remove takes only ID and --repo');
+  const entry = action === 'add' ? rosterEntry({ id, role: values.role, sessionKind: values['session-kind'], grants: values.grant, proofs: values.proof }) : null;
   const root = repositoryRoot(dependencies.cwd);
   const repository = values.repo ?? (await discover(root)).repository;
   if (!repository) throw new Error('Use --repo OWNER/NAME, or run from a checkout whose origin is the managed repository');
@@ -68,20 +62,30 @@ export async function principalCommand(args: string[], dependencies: InstallDepe
   // The edit holds the installation's apply lock from reading the roster until it is persisted and read back,
   // so two edits, or an edit and an install --apply, never each deploy a roster missing the other's entry.
   const release = await acquireApplyLock(directory, (dependencies.now ?? Date.now)());
-  try { return await editRoster(root, directory, id, entry, dependencies); } finally { await release(); }
+  try { return await editRoster(root, directory, id, entry, dependencies, values['token-file'] ? resolve(values['token-file']) : null); } finally { await release(); }
 }
-async function editRoster(root: string, directory: string, id: string, entry: ReturnType<typeof rosterEntry> | null, dependencies: InstallDependencies & { cwd: string }) {
+async function editRoster(root: string, directory: string, id: string, entry: ReturnType<typeof rosterEntry> | null, dependencies: InstallDependencies & { cwd: string }, tokenSource: string | null = null) {
   const record = await readInstallRecord(directory);
   if (!record) throw new Error(`No installation is recorded under ${directory}; run graphyard install --apply first`);
   const { roster, changed } = entry ? upsertRosterEntry(recordedRoster(record), entry) : removeRosterEntry(recordedRoster(record), id);
+  // GY-1998: --token-file is judged only after the edit is: a refused edit imports nothing. A
+  // self-contained host keeps every credential on the host and mints its own, so it is refused there.
+  if (tokenSource && record.selfContained) throw new Error(`--token-file restores a credential this machine keeps under ${directory}/tokens; a self-contained ${record.provider} installation keeps its credentials on the host, where principal add mints them. Nothing was imported; add ${id} without --token-file`);
   // The deployment is reached where install --apply reached it: its SSH host and user, local mode, port and image.
   const at = record.deployment;
   if (!at?.sshHost && !at?.local && (record.provider === 'docker-host' || record.provider === 'host')) throw new Error(`${directory}/install.json does not record the host this installation runs on; rerun graphyard install --apply once to record it, then edit the roster`);
-  const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}), ...(record.noGithubApp ? { noGithubApp: true } : {}),
+  const imported = tokenSource ? await importPrincipalToken(directory, id, tokenSource, record.principals?.find(principal => principal.id === id)?.fingerprint ?? null) : null;
+  try {
+    const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(record.service ? { serverName: record.service } : {}), ...(record.selfContained ? { selfContained: true } : {}),
     ...(at ? { sshUser: at.sshUser, ...(at.sshHost ? { sshHost: at.sshHost } : {}), ...(at.local ? { local: true } : {}), ...(at.port ? { port: at.port } : {}), ...(at.image ? { image: at.image } : {}) } : {}) }, dependencies, 'apply');
-  return applyRosterChange(session, record, roster, { id, changed, entry });
+    return await applyRosterChange(session, record, roster, { id, changed, entry });
+  } catch (error) {
+    // A credential imported for an edit that never reached install.json leaves with it, so no later add reuses it unasked.
+    if (imported?.created && !(await readInstallRecord(directory))?.principals?.some(principal => principal.id === id)) await rm(imported.path, { force: true });
+    throw error;
+  }
 }
-/** Repository onboarding: install a control plane, propose and apply the delivery workflow, register Apps, inspect readiness. */
+/** Repository onboarding: install a control plane, propose and apply the delivery workflow, inspect readiness. */
 export const installCommands = defineCommands([
   {
     name: 'up',
@@ -89,7 +93,7 @@ export const installCommands = defineCommands([
       '  up --repo OWNER/NAME [--provider compose|railway|hetzner|local] [--local]',
       '     [--master claude|codex] [--agent] [--goal FILE] [--browser-profile PROFILE]',
       '     [--confirm-price X | --max-monthly N] [--ssh-key NAME] [--ssh-host HOST] [--ssh-user USER]',
-      '     [--reuse-app SLUG]... [--github-mobile] [--wait MINUTES] [--no-wait] [--share-tailnet]',
+      '     [--wait MINUTES] [--no-wait] [--share-tailnet]',
       '  up --sudo-code CODE|email',
       '                                First-run setup in one command: preflight, control plane, host supervisor and',
       '                                Herdr, onboarding, agent accounts, harness and master loop, resumable (.graphyard/up.json;',
@@ -100,19 +104,15 @@ export const installCommands = defineCommands([
       '                                logins first (registry propose --apply), asking only for an empty role. A green run',
       '                                ends with one fresh sign-in link (signIn). A Tailscale host prints its tailnet-only',
       '                                `tailscale serve` URL; --share-tailnet runs it, links use it (reachableUrl); never public.',
-      '                                --agent runs every step non-interactively (JSON events on stderr), Apps in the given,',
-      '                                master\'s or same-login other install\'s Chrome profile (none: exit 2), handing off only',
-      '                                device approvals. Confirm access: GitHub Mobile when offered (its number; 3 prompts; password link',
-      '                                after 60 s); else the page\'s methods, re-checked each 10 s: your Chrome (shared profile; a copy:',
-      '                                the App page in your browser), --sudo-code an authenticator or email code typed in 2 s (email:',
-      '                                GitHub sends one), or app import both Apps, --reuse-app each (--no-wait exits 3 saying so). A drive',
-      '                                giving up hands off the page; a GitHub rejection exits 1 quoting it. --wait MINUTES bounds a wait',
-      '                                (agent: 20); rerun resumes Confirm access; up --help: options, exit codes.',
+      '                                --agent runs every step non-interactively (JSON events on stderr). No GitHub App is',
+      '                                registered: up creates the repository when missing and registers the merge writer\'s deploy',
+      '                                key with the gh login. --wait MINUTES bounds a wait (agent: 20); up --help: options, exit codes.',
     ],
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
     async run(context) {
-      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsage); return; }
+      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsageWithoutAppReuse); return; }
+      refuseUpAppReuse([context.id, ...context.args]);
       const result = await upCommand(context.repositoryRoot(), () => context.activeCliPath(), [context.id, ...context.args].filter((value): value is string => value !== undefined));
       context.print(result);
       if ('exitCode' in result) process.exitCode = result.exitCode;
@@ -122,32 +122,26 @@ export const installCommands = defineCommands([
     name: 'install',
     help: [
       '  install --provider railway|hetzner|docker-host|compose|local --repo OWNER/NAME',
-      '          [--plan|--apply] [--domain HOST] [--workers N] [--reviewer NAME]',
+      '          [--plan|--apply] [--domain HOST] [--workers N]',
       '          [--producer-proof PROOF] [--ssh-host HOST] [--ssh-user USER]',
       '          [--ssh-key NAME] [--port N] [--workspace NAME-OR-ID] [--image REF]',
       '          [--create-environments] [--herdr-rebind | --no-herdr]',
       '                                Install or reconcile a complete control plane.',
       '  install --target host|hetzner --repo OWNER/NAME [--plan|--apply]',
       '          [--ssh-host HOST | --local] [--migrate] [--max-monthly N | --confirm-price X]',
-      '          [--github-app FILE] [--reuse-app SLUG]... [--herdr-only | --profiles-only]',
+      '          [--herdr-only | --profiles-only]',
       '                                Self-contained host: server, Postgres, loop, executors,',
       '                                Herdr and agent runtimes on one machine (hetzner creates it',
       '                                and needs its monthly price confirmed). --migrate moves an',
       '                                installation there from GRAPHYARD_MIGRATE_DATABASE_URL.',
-      '                                An App already saved for the repository (--github-app,',
-      '                                or .graphyard/github-app.json) is reused: no browser step.',
-      '                                --reuse-app SLUG reuses an App saved on this host and',
-      '                                installed on the account: the repository is added to its',
-      '                                installation with gh after its permissions are checked; a',
-      '                                control-plane App whose webhook serves another install is',
-      '                                refused. The App page offers the same reuse.',
+      '                                No GitHub App, webhook or branch protection is set up: the',
+      '                                merge writer\'s deploy key (generated on the host for --target)',
+      '                                is registered read-write with the gh login, and it alone pushes.',
       '                                --plan prints every action with secrets redacted and',
       '                                changes nothing; --apply executes the same plan. UAT and',
       '                                production resources that cost money are created only with --create-environments.',
       '                                A Herdr plugin bound elsewhere is repointed only with --herdr-rebind; --herdr-only sets up Herdr alone;',
       '                                --profiles-only (with --apply) writes the reviewer and worker profiles on the host (master environments --apply there).',
-      '                                An App step nobody confirms within 900 s (under up: its --wait,',
-      '                                plus a minute) exits 1 with a JSON summary and the exact resume command.',
       '                                See docs/install.md for the agent-executable runbook.',
     ],
     // The installer creates the connection file; it must never read a stale one.
@@ -156,21 +150,13 @@ export const installCommands = defineCommands([
       const { values, request: inputs } = installRequestFromArgs(context.rest);
       const session = await prepareInstall(process.cwd(), inputs, {
         cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line),
-        githubApp: request => runManifestFlow(request.root, request.repository, request.origin, { reviewer: request.reviewer, announce: line => console.error(line), ...appStepWait(process.env), dependencies: { file: request.file, ...(request.reuse ? { reusable: request.reuse.slugs, reuse: request.reuse.adopt } : {}) } }),
       }, values.apply ? 'apply' : 'plan');
       if (values.logs) return console.log(await session.adapter.logs(session.context));
       if (values['herdr-only']) { const result = await installHerdrOnly(session); context.print(result); if (!result.herdr) process.exitCode = 1; return; }
       if (values['profiles-only']) return context.print(await installProfilesOnly(session));
       const plan = await buildPlan(session);
       if (!values.apply) return context.print(plan);
-      try { return context.print(await applyInstall(session, plan)); }
-      catch (error) {
-        // An App step nobody confirmed is a pause (GY-1413): print what was completed and how to resume.
-        if (!(error instanceof InstallPaused)) throw error;
-        console.error(error.message);
-        context.print(error.summary);
-        process.exitCode = 1;
-      }
+      return context.print(await applyInstall(session, plan));
     },
   },
   {
@@ -180,7 +166,7 @@ export const installCommands = defineCommands([
       '       [--delivery local|release-candidate|per-pr] [--candidate-cron CRON|off]',
       '                                Scan and propose the delivery workflow (--scan), or apply the reviewed proposal (--apply);',
       '                                the scan shows the merge-gate split (pre-merge vs per-candidate checks) before anything is applied;',
-      '                                after graphyard install, --apply reuses the install\'s identities and App and writes no principals file',
+      '                                after graphyard install, --apply reuses the install\'s identities and writes no principals file',
     ],
     async run(context) {
       const { base, connection, print } = context;
@@ -201,9 +187,8 @@ export const installCommands = defineCommands([
         const fresh = await scanProposal(root, { url: values.url ?? null, runtimes: availableRuntimes(), delivery: { ...(values.apply ? { ...reviewed, ...choices } : choices), merger: 'control-plane' } });
         if (values.apply) {
           if (!stored) throw new Error('No stored setup proposal to apply. Run init --scan, review .graphyard/setup-proposal.json, then rerun with --apply');
-          // An install that owns this repository supplies the identities and the App (GY-1413);
-          // when it cannot yet — its App step is still waiting — this refuses before anything else.
-          // It owns them only for the server it installed, so the selected server must be that one.
+          // An install that owns this repository supplies the identities (GY-1413), only for the
+          // server it installed, so the selected server must be that one.
           const selected = values.url ?? stored.proposal.server ?? null;
           const installed = await installedOnboarding(root, stored.proposal.repository, selected);
           const differences = repositoryScanDifference(fresh, stored.proposal);
@@ -217,9 +202,7 @@ export const installCommands = defineCommands([
           // Apply rewrites the registry from the reviewed proposal; the CI producer's token is read
           // first so a re-run keeps the repository secret valid, then the entry is merged back in.
           const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
-          // The App page init would open needs port 4311; a busy one refuses here, before any write.
-          if (!(await loadAppliedSetup(root))?.artifacts.githubApp && !await readFile(resolve(root, '.graphyard/github-app.json')).then(() => true, () => false) && !await appPagePortFree()) throw appPageBusy(4311);
-          const result = await applyProposal(root, stored.proposal, { url, githubSetup: interactiveGithubSetup(root), writeCredentials: true });
+          const result = await applyProposal(root, stored.proposal, { url, writeCredentials: true });
           if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
           const ciProofs = await registerCiProducer(result.principalsFile, roster);
           return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },
@@ -255,47 +238,15 @@ export const installCommands = defineCommands([
     ],
     async run(context) { return runDoctor(context); },
   },
-  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer [--session-kind ai|human] [--grant external-runs:import|delivery:observe-sha] [--repo OWNER/NAME]',
+  { name: 'principal', help: ['  principal add ID --role admin|coordinator|worker|reader|producer [--session-kind ai|human]',
+    '              [--grant external-runs:import|delivery:observe-sha] [--proof unit:*|integration:*|e2e:*|manual:*]...',
+    '              [--token-file PATH] [--repo OWNER/NAME]',
     '  principal remove ID [--repo OWNER/NAME]',
     '                                Add or remove one principal of this host\'s installation: writes its credential and its',
     '                                install.json roster entry, sets GRAPHYARD_PRINCIPALS alone on the deployment, and reads the',
-    '                                roster back from the control plane. A producer needs an explicit --grant; delivery:observe-sha',
-    '                                is held alone, by a dedicated observer principal; a later',
-    '                                install --apply keeps the entry. Repeating either command changes nothing.'], readsConnection: () => false,
+    '                                roster back from the control plane. A producer needs an explicit --grant or --proof; --token-file',
+    '                                restores an existing credential instead of minting one (not on a self-contained host); delivery:observe-sha is held alone, by a',
+    '                                dedicated observer principal; a later install --apply keeps the entry. Repeating either command',
+    '                                changes nothing.'], readsConnection: () => false,
     async run(context) { context.print(await principalCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { cwd: process.cwd(), cliPath: await context.activeCliPath(), hostId: context.individualHostId(), log: line => console.error(line) })); } },
-  { name: 'app', help: ['  app import --app-id ID --key-file PEM [--role control-plane|reviewer|revert-approver] [--repo R]', '  app list [--repo OWNER/NAME]  Import an App made elsewhere (key proven by an App JWT, saved 0600,',
-    '                                never printed) for --reuse-app without sudo; list reusable Apps per role',
-    '  app bind SLUG [--plan] [--ssh-host H] [--workspace W]  Bind an imported App to the observe-only install'], readsConnection: () => false,
-    async run(context) { context.print(await appCommand([context.id, ...context.args].filter((value): value is string => value !== undefined), { root: context.repositoryRoot() })); } },
-  {
-    name: 'github-setup',
-    help: [
-      '  github-setup HTTPS_URL [--reviewer NAME]',
-      '                                Register the control-plane or a reviewer GitHub App',
-      '                                through the local App-manifest browser flow',
-      '  github-setup --update-permissions [--reviewer NAME] [--wait SECONDS]',
-      '                                Compare a registered App with its declared permissions,',
-      '                                print the exact migration steps, and verify acceptance',
-    ],
-    async run(context) {
-      const root = context.repositoryRoot();
-      const discovered = await discover(root);
-      if (!discovered.repository) throw new Error('Set origin to the GitHub repository being managed first');
-      const { values, positionals } = parseArgs({ args: [context.id, ...context.args].filter((value): value is string => value !== undefined), options: { reviewer: { type: 'string' }, 'update-permissions': { type: 'boolean' }, wait: { type: 'string' } }, allowPositionals: true });
-      if (values['update-permissions']) {
-        const waitSeconds = values.wait === undefined ? 0 : Number(values.wait);
-        if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 3600) throw new Error('Use --wait with whole seconds up to 3600');
-        const result = await updateAppPermissions(root, { reviewer: values.reviewer, waitMs: waitSeconds * 1000 });
-        context.print(result);
-        if (!result.verified) process.exitCode = 1;
-        return;
-      }
-      if (values.wait !== undefined) throw new Error('--wait only applies to --update-permissions');
-      const deployment = positionals[0];
-      if (!deployment || positionals.length > 1) throw new Error('Use github-setup HTTPS_URL to register an App, or github-setup --update-permissions to migrate a registered one');
-      const setup = await startGithubSetup(root, discovered.repository, deployment, 4311, {}, values.reviewer);
-      console.log(`Open ${setup.url} in your browser. On SSH, forward port 4311 to this machine first. Credentials stay in ${setup.file}; do not share that file. Press Ctrl+C when finished.`);
-      const stop = () => setup.http.close(); process.once('SIGINT', stop); process.once('SIGTERM', stop);
-    },
-  },
 ]);

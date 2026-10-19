@@ -6,6 +6,7 @@ import { boundState, type StateReaders } from '../closed-question.js';
 import { save } from '../store.js';
 import type { Services } from './routes.js';
 import { lockedWork } from '../store/locked-read.js';
+import { gitRunnerFor } from '../merge-writer/local-observation.js';
 
 /**
  * Judging a closed-question proof (GY-109). The control plane binds the state the declaration
@@ -33,17 +34,22 @@ function refusal(work: Work | undefined, data: { proof: string; sha: string; bas
   return work!;
 }
 
-/** GitHub-backed readers for the candidate's state. */
-function githubReaders(services: Services): StateReaders {
-  const github = () => { demand(services.github, 'GitHub integration is required to read the state a closed question is asked against', 503); return services.github!; };
+/** Readers for the candidate's state from the checkout the control plane shares with the merge writer; no pull request exists to read. */
+function checkoutReaders(services: Services): StateReaders {
+  const git = () => {
+    const { engine } = services;
+    if (engine.gitRunner === undefined) engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
+    demand(engine.gitRunner, 'The control plane has no checkout to read the state a closed question is asked against', 503);
+    return engine.gitRunner!;
+  };
   return {
     async file(path, sha) {
-      const entry = await github().request(`/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${encodeURIComponent(sha)}`);
-      demand(entry && !Array.isArray(entry) && typeof entry.content === 'string', `${path} is not a readable file at ${sha.slice(0, 12)}`, 409);
-      return Buffer.from(entry.content, entry.encoding === 'base64' ? 'base64' : 'utf8').toString('utf8');
+      const result = await git()(['show', `${sha}:${path}`]);
+      demand(result.status === 0, `${path} is not a readable file at ${sha.slice(0, 12)}`, 409);
+      return result.stdout;
     },
-    async pullRequestBody(pr) { return String((await github().request(`/pulls/${pr}`))?.body ?? ''); },
-    async comments(pr) { return ((await github().request(`/issues/${pr}/comments?per_page=100`)) as { user?: { login?: string }; body?: string }[]).map(comment => `${comment.user?.login ?? 'unknown'}: ${comment.body ?? ''}`).join('\n\n'); },
+    async pullRequestBody() { return ''; },
+    async comments() { return ''; },
   };
 }
 
@@ -60,7 +66,7 @@ export async function judgeClosedQuestion(services: Services, actor: Principal, 
   const responder = services.responder;
   demand(responder, `No closed-question responder is configured; ${data.proof} takes its ordinary path`, 503);
   // External I/O stays outside the coordination transaction: read the state, then ask.
-  const state = await boundState(work, question, responder!, githubReaders(services));
+  const state = await boundState(work, question, responder!, checkoutReaders(services));
   demand(!state.excluded.length, `The responder may not be given the state ${data.proof} is asked against — ${state.excluded.join('; ')}; ${data.proof} takes its ordinary path`, 409);
   let answer: { answer: string; probability: number };
   try { answer = await responder!.ask({ question: question.question, criteria: question.criteria, state: state.state, stateHash: state.stateHash }); }

@@ -12,7 +12,7 @@ import { evaluateLandability, landabilityRefusals } from '../src/model/landabili
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
 import { reworkWaitsForApprover, riskClassApprover, selfApprover } from '../src/server/lane-rework.js';
-import { advisoryActionKey, advisoryChore, advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
@@ -172,7 +172,7 @@ test('unit:advisory-tests-selection — scripts/ci-tests.mjs exports the advisor
   for (const advisory of advisoryTests) assert.ok(preMergeTestFiles().includes(advisory), `${advisory} stays in github's pre-merge selection`);
 });
 
-test('integration:advisory-failure-files-chore — after the merge writer delivers a head the loop runs the advisory tests once on its merge commit, and each failing one files one chore naming the test and the merge sha; nothing is reverted and nothing is filed twice', async () => {
+test('integration:advisory-failure-files-nothing — after the merge writer delivers a head the loop runs the advisory tests once on its merge commit, and a failing one files no work item and prints one log line; nothing is reverted', async () => {
   const work = [item('control-plane', ['src/app.ts'], { gates: ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: true, reasons: [] })), stageEnteredAt: iso(start - 60_000) })];
   const events: MergeRecordEvent[] = [], advised: string[] = [], filed: { input: any; key: string }[] = [];
   const ports: MergePorts = {
@@ -196,20 +196,20 @@ test('integration:advisory-failure-files-chore — after the merge writer delive
   work[0] = { ...work[0]!, stage: 'done', observation: { ...work[0]!.observation!, merged: true, mergeSha } } as Work;
   await advisoryIdle(state);
   assert.deepEqual(advised, [mergeSha], 'one advisory run, on the merge commit');
-  const filing = cycle();
-  await mergeWriterStep(filing);
-  assert.equal(filed.length, 1, 'the one failing test file files one chore; a selection failure names no test');
-  assert.deepEqual(filed[0]!.input, advisoryChore('tests/hotspots.test.ts', mergeSha, 'GY-1'));
-  assert.equal(filed[0]!.input.type, 'chore');
-  assert.match(filed[0]!.input.title, new RegExp(`^Advisory test tests/hotspots\\.test\\.ts fails on ${mergeSha.slice(0, 12)}$`));
-  assert.ok(filed[0]!.input.description.includes(mergeSha));
-  assert.equal(state.actions[advisoryActionKey(mergeSha, 'tests/hotspots.test.ts')]?.state, 'done');
+  const logging = cycle();
+  const errors: string[] = [];
+  const error = console.error;
+  console.error = (line: string) => errors.push(String(line));
+  try { await mergeWriterStep(logging); } finally { console.error = error; }
+  assert.deepEqual(filed, [], 'the failing advisory test files no work item (GY-2086)');
+  assert.deepEqual(errors.map(line => line.trim()).filter(line => line.includes('advisory budget tests failed')).length, 1, 'the failing advisory test prints one log line');
+  assert.match(errors.find(line => line.includes('advisory budget tests failed')) ?? '', new RegExp(`failed on ${mergeSha}`));
   assert.ok(!events.some(event => (event as { kind: string }).kind === 'revert'), 'nothing is reverted');
   for (let again = 0; again < 2; again++) await mergeWriterStep(cycle());
-  assert.deepEqual([filed.length, advised.length], [1, 1], 'neither the run nor the chore repeats');
+  assert.deepEqual([filed.length, advised.length], [0, 1], 'neither the run nor a filing repeats');
 });
 
-test('integration:advisory-failure-files-chore — the advisory obligation is read from the merge ledger and kept in the persisted state: a restart mid-run runs it again, a delivery an open intent\'s reconciliation made is owed a run though no flight supplied it, and nothing delivered before the ledger was first read is owed', async () => {
+test('integration:advisory-failure-files-nothing — the advisory obligation is read from the merge ledger and kept in the persisted state: a restart mid-run runs it again, a delivery an open intent\'s reconciliation made is owed a run though no flight supplied it, and nothing delivered before the ledger was first read is owed', async () => {
   let clock = start;
   const delivered = (key: string, mergeSha: string, at: number) => ({ ...item('control-plane', ['src/app.ts']), key, id: key, stage: 'done',
     mergeLedger: { key, state: 'reconciled', head: sha(`head:${key}`), baseTip: base, mergeSha, risk: 'normal', intentAt: iso(at), pushedAt: iso(at + 1), observedTip: mergeSha, refusal: null, events: 3 } }) as unknown as Work;
@@ -239,12 +239,12 @@ test('integration:advisory-failure-files-chore — the advisory obligation is re
   assert.deepEqual(advised, [reconciled, reconciled], 'the restarted loop runs the interrupted obligation again');
   await advisoryIdle(state);
   await step();
-  assert.deepEqual(filed, [`Advisory test tests/module-budgets.test.ts fails on ${reconciled.slice(0, 12)}`]);
+  assert.deepEqual(filed, [], 'the failing advisory test files nothing across the restart either');
   assert.deepEqual([state.mergeWriter.advisory?.due, state.mergeWriter.advisory?.ran.map(entry => entry.mergeSha)], [[], [reconciled]]);
-  // Another restart: nothing runs or files twice.
+  // Another restart: nothing runs twice.
   state = JSON.parse(JSON.stringify(state));
   for (let again = 0; again < 3; again++) { await step(); await advisoryIdle(state); }
-  assert.deepEqual([advised.length, filed.length], [2, 1]);
+  assert.deepEqual([advised.length, filed.length], [2, 0]);
 });
 
 test('unit:rework-approver-by-risk — a control-plane rework waits for an approver only for a sensitive change, applied otherwise by graphyard-risk-class; github keeps reworkNeedsApprover by lane', () => {
@@ -265,4 +265,46 @@ test('unit:docs-word-budget — docs/coordination.md and docs/development.md eac
     assert.ok(sentences[0]!.split(/\s+/).length <= 25, `${page}: ${sentences[0]}`);
     for (const named of ['plannedFiles', 'sync restore', 'scope hook', 'producer sessions', 'budget-test blockers', 'normal-risk rework approvers']) assert.ok(sentences[0]!.includes(named), `${page} names ${named}`);
   }
+});
+
+test('unit:merge-writer-waits-out-upgrade — the cycle in which a merge lands starts no new trial, so the loop\'s upgrade between cycles kills none; the next cycle starts it', async () => {
+  const passed = ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: true, reasons: [] }));
+  const head2 = sha('head2'), candidate2 = { sha: head2, baseSha: base, pr: 8, branch: 'graphyard/gy-2-1', author: 'worker' };
+  const work = [item('control-plane', ['src/app.ts'], { gates: passed, stageEnteredAt: iso(start - 120_000) }),
+    item('control-plane', ['src/app.ts'], { id: 'w2', key: 'GY-2', gates: passed, stageEnteredAt: iso(start - 60_000), candidate: candidate2, observation: { ...observation('control-plane', ['src/app.ts']), candidate: candidate2 } })];
+  const trialled: string[] = [];
+  const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
+    trial: async (_mergeSha: string, _files: string[], target: Work) => { trialled.push(target.key); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; },
+    push: async () => 'pushed', holds: async () => false, record: async () => {}, merger: async () => 'control-plane', advisory: async () => ({ build: 'pass', failed: [] }) } as unknown as MergeWriterReads;
+  const state = emptyDaemonState(config);
+  const cycle = () => ({ state, effects: { mergeWriter: reads, persist: async () => {}, fileFaultClass: async () => ({ key: 'GY-900' }) } as unknown as DaemonEffects, now: () => start, snapshot: { work, now: iso(start) }, performed: [] as any[] }) as unknown as Cycle;
+  await mergeWriterStep(cycle());
+  await mergeWriterIdle(state);
+  assert.deepEqual(trialled, ['GY-1']);
+  const landed = cycle();
+  await mergeWriterStep(landed);
+  assert.ok(landed.performed.some(action => /^Merged GY-1 head/.test(action.detail)));
+  assert.equal(state.mergeWriter.inFlight, null, 'nothing is in flight when the cycle that merged ends');
+  work[0] = { ...work[0]!, stage: 'done', observation: { ...work[0]!.observation!, merged: true, mergeSha: sha(`merge:${head}`) } } as Work;
+  await advisoryIdle(state);
+  await mergeWriterStep(cycle());
+  assert.equal((state.mergeWriter.inFlight as { key: string } | null)?.key, 'GY-2', 'the next cycle starts the next trial');
+});
+
+test('unit:upgrade-waits-for-trial — the merge writer reports a trial in flight until it settles, which the loop\'s self-upgrade waits for', async () => {
+  const passed = ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: true, reasons: [] }));
+  const work = [item('control-plane', ['src/app.ts'], { gates: passed, stageEnteredAt: iso(start - 60_000) })];
+  let release: () => void = () => {};
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
+    trial: async () => { await held; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; },
+    push: async () => 'pushed', holds: async () => false, record: async () => {}, merger: async () => 'control-plane', advisory: async () => ({ build: 'pass', failed: [] }) } as unknown as MergeWriterReads;
+  const state = emptyDaemonState(config);
+  const cycle = { state, effects: { mergeWriter: reads, persist: async () => {}, fileFaultClass: async () => ({ key: 'GY-900' }) } as unknown as DaemonEffects, now: () => start, snapshot: { work, now: iso(start) }, performed: [] as any[] } as unknown as Cycle;
+  assert.equal(mergeWriterInFlight(state), false, 'nothing in flight before a trial starts');
+  await mergeWriterStep(cycle);
+  assert.equal(mergeWriterInFlight(state), true, 'the trial is in flight: an upgrade now would kill it');
+  release();
+  await mergeWriterIdle(state);
+  assert.equal(mergeWriterInFlight(state), false, 'once it settles the upgrade may run');
 });

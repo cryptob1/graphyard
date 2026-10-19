@@ -4,7 +4,7 @@ import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../../src/model/duration';
 import { groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
-import { leftFlowAt, releaseView } from '../../src/model/release';
+import { releaseView, servedFor } from '../../src/model/release';
 import { stalledCards } from '../../src/model/actionless';
 import { groupFaults, statusFaults, workFaults } from '../../src/model/fault-classes';
 import { backlogCounts } from '../../src/model/machine-backlog';
@@ -23,8 +23,8 @@ const week = 7 * 24 * 60 * 60 * 1000;
  * clock. What shipped is one line at the foot, linking to the Shipped page: shipped means the
  * release was observed serving it, dated from that observation. The latest is the newest merge
  * (GY-168), whether or not a release was recorded for it; the merges not yet seen live are the
- * ones the control plane's production observation holds at Deploy (`leftFlowAt`) — none where
- * production serves the newest merge, and none claimed where nothing observes production.
+ * ones the control plane's production observation reports unserved — none where production serves
+ * the newest merge, and none claimed where nothing observes production.
  */
 export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, stepMoves }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -54,7 +54,8 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   // a merge the production watch reports pending or failed, or merged after its last pass. With no
   // production observation nothing is claimed: a smoke-gated merge is not "not live" by default.
   // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
-  const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && leftFlowAt(w, release) === null).length;
+  const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && !servedFor(w, release)
+    && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
@@ -70,11 +71,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
     <div className="page-heading"><div><h1>Work</h1><p className="summary">{board ? summarySentence(counts) : 'Reading the board…'}</p></div>
       <div className="heading-tools"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
-    {status && !status.github && <div className="notice">GitHub is not connected, so nothing can merge yet. <a href="/docs/github">Set it up ↗</a></div>}
-    {status?.appPermissions?.attention?.length > 0 && <div className="notice danger" role="alert"><strong>GitHub App permissions need attention.</strong>{status.appPermissions.attention.map((line: string) => <p key={line}>{line}</p>)}{status.heldJobs > 0 && <p>{status.heldJobs} integration job{status.heldJobs === 1 ? ' is' : 's are'} held rather than retried until the permission is accepted.</p>}{/^https:\/\/github\.com\//.test(status.appPermissions.installationUrl ?? '') && <a href={status.appPermissions.installationUrl} target="_blank" rel="noreferrer noopener">Review the App installation on GitHub ↗</a>} <a href="/docs/github#app-permissions">Migration guide ↗</a></div>}
-    {/* A rate-limit pause is one incident (GY-117): what stopped, until when, what spent the budget. */}
-    {status?.githubBudget?.paused && <div className="notice danger" role="alert"><strong>GitHub requests are paused until {status.githubBudget.paused.until}.</strong> {status.githubBudget.paused.reason}. What exhausted the budget: {status.githubBudget.lastHour.requests} requests in the last hour{status.githubBudget.lastHour.byKind.length > 0 && ` (${status.githubBudget.lastHour.byKind.map((entry: any) => `${entry.kind} ${entry.requests}`).join(', ')})`}. Every gate reads stale until the pause lifts{status.jobs?.length > 0 && `; ${status.jobs.length} integration job${status.jobs.length === 1 ? '' : 's'} recorded the refusal`}.</div>}
-    {status?.jobs?.length > 0 && !status?.githubBudget?.paused && <div className="notice danger">{status.jobs.length} GitHub update(s) failed: {status.jobs[0].error}</div>}
+    {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
     {status?.executors?.attention?.length > 0 && <div className="notice danger" role="alert" aria-label="Unserved actions"><strong>{status.executors.live === 0 ? 'No executor is running.' : `No executor serves ${status.executors.attention.map((entry: any) => entry.kind).join(', ')}.`}</strong> {status.executors.attention.map((entry: any) => <p key={entry.kind}>{entry.text}</p>)}<p className="muted">An action nobody can claim is not queued behind other work; nothing moves until an executor of its kind is started. <a href="/docs/master-agent-reference#running-executors-under-supervision">How executors are supervised ↗</a></p></div>}
     {/* Drawn whether or not any work exists: status-level faults stand without an item. */}
     {faults.length > 0 && <section className="fault-classes" aria-label="Problems by class">

@@ -166,11 +166,11 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   assert.deepEqual(result.handoffs, [], 'no browser or device handoff');
   assert.ok(!events.some(event => event.kind === 'handoff' || event.kind === 'waiting'), 'no handoff or waiting event');
   assert.ok(result.checklist.every(item => item.done), JSON.stringify(result.checklist.filter(item => !item.done)));
-  assert.ok(world.calls.filter(args => args[0] === 'install').every(args => args.includes('--no-github-app')), 'no GitHub App is registered');
+  assert.ok(world.calls.filter(args => args[0] === 'install').every(args => !args.some(arg => /^--(reviewer|no-github-app|reuse-app|github-app)$/.test(arg))), 'no GitHub App is registered: install takes no App flag');
   assert.deepEqual(world.ghCalls, [['repo', 'view', repository, '--json', 'name']], 'the operator\'s gh login only looked the repository up');
   assert.equal(world.deployKeys.length, 1);
   const status = await request(operatorAgent, 'status');
-  assert.equal(status.github, false, 'the plane runs with no GitHub App');
+  assert.equal('github' in status, false, 'the plane runs with no GitHub App: its status reports none (GY-2010)');
   assert.equal(status.mergeWriter.merger, 'control-plane', 'the control plane is the merge writer');
   assert.ok(result.goal, 'the goal was submitted');
   const key = result.goal!;
@@ -210,8 +210,8 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
     goals: async () => (await request(coordinator, 'goals?open=1')).goals,
     runner: async (role, attempt, goal) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
       ? { goal: goal.key, verdict: 'approve', reason: 'One small item a worker finishes in one change' }
-      : { goal: goal.key, note: 'A greeting module under src/, served by the existing application.',
-        items: [{ ref: 'greeting', title: 'Greet the customer', description: 'Add the greeting module', type: 'feature', priority: 2,
+      : { goal: goal.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
+        items: [{ ref: 'greeting', title: 'Greet the customer', plain: 'Customers see a greeting.', description: 'Add the greeting module', type: 'feature', priority: 2,
           outcomes: ['greeting'], cases: ['greeting'],
           criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], plannedFiles: ['src/greeting.ts', 'public/greeting.json'], dependsOn: [] }] }, runs) }),
     plan: (goal, plan) => request(operatorAgent, `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
@@ -251,7 +251,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
       closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
       recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-      github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: reads } as unknown as DaemonEffects;
+      github: githubDouble, merge: githubDouble, mergeWriter: reads } as unknown as DaemonEffects;
     await runCycle(config, state, effects, () => clock);
     await mergeWriterIdle(state);
     await runCycle(config, state, effects, () => clock);

@@ -3,7 +3,6 @@ import { caseDirectory, caseId, contractFile } from '../e2e/case.js';
 import { criteriaSchema } from './policy.js';
 import { demand } from './refusal.js';
 import { pathScopesOverlap } from './scope.js';
-import { deliveryState } from './delivery.js';
 import type { Work } from './work.js';
 import type { Goal, GoalContext } from './goal.js';
 
@@ -14,19 +13,29 @@ import type { Goal, GoalContext } from './goal.js';
  * lets parallel items share a file or touches a required case is refused with the reason before
  * any approver sees it; an approver who is not its author approves it, and only then are its
  * items created and released (src/server/routes/goals.ts releasePlan).
+ *
+ * GY-2011: the plan also carries a plain `summary` (at most three sentences a person can read in a
+ * minute) and each item a one-sentence `plain` description; both are required on the payload and
+ * shown on the goal's picture page and each item page.
  */
 const line = (max: number) => z.string().trim().min(1).max(max).refine(value => !/[\u0000-\u0008\u000b-\u001f\u007f]/.test(value), 'Control characters are not allowed');
 const reason = line(2000);
 
 /** The architecture note's bound, in words. */
 export const planNoteMaxWords = 400;
+/** The plan summary's bound, in plain sentences (GY-2011). */
+export const planSummaryMaxSentences = 3;
 /** Plans the loop drafts for one goal; past them a refused plan is the master's to answer. */
 export const maxPlanRounds = 3;
 const planRef = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, 'A plan item ref is lower-case letters, digits and -, starting with a letter');
+/** Plain sentences: split on . ! ? followed by space or end; empty text is zero sentences. */
+export const plainSentences = (text: string) => text.trim().split(/(?<=[.!?])(?:\s+|$)/).map(part => part.trim()).filter(Boolean);
 /** One planned work item: the outcomes it serves, the required cases it must make pass, its criteria, its file boundary and the items it lands after. */
 export const planItemSchema = z.object({
   ref: planRef,
   title: line(200),
+  /** One plain sentence a non-engineer understands (GY-2011); copied onto the work item as `summary` at release. */
+  plain: line(400).refine(value => plainSentences(value).length === 1, { message: 'plain is one sentence' }),
   description: z.string().trim().max(20000).default(''),
   type: z.enum(['feature', 'bug', 'chore']).default('feature'),
   priority: z.number().int().min(0).max(4).default(2),
@@ -37,7 +46,15 @@ export const planItemSchema = z.object({
   dependsOn: z.array(planRef).max(20).default([]),
 }).strict();
 export type PlanItem = z.infer<typeof planItemSchema>;
-export const goalPlanSchema = z.object({ note: line(6000), items: z.array(planItemSchema).min(1).max(30) }).strict();
+export const goalPlanSchema = z.object({
+  /** At most three plain sentences: what the user gets and how it will be built (GY-2011). */
+  summary: line(800),
+  note: line(6000),
+  items: z.array(planItemSchema).min(1).max(30),
+}).strict().superRefine((plan, ctx) => {
+  const count = plainSentences(plan.summary).length;
+  if (count > planSummaryMaxSentences) ctx.addIssue({ code: 'custom', path: ['summary'], message: `summary is ${count} sentences; it is at most ${planSummaryMaxSentences}` });
+});
 export type GoalPlan = z.infer<typeof goalPlanSchema>;
 const words = (text: string) => text.trim().split(/\s+/).filter(Boolean).length;
 /** Every item ref each item lands after, directly or through another. */
@@ -58,6 +75,11 @@ function reaches(plan: Pick<GoalPlan, 'items'>) {
  */
 export function planRefusals(goal: Pick<Goal, 'key' | 'protected' | 'acceptance'>, plan: GoalPlan): string[] {
   const refusals: string[] = [];
+  if (!('summary' in plan) || plan.summary == null || String(plan.summary).trim() === '') refusals.push('summary is missing');
+  else {
+    const summarySentences = plainSentences(plan.summary);
+    if (summarySentences.length > planSummaryMaxSentences) refusals.push(`summary is ${summarySentences.length} sentences; it is at most ${planSummaryMaxSentences}`);
+  }
   const noteWords = words(plan.note);
   if (noteWords > planNoteMaxWords) refusals.push(`the architecture note is ${noteWords} words; it is at most ${planNoteMaxWords}`);
   const refs = plan.items.map(item => item.ref);
@@ -65,6 +87,8 @@ export function planRefusals(goal: Pick<Goal, 'key' | 'protected' | 'acceptance'
   if (twice.length) refusals.push(`item ref${twice.length === 1 ? '' : 's'} ${twice.join(', ')} ${twice.length === 1 ? 'is' : 'are'} planned twice`);
   const caseOfOutcome = new Map((goal.acceptance?.outcomes ?? []).map(outcome => [outcome.id, outcome.case.id]));
   for (const item of plan.items) {
+    if (!('plain' in item) || item.plain == null || String(item.plain).trim() === '') refusals.push(`plain is missing on item ${item.ref}`);
+    else if (plainSentences(item.plain).length !== 1) refusals.push(`item ${item.ref}'s plain is ${plainSentences(item.plain).length} sentences; it is one sentence`);
     const strange = item.outcomes.filter(id => !goal.protected.outcomes.includes(id));
     if (strange.length) refusals.push(`item ${item.ref} serves ${strange.join(', ')}, which ${goal.key} did not approve; its outcomes are ${goal.protected.outcomes.join(', ')}`);
     const unknown = item.cases.filter(id => !goal.protected.cases.includes(id));
@@ -152,16 +176,12 @@ export function planNext(goal: Goal): { who: string; command: string } | null {
   if (goal.stage === 'planning') return { who: 'planner role (the master loop launches it once its operator-agent and approver identities are provisioned)', command: `graphyard goal plan ${goal.key} PLAN.json` };
   if (goal.stage === 'plan-review') return { who: `an approver other than ${goal.plan!.author}`, command: `graphyard goal plan-approve ${goal.key} -- REASON (or goal plan-refuse)` };
   if (goal.stage === 'planned') return { who: 'the loop: Graphyard creates and releases the approved plan\'s items, carrying their dependencies', command: `graphyard goal release ${goal.key}` };
-  if (goal.stage === 'delivering' && goal.items?.length) return { who: `the loop: the dispatcher delivers ${goal.items.map(item => item.key).join(', ')} in dependency order; the goal is delivered once every one is done and production serves it`, command: `graphyard goal deliver ${goal.key} ${goal.items.map(item => item.key).join(' ')} -- REASON` };
+  if (goal.stage === 'delivering' && goal.items?.length) return { who: `the loop: the dispatcher delivers ${goal.items.map(item => item.key).join(', ')} in dependency order; the goal is delivered once every one is merged`, command: `graphyard goal deliver ${goal.key} ${goal.items.map(item => item.key).join(' ')} -- REASON` };
   return null;
 }
 
-/**
- * An item delivers its goal once it is done and production serves it: a deployment observed
- * covering its merge, and the smoke proof passed when its policy asks for one. Read by the deliver
- * route and the loop alike.
- */
-export const servedInProduction = (work: Work | undefined) => !!work && work.stage === 'done' && !!work.delivery?.deployment && ['delivered', 'smoke-passed'].includes(deliveryState(work) ?? '');
+/** An item delivers its goal once it is merged (GY-1981: done = merged). Read by the deliver route and the loop alike. */
+export const mergedItem = (work: Work | undefined) => !!work && work.stage === 'done' && !work.closure && !!work.delivery;
 /** The first line of a released plan item's description: the durable mark a retried release finds it by, whatever receipts expired. */
 export const planItemMark = (goal: Pick<Goal, 'key'>, plan: { draftedAt: string }, item: Pick<PlanItem, 'ref'>) => `Plan item ${item.ref} of ${goal.key}'s plan drafted ${plan.draftedAt}.`;
 /** What creating one approved plan item sends: its criteria and file boundary, the dependencies already created, and the goal, outcomes, required cases and architecture note it serves. */
@@ -173,6 +193,8 @@ export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance
     '', `Architecture note for ${goal.key}:`, goal.plan.note].join('\n').trim();
   return {
     title: `${goal.key}: ${item.title}`.slice(0, 200), description: description.length > 20000 ? `${description.slice(0, 19999)}…` : description,
+    // The item page opens on this plain sentence (GY-2011); master create may set the same field by hand.
+    summary: item.plain,
     type: item.type, priority: item.priority, criteria: item.criteria, plannedFiles: item.plannedFiles,
     dependencies: item.dependsOn.map(ref => { const dependency = created.get(ref); if (!dependency) throw new Error(`${item.ref} depends on ${ref}, which is not created yet`); return dependency.id; }),
     reason: `${goal.key}'s approved plan item ${item.ref}`,

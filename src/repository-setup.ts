@@ -6,13 +6,12 @@ import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, removeDeliveryWorkflow, saveDiscovery, writeDeliveryWorkflow, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
+import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, removeDeliveryWorkflow, saveDiscovery, setupProposalSchema, type ScanInput, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
 import { autonomyContract } from './autonomy.js';
 import { documentationAssignment, documentationPolicySchema, parseRepositoryConfig, repositoryConfigFile, type DocumentationPolicy, type RepositoryConfig } from './model/documentation.js';
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
-import { renderReleasePipeline } from './install/release-pipeline.js';
 import { assertUnitOwned, ForeignUnitRefusal, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
 import { coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
@@ -97,8 +96,9 @@ Register the assigned host/path/branch before submission. Do not reuse another
 assignment's worktree or quietly remove historical reservations.
 
 Run \`sync GY-N\` before submitting. It merges the shared origin/BASE the merge writer
-advances (never rebase; nothing is fetched). Commit on the assigned branch: nothing is
-pushed and no pull request is opened.
+advances (never rebase; nothing is fetched), and judges only merge conflicts:
+plannedFiles is the planned change list that keeps parallel work apart, a hint and not
+a limit. Commit on the assigned branch: nothing is pushed and no pull request is opened.
 
 Submit the commit with \`complete GY-N EPOCH --head SHA\` (the control plane is the merge
 writer; the shared object store already holds SHA). This reports implementation
@@ -124,13 +124,13 @@ docs/setup-from-zero.md: \`doctor\` prints one PASS or FAIL line per prerequisit
 ${launchAuthorization}
 
 A dedicated master coordinator must keep cycling: status, dispatch ready work,
-shepherd review, reconcile what GitHub merged, then deployment verification.
+shepherd review, record what the merge writer's trial landed, then deployment verification.
 Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
 external blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment
 blocker is recorded in Graphyard. Delivered work is immutable, so a deployment
 blocker is recorded as a follow-up work item naming the delivered item, its merge
-commit, and the external cause; the delivery stays pending until the release serves it.
+commit, and the external cause; delivered at merge; release health is one status line.
 An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
@@ -363,14 +363,6 @@ export function repositoryScanDifference(fresh: SetupProposal, stored: SetupProp
   return repositoryPart(fresh) === repositoryPart(stored) ? [] : ['The repository scan no longer matches the stored proposal'];
 }
 
-async function readGithubApp(directory: string, repository: string) {
-  const file = resolve(directory, 'github-app.json');
-  let app: any;
-  try { app = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT') throw error; return null; }
-  if (app.repository !== repository) throw new Error('Saved App belongs to a different repository');
-  return app;
-}
-
 const principalsDocumentSchema = z.object({
   version: z.literal(1), server: z.string(), repository: z.string(), note: z.string(),
   principals: z.array(z.object({
@@ -381,14 +373,12 @@ const principalsDocumentSchema = z.object({
 
 export interface ApplyDependencies {
   url: string;
-  githubSetup?: (repository: string, deployment: string) => Promise<{ appId: number; slug: string }>;
   now?: () => Date;
   token?: () => string;
   /**
    * The `graphyard install` that already owns this repository's identities (GY-1413): its install
    * directory and its confirmed App. Apply then commits only the onboarding files — it never writes
-   * a second principals registry and never opens an App page of its own. A null App is an install
-   * applied with `--no-github-app` (GY-1642): the onboarding is written with no App block.
+   * a second principals registry. Its App is the one a pull-request-era install recorded, else null.
    */
   installed?: { directory: string; githubApp: { appId: number; slug: string } | null };
   /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
@@ -429,21 +419,10 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   // committed delivery policy, and the candidate and promotion workflows are rendered from it.
   const delivery = proposal.delivery ? await applyDelivery(root, proposal.delivery, proposal.stack.name) : null;
   if (delivery) { applied.push(...delivery.applied); unchanged.push(...delivery.unchanged); drift.push(...delivery.drift); }
-  // GY-1480: a repository with no CI of its own gets a minimal delivery workflow — build and test
-  // for its stack, then Graphyard's gate job — in the onboarding change; it is reported among the
-  // workflows only once it is on disk. It decides "no CI" itself, so a rerun that finds only
-  // Graphyard's own workflows still reports it, matching the gate the proposed policy requires.
-  // The local mode (GY-1901) generates no GitHub Actions workflow, delivery workflow included.
-  const local = proposal.delivery?.mode === 'local';
-  const deliveryWorkflow = delivery && !local ? await writeDeliveryWorkflow(root) : null;
-  const staleWorkflow = delivery && local ? await removeDeliveryWorkflow(root) : null;
-  if (staleWorkflow) (staleWorkflow.state === 'removed' ? applied : drift).push(staleWorkflow.state === 'removed' ? `removed ${staleWorkflow.path}: the local mode generates no GitHub Actions workflow` : `${staleWorkflow.path} is not the generated workflow; delete it to finish switching to local delivery`);
-  // An operator's edit to it is drift: the edited file is kept, and still published as the workflow.
-  if (delivery && deliveryWorkflow) {
-    if (deliveryWorkflow.state === 'drift') drift.push(`${deliveryWorkflow.path} differs from the generated workflow; the edited file was kept`);
-    else (deliveryWorkflow.state === 'written' ? applied : unchanged).push(deliveryWorkflow.path);
-    delivery.workflows.push(deliveryWorkflow.path);
-  }
+  // GY-2009: repository setup writes no .github/workflows file; the merge writer's trial is the gate.
+  // Remove a leftover generated delivery workflow when present (local or not).
+  const staleWorkflow = delivery ? await removeDeliveryWorkflow(root) : null;
+  if (staleWorkflow) (staleWorkflow.state === 'removed' ? applied : drift).push(staleWorkflow.state === 'removed' ? `removed ${staleWorkflow.path}: install and CI use no GitHub Actions gates` : `${staleWorkflow.path} is not the generated workflow; delete it so no Actions gate remains`);
 
   const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
   const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
@@ -504,17 +483,8 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   await writeProfile('reviewer', { provider: proposal.policy.reviewProvider, note: proposal.profiles.reviewer.note });
 
   const previousState = await loadAppliedSetup(root);
-  // An install's App, or its choice of none, is the App: a saved or earlier registration is not
-  // read or revived beside it, so a stale or malformed saved App cannot abort the apply, and no
-  // App page is opened for it.
-  const savedApp = dependencies.installed ? null : await readGithubApp(directory, proposal.repository);
-  let githubApp: { appId: number; slug: string } | null = dependencies.installed ? dependencies.installed.githubApp : (savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null);
-  if (!githubApp && !dependencies.installed && dependencies.githubSetup) {
-    const registration = await dependencies.githubSetup(proposal.repository, server);
-    if (!Number.isSafeInteger(registration?.appId) || !registration?.slug) throw new Error('The GitHub App flow returned an incomplete registration');
-    githubApp = { appId: registration.appId, slug: registration.slug };
-    applied.push(`GitHub App registration ${githubApp.slug}`);
-  }
+  // No GitHub App is registered (GY-2010): only an App an earlier, pull-request-era apply or install recorded is kept.
+  const githubApp = dependencies.installed ? dependencies.installed.githubApp : previousState?.artifacts.githubApp ?? null;
 
   const state = appliedStateSchema.parse({ version: 1, appliedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
     proposalDigest: proposalDigest(proposal), server,
@@ -530,15 +500,11 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const documentationLine = documentationAssignment(documentation.policy).line;
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null, documentation: { file: repositoryConfigFile, policy: documentation.policy, line: documentationLine },
     delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows } : null,
-    // An install that chose no App has no App step pending; only an App-backed setup waits for one.
-    githubPending: !githubApp && !dependencies.installed,
     workerPrincipals,
     principalsFile: dependencies.installed ? null : principalsPath,
     next: dependencies.installed
       ? `The principals are the ones graphyard install deployed from ${dependencies.installed.directory}; nothing needs installing as GRAPHYARD_PRINCIPALS. Commit the onboarding files`
-      : githubApp
-      ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`
-      : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently',
+      : `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`,
     documentationNext: `Commit ${repositoryConfigFile} with AGENTS.md${delivery?.workflows.length ? ` and ${delivery.workflows.join(', ')}` : ''}, and set ${documentationLine} on the Graphyard deployment so every item names these documentation paths` };
 }
 
@@ -564,32 +530,15 @@ export async function applyDelivery(root: string, policyInput: DeliveryPolicy, s
     await atomicWrite(configFile, `${JSON.stringify({ ...config, delivery: policy }, null, 2)}\n`, 0o644);
     applied.push(`${repositoryConfigFile} delivery policy (${policy.mode}: pre-merge ${policy.mergeGate.preMerge.map(entry => entry.check).join(', ') || 'none'})`);
   }
-  let files: { path: string; content: string }[] = [];
-  try { files = renderReleasePipeline(policy, { stack, ...options }); }
-  catch (error: any) { drift.push(`release workflows were not generated: ${error.message}`); }
-  for (const file of files) {
-    const target = resolve(root, file.path);
-    let current: string | null = null;
-    try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-    if (current === file.content) { unchanged.push(file.path); continue; }
-    await mkdir(dirname(target), { recursive: true });
-    await atomicWrite(target, file.content, 0o644);
-    applied.push(file.path);
-  }
-  if (policy.mode === 'per-pr') for (const path of generatedWorkflowFiles) {
-    try { await stat(resolve(root, path)); drift.push(`${path} is left from the release-candidate model; delete it to finish opting out to per-PR delivery`); }
-    catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  }
-  // Under the local mode the control plane runs candidates itself (GY-1901): a candidate or promotion
-  // workflow init generated would keep releasing outside it, so it is removed; a hand-edited one is named.
-  if (policy.mode === 'local') for (const path of generatedWorkflowFiles) {
+  // GY-2009: never write .github/workflows; remove leftover generated candidate/promotion workflows.
+  for (const path of generatedWorkflowFiles) {
     let current: string | null = null;
     try { current = await readFile(resolve(root, path), 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
     if (current === null) continue;
-    if (current.split('\n', 3).includes('# Generated by graphyard init from the delivery policy in graphyard.json (docs/onboarding.md).')) { await rm(resolve(root, path)); applied.push(`removed ${path}: the local mode runs candidates in the control plane`); }
-    else drift.push(`${path} is not one init generated; delete it to finish switching to local delivery`);
+    if (current.split('\n', 3).includes('# Generated by graphyard init from the delivery policy in graphyard.json (docs/onboarding.md).')) { await rm(resolve(root, path)); applied.push(`removed ${path}: repository setup writes no GitHub Actions workflows`); }
+    else drift.push(`${path} is not one init generated; delete it so no Actions gate remains`);
   }
-  return { policy, requiredChecks: requiredPullRequestChecks(policy), workflows: files.map(file => file.path), applied, unchanged, drift };
+  return { policy, requiredChecks: requiredPullRequestChecks(policy), workflows: [], applied, unchanged, drift };
 }
 
 // --- Documentation policy: what the repository documents, proposed from the checkout (GY-215) ----

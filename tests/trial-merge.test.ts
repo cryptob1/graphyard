@@ -1,25 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { shadowErrorKey, shadowIdle, shadowReads, shadowRunnerKey, shadowRunnerRetries } from '../src/daemon/cycle-shadow.js';
-import { masterConfigSchema } from '../src/master.js';
-import type { Work } from '../src/model.js';
+import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { preMergeTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { processPidNamespace, reclaimTmpDirectories, tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
+import { processPidNamespace, processStartTicks, reclaimTmpDirectories, tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
-// Time-bomb allowance (GY-1694): the 2030-03-01 start is both the loop's injected now and its snapshot's now, so the fixture's stamps are judged against it; new Date() only stamps a crashed-trial owner marker.
 
-// GY-1522: the shadow gate's trial merge — the exact merge commit made in the object store, and its
+// GY-1522: the merge writer's trial merge — the exact merge commit made in the object store, and its
 // build and affected tests run in a detached, credential-free checkout that is always removed.
 
 // Every scratch directory here sits under the host's tmpdir without the `graphyard-` prefix: a trial takes seconds to
@@ -30,9 +25,6 @@ const gitIn = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd
 const gitFor = (root: string) => async (args: string[], env: Record<string, string> = {}) => String(await defaultChildRun('git', ['-C', root, ...args], { env: { ...process.env, ...identity, ...env } }));
 // The install this checkout resolves, wherever it sits above it.
 const installedModules = resolve(dirname(createRequire(import.meta.url).resolve('tsx/package.json')), '..');
-const start = Date.parse('2030-03-01T00:00:00Z'), iso = (at: number) => new Date(at).toISOString();
-const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
 
 async function repository(files: Record<string, string>) {
   const root = await temporaryDirectory('trial-merge-repo', tmpdir());
@@ -103,7 +95,7 @@ const fixtureFiles = {
   // every file passed, with a `killed` file listed a signal ends it. A `partial` file listed writes passing records for
   // every other file, prints a named failure for itself without a completion record, and exits 1 — as a runner that dies
   // mid-group after some files finished (GY-1548).
-  'tests/helpers/run-tests.ts': "import { existsSync, readFileSync, writeFileSync } from 'node:fs'; import { tmpdir } from 'node:os'; import { dirname, join } from 'node:path'; const at = process.argv.indexOf('--files-from'); if (at < 0) { console.error('no --files-from: the runner would run every test file'); process.exit(2); } const files = readFileSync(process.argv[at + 1], 'utf8').split('\\n').filter(Boolean);\n"
+  'tests/helpers/run-tests.ts': "import { existsSync, readFileSync, writeFileSync } from 'node:fs'; import { homedir, tmpdir } from 'node:os'; import { dirname, join } from 'node:path'; const at = process.argv.indexOf('--files-from'); if (at < 0) { console.error('no --files-from: the runner would run every test file'); process.exit(2); } const files = readFileSync(process.argv[at + 1], 'utf8').split('\\n').filter(Boolean);\n"
     + "console.log('group: ' + files.length + ' file(s)' + (existsSync('tree-marker') ? ' in ' + readFileSync('tree-marker', 'utf8').trim() : ''));\n"
     + "const durations = process.argv.indexOf('--durations');\n"
     + "if (files.some(file => file.includes('partial'))) { const done = files.filter(file => !file.includes('partial')); for (const file of done) console.log('ok - ' + file); const failed = files.find(file => file.includes('partial')); console.log('not ok - ' + failed); console.log('  test at ' + failed + ':1:1'); if (durations >= 0) writeFileSync(process.argv[durations + 1], done.map(file => JSON.stringify({ file, durationMs: 1, passed: true })).join('\\n') + (done.length ? '\\n' : '')); process.exit(1); }\n"
@@ -279,12 +271,12 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   const memory: FilesystemProbe = async path => ({ probed: path, volatile: path === clean ? 'tmpfs' : null, freeBytes: null });
   const full: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: path === clean ? 1e6 : 1e12 });
   const tmpfs: FilesystemProbe = async path => ({ probed: path, volatile: 'tmpfs', freeBytes: null });
-  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, durable), usable ? clean : null);
-  assert.equal(await trialCheckoutRoot([shared, clean], 2e9, durable), usable ? clean : null, 'a poisoned root is passed over though it is durable with room');
-  assert.equal(await trialCheckoutRoot([shared], 2e9, durable), null, 'a durable host /tmp holding a stray node_modules: the checkout stays in the managed session directory');
-  assert.equal(await trialCheckoutRoot([clean, near, shared], 2e9, memory), usable ? near : null, 'a tmpfs is passed over');
-  assert.equal(await trialCheckoutRoot([clean, near, shared], 2e9, full), usable ? near : null, 'so is a volume below the minimum free');
-  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, memory), null, 'none: the checkout stays in the managed session directory');
+  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, durable, []), usable ? clean : null);
+  assert.equal(await trialCheckoutRoot([shared, clean], 2e9, durable, []), usable ? clean : null, 'a poisoned root is passed over though it is durable with room');
+  assert.equal(await trialCheckoutRoot([shared], 2e9, durable, []), null, 'a durable host /tmp holding a stray node_modules: the checkout stays in the managed session directory');
+  assert.equal(await trialCheckoutRoot([clean, near, shared], 2e9, memory, []), usable ? near : null, 'a tmpfs is passed over');
+  assert.equal(await trialCheckoutRoot([clean, near, shared], 2e9, full, []), usable ? near : null, 'so is a volume below the minimum free');
+  assert.equal(await trialCheckoutRoot([clean, shared], 2e9, memory, []), null, 'none: the checkout stays in the managed session directory');
   const host: NodeJS.ProcessEnv = { PATH: process.env.PATH!, TMPDIR: shared, TMP: shared, TEMP: shared };
   const repo = await fixture();
   const seen = (logTail: string) => JSON.parse(/ENV:(.*)/.exec(logTail)![1]!) as { tmpdir: string; tmpEntries: string[]; tmpVariables: string[]; cwd: string };
@@ -293,7 +285,7 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     const merged = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base });
     assert.ok('mergeSha' in merged);
     const base = await temporaryDirectory('trial-merge-root', tmpdir());
-    return { base, run: () => runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: changed, timeoutMs: 120_000, key: 'GY-9', environment: host, temporaryRoots: [shared, clean], probe: durable, ...options }) };
+    return { base, run: () => runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: changed, timeoutMs: 120_000, key: 'GY-9', environment: host, temporaryRoots: [shared, clean], checkoutRoots: [shared, clean], probe: durable, ...options }) };
   };
   const directories: string[] = [];
   for (const [files, changed, outcome, probe] of [
@@ -373,7 +365,7 @@ test('integration:shadow-trial-stable-green — three consecutive trials of one 
     (error: { stdout?: string }) => /not ok - tests\/lookup\.test\.ts — the upward lookup found .*\/tmp\/node_modules/.test(String(error.stdout)), 'under the shared tmp the lookup resolves the stray node_modules');
   for (const attempt of [1, 2, 3]) {
     const base = join(host, `worktrees-${attempt}`);
-    const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['tests/lookup.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-1535', environment, temporaryRoots: [shared, persistent] });
+    const result = await runTrial({ root: repo.root, base, mergeSha: merged.mergeSha, changedFiles: ['tests/lookup.test.ts', 'tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-1535', environment, temporaryRoots: [shared, persistent], checkoutRoots: [shared, persistent] });
     assert.equal(result.build, 'pass', result.logTail);
     assert.deepEqual(result.tests, { passed: 2, failed: [], files: 2 }, `trial ${attempt} has no shadow-only-fail from the contamination: ${result.logTail}`);
     assert.equal(result.runnerExit, 0);
@@ -474,30 +466,6 @@ test('integration:shadow-trial-failure-diagnostics — a runner that exits non-z
   const buildBroken = repo.commitOnBase({ 'break-build': '', 'tests/ok.test.ts': 'x\n' }, 'build broken');
   assert.equal((await runTrial({ root: repo.root, base: await temporaryDirectory('trial-merge-root', tmpdir()), mergeSha: await mergeOf(repo, buildBroken), changedFiles: ['tests/ok.test.ts'], timeoutMs: 120_000, key: 'GY-9', cores: 2, environment: planted })).build, 'fail');
 
-  // The loop's record of the runner exit, through the shadow step over this repository: against head, base tip and trial merge sha, with the exit and the tail.
-  const run = ((command: string, args: string[], options: unknown) => command === 'git' && args[2] === 'fetch' ? '' : defaultChildRun(command, args, options as never)) as never;
-  const reads = shadowReads(config, repo.root, run, { base: await temporaryDirectory('trial-merge-root', tmpdir()), record: async () => { assert.fail('a runner failure records no verdict'); }, trial: input => runTrial({ ...input, cores: 2 }) });
-  const work = [{ id: 'w1', key: 'GY-1548', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1,
-    createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 1 }, candidate: { sha: crashed, baseSha: repo.base, pr: 1, branch: 'graphyard/gy-1548-1', author: 'w' },
-    reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], stage: 'build' }] as unknown as Work[];
-  const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work, now: iso(start) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {}, github: {}, merge: {}, shadow: reads } as unknown as DaemonEffects;
-  const state = emptyDaemonState(config), now = () => start;
-  const attention: string[] = [];
-  for (let cycle = 0; cycle < 5; cycle++) { attention.push(...(await runCycle(config, state, effects, now)).actions.filter(action => action.detail.startsWith('Shadow merge gate runner failure:')).map(action => action.detail)); await shadowIdle(state); }
-  const record = state.actions[shadowRunnerKey(crashed, repo.base)];
-  assert.ok(record, 'the diagnostic record is keyed by head and base tip');
-  // The loop made its own trial merge of the head (the trial ref holds the newest); the record names that commit.
-  const loopMerge = gitIn(repo.root, 'rev-parse', trialRef(crashed));
-  assert.equal(record.state, 'failed');
-  assert.equal(record.attempts, shadowRunnerRetries, 'tried again once, then given up');
-  for (const named of [crashed, repo.base, loopMerge, 'tests runner exited (status 3)', '2 of the group\'s 2 file(s) finished', 'tests/crash.test.ts', 'given up against this tip', 'the runner process is leaving without a verdict', '[exit status 3]']) assert.ok(record.detail.includes(named), `the record names ${named}:\n${record.detail}`);
-  assert.ok(record.detail.length <= 2000);
-  assert.deepEqual(state.shadow, [], 'no verdict, so no shadow-only-fail can follow');
-  assert.equal(attention.length, 1, `one attention line, once: ${attention.join(' / ')}`);
-  assert.match(attention[0]!, /^Shadow merge gate runner failure: GY-1548 head [0-9a-f]{40} on [0-9a-f]{40} ended 2 trials with its tests runner exiting \(status 3\) and no failing test named/);
-  assert.ok(!state.actions[shadowErrorKey(crashed, repo.base)], 'a runner failure is not a trial error');
 });
 
 test('integration:trial-run-build-and-tests — the trial reads package.json and scripts/ci-tests.mjs from the merge commit: only a listing that answers without them skips install, build and selection, and a probe git cannot answer is a runner failure, never a passing trial with zero checks (GY-1675)', async () => {
@@ -557,4 +525,134 @@ test('integration:shadow-trial-bounded-test-groups — the selection runs in gro
   assert.deepEqual(groups.flat(), suiteFiles, 'every selected file, once, in order');
   assert.deepEqual([groupTestFiles([]), groupTestFiles(['a'], 0)], [[], [['a']]], 'an empty selection has no group; a bound under one is one');
   assert.equal(trialTestGroupSize, 40);
+});
+
+test('unit:trial-checkout-outside-temp — with /tmp a tmpfs and the process tmpdir /var/tmp, the trial checkout root chosen is a short folder on disk in the home, made on demand, under none of /tmp, /var/tmp or the tmpdir, with no TMPDIR override; a checkout a crashed trial left there is taken back (GY-2020)', async () => {
+  // The suite treats any checkout under /tmp or /var/tmp as a test fixture, so the temporary roots are never checkout roots.
+  const excluded = trialExcludedRoots('/var/tmp');
+  assert.deepEqual(excluded, ['/tmp', '/var/tmp']);
+  assert.deepEqual(trialExcludedRoots('/tmp'), ['/tmp', '/var/tmp']);
+  const memoryTmp: FilesystemProbe = async path => ({ probed: path, volatile: path === '/tmp' || path.startsWith('/tmp/') ? 'tmpfs' : null, freeBytes: 1e12 });
+  assert.equal(await trialCheckoutRoot(trialTemporaryRoots('/var/tmp'), 2e9, memoryTmp, excluded), null, 'the durable /var/tmp is passed over: no trial checkout lands in a temporary root');
+  const home = await temporaryDirectory('gy-trial-home', homedir());
+  const [trials] = trialCheckoutRoots(home);
+  assert.equal(trials, join(home, '.gy', 'trials'));
+  assert.equal(existsSync(trials!), false);
+  const chosen = await trialCheckoutRoot([...trialTemporaryRoots('/var/tmp'), trials!], 2e9, memoryTmp, excluded);
+  const outside = (path: string) => [...excluded, tmpdir()].every(root => path !== root && !path.startsWith(`${root}/`));
+  // A home with a stray package.json, .git or node_modules above it falls back to the session directory instead.
+  assert.equal(chosen, lookupPoisoned(home) ? null : trials, 'the home\'s own trials folder is chosen');
+  if (chosen) { assert.ok(outside(chosen), `${chosen} is under no temporary root`); assert.ok(existsSync(chosen), 'it is made on demand'); }
+  const onlyMemory: FilesystemProbe = async path => ({ probed: path, volatile: 'tmpfs', freeBytes: null });
+  assert.equal(await trialCheckoutRoot([trials!], 2e9, onlyMemory, excluded), null, 'a memory-backed home: the managed session directory');
+  // A crashed trial's checkout, its owner marker naming a process that is gone, is taken back; a live one is kept.
+  mkdirSync(trials!, { recursive: true });
+  const crashed = join(trials!, `${trialCheckoutPrefix}crashed`), live = join(trials!, `${trialCheckoutPrefix}live`);
+  mkdirSync(join(crashed, 'checkout'), { recursive: true }); mkdirSync(live);
+  await writeTempOwner(live);
+  writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: 2 ** 22 + 7, startedAt: 1, pidNamespace: processPidNamespace(), at: '' })}\n`);
+  assert.deepEqual(await reclaimTrialCheckouts(trials!), [crashed]);
+  assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed)), existsSync(live)], [false, false, true]);
+});
+
+test('unit:trial-checkout-reclaim-durable — a crashed checkout that left the trials folder short of space is taken back before the space is measured, and a checkout whose removal failed keeps its owner marker and is taken back by a later pass (GY-2020)', async () => {
+  const home = await temporaryDirectory('gy-trial-home', homedir());
+  const [trials] = trialCheckoutRoots(home);
+  mkdirSync(trials!, { recursive: true });
+  // Low space while the crashed checkout stands, room once it is gone: the reclaim runs first, so the root is chosen.
+  const crashed = join(trials!, `${trialCheckoutPrefix}full`);
+  mkdirSync(join(crashed, 'checkout', 'node_modules'), { recursive: true });
+  writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: 2 ** 22 + 9, startedAt: 1, pidNamespace: processPidNamespace(), at: '' })}\n`);
+  const measured: boolean[] = [];
+  const filling: FilesystemProbe = async path => { measured.push(existsSync(crashed)); return { probed: path, volatile: null, freeBytes: existsSync(crashed) ? 1e9 : 1e12 }; };
+  assert.equal(await trialCheckoutRoot([trials!], 2e9, filling, []), lookupPoisoned(trials!) ? null : trials);
+  assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed)), measured], [false, false, [false]], 'the space is measured after the stale checkout went');
+  // A removal that fails keeps the directory marked as this live process's own, and the next pass takes it back.
+  const stuck = join(trials!, `${trialCheckoutPrefix}stuck`), live = join(trials!, `${trialCheckoutPrefix}live`);
+  mkdirSync(join(stuck, 'checkout'), { recursive: true }); mkdirSync(live);
+  await writeTempOwner(stuck); await writeTempOwner(live);
+  await assert.rejects(clearTrialCheckout(stuck, async () => { throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' }); }), /EBUSY/);
+  assert.deepEqual([existsSync(stuck), existsSync(tempOwnerMarker(stuck))], [true, true], 'the failed removal keeps its owner marker');
+  assert.deepEqual(await reclaimTrialCheckouts(trials!), [stuck], 'a later pass takes the abandoned checkout back, never a live one');
+  assert.deepEqual([existsSync(stuck), existsSync(tempOwnerMarker(stuck)), existsSync(live)], [false, false, true]);
+  await clearTrialCheckout(live);
+  assert.deepEqual([existsSync(live), existsSync(tempOwnerMarker(live))], [false, false], 'a removal that succeeds takes its marker with it');
+});
+
+/**
+ * GY-2020 (review of 9c5bf7cc113d): every trial first takes back the short checkouts crashed trials
+ * left in the on-disk trials folder, which is shared by every head and item and which no tmp reclaim
+ * scans. Over a simulated day of the merge writer's trials, each a real trial (a real detached
+ * checkout, made and removed) in the trials folder, trials crash now and then, leaving a checkout
+ * whose owner is gone; one checkout is held by a process that lives until midday and dies then; one
+ * is this process's own and lives all day. Each crashed checkout is taken back by the next trial,
+ * the midday one after its owner dies and never before, the live one never; no trial's checkout
+ * outlives it; the folder never holds more than the live ones plus the crashes since the last trial;
+ * and nothing lands under /tmp, /var/tmp or the tmpdir's name for the folder.
+ */
+test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crashed trials\' checkouts in the shared on-disk trials folder are taken back by the next trial, a live owner\'s never, a dying owner\'s only after it dies, the folder stays bounded, and nothing lands in a temporary root', { timeout: 300_000 }, async () => {
+  // A repository the merge does not make a Node package builds and selects nothing: each trial is its real checkout, made and removed.
+  const repo = await temporaryDirectory('soak-trial-repo', tmpdir());
+  const git = (...args: string[]) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: { ...process.env, ...identity } }).trim();
+  git('init', '-q', '-b', 'main'); writeFileSync(join(repo, 'a.txt'), 'one\n'); git('add', '-A'); git('commit', '-q', '-m', 'base');
+  const mergeSha = git('rev-parse', 'HEAD');
+  const sessions = await temporaryDirectory('soak-trial-sessions', tmpdir()), clean = await temporaryDirectory('soak-trial-tmp', tmpdir());
+  const home = await temporaryDirectory('soak-trial-home', tmpdir());
+  const [trials] = trialCheckoutRoots(home);
+  const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 1e12 });
+  // The live owners: this process all day, and a child that dies at midday.
+  const kept = join(trials!, `${trialCheckoutPrefix}live`), dying = join(trials!, `${trialCheckoutPrefix}dying`);
+  mkdirSync(join(kept, 'checkout'), { recursive: true }); mkdirSync(join(dying, 'checkout'), { recursive: true });
+  await writeTempOwner(kept);
+  const child = spawn('sleep', ['3600'], { stdio: 'ignore' });
+  const ticks = processStartTicks(child.pid!);
+  writeFileSync(tempOwnerMarker(dying), `${JSON.stringify({ pid: child.pid, startedAt: ticks, pidNamespace: processPidNamespace(), at: new Date().toISOString() })}\n`);
+  const exited = new Promise(resolve => child.once('exit', resolve));
+  let crashes = 0, gone = 2 ** 22;
+  const crash = () => {
+    // A trial killed before its cleanup: its checkout and its marker naming a process that is gone.
+    const left = join(trials!, `${trialCheckoutPrefix}crash${++crashes}`);
+    mkdirSync(join(left, 'checkout', 'node_modules'), { recursive: true }); writeFileSync(join(left, 'checkout', 'a.txt'), 'x\n');
+    writeFileSync(tempOwnerMarker(left), `${JSON.stringify({ pid: ++gone, startedAt: 1, pidNamespace: processPidNamespace(), at: new Date().toISOString() })}\n`);
+    return left;
+  };
+  const checkouts: string[] = [], reclaimed: string[] = [];
+  let pending: string[] = [], dyingAlive = true, most = 0, dyingGoneBy: number | null = null;
+  // A trial every 15 minutes for a day.
+  const trialsRun = 96;
+  try {
+    for (let n = 0; n < trialsRun; n++) {
+      // A trial crashes every 45 minutes or so, two at once now and then.
+      if (n % 3 === 1) pending.push(crash());
+      if (n % 17 === 9) pending.push(crash());
+      if (n === trialsRun / 2) { child.kill('SIGKILL'); await exited; dyingAlive = false; }
+      await runTrial({ root: repo, base: sessions, mergeSha, changedFiles: [], timeoutMs: 120_000, key: `GY-${n}`, environment: { PATH: process.env.PATH! },
+        temporaryRoots: [clean], checkoutRoots: [trials!], probe: durable, run: async (command, args, options) => {
+          if (command === 'git' && args.includes('worktree') && args.includes('add')) {
+            checkouts.push(args[args.indexOf('--detach') + 1]!);
+            // While the trial runs, every crashed checkout before it is gone, the live one stands, and the dying one stands while its owner lives.
+            for (const left of pending) assert.equal(existsSync(left), false, `${left} outlived the trial after its crash`);
+            reclaimed.push(...pending); pending = [];
+            assert.ok(existsSync(kept), 'the live owner\'s checkout is never taken');
+            if (dyingAlive) assert.ok(existsSync(dying), 'a checkout whose owner lives is never taken');
+          }
+          return defaultChildRun(command, args, options);
+        } });
+      const held = readdirSync(trials!).filter(name => !name.endsWith('.owner'));
+      most = Math.max(most, held.length);
+      // Bounded: the two live owners' checkouts, never a trial's own after it ends.
+      assert.ok(held.length <= 2, `trial ${n}: the trials folder holds ${held.join(', ')}`);
+      for (const made of checkouts) assert.equal(existsSync(made), false, `trial ${n}: ${made} outlived its trial`);
+      if (!dyingAlive && dyingGoneBy === null && !existsSync(dying)) dyingGoneBy = n;
+    }
+  } finally { if (dyingAlive) child.kill('SIGKILL'); }
+  assert.equal(checkouts.length, trialsRun, 'every trial made its real checkout');
+  assert.ok(crashes >= 30 && reclaimed.length === crashes, `${reclaimed.length} of ${crashes} crashed checkouts were taken back by the next trial`);
+  for (const left of reclaimed) assert.equal(existsSync(tempOwnerMarker(left)), false, `${left}'s marker went with it`);
+  assert.equal(dyingGoneBy, trialsRun / 2, 'the dying owner\'s checkout went with the first trial after its owner died');
+  assert.ok(existsSync(kept) && existsSync(tempOwnerMarker(kept)), 'the live owner\'s checkout stands at the end of the day');
+  // Every checkout was in the on-disk trials folder, under none of /tmp, /var/tmp or the tmpdir by the folder's own choice of root.
+  for (const made of checkouts) assert.ok(made.startsWith(`${trials}/${trialCheckoutPrefix}`) && made.endsWith('/checkout'), `${made} is in the trials folder`);
+  assert.deepEqual(trialExcludedRoots('/var/tmp'), ['/tmp', '/var/tmp'], 'the default folder keeps out of the temporary roots');
+  assert.ok(most <= 2, `the folder never held more than ${most} entries after a trial`);
 });

@@ -98,8 +98,8 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['merge (conflict)', withGates(handedIn, 'merge', ['Pull request is not mergeable against the current base']), 'Stuck: the pull request conflicts with the main branch', 'stuck'],
     ['merge (ready)', { ...withGates(handedIn, 'merge', []), stage: 'merge', gates: find('GY-18').gates }, 'Ready to merge PR #42', 'waiting'],
     ['done', { ...find('GY-18') }, 'Shipped in PR #40', 'shipped'],
-    ['done (awaiting deploy)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined }, policy: { ...find('GY-18').policy, deploySmoke: true } as any }, 'Shipped in PR #40 — waiting to be deployed', 'waiting'],
-    // No per-item deployment record is written unless the policy asks for the check after deploying (GY-161 AC-11).
+    // Done = merged (GY-1981): shipped whatever the smoke policy or deployment record.
+    ['done (smoke policy, no deployment record)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined }, policy: { ...find('GY-18').policy, deploySmoke: true } as any }, 'Shipped in PR #40', 'shipped'],
     ['done (no deployment record)', { ...find('GY-18'), delivery: { ...find('GY-18').delivery!, deployment: undefined } }, 'Shipped in PR #40', 'shipped'],
     ['blocked', { ...find('GY-17') }, 'Stuck: A fault blocks it; the master agent clears it.', 'stuck'],
   ];
@@ -233,12 +233,14 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   assert.match(text(review), /Waiting for someone else to approve the latest code/);
   assert.doesNotMatch(text(review), /Proven to work:/, 'later steps are collapsed');
   for (const raw of ['needs trusted passing evidence', 'Policy v', 'Revision ', 'assignment 1', 'GitHub observation missing']) assert.ok(!text(review).includes(raw) && !visible.includes(raw), `no ${raw} by default`);
-  // Requirements sit below the summary and What is left (GY-161 AC-10, GY-171 AC-1): one line per criterion, its full text folded;
-  // each criterion appears once, with one marker per proof.
-  assert.match(view, /<section class="panel requirements" aria-label="Requirements">/);
-  const lines = text(view);
-  for (const ac of find('GY-16').criteria) assert.equal(lines.split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once`);
+  // Requirements sit below the summary and What is left (GY-161 AC-10, GY-171 AC-1), folded with the description under Details
+  // (GY-2011 AC-3): one line per criterion, its full text folded; each criterion appears once in Requirements (the Tests panel
+  // names its proofs' criterion too, GY-2091), with one marker per proof.
+  assert.match(view, /<details class="panel item-details-fold" aria-label="Details"><summary>Details<\/summary>[\s\S]*<section class="requirements" aria-label="Requirements">/);
+  const requirements = view.slice(view.indexOf('aria-label="Requirements"'), view.indexOf('aria-label="Pull request"'));
+  for (const ac of find('GY-16').criteria) assert.equal(text(requirements).split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once in Requirements`);
   assert.equal(view.match(/class="marker-pass"/g)?.length, 2); assert.equal(view.match(/class="marker-pending"/g)?.length, 1);
+  const lines = text(view.replace('<details class="panel item-details-fold"', '<details open class="panel item-details-fold"'));
   assert.match(lines, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
   assert.match(view, /<li class="marker-pass">✓ <abbr class="term"[^>]*>integration:login-rate-limit<\/abbr> passed<\/li>/);
   // Policy-changing actions sit in a closed, admin-only Edit menu.

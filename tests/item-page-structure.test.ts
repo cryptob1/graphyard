@@ -76,7 +76,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   assert.ok(technical > 0, 'the page has a Technical details section');
   const above = html.slice(0, technical);
 
-  // The order: the summary (status sentence, who acts next, the seven-step tracker), then the four sections, then the technical detail.
+  // The order: the summary (status sentence, who acts next, the six-step tracker), then the four sections, then the technical detail.
   const order = ['class="status-sentence', 'Who acts next:', 'class="steps-detail', 'aria-label="What is left"', 'aria-label="Requirements"', 'aria-label="Pull request"', 'aria-label="Activity"', 'aria-label="Technical details"'].map(needle => html.indexOf(needle));
   assert.ok(order.every(index => index >= 0), `every section is rendered: ${order}`);
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'summary, What is left, Requirements, Pull request, Activity, Technical details');
@@ -101,10 +101,11 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   const requirements = html.slice(html.indexOf('aria-label="Requirements"'), html.indexOf('aria-label="Pull request"'));
   assert.equal(requirements.match(/<details class="criterion-full"><summary><span class="criterion-mark" title="Pending">○<\/span> <span class="mono">AC-\d<\/span>/g)?.length, 2, 'each criterion once, marked pending');
   for (const ac of item.criteria) assert.ok(requirements.includes(`<p>${escape(ac.text)}</p></details>`), `${ac.id}: full text behind its line`);
-  // The lines themselves are never behind a closed disclosure: the panel is a plain section, and only each criterion's full text folds.
+  // The criteria fold with the description under one closed Details (GY-2011 AC-3); inside it each criterion's full text folds again.
   assert.match(requirements, /^aria-label="Requirements"><h2>Requirements <small>/);
-  assert.match(html, /<section class="panel requirements" aria-label="Requirements">/);
-  const shown = visibleWords(html).join(' ');
+  assert.match(html, /<details class="panel item-details-fold" aria-label="Details"><summary>Details<\/summary>[\s\S]*<section class="requirements" aria-label="Requirements">/);
+  // What a reader sees once Details is opened: each criterion's line, its full text still folded.
+  const shown = visibleWords(html.replace('<details class="panel item-details-fold"', '<details open class="panel item-details-fold"')).join(' ');
   assert.match(shown, /AC-1 Below the existing summary the item page shows What is left, Requirements, Pull request… unit:item-page-sections pending/, 'one line: the first sentence, capped');
   assert.doesNotMatch(shown, /A test renders a real-shaped item mid-review/, 'the rest waits for the expand');
   // A criterion whose every proof passed is marked met (GY-16 in the fixture: two of its three proofs passed).
@@ -181,7 +182,7 @@ test('the Activity section reads the kinds the ledger records — command names 
   // Typed over every command: a command added to the engine without a plain label fails typecheck here.
   const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true, mechanicalplan: true,
     heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, defer: true, window: true, dispatchblock: true, scope: true, autoscope: true, evidence: true,
-    deployment: true, reading: true, revoke: true, session: true, request: true, refresh: true, adopt: true };
+    reading: true, revoke: true, session: true, request: true, adopt: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
     ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Live in production', 'Asked you for a decision', 'Graphyard checked GitHub']);

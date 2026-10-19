@@ -14,7 +14,7 @@ import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, 
 import { faultClassPolicyFromEnv, type FaultClassPolicy } from '../model/fault-classes.js';
 import { faultRecurrenceReport } from './faults.js';
 import { diagnosisReport } from './diagnosis.js';
-import { latencyBudget, silenceReport } from './metrics.js';
+import { latencyBudget } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
@@ -27,11 +27,9 @@ import { divergedHead } from '../cli/checkout-restore-act.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
-import { shadowGateSummary } from './cycle-shadow.js';
-import { mergeWriterSummary } from './cycle-merge-writer.js';
-import { wakeMasterForStalls } from './cycle-master.js';
-import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallNeedsMaster, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
-import { fileStalledStepsUpstream, stallUpstreamFiler, type StallUpstreamFiler } from './stall-upstream.js';
+import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
+import { stallNeedsMaster, wakeMasterForStalls } from './cycle-master.js';
+import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
 import { detachRuns } from '../runner/registry.js';
 import type { LoopWake } from './loop-wake.js';
 
@@ -55,8 +53,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // The loop-step stalls (GY-1854): the standing runs of one failing call, the stalls among them
     // with their one recorded remedy attempt, each under the subject key a master wake names it by.
     stepStalls: Object.values(state.stepStalls).map(run => ({ ...run, subject: stallSubjectKey(run.signature), needsMaster: stallNeedsMaster(run) })),
-    // What it could act on and the longest any of those has waited, and the latency budgets.
-    silence: silenceReport(state.silence, now),
+    // What it could act on, and the latency budgets.
     budget: latencyBudget(state.latency),
     lock: state.lock, cycle: state.cycle, lastCycleAt: state.lastCycleAt, lagMs,
     unresolved: recent.filter(action => action.state === 'started' || action.state === 'indeterminate'),
@@ -72,8 +69,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     deployment: state.deployment,
     // The main watch (GY-1519): unknown commits on main, the newest, and whether promotion is frozen on one.
     mainWatch: mainWatchSummary(state.mainWatch),
-    // The shadow merge gate's report (GY-1522): outcome counts, trial p50/p90 and the newest disagreements.
-    shadowGate: shadowGateSummary(state.shadow),
     // The control-plane merge executor (GY-1524): the heads queued oldest first, the merge in flight, the last delivery and the newest refusals.
     mergeWriter: mergeWriterSummary(state.mergeWriter),
     // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).
@@ -243,9 +238,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   /** The ports the stall step's bound remedies run through (GY-1854); absent, the loop's own are wired — the profile write, the host-owned credential renewal and the merge-ledger adoption. */
   stallRemedies?: StepStallRemedyRunner;
   /** The profile remedy's write and read-back (GY-1854); absent, `master environments --apply`'s own write and the checkout's configuration. */
-  stallProfiles?: () => ProfileRemedyPorts;
-  /** Files an uncleared stall's one upstream item (GY-1855); absent, `master.json` `upstream` or this install as the operator-agent. */
-  stallUpstream?: StallUpstreamFiler; } ) {
+  stallProfiles?: () => ProfileRemedyPorts; } ) {
   // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
@@ -319,7 +312,6 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     // loaded. Either refusal is an escalation naming the dirty paths and which live leases' planned
     // files they match: those matches are the checkout's writes attributed to the attempts most
     // likely to have made them.
-    const stallUpstream = options.stallUpstream ?? stallUpstreamFiler(() => config, () => options.repository ?? coordinatorCheckoutRoot(config.cliPath));
     const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
     const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead, runsSnapshot: () => snapshot,
       diverged: (checkout, loaded) => divergedHead(checkout.root, { base: `refs/remotes/origin/${config.baseBranch}`, loaded }).then(head => head === checkout.commit) });
@@ -407,17 +399,14 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const applied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
           for (const { signature, record } of applied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail} (${signature.slice(0, 160)})`);
-          // GY-1855: a stall past its clearing bound files exactly one upstream item per signature.
-          const upstream = await fileStalledStepsUpstream(state, stallUpstream, now, effects.persist);
-          if (upstream) log(`[graphyard-master] cycle ${result.metrics.cycle} ${upstream.kind} ${upstream.state}: ${upstream.detail}`);
-          if (stalls.notes.length || stalls.cleared || applied.length || upstream) await effects.persist(state);
+          if (stalls.notes.length || stalls.cleared || applied.length) await effects.persist(state);
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
           // Both halves of every cycle: what it could act on, and what it did about it — and where its
           // time went: its three slowest steps and its slowest external call (GY-377).
-          log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms (${result.metrics.childWaitMs ?? 0}ms waiting on child processes); ${result.metrics.open} open, ${result.silence.actionable} actionable, ${result.actions.length} action(s)${result.silence.longest && result.silence.longestIdleMs > 0 ? `, longest wait ${Math.round(result.silence.longestIdleMs / 1000)}s on ${result.silence.longest.detail}` : ''}${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}${result.metrics.timings ? `; ${describeTimings(result.metrics.timings)}` : ''}`);
+          log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms (${result.metrics.childWaitMs ?? 0}ms waiting on child processes); ${result.metrics.open} open, ${result.actionable.length} actionable, ${result.actions.length} action(s)${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}${result.metrics.timings ? `; ${describeTimings(result.metrics.timings)}` : ''}`);
           // The configured interval is the idle cadence; while anything is actionable the loop comes
           // back inside the responsive window so ready work cannot sit out a long interval.
-          wait = cycleDelay(interval(), result.silence);
+          wait = cycleDelay(interval(), result.actionable.length);
           // GY-1622: a docs-sync hold left standing ends the idle wait at its bound, so the step that releases it runs then.
           const held = holdBoundWait(state, wait, now()); holdBound = held.next;
           if (held.bound !== null) { wait = held.wait; log(`[graphyard-master] the next cycle runs in ${Math.round(wait / 1000)}s, at the docs-sync hold bound ${new Date(held.bound).toISOString()}`); }
@@ -445,9 +434,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const stallApplied = await remedyStalledSteps(state, stallRunner, now(), effects.persist);
           for (const { record } of stallApplied)
             log(`[graphyard-master] the ${record.kind} stall remedy ${record.outcome}${record.verified ? ', verified' : ', unverified'}: ${record.detail}`);
-          const upstream = await fileStalledStepsUpstream(state, stallUpstream, now, effects.persist);
-          if (upstream) log(`[graphyard-master] cycle ${failure.cycle} ${upstream.kind} ${upstream.state}: ${upstream.detail}`);
-          if (stall.counted || owedCounted || cleared || stallApplied.length || upstream) await effects.persist(state);
+          if (stall.counted || owedCounted || cleared || stallApplied.length) await effects.persist(state);
           // A stall that needs the master is woken from here: this cycle failed before its
           // master-session step, and every cycle the same read fails would too (cycle-master.ts).
           const woken = await wakeMasterForStalls(config, state, effects, now).catch(error => { log(`[graphyard-master] the stall wake was not delivered beside cycle ${failure.cycle}: ${message(error)}`); return [] as string[]; });
@@ -466,7 +453,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
         const selfUpgrade = effects.selfUpgrade;
         if (!stopping) await serveRestore(keepAlive);
-        await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
+        // An upgrade restarts the loop, which would kill a merge trial in flight: it waits for the trial to settle (a merge leaves the next cycle free).
+        await guard.betweenCycles(stopping || !selfUpgrade ? undefined : async current => mergeWriterInFlight(current) ? { outcome: 'skipped' as const, reason: 'a merge trial is in flight' } : selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
         // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
         // is for a cycle that hangs, and a thrown one has just proved it did not.
         if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
