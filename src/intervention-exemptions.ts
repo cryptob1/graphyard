@@ -59,7 +59,7 @@ export const loopRound = (decision: ReworkDecision | null) => !!decision?.bindin
 /**
  * Whether a rework decision is the loop's own round for required checks that failed on the head
  * it returns (GY-1387): its grounds binding names that head and the failed checks
- * (`failedCheckRework`, `<sha>:ci:<checks>`), and the head is the candidate the rework sent back.
+ * (`<sha>:ci:<checks>`, recorded before GY-2010), and the head is the candidate the rework sent back.
  */
 export const failedCheckBinding = (binding: string | null, candidate: { sha: string } | null | undefined) => {
   const match = binding ? /^([a-f0-9]{40}):ci:.+$/.exec(binding) : null;

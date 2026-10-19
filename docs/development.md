@@ -19,7 +19,7 @@ npm ci && npm run build && npm test
 
 ### Base failures
 
-A required check failing on base head too: no rework (waits while base log is unreadable); one attention entry, P0 repair item per failing test and base head. Once base passes, failed jobs rerun and blocked candidates get a Graphyard base merge (`refresh`) keeping approval; a failure the base tip already passes refreshes at once (trigger `base breakage`).
+A merge trial whose failing tests fail on the base tip too: no rework; the writer holds the head (`base failure`), one attention entry, one P0 repair item per failing set. Nothing is rerun or refreshed: after 30 min the writer trials the held head afresh on the then tip, and the record clears once the item no longer shows it.
 
 ## Documentation
 

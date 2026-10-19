@@ -7,22 +7,15 @@ Unplanned file: none — `scope-request` files nothing, the plan is not a lock (
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses there; `master.json` edits skip checks. Refuses until reviewer App and profile exist, its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`.
+`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; `master autonomy --apply` refuses there; `master.json` edits skip checks. Refuses until a reviewer profile and a reviewer App bound before GY-2010 exist (`master reviewer setup`/`bind` are removed, so new installs cannot promote), its bot none of your `gh` login, `operatorLogin`, worker App or principals; logs `.graphyard/master-actions/promotions.jsonl`, provisions operator-agent and approver, writes `supervision: autonomous`.
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`. Approvals survive base refreshes ([carry](github.md#bindings-and-carry)); a current-head one dismissed `The merge-base changed after approval.` is restored, never re-posted. A branch must never keep another item's unlanded commits (build gate refuses): `git reset --hard REVIEWED_HEAD`, `sync GY-N`, `restore-branch GY-N EPOCH`.
+Dispatch is optimistic (overlap holds nothing), smallest planned scope first ([rules](coordination.md#dispatch-optimistically-smallest-scope-first)); `git merge-tree` reports `conflicts`. Approvals survive base refreshes (carry); a current-head one dismissed `The merge-base changed after approval.` is restored, never re-posted. A branch must never keep another item's unlanded commits (build gate refuses): `git reset --hard REVIEWED_HEAD`, `sync GY-N`, `restore-branch GY-N EPOCH`.
 
 ## GitHub administration through the browser
 
-Flows (`master browser app-permissions`, `master browser installation-accept`) drive the `master init --browser-profile` profile:
-
-| Flow | Effect
-| --- | ---
-| `app-permissions` | Permissions raised
-| `installation-accept` | Requests accepted
-
-Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup (`master browser fixtures`)); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human, following each offered method's control as a button or a link; a refused capture's record names the controls it saw. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing/retired rules: `harness` drift, reapplied each cycle.
+Graphyard holds no GitHub App: its one GitHub credential is the merge writer's deploy key ([install](install.md)), and `/api/github/installation` is 404. `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing App credential; `master browser fixtures` lists the Confirm-access captures earlier flows kept under `.graphyard/master-actions/`. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing/retired rules: `harness` drift, reapplied each cycle.
 
 ## Typed actions and executors
 
@@ -40,11 +33,11 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; a cycle over 60s is attention naming its slowest steps, never an item; an unbound [stall](operations-reference.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing; an owed control-plane refusal (`… not trialled/pushed…`) of a queued/in-flight head is its motion, never `owed-decision`, through a live flight and until (retrials+1)×20min trial +1 cycle past its newest step, one `merge-writer` stall (`stalled-step`) for a queue it cannot move; `fleet-capacity`/`unanswered-request` (past `settledAnswerGraceMs`), `configuration`/`decision-unanswered`/`unclassified` unless (`plane-unavailable`/`fix-item`/`decision-stale`/`overlong-session`). Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; gh pauses `github-budget`. `no master role` blockers group as `configuration`, not `stalled-gate`. Pre-start launch failures: one; a finished lease-holder files `session` past the orphan watch and gone-worker preserve.
+`faultClass` (`master status` `faults`): recurring classes file one item each; a cycle over 60s is attention naming its slowest steps, never an item; an unbound [stall](operations-reference.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing; an owed control-plane refusal (`… not trialled/pushed…`) of a queued/in-flight head is its motion, never `owed-decision`, through a live flight and until (retrials+1)×20min trial +1 cycle past its newest step, one `merge-writer` stall (`stalled-step`) for a queue it cannot move; `fleet-capacity`/`unanswered-request` (past `settledAnswerGraceMs`), `configuration`/`decision-unanswered`/`unclassified` unless (`plane-unavailable`/`fix-item`/`decision-stale`/`overlong-session`). Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`. `no master role` blockers group as `configuration`, not `stalled-gate`. Pre-start launch failures: one; a finished lease-holder files `session` past the orphan watch and gone-worker preserve.
 
 ## Merge trial
 
-The merge writer's trial, the only trial: the merge commit's build and affected tests, credential-free in a sticky tmp-reclaimed `TMPDIR` (`gy-t*`), checkout in `~/.gy/trials`, killed after 20 minutes, no verdict. The shadow gate is gone (GY-2087): no `run.shadowGate`, no `shadowGate` in `master status`, and old cursor `shadow` verdicts drop on load.
+The merge writer's trial, the only trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium` into the host's shared cache, failure retried as the host's; then `npm run test:browser`), credential-free in a sticky tmp-reclaimed `TMPDIR` (`gy-t*`), checkout in `~/.gy/trials`, killed after 20 minutes. The shadow gate is gone (GY-2087): no `run.shadowGate`, and old cursor `shadow` verdicts drop on load.
 
 ## Pipeline speed
 

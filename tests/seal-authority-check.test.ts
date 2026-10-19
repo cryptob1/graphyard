@@ -20,6 +20,7 @@ import { defaultChildRun } from '../src/child-runner.js';
 import { deliveryPolicySchema } from '../src/model/delivery-policy.js';
 import { renderPromotionWorkflow } from '../src/install/release-pipeline.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { releaseLedgerGit } from './helpers/release-ledger-git.js';
 
 // GY-1882: the uat GRAPHYARD_RELEASE_TOKEN seals a candidate's imports only after soak and UAT have
 // run, so a credential without the role failed promotion twenty minutes in. The plane answers whether
@@ -42,15 +43,7 @@ const outOfScopeRole = 'operator-agent (other repository)';
 let database: InstanceType<typeof EmbeddedPostgres>, store: Store, http: ReturnType<typeof server>, url: string, scratch: string, work: string;
 const cutCandidates: ReleaseCandidate[] = [];
 const tagObject = (index: number) => String(51 + index).repeat(40);
-const github = {
-  config: { repository: 'owner/project' },
-  async request(path: string) {
-    if (path.startsWith('/git/matching-refs/tags/rc/')) return /page=1(?:&|$)/.test(path) ? cutCandidates.map((entry, index) => ({ ref: `refs/tags/rc/${entry.id}`, object: { sha: tagObject(index), type: 'tag' } })) : [];
-    const index = cutCandidates.findIndex((_, i) => path === `/git/tags/${tagObject(i)}`);
-    if (index >= 0) return { object: { sha: cutCandidates[index].sha, type: 'commit' }, message: JSON.stringify(cutCandidates[index]) };
-    throw new Error(`unexpected GitHub read ${path}`);
-  },
-};
+const github = releaseLedgerGit(() => cutCandidates, tagObject);
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1882;
@@ -58,7 +51,8 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('seal_authority_check_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/seal_authority_check_test`); await store.init();
-  http = server(new Engine(store, [15368], 120, 'owner/project'), principals.map(p => ({ ...p, token: tokens.get(p.id)! })), github as any);
+  const engine = new Engine(store, [15368], 120, 'owner/project'); engine.gitRunner = github.run;
+  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 

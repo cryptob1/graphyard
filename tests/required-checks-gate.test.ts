@@ -31,36 +31,23 @@ function item(checks: Check[], requiredChecks: { name: string; appId: number | n
 const testGate = (work: Work) => evaluate(work, [work], now, ciAppIds).gates.find(gate => gate.name === 'test')!;
 const passing: Check[] = [{ name: 'test', result: 'success' }, { name: 'typecheck', result: 'success' }];
 
-test('unit:required-checks-gate — a failed branch-protection required check outside the policy refuses the test gate as "Required check secrets failed" and asks for rework as a failed policy check does', () => {
+test('unit:required-checks-gate — a failed branch-protection required check recorded on a pull-request-era observation refuses no gate and asks for no rework, as a failed policy check asks for none; the test gate reads only the merge writer (GY-2010)', () => {
   // The incident: policy checks passed, protection requires `secrets`, and its run failed.
   const failed = item([...passing, { name: 'secrets', result: 'failure', appId: 15368 }]);
-  const gate = testGate(failed);
-  assert.equal(gate.passed, false, 'not mergeable: the test gate refuses');
-  assert.deepEqual(gate.reasons, ['Required check secrets failed on the current candidate']);
-  assert.notEqual(evaluate(failed, [failed], now, ciAppIds).stage, 'merge');
-  assert.equal(refusalAction(failed, 'test', gate.reasons[0]), 'request-rework');
+  assert.deepEqual(testGate(failed).reasons, [`merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}`], 'the GitHub check refuses no gate');
+  assert.equal(refusalAction(failed, 'test', testGate(failed).reasons[0]), 'merge', 'the merge writer answers the test gate');
 
-  const decision = routineDecision(failed, { autoMerge: true }, now.getTime());
-  assert.equal(decision?.action, 'rework');
-  assert.equal(decision?.binding, `${head}:ci:secrets`);
-  assert.match(decision!.reason, /required CI check secrets failed on candidate aaaaaaaaaaaa/);
-  // Exactly as a failed policy check: both failing are one request naming both.
-  assert.equal(routineDecision(item([{ name: 'test', result: 'failure' }, { name: 'typecheck', result: 'success' }, { name: 'secrets', result: 'failure' }]), { autoMerge: true }, now.getTime())?.binding, `${head}:ci:secrets,test`);
+  // Since GY-2010 a stored check grounds no rework, protection-only or policy alike: the writer's trial does.
+  assert.equal(routineDecision(failed, { autoMerge: true }, now.getTime()), null);
+  assert.equal(routineDecision(item([{ name: 'test', result: 'failure' }, { name: 'typecheck', result: 'success' }, { name: 'secrets', result: 'failure' }]), { autoMerge: true }, now.getTime()), null);
 
   // Still running: not yet passed, a re-read rather than a rework.
   const running = item([...passing, { name: 'secrets', result: 'in_progress' }]);
-  assert.deepEqual(testGate(running).reasons, ['Required CI check secrets has not passed on the current candidate']);
-  assert.equal(refusalAction(running, 'test', testGate(running).reasons[0]), 'resync');
   assert.equal(routineDecision(running, { autoMerge: true }, now.getTime()), null);
-  // Passed, or passed on a rerun: nothing stands. Graphyard's own merge check is never required of the candidate.
-  assert.equal(testGate(item([...passing, { name: 'secrets', result: 'success' }])).passed, true);
-  assert.equal(testGate(item([...passing, { name: 'secrets', result: 'failure' }, { name: 'secrets', result: 'success' }])).passed, true);
+  // Passed on a rerun: nothing stands.
   assert.equal(routineDecision(item([...passing, { name: 'secrets', result: 'failure' }, { name: 'secrets', result: 'success', attempt: 2 } as Check]), { autoMerge: true }, now.getTime()), null);
-  // A check protection binds to another app is judged only from that app's runs.
-  assert.deepEqual(testGate(item([...passing, { name: 'secrets', result: 'success', appId: 1 }], [{ name: 'secrets', appId: 2 }])).reasons, ['Required CI check secrets has not passed on the current candidate']);
-  // Without protection requiring it, a failed check outside the policy stands in no gate and asks for nothing.
+  // Without protection requiring it, a failed check outside the policy asks for nothing.
   const unprotected = item([...passing, { name: 'secrets', result: 'failure' }], []);
-  assert.equal(testGate(unprotected).passed, true);
   assert.equal(routineDecision(unprotected, { autoMerge: true }, now.getTime()), null);
 });
 

@@ -4,7 +4,6 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isReleaseCandidateTest, listTestFiles, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
-import { commitVerdict } from '../src/main-guard.js';
 import { policySchema } from '../src/model/policy.js';
 import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -158,16 +157,6 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   for (const id of [...jobs.keys(), ...soakJobs.keys()]) assert.ok(!required.includes(id), `${id} is not a required check`);
 });
 
-test('unit:ci-bubblewrap-install-resilient — GY-2009 removed Actions shards; main-guard still classifies a timed-out required check as cancelled to rerun', () => {
+test('unit:ci-bubblewrap-install-resilient — GY-2009 removed the Actions shards, so no bubblewrap install step remains to bound', () => {
   assert.ok(!existsSync(join(repositoryRoot, ciPath)), 'ci.yml is gone');
-  const ci = [15368], required = ['test', 'typecheck'];
-  const checks = [
-    { name: 'typecheck', result: 'success', appId: 15368, id: 1 },
-    { name: 'test shard 1', result: 'success', appId: 15368, id: 2 },
-    { name: 'test shard 2', result: 'timed_out', appId: 15368, id: 3 },
-    { name: 'test-browser', result: 'success', appId: 15368, id: 4 },
-    { name: 'test', result: 'failure', appId: 15368, id: 5 },
-  ];
-  assert.deepEqual(commitVerdict(checks, required, ci), { verdict: 'cancelled', failing: ['test'], checkRun: 3 });
-  assert.deepEqual(commitVerdict(checks.map(check => check.id === 3 ? { ...check, result: 'failure' } : check), required, ci), { verdict: 'fail', failing: ['test'] });
 });

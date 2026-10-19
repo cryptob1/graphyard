@@ -13,5 +13,14 @@ export const ciCheckRefusalPattern = new RegExp(`^${ciCheckRefusalBody}$`);
 export const ciCheckRefusalSource = ciCheckRefusalBody;
 /** The refusal the test gate raises for `name`, with its rerun tail when one is recorded. */
 export const ciCheckRefusal = (name: string, rerun = '') => `Required CI check ${name} has not passed on the current candidate${rerun}`;
+/**
+ * GY-2010: the test and merge gates' refusals while the merge writer's ledger holds no passing trial
+ * of the head, or no reconciled push of it (model/gates.ts `trialRefusal`, `pushRefusal`). The
+ * writer answers both itself, so the item waits on it; no executor step or escalation does.
+ */
+export const mergeWriterTrialPattern = /^merge writer has not trialled \S{1,12} on \S{1,12}$/;
+export const mergeWriterPushPattern = /^merge writer has not pushed \S{1,12}$/;
+/** Whether `refusal` of `gate` is one the merge writer itself answers. */
+export const mergeWriterRefusal = (gate: string, refusal: string) => gate === 'test' ? mergeWriterTrialPattern.test(refusal) : gate === 'merge' && mergeWriterPushPattern.test(refusal);
 /** The check a CI-pending refusal names, or null when `reason` is some other refusal. */
 export const ciCheckName = (reason: string): string | null => ciCheckRefusalPattern.exec(reason)?.[1] ?? null;

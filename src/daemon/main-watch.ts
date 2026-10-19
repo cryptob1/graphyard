@@ -141,7 +141,8 @@ export function mainWatchInputs(work: readonly Work[], directMergeWindows: MainW
   return {
     ledger: Object.fromEntries(work.flatMap(item => item.mergeLedger ? [[item.key, item.mergeLedger] as const] : [])),
     deliveries: work.flatMap(item => item.delivery ? [{ key: item.key, mergeSha: item.delivery.mergeSha }, ...(item.delivery.children ?? []).map(child => ({ key: child.key, mergeSha: child.mergeSha }))] : []),
-    mainGuardReverts: work.flatMap(item => (item.mainGuardReverts ?? []).map(revert => ({ key: item.key, revertSha: revert.revertSha }))),
+    // A pull-request-era main-guard revert (GY-2010 deleted the guard) still explains its commit from the stored record.
+    mainGuardReverts: work.flatMap(item => ((item as { mainGuardReverts?: { revertSha: string | null }[] }).mainGuardReverts ?? []).map(revert => ({ key: item.key, revertSha: revert.revertSha }))),
     // A revert the merge writer pushed for a failed release candidate (release-revert.ts) is explained by the item's record of it, labelled `candidate-revert`.
     candidateReverts: candidateRevertsOf(work),
     directMergeWindows,

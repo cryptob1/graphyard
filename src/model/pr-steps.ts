@@ -3,7 +3,7 @@ import { latestCheck } from '../merge-queue.js';
 import { noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
-import { ciCheckName } from './ci-refusal.js';
+import { ciCheckName, mergeWriterTrialPattern } from './ci-refusal.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
 
@@ -70,6 +70,12 @@ export function checkStates(work: Work, ciAppIds: readonly number[] | null = nul
   const gate = work.gates.find(entry => entry.name === 'test');
   const reasons = gate?.reasons ?? [];
   const named = (name: string) => !gate || reasons.some(reason => ciCheckName(reason) === name);
+  // GY-2010: the merge writer's trial builds and tests the merge commit; until it records a passing
+  // trial of this head every check is running, and a refused trial of this head failed them.
+  if (reasons.some(reason => mergeWriterTrialPattern.test(reason))) {
+    const refused = work.mergeLedger?.state === 'refused' && !!work.candidate && work.mergeLedger.head === work.candidate.sha;
+    return (work.policy.checks ?? []).map(name => ({ name, state: refused ? 'failed' : 'running' }));
+  }
   return (work.policy.checks ?? []).map(name => {
     if (!named(name)) return { name, state: 'passed' };
     const runs = (work.observation?.checks ?? []).filter(check => check.name === name && !!ciAppIds?.includes(check.appId));

@@ -13,6 +13,7 @@ import { currentEvidence, type Observation, type Principal, type Work } from '..
 import { server } from '../src/server.js';
 import { attributionDrilldown, candidateManifest, compatibilitySignature, computeAttribution, digestHash, manifestHash, readAttribution, releaseManifest, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 /**
  * GY-39: candidate/deployment attribution integrity, safe re-anchoring and analytics. One
@@ -135,7 +136,8 @@ async function delivered(mergeSha: string) {
   w = await engine.execute(collector, 'evidence', w.id, { proof: 'integration:claim-safety', sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   const committed = { revision: (await engine.store.workItem(w.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  w = await engine.observe(w.id, committed.revision, { ...observation(), merged: true, mergedAt, mergeSha });
+  // GY-2010: the merge writer's ledger delivers it, as production does; no GitHub merge is observed.
+  w = await deliverThroughLedger(engine, w.id, mergeSha, mergedAt);
   assert.equal(w.stage, 'done'); return w;
 }
 async function release(f: Fixture, artifacts: Record<string, string>, sourceSha: string, members: { workId: string; mergeSha: string; included?: boolean }[] = [], releaseId = `release-${f.n}-${++serial}`) {

@@ -17,6 +17,7 @@ import { localReleasePorts } from '../src/daemon/release-ports.js';
 import { masterConfigSchema } from '../src/master.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { releaseLedgerGit } from './helpers/release-ledger-git.js';
 
 // GY-1874: a direct promotion — `release promote` with a plane credential, and the loop's local
 // promotion port — reads the candidate's imported-run hold and then deploys. The read alone does not
@@ -43,18 +44,10 @@ let database: InstanceType<typeof EmbeddedPostgres>, store: Store, http: ReturnT
 let start = 0;
 const at = (minutes: number) => new Date(start + minutes * 60_000);
 
-/** The release candidates cut so far, served as `rc/` tags by the GitHub reads an import makes. */
+/** The release candidates cut so far, served as `rc/` tags in the checkout an import reads. */
 const cutCandidates: ReleaseCandidate[] = [];
 const tagObject = (index: number) => String(41 + index).repeat(40);
-const github = {
-  config: { repository: 'owner/project' },
-  async request(path: string) {
-    if (path.startsWith('/git/matching-refs/tags/rc/')) return /page=1(?:&|$)/.test(path) ? cutCandidates.map((entry, index) => ({ ref: `refs/tags/rc/${entry.id}`, object: { sha: tagObject(index), type: 'tag' } })) : [];
-    const index = cutCandidates.findIndex((_, i) => path === `/git/tags/${tagObject(i)}`);
-    if (index >= 0) return { object: { sha: cutCandidates[index].sha, type: 'commit' }, message: JSON.stringify(cutCandidates[index]) };
-    throw new Error(`unexpected GitHub read ${path}`);
-  },
-};
+const github = releaseLedgerGit(() => cutCandidates, tagObject);
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1874;
@@ -62,8 +55,8 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('promotion_hold_seal_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/promotion_hold_seal_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, 'owner/project');
-  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), github as any);
+  const engine = new Engine(store, [15368], 120, 'owner/project'); engine.gitRunner = github.run;
+  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
   start = Date.now();

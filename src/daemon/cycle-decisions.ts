@@ -382,7 +382,7 @@ export async function decisionStep(cycle: Cycle, settled: Map<string, Work>, ass
     const request = item.scopeRequest;
     // A carried ask (GY-1568) outlived its attempt: the finding rule widens only for a live one, so it is the approver's.
     if (!request) return !!item.carriedScopeRequest;
-    if (!effects.reviewFindings || !effects.widenScope) return true;
+    if (!(effects.reviewFindings || effects.baseSuccessions || effects.baseText) || !effects.widenScope) return true;
     const judged = state.actions[`${scopeKey(item, request)}:finding:${item.policyRevision}`];
     return judged?.state === 'done' && !/^Widened /.test(judged.detail);
   };

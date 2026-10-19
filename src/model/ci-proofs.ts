@@ -8,9 +8,10 @@ import { demand } from './refusal.js';
  * a registered contract against the exact candidate head and publishes the result through one
  * dedicated producer principal. That principal is a trust boundary of its own: its evidence is
  * accepted only for the automatable proof families, only with the job it came from named, and
- * only once the control plane has read that job back from GitHub and found it completed on the
- * evidence commit with the conclusion the result claims. Manual proofs and the post-deployment
- * smoke proof never travel this lane, whatever the principal's grants say.
+ * only for this repository. Since GY-2010 the control plane reads nothing back from GitHub: the
+ * principal is the trust boundary, and its run binding is recorded as Graphyard's own record of
+ * the job (`boundCiRun`). Manual proofs and the post-deployment smoke proof never travel this
+ * lane, whatever the principal's grants say.
  */
 export const ciProducerRuntime = 'github-actions';
 export const ciProofFamilies = ['unit', 'integration'] as const;
@@ -31,14 +32,14 @@ export const ciFamilyAllows = (proof: string) => (ciProofFamilies as readonly st
 export const ciPatternAllowed = (pattern: string) => ciFamilyAllows(pattern);
 
 const runId = z.string().regex(/^[1-9]\d*$/);
-/** What the reporter names: the job whose check run the control plane reads back from GitHub. */
+/** What the reporter names: the workflow job that produced the evidence. */
 export const ciRunBindingSchema = z.object({
   provider: z.literal('github-actions'), repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
   runId, runAttempt: z.number().int().positive(), jobId: z.number().int().positive(),
 }).strict();
 export type CiRunBinding = z.infer<typeof ciRunBindingSchema>;
 
-/** The check run GitHub reports for the named job, read by the control plane's own App. */
+/** The job a CI binding names, as the control plane records it from the CI producer's own binding (`boundCiRun`). */
 export interface CiRunObservation {
   repository: string; jobId: number; headSha: string; appId: number | null; detailsUrl: string | null;
   status: string | null; conclusion: string | null; name: string | null; observedAt: string;
@@ -46,12 +47,25 @@ export interface CiRunObservation {
 /** The verified binding stored on the evidence record. */
 export interface CiRun extends CiRunBinding { headSha: string; job: string | null; conclusion: string; verifiedAt: string }
 
-/** The GitHub check-run document the route reads, reduced to the fields trust is decided on. */
+/** A GitHub check-run document reduced to the fields trust is decided on (pull-request-era records). */
 export function observeCiCheckRun(repository: string, checkRun: any, now = new Date()): CiRunObservation {
   return {
     repository, jobId: Number(checkRun?.id), headSha: String(checkRun?.head_sha ?? ''),
     appId: Number.isSafeInteger(checkRun?.app?.id) ? checkRun.app.id : null, detailsUrl: typeof checkRun?.details_url === 'string' ? checkRun.details_url : null,
     status: checkRun?.status ?? null, conclusion: checkRun?.conclusion ?? null, name: typeof checkRun?.name === 'string' ? checkRun.name : null, observedAt: now.toISOString(),
+  };
+}
+
+/**
+ * The CI producer's binding recorded as Graphyard's own record of its job (GY-2010): the job ran
+ * the evidence's proof on the evidence commit and concluded as its result says. Nothing is read
+ * from GitHub; the principal, its grants and the families are the trust boundary.
+ */
+export function boundCiRun(binding: CiRunBinding, evidence: { proof: string; sha: string; result: 'pass' | 'fail' }, now = new Date()): CiRunObservation {
+  return {
+    repository: binding.repository, jobId: binding.jobId, headSha: evidence.sha, appId: githubActionsAppId,
+    detailsUrl: `https://github.com/${binding.repository}/actions/runs/${binding.runId}/job/${binding.jobId}`,
+    status: 'completed', conclusion: evidence.result === 'pass' ? 'success' : 'failure', name: evidence.proof, observedAt: now.toISOString(),
   };
 }
 
@@ -62,7 +76,7 @@ export function observeCiCheckRun(repository: string, checkRun: any, now = new D
  * from a job that succeeded, so a report rewritten after the harness judged it cannot be published.
  */
 export function ciRunRefusal(binding: CiRunBinding, observed: CiRunObservation | null | undefined, evidence: { sha: string; result: 'pass' | 'fail' }, repository: string, ciAppIds: readonly number[] = [githubActionsAppId]): string | null {
-  if (!observed) return 'The CI job could not be read from GitHub; CI evidence is accepted only once its job is observed';
+  if (!observed) return 'The CI job could not be read from the evidence; CI evidence must name the workflow job that produced it';
   if (!repository || binding.repository.toLowerCase() !== repository.toLowerCase() || observed.repository.toLowerCase() !== repository.toLowerCase()) return `CI evidence names repository ${binding.repository}; this control plane coordinates ${repository || 'no repository'}`;
   if (observed.jobId !== binding.jobId) return `GitHub reported job ${observed.jobId}, not the job ${binding.jobId} the evidence names`;
   if (observed.appId === null || !ciAppIds.includes(observed.appId)) return `Job ${binding.jobId} was not published by GitHub Actions (App ${observed.appId ?? 'unknown'})`;
