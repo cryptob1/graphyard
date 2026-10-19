@@ -217,12 +217,14 @@ test('unit:reuse-app-install — reusing an App saved on this host adds the repo
     const reviewer = fakeGitHub({ appId: 7002, registered: requiredPermissions(reviewerPermissions), granted: requiredPermissions(reviewerPermissions), hook: 'https://elsewhere.example/api/github/webhook' });
     const reused = await reuseExistingApp({ slug: 'acme-api-review-claude', role: 'reviewer', repository: 'acme/shop', registrations, gh: reviewer.gh, fetcher: reviewer.fetcher, apply: true });
     assert.equal(reused.app.botUserId, 99); assert.ok(!reviewer.github.calls.includes('GET /app/hook/config'));
-    // install --reuse-app and up --reuse-app carry the slug through the resume command and on to install.
-    const { request } = installRequestFromArgs(['--provider', 'compose', '--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api', '--reuse-app', 'acme-api-review-claude']);
-    assert.deepEqual(request.reuseApps, ['graphyard-acme-api', 'acme-api-review-claude']);
-    assert.match(resumeCommand({ inputs: { baseBranch: 'main', ...request } as any }), /--reuse-app graphyard-acme-api --reuse-app acme-api-review-claude --apply$/);
-    assert.throws(() => installRequestFromArgs(['--provider', 'compose', '--repo', 'acme/shop', '--reuse-app', '../app']), /App slug/);
-    assert.deepEqual(upRequestFromArgs(['--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api']).reuseApps, ['graphyard-acme-api']);
+    // GY-2009: install registers no App, so install --reuse-app is an unknown option and the resume command carries none.
+    assert.throws(() => installRequestFromArgs(['--provider', 'compose', '--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api']), /Unknown option '--reuse-app'/);
+    const { request } = installRequestFromArgs(['--provider', 'compose', '--repo', 'acme/shop']);
+    assert.doesNotMatch(resumeCommand({ inputs: { baseBranch: 'main', ...request } as any }), /--reuse-app/);
+    // up's CLI entry refuses the flag before up runs.
+    const { refuseUpAppReuse } = await import('../src/cli/install.js');
+    assert.throws(() => refuseUpAppReuse(['--repo', 'acme/shop', '--reuse-app', 'graphyard-acme-api']), /GY-2009/);
+    assert.equal(upRequestFromArgs(['--repo', 'acme/shop']).reuseApps, undefined);
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
