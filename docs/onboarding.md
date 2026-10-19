@@ -49,7 +49,7 @@ A Pi **doctor** acts on `run.doctor.intervalMinutes`, never asks people; files o
 
 ## 4. Prove the first change
 
-`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged when the merge writer's trial passes and pushes main with its deploy key; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged by the merge writer's passing trial; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 ## The dashboard
 

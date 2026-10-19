@@ -50,7 +50,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 
 ## Step 5: first item
 
-Dispatch a [small item](onboarding.md#4-prove-the-first-change); the merge writer trials and pushes it.
+Dispatch a [small item](onboarding.md#4-prove-the-first-change).
 
 ## Roster and self-contained host
 
