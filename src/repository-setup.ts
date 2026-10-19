@@ -686,8 +686,19 @@ async function executorInstallUnits(root: string, unitDirectory: string): Promis
 export const executorSlotUndeclaredExit = 78;
 
 export async function readExecutorDeclaration(root: string): Promise<ExecutorDeclaration | null> {
-  try { return executorDeclarationSchema.parse(JSON.parse(await readFile(resolve(connectionRoots(root)[0], executorDeclarationFile), 'utf8'))); }
+  let raw: unknown;
+  try { raw = JSON.parse(await readFile(resolve(connectionRoots(root)[0], executorDeclarationFile), 'utf8')); }
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
+  // A host's declaration may name a kind this checkout's code removed (GY-1981 removed
+  // verify-deployment and every slot still listing it crash-looped on the strict enum's refusal):
+  // read the kinds as plain strings, keep the ones the running code knows, log the dropped ones,
+  // and fall back to kinds: null — every kind the executor handles — when none remain.
+  const read = executorDeclarationSchema.extend({ kinds: z.array(z.string()).min(1).nullable().default(null) }).parse(raw);
+  const known = executorRunnableKinds as readonly string[];
+  const kept = read.kinds?.filter(kind => known.includes(kind));
+  const dropped = read.kinds?.filter(kind => !known.includes(kind)) ?? [];
+  if (dropped.length) console.error(`[graphyard-executor] the declaration names ${dropped.join(', ')}, which this checkout does not run; serving ${kept?.length ? kept.join(', ') : 'every kind this checkout runs'}`);
+  return executorDeclarationSchema.parse({ ...read, kinds: kept?.length ? kept : null });
 }
 export async function writeExecutorDeclaration(root: string, declaration: ExecutorDeclaration) {
   const parsed = executorDeclarationSchema.parse(declaration);
