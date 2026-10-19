@@ -10,7 +10,7 @@ import { serverOrigin, loadConnection, managedInstructions } from '../repository
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
+import { APP_PENDING, checkoutLauncherOf, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
 import { scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
@@ -189,7 +189,8 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (!appPending && (!Number.isSafeInteger(status.githubAppId) || status.githubAppId <= 0)) throw new Error('Master setup requires the control plane to identify its GitHub App');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
-  try { if (!(await lstat(resolve(input.cliPath))).isFile()) throw new Error(); } catch { throw new Error('Master setup requires an existing Graphyard CLI launcher'); }
+  const cliPath = checkoutLauncherOf(resolve(input.cliPath));
+  try { if (!(await lstat(cliPath)).isFile()) throw new Error(); } catch { throw new Error('Master setup requires an existing Graphyard CLI launcher'); }
   let previous: MasterConfig | undefined;
   try { previous = await readMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }
   if (previous && (previous.url !== url || previous.repository.toLowerCase() !== detected.repository.toLowerCase())) throw new Error('Existing master configuration belongs to another server or repository');
@@ -214,7 +215,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   // records among them, and any field a future command adds to the schema, so rerunning setup (as
   // `up`'s master-loop step does) can no longer drop an identity another command wrote and strand
   // every goal in acceptance drafting.
-  const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath: resolve(input.cliPath), repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath, repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
