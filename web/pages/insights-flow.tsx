@@ -193,7 +193,7 @@ export function WhereTimeGoes({ report }: { report: any }) {
  * The items the Now view draws: every open item that has a current recorded step. That is the
  * Moving and Blocked groups, and also rework waiting for a builder while its candidate is still
  * open — the Work page files it under Up next, but its candidate is in the recorded flow, back at
- * Build. The Now view draws the recorded steps the step history keeps (Build to Deploy,
+ * Build. The Now view draws the recorded steps the step history keeps (Build to Merge,
  * src/model/pr-steps.ts `flowStep`), not the four states the Work page draws: one column per
  * recorded step, so a dot stands exactly where the recorded history put it.
  */
