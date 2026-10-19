@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-Unplanned file: `scope-request GY-N EPOCH PATH… [--wait] -- REASON`; auto-granted if grounded (fault-class machinery; trusted failed-check `PATH:LINE` quoted; repeating-path soak suites); non-repository refused; else `approve-scope`; `master scope GY-N [--allow-broad-scope] REASON` applies refusals; transport-failed widens retry; a live lease's additive multi-path refusal waits 15min, others stand; attempt ends close requests, `master unblock GY-N` closes carried; `held`: applied at attempt end, never re-requested; covering revision watched. Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `answer GY-N …`; `master decide GY-N withdraw-park REASON`; [host-doable](deployment.md) and criterion-rewrite asks ([requirements decisions](glossary.md#who-decides)) refused; bare `requirements` (no AC-N, criteria, or key with tests/ path) names the rewrite as work: whether it lands, succeeds or is ordered parks; a change verb on the requirements or a named object refuses.
+Unplanned file: none — `scope-request` files nothing, the plan is not a lock (GY-1991); the legacy flow for a request still on the books auto-grants if grounded, refuses non-repository, else `approve-scope`; `master scope GY-N [--allow-broad-scope] REASON` applies refusals; attempt ends close requests, `master unblock GY-N` closes carried; `held`: applied at attempt end, never re-requested. Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([Needs you](dashboard.md#needs-you)); `answer GY-N …`; `master decide GY-N withdraw-park REASON`; [host-doable](deployment.md) and criterion-rewrite asks ([requirements decisions](glossary.md#who-decides)) refused; bare `requirements` (no AC-N, criteria, or key with tests/ path) names the rewrite as work: whether it lands, succeeds or is ordered parks; a change verb on the requirements or a named object refuses.
 
 ## Promotion to autonomy
 
@@ -44,7 +44,7 @@ Unacted producer requests (unstarted/refused/launch-exited) relaunch on untried 
 
 ## Merge trial
 
-The merge writer's trial is the loop's only trial: the merge commit's build and affected tests, credential-free in a sticky tmp-reclaimed `TMPDIR` (`gy-t*`), killed after 20 minutes with no verdict. The shadow gate is gone (GY-2087): no `run.shadowGate`, no `shadowGate` in `master status`, and a cursor's old `shadow` verdicts are dropped on load.
+The merge writer's trial, the only trial: the merge commit's build and affected tests, credential-free in a sticky tmp-reclaimed `TMPDIR` (`gy-t*`), checkout in `~/.gy/trials`, killed after 20 minutes, no verdict. The shadow gate is gone (GY-2087): no `run.shadowGate`, no `shadowGate` in `master status`, and old cursor `shadow` verdicts drop on load.
 
 ## Pipeline speed
 
