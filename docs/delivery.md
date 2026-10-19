@@ -3,7 +3,7 @@
 
 Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
 
-**The master loop deploys continuously** (compose/local installs): each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case as the install's `<installId>-e2e` identity; passing, the loop restarts onto it. The redeploy is stamped from the deployed commit's tree (`install --source-root`), so `/healthz` names it even while the loop runs a held snapshot. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`); two tries until main moves, unless the tip migrated the database. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print the ledger and pipeline.
+**The master loop deploys continuously** (compose/local installs): each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case as the `<installId>-e2e` identity. The deploy runs off the cycle: the pass starts it; the loop cycles on, starts no second meanwhile, and records the settled success or rollback. The redeploy stamps the deployed commit's tree (`install --source-root`), so a held snapshot's `/healthz` still names it. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`); two tries until main moves, unless it migrated the database. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print the ledger and pipeline.
 
 ### Release filing credential
 
@@ -17,11 +17,11 @@ Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign]
 
 ### Main
 
-Main moves only by the merge writer's push of a trialled merge commit; the report-only main watch explains every commit. Base failures file P0.
+Main moves only by the merge writer's push of a trialled merge; the report-only main watch explains every commit. Base failures file P0.
 
 ## Managed repositories
 
-`init --scan` splits checks (`delivery.mergeGate`); `--apply` writes the policy to `graphyard.json`. `deploy.adapter`: `railway`|`command`; `install --plan` lists.
+`--apply` writes `init --scan`'s split checks (`delivery.mergeGate`) to `graphyard.json`. `deploy.adapter`: `railway`|`command`; `install --plan` lists.
 
 `mode: local` (`control-plane` default): previews local, `command` adapter; `delivery.applications`/`delivery.cases` bind cases to static or Compose apps. Bound cases preview items: static builds publish `/preview/KEY/`; Compose apps run isolated.
 
@@ -35,11 +35,11 @@ An environment registers `{"kind":"environment","services":[…]}`; an observer 
 {"registration":{"id":"production-builder","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildInputsDigest":"sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e","artifacts":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"}],"provenanceUrl":"https://ci.example.test/builds/812"}
 ```
 
-`POST /api/delivery/release` selects its manifest members (reverted members excluded, noted); `POST /api/delivery/approve` selects the release by `approvalId` and `expectedGeneration`.
+`POST /api/delivery/release` selects its manifest members (reverted excluded); `POST /api/delivery/approve` selects the release by `approvalId` and `expectedGeneration`.
 
 ## Observe and verify
 
-`POST /api/delivery/observe` carries every service's instances with digests measured by host attestation, never a self-report. `POST /api/delivery/observe-sha` marks contained merges Deployed: every service and an exact 40-hex `sha`. Smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` runs per `freshnessSeconds`. `master status` `delivery` reports `readyToMerged`/`mergedToProduction`/`stages` p50/p90. `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined`.
+`POST /api/delivery/observe` carries every service's instances with host-attested digests, never a self-report. `POST /api/delivery/observe-sha` marks contained merges Deployed: every service and an exact 40-hex `sha`. Smoke-required work needs an `e2e:deploy-smoke` pass naming it. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` runs per `freshnessSeconds`. `master status` `delivery` reports `readyToMerged`/`mergedToProduction`/`stages` p50/p90. `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined`.
 
 ## Main watch
 
@@ -47,7 +47,7 @@ An environment registers `{"kind":"environment","services":[…]}`; an observer 
 
 ## Rollback
 
-Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (never automatic with `none`); `POST /api/delivery/rollback` requests one; executors `POST /api/delivery/rollback-claim`, then `rollback-settle` (`applied`/`failed`/`unknown`); `unknown` blocks until `rollback-resolve` names the provider operation and evidence. `"automaticRollback": true` reverts degraded generations.
+Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (never automatic with `none`); `POST /api/delivery/rollback` requests one; executors `POST /api/delivery/rollback-claim`, then `rollback-settle` (`applied`/`failed`/`unknown`); `unknown` blocks until `rollback-resolve` names the operation and evidence. `"automaticRollback": true` reverts degraded generations.
 
 ## Coordinator recovery
 

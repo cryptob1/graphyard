@@ -298,6 +298,7 @@
     "tests/containment-attention.test.ts": 1780,
     "tests/containment-followups.test.ts": 1305,
     "tests/containment-verification-bounded.test.ts": 520,
+    "tests/continuous-deploy-off-cycle.test.ts": 25922,
     "tests/control-plane-rework-workspace.test.ts": 1500,
     "tests/control-plane-switches.test.ts": 1500,
     "tests/coordination.test.ts": 299,
