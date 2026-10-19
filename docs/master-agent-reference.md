@@ -9,10 +9,6 @@
 
 `graphyard master promote --admin-token-stdin` makes supervised installs autonomous; refuses until a reviewer profile exists; provisions operator-agent and approver.
 
-## Conflict avoidance
-
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports `conflicts`.
-
 ## GitHub administration through the browser
 
 Graphyard's one remote credential is the merge writer's deploy key ([install](install.md)), and `/api/github/installation` is 404. `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing credential. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; `harness` drift is reapplied each cycle.
@@ -31,11 +27,11 @@ Unacted producer requests relaunch on untried profile.
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; a cycle over 60s is attention, never an item; an unbound [stall](operations.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing; a queue-held trial, push or `base failure` refusal is the writer's motion, never a fault. Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; a normal-risk control-plane head's designed post-merge wait files none (read from its mark, not the reason's wording), and a dispatch the deploy's release-skew window refuses counts zero and files none.
+`faultClass` (`master status` `faults`): recurring classes file one item each; a cycle over 60s is attention, never an item; an unbound [stall](operations.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing. Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`; a designed post-merge wait files none (its mark, not its wording), so does a release-skew dispatch refusal.
 
 ## Merge trial
 
-The merge writer's trial, the only trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in a sticky tmp-reclaimed `TMPDIR`, killed after 20 minutes.
+The merge writer's trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in a sticky tmp-reclaimed `TMPDIR`, killed after 20 minutes.
 
 ## Pipeline speed
 
