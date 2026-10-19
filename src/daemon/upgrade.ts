@@ -152,12 +152,12 @@ export const deployLine = (failed: DeployFailure | null | undefined) => !failed 
  * GY-1982: one continuous deploy of the base tip, between cycles. The release already recorded is
  * no deploy, and a tip that failed twice waits for the base branch to move. Otherwise the checkout
  * moves onto the tip, which is deployed, health-checked and run end to end; passing, the release
- * reading names it, it is pinned known good, and null lets the alignment restart onto it. Failing,
+ * reading names it, it is pinned known good, and 'deployed' has the alignment restart onto it. Failing,
  * the recorded release is redeployed the same way (end to end excepted), the checkout returned and
  * the failure recorded — unless the tip migrated the database past what the older release accepts:
  * then it is kept, and the restart onto it goes ahead.
  */
-async function deployTip(state: DaemonState, tip: string, from: string, ports: DeployPorts, ctx: { git: (...args: string[]) => Promise<string> | string; at: () => string; persist: () => Promise<void>; note: (detail: string, failure: boolean) => Promise<void> }): Promise<SelfUpgradeOutcome | null> {
+async function deployTip(state: DaemonState, tip: string, from: string, ports: DeployPorts, ctx: { git: (...args: string[]) => Promise<string> | string; at: () => string; persist: () => Promise<void>; note: (detail: string, failure: boolean) => Promise<void> }): Promise<SelfUpgradeOutcome | 'deployed' | null> {
   const recorded = state.promotion?.promotedSha ?? state.release?.commit ?? null;
   if (sameCommit(recorded, tip)) return null;
   const prior = state.promotion?.deployFailed, attempts = prior && sameCommit(prior.sha, tip) ? prior.attempts + 1 : 1;
@@ -174,7 +174,7 @@ async function deployTip(state: DaemonState, tip: string, from: string, ports: D
     await ctx.persist();
     await ports.pin?.(tip).catch(() => {});
     await ctx.note(`Deployed base tip ${shortCommit(tip)}: health and end to end passed`, false);
-    return null;
+    return 'deployed';
   }
   const kept = schemas.target !== null && schemas.database !== null && schemas.target > schemas.database;
   const back = kept || !recorded ? null : await sequence(recorded, ['deploy', 'health']);
@@ -185,7 +185,7 @@ async function deployTip(state: DaemonState, tip: string, from: string, ports: D
   await ctx.persist();
   const line = deployLine(deployFailed)!;
   await ctx.note(line, true);
-  return kept ? null : { outcome: 'failed', reason: line };
+  return kept ? 'deployed' : { outcome: 'failed', reason: line };
 }
 
 /**
@@ -630,9 +630,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   if (!checkout.commit) return unaligned(`the coordinator checkout at ${codeRoot} could not be read`);
   // GY-1982: continuous deploy, from a clean detached checkout. A tip the install does not run is
   // deployed first; only a deployed (or kept) tip goes on to the alignment and the restarts below.
+  let deployedFrom: string | null = null;
   if (ports && typeof ports !== 'string' && checkout.dirty === false && checkout.detached === true) {
     const deployed = await deployTip(state, to, checkout.commit, ports, { git, at, persist, note: (detail, failure) => note(detail, failure, deployKey) });
-    if (deployed) return deployed;
+    if (deployed === 'deployed') deployedFrom = checkout.commit; else if (deployed) return deployed;
     Object.assign(checkout, await checkoutState(codeRoot, deps.run));
   }
   if (to === checkout.commit) {
@@ -646,13 +647,13 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       return checkout.dirty === true ? finish(state.upgrade.pending, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
     }
     // The tip itself is code the running loop never loaded: the restart onto it is owed, verified
-    // or not (GY-1464), unless a completed pass already processed it without loaded code.
-    if (loaded && loaded !== to && !processed(to)) {
+    // or not (GY-1464), unless a completed pass already processed it without loaded code; a tip deployed now (GY-1982) always is.
+    if ((deployedFrom && !sameCommit(loaded, to)) || (loaded && loaded !== to && !processed(to))) {
       if (checkout.dirty === null) return unaligned(`the restart onto ${shortCommit(to)} is owed, but whether the coordinator checkout at ${shortCommit(checkout.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
-      let code: boolean;
-      try { code = upgradeTouchesCode(listedPaths(await git('diff', '--name-only', `${loaded}..${to}`))); }
+      let code = !!deployedFrom;
+      if (!code) try { code = upgradeTouchesCode(listedPaths(await git('diff', '--name-only', `${loaded}..${to}`))); }
       catch (error) { return unaligned(`the diff from ${shortCommit(loaded)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
-      state.upgrade.pending = { from: loaded, to, code };
+      state.upgrade.pending = { from: loaded ?? deployedFrom, to, code };
       await persist();
       return checkout.dirty === true ? finish(state.upgrade.pending, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
     }

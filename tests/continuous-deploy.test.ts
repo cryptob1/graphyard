@@ -27,6 +27,7 @@ const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https:
 /** A clean, detached coordinator checkout at `head`; a fetch finds `originTip`; every ancestry read answers "not contained". */
 class FakeGit {
   checkouts: string[] = [];
+  diff = 'src/daemon/run.ts\n';
   constructor(public head: string, public originTip: string) {}
   run = async (command: string, args: string[]): Promise<string> => {
     assert.equal(command, 'git');
@@ -35,7 +36,7 @@ class FakeGit {
     if (op === 'symbolic-ref') throw Object.assign(new Error('fatal: not a symbolic ref'), { status: 1 });
     if (op === 'status') return '';
     if (op === 'fetch') return '';
-    if (op === 'diff') return 'src/daemon/run.ts\n';
+    if (op === 'diff') return this.diff;
     if (op === 'checkout') { this.head = operands[2]; this.checkouts.push(operands[2]); return ''; }
     if (op === 'merge-base') throw Object.assign(new Error('not an ancestor'), { status: 1 });
     throw new Error(`fake git cannot answer: git ${args.slice(2).join(' ')}`);
@@ -101,6 +102,13 @@ test('unit:continuous-deploy-advances-release — a base tip that differs from t
   clock.now += 60_000;
   assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, ports, fleet))).outcome, 'up-to-date');
   assert.deepEqual(calls, [], 'the recorded release is not deployed again');
+
+  // A tip touching no loaded code is deployed and restarted onto all the same.
+  fake.originTip = next; fake.diff = 'docs/delivery.md\n';
+  clock.now += 60_000;
+  assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, ports, fleet))).outcome, 'upgraded');
+  assert.equal(state.promotion?.promotedSha, next);
+  assert.equal(fleet.self, 2, 'a docs-only deploy still restarts the loop onto it');
 });
 
 test('unit:continuous-deploy-rolls-back — a tip failing health or end to end is rolled back to the recorded release through the same sequence, recorded with its step and reason in one status line, and attempted at most twice until the base tip moves', async () => {

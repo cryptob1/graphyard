@@ -564,12 +564,15 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
 
 /**
  * GY-1982: the loop's end-to-end step after it deploys a commit: every case under e2e/cases/ (the
- * cases release-candidate.yml ran) through the runner against the install's own URL. A failing case
- * throws the suite's detail, the end-to-end failure that rolls the deploy back.
+ * cases release-candidate.yml ran) through the runner against the install's own URL. Every failing
+ * case throws, optional and pending ones too, the end-to-end failure that rolls the deploy back.
  */
 export async function deployedE2e(root: string, url: string, token: string, suite: typeof e2eSuite = e2eSuite) {
-  const result = await suite(await loadCases(root), token, { root, contract: await checkoutContract(root), select: () => true, runAll: true }).run(url, null);
+  let report: E2eReport | null = null;
+  const result = await suite(await loadCases(root), token, { root, contract: await checkoutContract(root), select: () => true, runAll: true, report: value => { report = value; } }).run(url, null);
+  const failed = (report as E2eReport | null)?.cases.filter(outcome => outcome.verdict === 'failed') ?? [];
   if (!result.passed) throw new Error(result.detail);
+  if (failed.length) throw new Error(`${failed.length} E2E case${failed.length === 1 ? '' : 's'} failed: ${failed.map(outcome => `${outcome.id}${outcome.failingStep ? ` (${outcome.failingStep.reason})` : ''}`).join('; ')}`.slice(0, 500));
   return result;
 }
 

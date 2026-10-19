@@ -44,3 +44,19 @@ test('unit:loop-deploy-runs-e2e-cases — the deploy\'s end-to-end step selects 
     'a failing case throws, the end-to-end failure continuous deploy rolls back on');
   assert.deepEqual(failing.seen.cases, everyCase);
 });
+
+test('unit:loop-deploy-runs-e2e-cases — through the real runner and its verdict, a failing optional case still fails the deploy\'s end-to-end step', async () => {
+  const { deployedE2e, e2eSuite: realSuite } = await import('../src/e2e/runner.js') as Record<string, any>;
+  const { parseCase } = await import('../src/e2e/case.js') as Record<string, any>;
+  const optional = parseCase('e2e/cases/optional-home.json', JSON.stringify({ id: 'optional-home', title: 'Optional home', target: 'any', required: false, steps: [{ kind: 'http', method: 'GET', path: '/home', status: 200, expect: [] }] }));
+  const fetcher = (async (input: string | URL | Request) => {
+    const path = new URL(String(input)).pathname;
+    if (path === '/api/merger') return Response.json({ mode: 'control-plane' });
+    return path === '/home' ? new Response('down', { status: 503 }) : Response.json({ ok: true });
+  }) as typeof fetch;
+  let clock = 0;
+  const suite = ((_cases: readonly CaseFile[], token: string, options: Parameters<typeof e2eSuite>[2] = {}) =>
+    realSuite([{ file: 'e2e/cases/optional-home.json', definition: optional }], token, { ...options, fetcher, now: () => clock, sleep: async (ms: number) => { clock += ms; } })) as typeof e2eSuite;
+  await assert.rejects(deployedE2e(root, 'http://127.0.0.1:4311', 'coordinator-token', suite), /1 E2E case failed: optional-home/,
+    'the release verdict passes an optional failure, but continuous deploy rolls back on it');
+});
