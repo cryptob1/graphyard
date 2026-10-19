@@ -17,7 +17,7 @@ test('every principal token is crypto-random, role-scoped, and at least 32 chara
   for (const token of tokens) { assert.ok(token.length >= 32); assert.match(token, /^[A-Za-z0-9_-]+$/); }
 
   const principals = plannedPrincipals('owner-project', { workers: 3, producerProofs: ['integration:claim-safety', 'integration:claim-safety'] });
-  assert.deepEqual(principals.map(principal => principal.role), ['admin', 'coordinator', 'worker', 'worker', 'worker', 'reader', 'producer']);
+  assert.deepEqual(principals.map(principal => principal.role), ['admin', 'coordinator', 'worker', 'worker', 'worker', 'reader', 'admin', 'producer']);
   assert.equal(new Set(principals.map(principal => principal.id)).size, principals.length);
   // A producer is lane-scoped: it exists only with an explicit, de-duplicated proof grant.
   assert.deepEqual(principals.at(-1)!.proofs, ['integration:claim-safety']);
@@ -67,7 +67,7 @@ test('tokens are written once under the installation directory with mode 0600 an
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
-test('GRAPHYARD_PRINCIPALS matches the server principal schema and carries each role exactly once', async () => {
+test('GRAPHYARD_PRINCIPALS matches the server principal schema and carries each lane once, the operator and the e2e identity its two admins', async () => {
   const home = await scratch();
   try {
     const directory = installDirectory('owner-project', home);
@@ -76,7 +76,7 @@ test('GRAPHYARD_PRINCIPALS matches the server principal schema and carries each 
     const tokens = await ensureTokens(directory, principals, new Vault());
     const parsed = principalSchema.parse(JSON.parse(principalsVariable(principals, tokens)));
     assert.equal(parsed.length, principals.length);
-    assert.equal(parsed.filter(principal => principal.role === 'admin').length, 1);
+    assert.deepEqual(parsed.filter(principal => principal.role === 'admin').map(principal => principal.id), ['owner-project-operator', 'owner-project-e2e'], 'the operator and the e2e identity (GY-2167) are the two admins');
     assert.equal(parsed.filter(principal => principal.role === 'coordinator').length, 1);
     assert.deepEqual(parsed.find(principal => principal.role === 'producer')!.proofs, ['integration:install-apply-adapters']);
     // Worker credentials are never any other role's credential.

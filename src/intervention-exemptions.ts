@@ -32,8 +32,8 @@ export type ExemptionMoment =
   | { at: 'requirements'; details: Record<string, any>; reason: string; widened: boolean; implied?: boolean; asked: boolean; routed: readonly string[]; stage: Stage | null; work: { epoch?: number | null; blocker?: string | null } | null; blockerBefore: string | null | undefined }
   /** A `rework` row (`rework`), or a rework decision still open past the last row (`open-rework`). */
   | { at: 'rework' | 'open-rework'; decision: ReworkDecision | null; asked: boolean; grounds: ReworkGroundsWork | null; candidate: { sha: string } | null | undefined }
-  /** A `merge.operator-authorized` or `merge.reconciled` row. */
-  | { at: 'merge'; details: Record<string, any> }
+  /** A `merge.operator-authorized` or `merge.reconciled` row, its kind carried beside its payload. */
+  | { at: 'merge'; kind: string; details: Record<string, any> }
   /** An `autosettle` or `recover` row lowering the item's containment fence. */
   | { at: 'settlement'; kind: string; details: Record<string, any>; when: string }
   /** An ask still open past the last row, on the item as the current record holds it, judged at the fold's own instant. */
@@ -234,6 +234,15 @@ export const loopReworkRound = rule('loop-rework-round', moment => {
 /** A merge inside a direct-merge window is the operator's standing policy, not a one-off intervention. */
 export const directMergeWindow = rule('direct-merge-window', moment => moment.at === 'merge' && !!moment.details.directMerge);
 /**
+ * GY-2166: the merge writer's own reconcile is the last record of a delivery its flight executed —
+ * the intent, trial and pushed rows beside it are kinds the fold does not read — so a `merge.reconciled`
+ * row naming no reconciliation (`requestedBy`, which only a delivery an approver judged past the record
+ * carries) is the guarded path reporting itself, never a bypass. Three of the writer's ordinary batch
+ * deliveries, landing while their items still read `test`, filed the 19 October 2026 intervention-pattern.
+ */
+export const mergeWriterReconcile = rule('merge-writer-reconcile', moment =>
+  moment.at === 'merge' && moment.kind === 'merge.reconciled' && !moment.details.requestedBy);
+/**
  * GY-1392: the loop settling a verified-dead fence within the settle bound is the product doing its
  * own job, as the faults pass reads it (containmentInMotion); only a settlement by hand, a recovery,
  * or a loop settlement that came past the bound is an intervention.
@@ -306,7 +315,7 @@ export const approvedDecisionWeakening = rule('approved-decision-weakening', mom
 export const interventionExemptions: readonly InterventionExemption[] = [
   approvedAutoscope, successorReplan, auditedScopeWidening, routedScopeWidening, unstartedReplan, criteriaImpliedWidening,
   routineReworkGround, laneReworkGround, failedCheckRound, loopReworkRound,
-  directMergeWindow, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, approverHoldsScopeRequest, scopeRefusalWithinBound, leaseLossResolve, approvedDecisionWeakening,
+  directMergeWindow, mergeWriterReconcile, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, approverHoldsScopeRequest, scopeRefusalWithinBound, leaseLossResolve, approvedDecisionWeakening,
 ];
 
 /** The name of the first rule that exempts the moment, or null when it is a signal. */
