@@ -3,15 +3,18 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { containmentSettlementRefusals, containmentVerificationSchema } from '../src/quarantine.js';
+import { containmentSettlementRefusals, containmentVerificationSchema, containmentAttestation } from '../src/quarantine.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 import { assessContainment, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { containmentSettleWaitBoundMs, cycleFaults, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { settleDue, settleEndedAttemptFence, transientSettlementRefusal } from '../src/daemon/cycle-reclaim.js';
+import type { Cycle } from '../src/daemon/cycle.js';
+import type { SessionHandle } from '../src/model/sessions.js';
 import { workFaults } from '../src/model/fault-classes.js';
 import { containmentPhase } from '../src/model/containment.js';
-// Time-bomb allowance (GY-1694): the 2026-10-03/05 instance stamps are replayed ledger fixtures judged on Date.parse(entry.observedAt); the Date.now() case builds its own lapsed fence relative to the real clock and judges it there.
+// Time-bomb allowance (GY-1694): the 2026-10-03/05 instance stamps are replayed ledger fixtures judged on Date.parse(entry.observedAt); the Date.now() case builds its own lapsed fence relative to the real clock and judges it there; the 2026-10-18/19 instance ids are test names, replayed as relative-deadline fixtures whose fence deadlines derive from the real clock (GY-2151).
 
 // GY-1151 names this file for its proof: manual:fault-class-containment. The master loop filed 7 containment
 // faults in 24 hours on 3 October 2026. Every one was a completed or interrupted attempt whose containment
@@ -302,4 +305,152 @@ test('manual:fault-class-containment — the cycle whose reclaim step settles a 
     assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'containment').map(instance => instance.id), [],
       'and the faults pass of that same cycle read the fence gone, so no instance opened');
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+// ---------------------------------------------------------------------------
+// GY-2151: 3 containment faults in 24 hours on 18–19 October 2026, after GY-1155 and GY-1299 shipped.
+//
+// Every one was the loop's own autosettle POST refused by the plane's referee, and each refusal
+// opened an action:settle instance that invited the operator attestation path:
+//   - GY-2075 19:53:30Z, epoch 3: the POST met `fetch failed` — the plane never answered it — and
+//     the failure was classed as the host's, so the fence took the widening action backoff instead
+//     of a next-cycle fresh-probe retry;
+//   - GY-2085 23:35:21Z, epoch 3, and GY-2113 00:55:13Z, epoch 2: one second after the loop closed a
+//     submitted attempt's session it POSTed a settlement its own record called settleable, while
+//     the plane's live record still fenced the item — the worker's last heartbeat had renewed the
+//     lease the quarantine retained (to 23:36:32Z / 00:56:42Z), GY-2085's launch authority ran to
+//     23:36:02Z, and the session observation written after the close had replaced the close
+//     outcome the loop's record waived the windows on. The plane refused each POST correctly, and
+//     settled both fences itself (23:39:03Z / 00:59:25Z), exactly when its own grace allowed.
+// The shared cause: the loop's settlement gate is judged on a record the loop holds — the cycle's
+// snapshot, or the record its ending constructed — while the fence is lowered by the plane judging
+// its own. The candidate judges every settlement on the record the plane holds now, at the latest
+// control-plane time the verification's measured clock bound allows, and posts only when the
+// plane's own referee would lower the fence; a POST the plane never answered is a transient
+// refusal, retried on the next cycle with a fresh probe and counted as the plane's outage, not the
+// fence's fault. Each instance is replayed from the ledger (`graphyard events GY-N`), the plane
+// judging with the engine's own refusals on the record it holds.
+// ---------------------------------------------------------------------------
+
+const fenceHost = 'vishrog', fencePath = '/srv/worktrees/GY-2151-2', fenceScope = { unit: 'graphyard-watch-1511378-7d52feae-e43e-4d96-9ccc-5d5c2878bf99.scope', pid: 1511378 };
+const fenceIso = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString();
+const fenceClose = (pane: string) => `closed by the loop: GY-2151 has left build, the stage this implementation session was launched for, and is now in test; pane ${pane} closed`;
+const fenceObserved = (pane: string) => `the claude runtime on ${fenceHost} no longer reports pane ${pane}: the attempt was submitted as a pull request, so the session is over`;
+
+/**
+ * The item as two records held it around one refused settlement: `outcome` is the session handle's —
+ * the loop's close, or the observation that overwrote it on the plane; `lease` and `launch` are the
+ * fence deadlines as offsets from now (negative: expired). The plane's record keeps the lapsed lease
+ * its reconciliation had yet to clear, as both instances' did.
+ */
+function fencedItem(outcome: 'loop' | 'observed', deadlines: { lease: number; launch: number }, epoch: number, owner: string, pane: string): Work {
+  return {
+    id: 'work-2151', key: 'GY-2151', title: 'Fence', description: '', type: 'bug', priority: 1,
+    dependencies: [], criteria: [{ id: 'AC-1', text: 'Settles', proofs: ['unit:fence-settles'] }],
+    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'review', revision: 3, policyRevision: 1,
+    createdAt: fenceIso(-60 * 60_000), updatedAt: fenceIso(0), stageEnteredAt: fenceIso(-30 * 60_000), ready: true, epoch,
+    lease: { owner, epoch, expiresAt: fenceIso(deadlines.lease) },
+    lastAssignment: { owner, epoch, claimedAt: fenceIso(-30 * 60_000) },
+    workspaces: [{ host: fenceHost, path: fencePath, epoch, owner, branch: `graphyard/gy-2151-${epoch}` }],
+    candidate: null, submission: { epoch, pr: 182 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+    gates: [], violations: [],
+    containmentQuarantine: { owner, epoch, at: fenceIso(-30 * 60_000), settlementHash: 'b'.repeat(64), launchAcknowledgedAt: fenceIso(deadlines.launch - 120_000),
+      launchExpiresAt: fenceIso(deadlines.launch), leaseExpiresAt: fenceIso(deadlines.lease), scope: fenceScope },
+    sessions: [{ id: `${owner}:${epoch}`, kind: 'implementation', principal: owner, epoch: null, runtime: 'claude', host: fenceHost, subject: 'GY-2151', state: 'finished',
+      outcome: outcome === 'loop' ? fenceClose(pane) : fenceObserved(pane), pane } as unknown as SessionHandle],
+  } as unknown as Work;
+}
+
+/**
+ * The loop's settle of one fenced submitted attempt against a plane that keeps its own record and
+ * judges every autosettle on it with the engine's refusals: the loop probes the record its cycle
+ * opened with (`snapshot`) and reads the plane's record afresh before posting; `settle` replaces
+ * the POST for a transport failure. Returns the plane, the loop's state and the settle outcome.
+ */
+async function settleFencedAttempt(live: Work, snapshot: Work, epoch: number, owner: string, pane: string,
+  settle?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>) {
+  const plane = { item: structuredClone(live), settles: 0, refusals: [] as string[] };
+  const probe = (): SupervisorProbeReport => ({ method: 'linux-proc-systemd', platform: 'linux', uid: 1000, workspacePath: fencePath, held: [], inaccessible: 0, unverifiable: [],
+    processes: [], scopes: [], recordedScope: { ...fenceScope, activeState: 'inactive' } }) as unknown as SupervisorProbeReport;
+  const directory = await temporaryDirectory('fault-class-containment-fence');
+  const credentialFile = join(directory, 'coordinator.token');
+  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
+  const loopConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234,
+    hostId: fenceHost, masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+  const state: DaemonState = emptyDaemonState(loopConfig);
+  const effects = {
+    controlPlaneClock: async () => ({ clockOffset: { min: 0, max: 0 }, roundTripMs: 1, source: 'timed read' as const }),
+    containment: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: 'timed read' | 'snapshot read' }) =>
+      assessContainment(work, { hostId: fenceHost, observedAt: observed.now, clockOffset: observed.clockOffset, clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, probe }),
+    settleContainment: async (work: Work, assessment: ContainmentAssessment) => {
+      plane.settles++;
+      if (settle) return settle(work, assessment);
+      const refusals = containmentSettlementRefusals(plane.item, containmentVerificationSchema.parse(assessment.verification), { now: Date.now() });
+      plane.refusals.push(...refusals);
+      if (refusals.length) throw Object.assign(new Error(JSON.stringify({ error: `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(plane.item.key)}` })), { confirmedRefusal: true });
+      plane.item.containmentQuarantine = null;
+    },
+    readWork: async () => structuredClone(plane.item),
+    persist: async () => {},
+  } as unknown as DaemonEffects;
+  const cycle = { config: loopConfig, state, effects, now: Date.now, snapshot: { work: [structuredClone(snapshot)], now: fenceIso(0) }, clock: Date.now(), clockOffset: { min: 0, max: 0 },
+    performed: [], isolate: async (_kind: string, _item: unknown, _name: string, fn: () => Promise<unknown>) => fn(), agents: [], open: [] } as unknown as Cycle;
+  const settled = await settleEndedAttemptFence(cycle, structuredClone(snapshot), { epoch, owner, closed: fenceClose(pane) });
+  await rm(directory, { recursive: true, force: true });
+  return { plane, state, settled, key: `settle:work-2151:${epoch}` };
+}
+const containmentInstances = (state: DaemonState) => state.faults.instances.filter(instance => instance.faultClass === 'containment');
+
+test('manual:fault-class-containment — action:settle|GY-2075|2026-10-18T19:53:30.673Z (fetch failed) is the plane not answering: a transient refusal retried next cycle with a fresh probe, no instance', async () => {
+  // The fence's windows had genuinely passed on both records; the POST itself met `fetch failed`.
+  const item = fencedItem('loop', { lease: -10 * 60_000, launch: -12 * 60_000 }, 3, 'graphyard-opencode-1', 'w1V:pRF7');
+  const { plane, state, settled, key } = await settleFencedAttempt(item, structuredClone(item), 3, 'graphyard-opencode-1', 'w1V:pRF7',
+    async () => { throw new Error('fetch failed'); });
+  assert.equal(settled, false, 'the fence stands; the settlement is retried');
+  assert.equal(plane.settles, 1, 'the POST was attempted: the gate passed and the transport failed');
+  const row = state.actions[key];
+  assert.equal(row?.state, 'failed');
+  assert.match(row?.detail ?? '', /the control plane did not answer, so it is retried next cycle with a fresh probe/);
+  assert.equal(row?.faultClass, undefined, "the plane's outage is a wait, not the fence's fault");
+  assert.deepEqual(containmentInstances(state), [], 'no containment instance opens for a plane the loop never reached');
+  assert.equal(settleDue(state.actions[key], state.cycle), false, 'not again in the cycle that was refused');
+  assert.equal(settleDue(state.actions[key], state.cycle + 1), true, 'but on the next cycle, with a fresh probe');
+  assert.equal(transientSettlementRefusal(new Error('fetch failed')), 'the control plane did not answer');
+  assert.equal(transientSettlementRefusal(new Error('ECONNRESET')), 'the control plane did not answer');
+});
+
+test('manual:fault-class-containment — action:settle|GY-2113|2026-10-19T00:55:13.308Z (lease grace window) is judged on the plane record and waits, not posted and refused', async () => {
+  // The loop's snapshot carried the close outcome and a lease deadline 240s old; the plane's live
+  // record had the observation's outcome and the last heartbeat's renewal, 60s before its grace end.
+  const snapshot = fencedItem('loop', { lease: -240_000, launch: -300_000 }, 2, 'graphyard-opencode-2', 'w1V:pRKB');
+  const live = fencedItem('observed', { lease: -60_000, launch: -300_000 }, 2, 'graphyard-opencode-2', 'w1V:pRKB');
+  const { plane, state, settled, key } = await settleFencedAttempt(live, snapshot, 2, 'graphyard-opencode-2', 'w1V:pRKB');
+  assert.equal(settled, false, 'the fence waits, in motion');
+  assert.equal(plane.settles, 0, 'no POST the plane must refuse');
+  const row = state.actions[key];
+  assert.equal(row?.state, 'waiting');
+  assert.match(row?.detail ?? '', /the control plane's own record still fences it .*Worker lease for epoch 2 has not been expired for the required 120s grace window/);
+  assert.deepEqual(containmentInstances(state), [], 'the fence in motion is no fault');
+  assert.equal(settleDue(state.actions[key], state.cycle + 1), true, 're-probed on the next cycle');
+
+  // The same fence on the cycle its windows pass: the fresh judgment posts, and the plane lowers it.
+  const passed = fencedItem('observed', { lease: -300_000, launch: -300_000 }, 2, 'graphyard-opencode-2', 'w1V:pRKB');
+  const late = await settleFencedAttempt(passed, structuredClone(passed), 2, 'graphyard-opencode-2', 'w1V:pRKB');
+  assert.equal(late.settled, true, "settled once the plane's own grace allows");
+  assert.equal(late.plane.item.containmentQuarantine, null);
+  assert.equal(late.state.actions[late.key]?.state, 'done');
+  assert.deepEqual(containmentInstances(late.state), []);
+});
+
+test('manual:fault-class-containment — action:settle|GY-2085|2026-10-18T23:35:21.939Z (lease and launch grace windows) is judged on the plane record and waits, not posted and refused', async () => {
+  const snapshot = fencedItem('loop', { lease: -240_000, launch: -300_000 }, 3, 'graphyard-opencode-1', 'w1V:pRJD');
+  const live = fencedItem('observed', { lease: -60_000, launch: -60_000 }, 3, 'graphyard-opencode-1', 'w1V:pRJD');
+  const { plane, state, settled, key } = await settleFencedAttempt(live, snapshot, 3, 'graphyard-opencode-1', 'w1V:pRJD');
+  assert.equal(settled, false, 'the fence waits, in motion');
+  assert.equal(plane.settles, 0, 'no POST the plane must refuse');
+  const row = state.actions[key];
+  assert.equal(row?.state, 'waiting');
+  assert.match(row?.detail ?? '', /Worker lease for epoch 3 has not been expired for the required 120s grace window/);
+  assert.match(row?.detail ?? '', /Launch authority for epoch 3 has not been expired for the required 120s grace window/);
+  assert.deepEqual(containmentInstances(state), []);
 });
