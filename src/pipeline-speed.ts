@@ -459,7 +459,9 @@ export function leadTime(work: Work[], releasedAt: ReadonlyMap<string, string | 
   }).sort((a, b) => b.mergedAt - a.mergedAt);
   const window = (from: number): LeadTimeWindow => {
     const items = samples.slice(from, from + 10);
-    return { medianMs: items.length ? nearestRankPercentiles(items.map(sample => sample.ms)).p50Ms : null, count: items.length };
+    const sorted = items.map(sample => sample.ms).sort((a, b) => a - b), middle = sorted.length >> 1;
+    // The true median: an even window takes the mean of its two middle values, never the lower one.
+    return { medianMs: sorted.length ? (sorted.length % 2 ? sorted[middle] : Math.round((sorted[middle - 1] + sorted[middle]) / 2)) : null, count: items.length };
   };
   const last = window(0), previous = window(10);
   return { line: last.count ? leadTimeLine(last, previous) : null, last, previous };
@@ -467,13 +469,13 @@ export function leadTime(work: Work[], releasedAt: ReadonlyMap<string, string | 
 /** How far back the release-event read for the lead-time window must reach, less a margin for the clock difference between the plane that stamped the documents and the ledger that recorded the events. */
 export const leadTimeReadMarginMs = 10 * 60_000;
 /**
- * The release-event read's lower bound for this work: the last 20 merges' earliest creation or
- * merge, less the margin — an item's release never precedes either. Null while nothing has
+ * The release-event read's lower bound for this work: the newest `reach` merges' earliest creation
+ * or merge, less the margin — an item's release never precedes either. Null while nothing has
  * merged, when there is nothing to read.
  */
-export function leadTimeSince(work: Work[]): string | null {
+export function leadTimeSince(work: Work[], reach = 20): string | null {
   const merged = work.map(item => ({ at: time(acceptedMergeAt(item)), created: time(item.createdAt) }))
-    .filter(entry => entry.at !== null).sort((a, b) => b.at! - a.at!).slice(0, 20);
+    .filter(entry => entry.at !== null).sort((a, b) => b.at! - a.at!).slice(0, reach);
   const stamps = merged.flatMap(entry => [entry.at!, entry.created].filter((value): value is number => value !== null && Number.isFinite(value)));
   return stamps.length ? new Date(Math.min(...stamps) - leadTimeReadMarginMs).toISOString() : null;
 }

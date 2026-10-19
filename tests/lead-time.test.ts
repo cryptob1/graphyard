@@ -39,7 +39,7 @@ const unmerged = (stage: 'build' | 'done'): Work => ({ ...merged(0, minute), sta
 
 test('unit:lead-time — the median released-to-merged time of the last 10 merges and of the 10 before them, each unmerged or unreleased item skipped, each window counted (AC-1)', () => {
   // Twenty-five merges: the newest ten took 40 minutes each, the ten before took a rising
-  // 30–48 minutes (nearest-rank p50: the fifth smallest, 38), the oldest five 5 hours — outside
+  // 30–48 minutes (median: the mean of the fifth and sixth, 38 and 40, so 39), the oldest five 5 hours — outside
   // both windows and never counted.
   const newest = Array.from({ length: 10 }, (_, index) => take((30 - index) * hour, 40 * minute));
   const previous = Array.from({ length: 10 }, (_, index) => take((20 - index) * hour, (30 + 2 * index) * minute));
@@ -47,8 +47,8 @@ test('unit:lead-time — the median released-to-merged time of the last 10 merge
   const items = [...newest, ...previous, ...oldest].map(entry => entry.item);
   const report = leadTime(items, releaseMap([...newest, ...previous, ...oldest]));
   assert.deepEqual(report.last, { medianMs: 40 * minute, count: 10 });
-  assert.deepEqual(report.previous, { medianMs: 38 * minute, count: 10 });
-  assert.equal(report.line, 'Lead time 40 min · last 10 merges · was 38 min');
+  assert.deepEqual(report.previous, { medianMs: 39 * minute, count: 10 });
+  assert.equal(report.line, 'Lead time 40 min · last 10 merges · was 39 min');
 
   // An open item, an item closed without delivery, and a merge with no recorded release time are
   // all skipped, and each window reaches past them for the next qualifying merges.
@@ -56,7 +56,7 @@ test('unit:lead-time — the median released-to-merged time of the last 10 merge
   const partial = releaseMap([...newest.slice(1), ...previous, ...oldest]); // the newest merge has no release time
   const narrowed = leadTime(withSkipped, partial);
   assert.deepEqual(narrowed.last, { medianMs: 40 * minute, count: 10 }, 'the newest merge is skipped and the window takes the next qualifying merge');
-  assert.deepEqual(narrowed.previous, { medianMs: 40 * minute, count: 10 }, 'the second window shifts to the oldest five, whose releases were recorded');
+  assert.deepEqual(narrowed.previous, { medianMs: 41 * minute, count: 10 }, 'the second window shifts one merge older, taking the newest of the oldest five');
   assert.notDeepEqual(narrowed.previous, report.previous, 'the skipped merge moved both windows');
   assert.equal(leadTime([unmerged('build'), unmerged('done')], new Map()).last.count, 0, 'nothing unmerged ever qualifies');
 });
@@ -140,4 +140,22 @@ test('unit:lead-time-events-read — the report reads each release from the item
   const quiet = await leadTimeReport([unmerged('build')], async path => { untouched.push(path); return { events: [], page: { hasMore: false, nextCursor: null } }; });
   assert.equal(untouched.length, 0, 'an empty window reads nothing');
   assert.equal(quiet.line, null);
+});
+
+test('unit:lead-time-events-read — merges with no recorded release widen the read until both windows fill (AC-2)', async () => {
+  // Thirty merges, the newest five with no ready event: the newest twenty merges' history yields
+  // only fifteen samples, so the read reaches over older merges until the previous ten are whole.
+  const all = Array.from({ length: 30 }, (_, index) => take((40 - index) * hour, 30 * minute));
+  const rows = all.slice(5).map(({ item, releasedMs }) => ({ work_id: item.id, created_at: iso(releasedMs) }));
+  const sinces: string[] = [];
+  const reader = async (path: string) => {
+    const since = new URLSearchParams(path.slice(path.indexOf('?'))).get('since')!;
+    sinces.push(since);
+    return { events: rows.filter(row => row.created_at >= since), page: { hasMore: false, nextCursor: null } };
+  };
+  const report = await leadTimeReport(all.map(entry => entry.item), reader);
+  assert.equal(sinces.length, 2, 'one widened read fills the windows');
+  assert.ok(sinces[1] < sinces[0], 'the second read reaches further back');
+  assert.deepEqual(report.last, { medianMs: 30 * minute, count: 10 });
+  assert.deepEqual(report.previous, { medianMs: 30 * minute, count: 10 });
 });
