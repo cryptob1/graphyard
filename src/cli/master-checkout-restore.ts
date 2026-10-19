@@ -1,4 +1,4 @@
-// Concern: `graphyard master checkout-restore` and the confined master's `master restart` and `master executors` (GY-1658) — host acts a confined master identity requests and the loop, the one unconfined process, carries out.
+// Concern: `graphyard master checkout-restore` and the confined master's `master restart` (GY-1658) — host acts a confined master identity requests and the loop, the one unconfined process, carries out.
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
 import { z } from 'zod';
@@ -11,7 +11,7 @@ export { checkoutWriterProcesses, checkoutWriterScan, freezeCheckoutWriters, pro
 // The act itself — the quiesce-and-restore and the HEAD advance under the freeze — is checkout-restore-act.ts's, re-exported for its callers.
 export { type CheckoutQuiesce, checkoutRestoreRefPrefix, type RestoreAct, type RestoreActOutcome, divergedHead, type DivergeInputs, restoreCheckoutFrozen, restoreCoordinatorCheckout, restoreInProcess, statusPaths } from './checkout-restore-act.js';
 // The command side, re-exported for its callers: checkout-restore-command.ts imports this module's requests and paths (functions and paths only, used inside its functions).
-export { checkoutRestoreCommand, checkoutRestoreWaitMs, loopExecutorsWaitMs } from './checkout-restore-command.js';
+export { checkoutRestoreCommand, checkoutRestoreWaitMs } from './checkout-restore-command.js';
 import type { MasterConfig } from '../master/profiles.js';
 
 // The GY-857 guard refuses every loop start, self-upgrade and restart from a coordinator checkout
@@ -33,19 +33,17 @@ import type { MasterConfig } from '../master/profiles.js';
 // so a fix to it reaches an installation whose loop cannot restart; a request that finds the
 // checkout clean but at a HEAD other than the commit the loop runs restarts the loop onto that HEAD
 // (the drift GY-1531 lets a restart adopt) instead of ending `clean` with the escalation standing.
-// The command side — filing a request, the stale-loop and old-HEAD handoffs, `master restart` and
-// `master executors` — is checkout-restore-command.ts; the act itself is checkout-restore-act.ts.
+// The command side — filing a request, the stale-loop and old-HEAD handoffs and `master restart` —
+// is checkout-restore-command.ts; the act itself is checkout-restore-act.ts.
 
 export const checkoutRestoreUsage = 'Use master checkout-restore REASON';
 
 const restartSchema = z.object({ state: z.enum(['requested', 'failed', 'done']), pid: z.number().int(), at: z.string(), detail: z.string().max(4000) }).strict();
 /** `adopted` (GY-1680): no dirty path, but HEAD is not the commit the loop loaded; the loop restarts onto it (`commit`). */
 const outcomeSchema = z.object({
-  at: z.string(), state: z.enum(['restored', 'adopted', 'clean', 'failed', 'restart', 'executors']), detail: z.string().max(4000),
+  at: z.string(), state: z.enum(['restored', 'adopted', 'clean', 'failed', 'restart']), detail: z.string().max(4000),
   ref: z.string().nullable(), commit: z.string().nullable(), paths: z.array(z.string()).max(10_000),
   restart: restartSchema.nullable().default(null),
-  /** What `master executors` printed when the loop ran it for a confined master. */
-  result: z.unknown().optional(),
 }).strict();
 /**
  * GY-1680: the request was filed against a loop whose loaded code (`loaded`, as its cursor recorded it;
@@ -55,8 +53,8 @@ const outcomeSchema = z.object({
  */
 const handoffSchema = z.object({ loaded: z.string().nullable(), restart: z.string().max(100) }).strict();
 const requestSchema = z.object({
-  id: z.string().max(100), act: z.enum(['checkout-restore', 'restart', 'executors']).default('checkout-restore'), reason: z.string().min(1).max(2000), requestedAt: z.string(), requestedBy: z.string().max(200),
-  /** The `master executors` arguments the loop runs. */
+  id: z.string().max(100), act: z.enum(['checkout-restore', 'restart']).default('checkout-restore'), reason: z.string().min(1).max(2000), requestedAt: z.string(), requestedBy: z.string().max(200),
+  /** Always empty: the `master executors` arguments a request filed before GY-1984 could carry. */
   args: z.array(z.string().max(200)).max(20).default([]),
   outcome: outcomeSchema.nullable(),
   handoff: handoffSchema.optional(),
@@ -71,13 +69,12 @@ export const besideCursor = (config: Pick<MasterConfig, 'credentialFile'>, suffi
 /** The request files: beside the loop's cursor (daemonStatePath), so a session that sees the checkout read-only can still file them. */
 export const checkoutRestoreRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore');
 export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-restart');
-export const loopExecutorsRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-executors');
 /** The single-use grant the loop signs for one serve of a checkout-restore request (GY-1680), beside the cursor like the request it names; the entry accepts it nowhere else. */
 export const checkoutRestoreGrantPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore-grant');
 /** The freeze ledger of a serve (GY-1680 review): the writers the entry stopped, recorded before each SIGSTOP beside the cursor, which the loop continues when the entry is ended before its own thaw (continueFrozenWriters). */
 export const checkoutRestoreFreezeLedgerPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'checkout-restore-frozen');
 export const loopRequestPath = (config: Pick<MasterConfig, 'credentialFile'>, act: LoopRequestAct) =>
-  act === 'restart' ? loopRestartRequestPath(config) : act === 'executors' ? loopExecutorsRequestPath(config) : checkoutRestoreRequestPath(config);
+  act === 'restart' ? loopRestartRequestPath(config) : checkoutRestoreRequestPath(config);
 export async function readCheckoutRestoreRequest(file: string): Promise<CheckoutRestoreRequest | null> {
   try { return requestSchema.parse(JSON.parse(await readFile(file, 'utf8'))); } catch { return null; }
 }
@@ -101,9 +98,7 @@ export async function fileCheckoutRestoreRequest(file: string, reason: string, r
  * defaulting to this process's own code with `quiesce`.
  */
 export interface LoopRequestDeps { restart: () => Promise<unknown>; settle?: (adopt: string | null) => Promise<unknown>; unadopt?: (loaded: string) => Promise<unknown>; report?: (outcome: CheckoutRestoreOutcome) => void; run?: ChildRun; now?: () => Date; pid?: number; quiesce?: CheckoutQuiesce;
-  loaded?: () => string | null; restore?: RestoreAct;
-  /** Runs `master executors ARGS` on the host — the loop's own view of its processes and systemd — and returns what it prints. */
-  executors?: (args: string[]) => Promise<unknown> }
+  loaded?: () => string | null; restore?: RestoreAct }
 
 /**
  * The loop's side (GY-1658): carry out a standing request, once, and the restart it owes until it
@@ -125,18 +120,6 @@ export async function serveCheckoutRestore(file: string, root: string, deps: Loo
     return restartOwed(file, request, request.outcome, deps, pid, now);
   }
   let outcome: CheckoutRestoreOutcome;
-  if (request.act === 'executors') {
-    try {
-      if (!deps.executors) throw new Error('this loop cannot run master executors for a confined master');
-      const result = await deps.executors(request.args);
-      const verdict = (result as { result?: unknown } | null)?.result;
-      outcome = { at: now().toISOString(), state: 'executors', ref: null, commit: null, paths: [], detail: `the loop ran master executors ${request.args.join(' ')}`.trim() + (typeof verdict === 'string' ? `: ${verdict}` : ''), restart: null, result };
-    } catch (error) {
-      outcome = { at: now().toISOString(), state: 'failed', ref: null, commit: null, paths: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 4000), restart: null };
-    }
-    deps.report?.(outcome);
-    return write(file, request, outcome, deps);
-  }
   if (request.act === 'restart') {
     outcome = { at: now().toISOString(), state: 'restart', ref: null, commit: null, paths: [], detail: `the loop restarts through its supervising unit, as ${request.requestedBy} asked: ${request.reason}`, restart: null };
   } else try {

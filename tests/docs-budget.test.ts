@@ -15,7 +15,7 @@ const read = (path: string) => readFileSync(`${root}${path}`, 'utf8');
 // Graphyard's own documentation budget is this repository's configuration, not a product rule for
 // managed projects (GY-574): graphyard.json's documentation.wordBudget sets the total, the per-page
 // cap and the pages counted, exactly as the control plane reads any project's. GY-2172 halved the
-// set and lowered the total to the new word count plus 10% (8,489); per page 1,200. A page over
+// set and lowered the total to the new word count plus 10% (8,484); per page 1,200. A page over
 // its cap fails here. The total was never a merge gate, so main re-saturated within
 // hours of every trim (GY-1515): a total within 3% of the budget now fails any change that adds a
 // word to it (docsBudgetJudgement), while a change that adds none, the base branch itself, or a
@@ -53,7 +53,7 @@ function headings(text: string) {
 }
 
 /** Graphyard's own configured budget (GY-1453), which docs/development.md states. */
-const CONFIGURED_BUDGET = { total: 8_489, perPage: 1_200, paths: ['README.md', 'docs/'] };
+const CONFIGURED_BUDGET = { total: 8_484, perPage: 1_200, paths: ['README.md', 'docs/'] };
 /** The budget the judgement tests below exercise on fixtures, independent of the configured one. */
 const FIXTURE_BUDGET = { total: 12_000, perPage: 1_200, paths: ['README.md', 'docs/'] };
 const git = (...args: string[]) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
@@ -113,7 +113,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
   assert.ok(budget, 'graphyard.json configures documentation.wordBudget');
   assert.deepEqual({ total: budget.total, perPage: budget.perPage, paths: budget.paths }, CONFIGURED_BUDGET, 'graphyard.json budgets 16,000 words, 1,200 per page, over README.md and docs/');
-  assert.match(read('docs/development.md'), /`wordBudget` \(8,489 words, 1,200 per page;/, 'docs/development.md states the configured budget');
+  assert.match(read('docs/development.md'), /`wordBudget` \(8,484 words, 1,200 per page;/, 'docs/development.md states the configured budget');
   // Verification maps (GY-1495) carry their own 250-word cap (tests/verification-maps.test.ts), never the docs budget.
   for (const map of readdirSync(`${root}verification`).filter(name => name.endsWith('.md'))) assert.ok(!budgetedPage(`verification/${map}`, budget), `verification/${map} is outside the docs budget`);
   assert.equal(words('one  two\tthree\n\nfour — `five six` [seven](eight.md)'), 8, 'words are whitespace-separated runs, as wc -w counts them');

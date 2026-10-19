@@ -7,7 +7,6 @@ import { masterSetupCommand } from './master-setup.js';
 import { loadStoredMasterConfig, masterInstructions } from '../master.js';
 import { sessionCommands } from './session-commands.js';
 import { registryHelp } from './master-registry.js';
-import { executorsHelp } from './master-executors.js';
 import { closeHelp } from './master-close.js';
 import { openMasterSession, unhandled } from './master/session.js';
 import { intentCommand } from './master/intent.js';
@@ -100,7 +99,6 @@ export const masterCommands = defineCommands([
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
       ...registryHelp,
-      ...executorsHelp,
     ],
     async run(context) {
       const { id } = context;
@@ -121,8 +119,8 @@ export const masterCommands = defineCommands([
       if (id === 'checkout-restore' && context.args[0] === checkoutRestoreServeFlag) return context.print(await serveCheckoutRestoreAct(context.args.slice(1)));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
-      // A confined master's `restart` and `executors` are operations' loop requests (GY-1658), not acts on the host's systemd and pids it cannot reach.
-      const concerns = (id === 'restart' || id === 'executors') && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand];
+      // A confined master's `restart` is operations' loop request (GY-1658), not an act on the host's systemd it cannot reach.
+      const concerns = id === 'restart' && confinedMaster() ? [operationsCommand] : [intentCommand, fleetCommand, operationsCommand, loopCommand];
       for (const command of concerns) if (await command(session) !== unhandled) return;
       throw new Error(`There is no master ${id}; use master guide for the subcommands`);
     },

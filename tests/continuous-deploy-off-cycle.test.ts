@@ -63,9 +63,8 @@ const config = async () => {
   return { root, master };
 };
 
-const upgradeDeps = (fake: FakeGit, ports: DeployPorts, fleet: { self: number; executors: string[] }): SelfUpgradeDeps => ({
+const upgradeDeps = (fake: FakeGit, ports: DeployPorts, fleet: { self: number }): SelfUpgradeDeps => ({
   root: '/coordinator', run: fake.run, deploy: async () => ports,
-  restartExecutors: async to => { fleet.executors.push(to); return { result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
   restartSelf: async () => { fleet.self += 1; },
 });
 
@@ -114,7 +113,7 @@ test('unit:continuous-deploy-off-cycle — with an end-to-end run that outlasts 
   const gate = new Promise<void>(resolve => { release = resolve; });
   t.after(async () => { release(); await sleep(20); });
   const { ports, started, calls, pins } = fakePorts({ gate });
-  const fleet = { self: 0, executors: [] as string[] };
+  const fleet = { self: 0 };
   const state = emptyDaemonState(master);
   state.release = { commit: released, dirty: false };
   const effects = loopEffects(root, master, upgradeDeps(fake, ports, fleet));
@@ -142,8 +141,7 @@ test('unit:continuous-deploy-off-cycle — with an end-to-end run that outlasts 
   assert.deepEqual(pins, [tip], 'the deployed tip is pinned known good');
   assert.equal(state.actions['upgrade:deploy']?.state, 'done');
   assert.equal(state.promotion?.deployFailed, null);
-  await waitFor(() => fleet.self >= 1 && fleet.executors.length >= 1, 'the loop never restarted onto the deployed tip');
-  assert.deepEqual(fleet.executors, [tip], 'the executors restarted onto the deployed tip');
+  await waitFor(() => fleet.self >= 1, 'the loop never restarted onto the deployed tip');
   assert.equal(state.upgrade.last?.to, tip);
   assert.equal(state.upgrade.last?.code, true, 'the deployed tip is loaded code whatever the diff says');
   assert.equal(started.length, 1, 'still no second deploy');
@@ -158,7 +156,7 @@ test('unit:continuous-deploy-off-cycle-rollback — a deploy whose end-to-end ru
   const { root, master } = await config();
   const fake = new FakeGit(released, tip);
   const { ports, started, calls } = fakePorts({ fails: { [tip]: 'e2e' } });
-  const fleet = { self: 0, executors: [] as string[] };
+  const fleet = { self: 0 };
   const state = emptyDaemonState(master);
   state.release = { commit: released, dirty: false };
   state.promotion = promotionReading(null, iso(0), { mainSha: released, promotedSha: released, promotedAt: iso(0) });

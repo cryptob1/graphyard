@@ -38,7 +38,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
   // Open problems by fault class (GY-173): one count per shared cause, read from each open item's
   // own record the same way the master loop reads it, and from the control plane's status — the
-  // App permissions, integration jobs, GitHub pause and unserved executors its notices show — so a
+  // App permissions, integration jobs and GitHub pause its notices show — so a
   // cause behind several items or notices reads as one. A single problem is already its own row
   // or notice, so the grouping is drawn once there are two to group.
   const problems = [...work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now)), ...statusFaults(status)];
@@ -72,7 +72,6 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       <div className="heading-tools"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
-    {status?.executors?.attention?.length > 0 && <div className="notice danger" role="alert" aria-label="Unserved actions"><strong>{status.executors.live === 0 ? 'No executor is running.' : `No executor serves ${status.executors.attention.map((entry: any) => entry.kind).join(', ')}.`}</strong> {status.executors.attention.map((entry: any) => <p key={entry.kind}>{entry.text}</p>)}<p className="muted">An action nobody can claim is not queued behind other work; nothing moves until an executor of its kind is started. <a href="/docs/master-agent-reference#running-executors-under-supervision">How executors are supervised ↗</a></p></div>}
     {/* Drawn whether or not any work exists: status-level faults stand without an item. */}
     {faults.length > 0 && <section className="fault-classes" aria-label="Problems by class">
       <h2>Problems by class <small>one cause, counted once per class</small></h2>

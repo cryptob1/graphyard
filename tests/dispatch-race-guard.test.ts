@@ -11,7 +11,6 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { actionClaimMs, actionId, claimAction, reconcileActions, type ActionRow } from '../src/model/actions.js';
 import { nextAction } from '../src/model/next-action.js';
 import { createSchema, systemDrivenDefault, type Work } from '../src/model/work.js';
-import { controlPlaneHandlers } from '../src/executor.js';
 import { dispatchWork, masterConfigSchema, masterInstructions, prepareWorkerLaunch, runAutonomyCommand, unauthorizedMergeViolation, workAttentionOwner, type WorkerProfile } from '../src/master.js';
 import { assertHandDispatch, dispatchRaceRefusal, handDecision, mergeDecisionRecovery, handDispatchClaimMarginMs, handDispatchClaimTimeoutMs, handDispatchFenceMs, loopOwned, producerRecovery, releaseEventKinds, reviewRecovery, systemDriven, systemDrivenRefusal } from '../src/cli/hand-actions.js';
 import { dispatchFailureLimit } from '../src/auto-dispatch.js';
@@ -184,25 +183,6 @@ test('unit:dispatch-race-guard master dispatch is refused naming the pending act
     state.work = [item({ systemDriven: false, actionQueue: { actions: [dispatchRow({ attempts: 1, retryAt: iso(30_000) })], history: [] } })];
     assert.match(await master.refusal(['dispatch', 'GY-7', 'claude-worker']), new RegExp(`GY-7: dispatch action ${dispatchRow().id} .* is in a failure backoff that ends at .*; the dispatcher claims it then, so master dispatch is refused`));
   } finally { await master.close(); }
-});
-
-test('unit:dispatch-race-guard the executor\'s dispatch proceeds on the row the hand dispatch was refused for', async () => {
-  const row = dispatchRow(claimed());
-  const work = item({ systemDriven: true, actionQueue: { actions: [row], history: [] } });
-  assert.match(dispatchRaceRefusal(work, new Date(), { intervalMs: 10_000, releasedAt: iso(-1_000) })!, /claimed by executor executor-host-1/);
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: '/outside/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-1', masterAgentName: 'm',
-    workers: [{ name: 'claude-worker', principal: 'worker-a', agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }] });
-  const launched: string[] = [];
-  const unusable = async () => { throw new Error('not part of a dispatch'); };
-  const handlers = controlPlaneHandlers(() => config, {
-    snapshot: async () => ({ work: [work], now: iso() }), mutate: unusable, agents: () => [],
-    workerCredentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])), producerCredentials: async () => ({}),
-    dispatchWorker: async (target, profile) => { launched.push(`${target.key}:${profile.name}`); return { pane: 'pane-w' }; },
-    launchReview: unusable, launchProducer: unusable,
-  });
-  // A system-driven item inside the release interval, with its row claimed: exactly what the hand path refuses.
-  assert.match(await handlers.dispatch!(row, { id: 'executor-host-1', host: 'host-1' }), /dispatched GY-7 to claude-worker/);
-  assert.deepEqual(launched, ['GY-7:claude-worker']);
 });
 
 test('unit:dispatch-race-guard an expired, unreclaimed lease is the loop\'s pending release: master dispatch is refused naming the reclaim', async () => {

@@ -68,7 +68,7 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
  * description and criteria, folded), Pull request, Tests (every test proof the criteria name with
  * its result on the head — `unit:`/`integration:` from the merge trial, `e2e:` from the evidence,
  * GY-162/GY-2091) and Activity. Everything technical — gate internals, sessions and their attach
- * commands, review provider, next action and executors, agent requests, evidence — is in one
+ * commands, review provider, next action, agent requests, evidence — is in one
  * collapsed "Technical details" section, and policy changes are in the admin Edit menu.
  */
 export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
@@ -97,9 +97,6 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // Needs you page renders: it is answered there, in this session, never on a command line.
   const waitingOnYou: HumanRequestRow[] = (status?.humanOnly ?? openHumanOnly([{ work: item }], now)).filter((row: HumanRequestRow) => row.id === item.id);
   const actions = item.actionQueue?.actions ?? [];
-  // A pending action no live executor serves (GY-105), as the control plane reports it: shown as
-  // unclaimable rather than as waiting its turn.
-  const unserved: { kind: string; since: string; start: string } | undefined = (status?.executors?.unserved ?? []).find((entry: any) => entry.work === item.id);
   // Escape returns to the page the item was opened from, unless the reader is typing.
   useEffect(() => {
     const keydown = (event: KeyboardEvent) => { if (event.key === 'Escape' && !(event.target as HTMLElement | null)?.closest?.('input, textarea, select, [role="dialog"]')) setSelected(null); };
@@ -215,9 +212,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {!!item.exclusiveResources?.length && <p>Exclusive resources: {item.exclusiveResources.join(', ')}. Reserved only while an assignment lease is active.</p>}
       {overlap && <p className="overlap-line">{overlap}. Coordinate the changes; this warning does not establish a semantic conflict.</p>}
       <h3>Code review</h3><p>Provider: {item.policy.reviewProvider === 'codex' ? 'Codex cloud' : item.policy.reviewProvider === 'agent' ? 'Identity-bound agent reviewers' : 'Formal GitHub approval'}</p>{item.policy.reviewProvider === 'agent' && <p className="muted">Reviewer profiles in failover order: {(item.policy.reviewerProfiles ?? []).map(p => `${p.name} (${p.runtime})`).join(' → ') || 'none configured'}</p>}{item.observation?.agentReview && <p>{shortShas(item.observation.agentReview.reason)}</p>}{(item.reviewFailovers ?? []).filter(f => f.sha === item.candidate?.sha && f.baseSha === item.candidate?.baseSha && f.policyRevision === item.policyRevision).map(f => <p className="amber" key={`${f.profile}-${f.at}`}>Failover: {f.profile} exhausted ({f.exhaustion}) · {f.nextProfile ? `dispatched to ${f.nextProfile}` : 'no reviewer profile remains'}</p>)}{admin && <p className="muted">Changing provider creates a policy revision and requires fresh acceptance evidence. Agent reviewer profiles are configured through the CLI or API because they name registered reviewer App identities.</p>}
-      <h3>Next action and executors</h3>
-      {item.nextAction && <p className="next-action"><strong>Next:</strong> <code>{item.nextAction.kind}</code>{(() => { const row = actions.find(entry => entry.kind === item.nextAction!.kind); return row?.claim ? ` — ${row.claim.executor} on ${row.claim.host} is running it` : row ? (unserved ? ` — nobody can claim it: no live executor serves ${row.kind} (waited ${age(unserved.since)}); ${unserved.start}` : ' — waiting for an executor to claim it') : ''; })()}</p>}
-      {unserved && <p className="amber">This action is not queued behind other work: {status.executors.live === 0 ? 'no executor is alive' : `the ${status.executors.live} live executor(s) serve ${(status.executors.served ?? []).join(', ') || 'nothing'}`}, and nothing moves until one that serves <code>{unserved.kind}</code> is started.</p>}
+      <h3>Next action</h3>
+      {item.nextAction && <p className="next-action"><strong>Next:</strong> <code>{item.nextAction.kind}</code></p>}
       {item.nextAction
         ? <p>The control plane computes <code>{item.nextAction.kind}</code> for this item{item.nextAction.gate ? <> from the <strong>{item.nextAction.gate}</strong> gate’s refusal “{shortShas(unechoed(item.nextAction.refusal ?? ''))}”</> : ''}: {shortShas(unechoed(item.nextAction.reason))}. {item.nextAction.llmRole ? `The action starts a session whose judgment is ${item.nextAction.llmRole}; running the action itself needs no model.` : 'Running it needs no language model at all.'}</p>
         : <p className="muted">The control plane has no outstanding action for this item.</p>}

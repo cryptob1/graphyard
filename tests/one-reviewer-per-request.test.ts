@@ -10,13 +10,11 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import type { ActionRow } from '../src/model/actions.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict, reviewConflictAttention } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster, sessionAgentName, type HerdrAgent } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
-import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { controlPlaneHandlers } from '../src/executor.js';
+import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type DispatchTick } from '../src/auto-dispatch.js';
 import { routineDecision, standingVerdict } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -87,17 +85,16 @@ const interleavings: { name: string; first: Launcher | null; at?: 'launching' | 
 function deferred<T = void>() { let resolve!: (value: T) => void; const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve }; }
 
 /**
- * The loop's dispatch tick and the stateless executor's request-review handler launch for one
- * request, each held at the door of launchReview until the interleaving lets it in. Every launcher's
- * own outcome is recorded where it calls launchReview: the executor settles a refusal for a session
- * already answering the head as its result (GY-1090), so its handler's return alone cannot say
- * whether it launched or stood down.
+ * Two dispatch ticks launch for one request — the cycle's with the configured reviewer profile, the
+ * dispatcher's with the other — each held at the door of launchReview until the interleaving lets it
+ * in. Every launcher's own outcome is recorded where it calls launchReview: a tick settles a refusal
+ * as one of its refused requests, so its return alone cannot say whether it launched or stood down.
  */
 async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (typeof interleavings)[number]) {
   await updateReviewLedger(master.root, current => { current.reviews = []; });
   master.log.tabs.length = 0; master.log.started.length = 0;
-  // The loop and the executor both launch the configured reviewer profile; the executor here is
-  // wired to the second one, as the incident's two sessions ran two runtimes.
+  // Both ticks launch their configured reviewer profile; the dispatcher's is wired to the second
+  // one, as the incident's two sessions ran two runtimes.
   const loaded = await loadMasterConfig(master.root);
   const config = { ...loaded, run: { ...loaded.run, reviewerProfile: 'claude-reviewer' } };
   // A review is requested only once the head's mechanical proofs pass (GY-115): prove it first.
@@ -114,22 +111,16 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   const launch = (who: Launcher, profile: string) => (work: Work, dispatch: { id: string }, herdr: { name?: string }[], observedAt: string) => door[who].promise
     .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, mint: mint(who), requestId: dispatch.id }))
     .then(result => { outcomes[who] = { launched: true }; settled[who].resolve(); return result; }, error => { outcomes[who] = { launched: false, error: error.message }; settled[who].resolve(); throw error; });
-  // The loop's dispatch tick, launching through the real launcher with the first profile.
-  const cycle: DispatchEffects = {
+  // A dispatch tick, launching through the real launcher with WHO's profile.
+  const effects = (who: Launcher): DispatchEffects => ({
     snapshot: async () => ({ work: [item], now: new Date().toISOString() }), agents: () => agents,
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     reconcileReviews: async () => ({ reviews: (await readReviewLedger(master.root)).reviews }), reconcileProducers: async () => ({ producers: [] }),
-    launchReview: (work, dispatch, profile, herdr, observedAt) => launch('cycle', profile.name)(work, dispatch, herdr, observedAt),
+    launchReview: (work, dispatch, profile, herdr, observedAt) => launch(who, profile.name)(work, dispatch, herdr, observedAt),
     launchProducer: async () => { throw new Error('no producer is under test'); }, persist: async () => {},
-  };
-  // The stateless executor's request-review handler, launching the other profile for the same request.
-  const handlers = controlPlaneHandlers(() => config, {
-    snapshot: async () => ({ work: [item], now: new Date().toISOString() }), mutate: async () => ({}), agents: () => agents,
-    workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => ({}), launchProducer: async () => ({}),
-    launchReview: (work, dispatch, herdr, observedAt) => launch('dispatcher', 'second-reviewer')(work, dispatch, herdr, observedAt),
   });
-  const action = { id: 'action-1', work: item.id, key: item.key, gate: 'review', kind: 'request-review', inputs: { kind: 'request-review', provider: 'github', requestId: request.id, pr: 119, sha: H, baseSha: B, policyRevision: 3 } } as unknown as ActionRow;
-  const both = Promise.allSettled([runDispatchTick(config, emptyDispatchCursor(config), cycle), handlers['request-review']!(action, { id: 'exec-1', host: 'h' })]);
+  const second = { ...config, run: { ...config.run, reviewerProfile: 'second-reviewer' } };
+  const both = Promise.allSettled([runDispatchTick(config, emptyDispatchCursor(config), effects('cycle')), runDispatchTick(second, emptyDispatchCursor(second), effects('dispatcher'))]);
   if (!order.first) { door.cycle.resolve(); door.dispatcher.resolve(); }
   else {
     door[order.first].resolve();
@@ -145,7 +136,7 @@ async function assertOneSession(master: Awaited<ReturnType<typeof reviewerMaster
   const { outcomes, tick, dispatched, request } = result;
   const seen = `${order.name}: ${JSON.stringify(outcomes)}`;
   assert.equal(tick.status, 'fulfilled', seen);
-  // The executor's row never fails for the race: it launched, or it settled on the session that did.
+  // Neither tick fails for the race: it launched, or it stood down for the session that did.
   assert.equal(dispatched.status, 'fulfilled', `${seen} ${dispatched.status === 'rejected' ? (dispatched.reason as Error).message : ''}`);
   assert.equal(master.log.tabs.length, 1, `one Herdr tab for one request, got ${master.log.tabs.length} — ${seen}`);
   assert.equal(master.log.started.length, 1, `one runtime started — ${seen}`);
@@ -162,10 +153,10 @@ async function assertOneSession(master: Awaited<ReturnType<typeof reviewerMaster
   const [record] = ledger.reviews;
   assert.deepEqual([record.requestId, record.state, record.pane, record.launching, record.attempt], [request.id, 'pending', master.log.tabs[0], undefined, 1], seen);
   assert.equal(record.profile, winner === 'cycle' ? 'claude-reviewer' : 'second-reviewer', seen);
-  // The executor reports what it did: its launch, or the session already answering the head.
-  const reported = (dispatched as PromiseFulfilledResult<unknown>).value as string;
-  if (winner === 'dispatcher') assert.match(reported, /^launched reviewer /, seen);
-  else assert.match(reported, new RegExp(`is left to reviewer session ${record.agentName} already answering that head`), seen);
+  // Each tick reports what it did: the winner's its launch, the other's none.
+  const ticks = { cycle: (tick as PromiseFulfilledResult<DispatchTick>).value, dispatcher: (dispatched as PromiseFulfilledResult<DispatchTick>).value };
+  assert.equal(ticks[winner].launched.length, 1, seen);
+  assert.equal(ticks[loser].launched.length, 0, seen);
   // The record existed, as a reservation for this very session, before its runtime was started.
   const atStart = master.log.started[0].recorded;
   assert.equal(atStart.length, 1); assert.equal(atStart[0].id, record.id); assert.equal(atStart[0].launching, true); assert.equal(atStart[0].requestId, request.id);

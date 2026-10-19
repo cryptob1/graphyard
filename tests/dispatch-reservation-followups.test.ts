@@ -4,8 +4,6 @@ import { readFile, rm, utimes, writeFile, mkdir } from 'node:fs/promises';
 import { hostname } from 'node:os';
 import { join } from 'node:path';
 import { currentAgents, dispatchReservationDirectory, dispatchReserved, dispatchedFile, profileLaunchedFile, removeJudged, reserveDispatch, takeOverStale } from '../src/master/dispatch-reservation.js';
-// @ts-expect-error The standalone executor is a dependency-free entry point script.
-import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
 import type { HerdrAgent, WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -101,15 +99,4 @@ test('unit:launch-marker-ignores-clock-skew — a profile launch marker re-reads
     await writeFile(dispatchedFile(root, 'GY-1'), JSON.stringify({ epoch: 1, at: new Date().toISOString() }));
     await assert.rejects(reserveDispatch(root, item(0), profile, behind), (error: unknown) => dispatchReserved(error) && /epoch 1/.test(String(error)), 'an item dispatched at a newer epoch after the snapshot is refused');
   } finally { await rm(root, { recursive: true, force: true }); }
-});
-
-test('unit:executor-dispatch-rereads-herdr — the standalone executor hands dispatchWork a fresh Herdr reader', async () => {
-  const calls: unknown[][] = [];
-  const bound = async () => '';
-  const modules = { master: { dispatchWork: (...args: unknown[]) => { calls.push(args); return {}; }, listHerdrAgents: async (run: unknown) => [{ name: 'read', run }] }, daemon: {}, reviewer: {}, producer: {} };
-  const effects = controlPlaneEffects(modules, { root: '/repo', current: () => ({}), run: bound, snapshot: async () => ({}), mutate: async () => ({}), mergeExecutor: {} });
-  await effects.dispatchWorker({ key: 'GY-1' }, profile, [], { work: [], now: new Date().toISOString() });
-  const options = calls[0][10] as { agents?: () => Promise<unknown[]> };
-  assert.equal(typeof options?.agents, 'function', 'a fresh reader is supplied');
-  assert.deepEqual(await options.agents!(), [{ name: 'read', run: bound }], 'and it reads Herdr through the executor\'s runner');
 });

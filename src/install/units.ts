@@ -53,13 +53,6 @@ export function perInstallUnits(repository: string): InstallUnits {
 }
 export const legacyInstallUnits: InstallUnits = { version: 1, slug: null, master: legacyLoopUnit, executorTemplate: legacyExecutorTemplate, alias: true };
 
-/** One executor slot's instance of the install's template. */
-export const executorInstance = (units: Pick<InstallUnits, 'executorTemplate'>, slot: number | string) => units.executorTemplate.replace('@.service', `@${slot}.service`);
-/** The glob `systemctl list-units` takes for every instance of the install's template, and nobody else's. */
-export const executorGlob = (units: Pick<InstallUnits, 'executorTemplate'>) => units.executorTemplate.replace('@.service', '@*.service');
-/** The instance-name pattern of the install's template, for reading what `list-units` printed. */
-export const executorInstancePattern = (units: Pick<InstallUnits, 'executorTemplate'>) =>
-  new RegExp(`(?<![A-Za-z0-9._-])${units.executorTemplate.replace('@.service', '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}@(\\d+)\\.service`, 'g');
 /** Every unit an install owns, by exact name or template: what its harness may restart. */
 export const ownedUnits = (units: InstallUnits) => [units.master, units.executorTemplate];
 
@@ -194,7 +187,7 @@ export function foreignUnitText(text: string, root: string, home = homedir()): s
   // a unit spells quoted reads back as exactly its checkout instead of dissolving into fragments no
   // reader can name (the old bare split read such a unit as this checkout's own).
   const script = execStart ? systemdCommandLineWords(execStart).find(part => /\/scripts\/graphyard-executor\.mjs$/.test(part)) : undefined;
-  // A repository without its own executor script runs this package's (renderExecutorUnit): that unit, working in ROOT, is ROOT's.
+  // A unit an older install wrote to run this package's executor script, working in ROOT, is ROOT's.
   const packaged = workingDirectory && script && canonical(script) === canonical(packageExecutorScript);
   // GY-1790: the entry held under ROOT's own .graphyard/held-cli/ is ROOT's — a snapshot restart points the slots at it while the checkout stands dirty.
   const held = !!script && canonical(dirname(dirname(dirname(script)))) === join(own, '.graphyard', 'held-cli');

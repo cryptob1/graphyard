@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, type PlaneDeploy, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { readInterventionReport } from './interventions/report.js';
 import { interventionPolicyFromEnv } from './model/interventions.js';
@@ -30,6 +30,7 @@ import { retroCheckRefusals } from './model/retro-synthesis.js';
 import { readAppliedRetroChecks } from './retro-synthesis.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { nonRepositoryRead } from './model/scope-repository.js';
+import { buildIdentity } from './protocol-version.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, unplannedPaths, type ScopeDecision, type ScopeRequestState } from './model/scope.js';
 import { askIdentity, mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { handScopeWideningRefusal, routedScopeAsk } from './model/scope-provenance.js';
@@ -46,7 +47,6 @@ import { sameObservationInputs } from './model/observation-save.js';
 import { adoptSchema, adoptedBranchHeld, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, gitBranchName, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
-import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
 import { livenessFallback, livenessOf, livenessRepairEntry, rowDueAt, stalledActionLifts, waitDueAt } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
@@ -212,15 +212,9 @@ const actionClaimSchema = z.object({
   work: z.string().min(1).max(200).optional(),
 }).strict();
 /** A presence-only poll (GY-1288): who is asking, where, and what it runs — a claim's own fields, claiming nothing. */
-export const executorPresenceSchema = actionClaimSchema.pick({ executor: true, host: true, kinds: true, serves: true }).strict();
 const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
 // A renewal carries no result: it says only that the executor named on the claim is still
 // inside the handler, and asks for the lease it already holds to run on.
-// A remedy record names the remedy, the unchanged reason it was applied for and what it did (GY-949).
-const actionRemedySchema = z.object({
-  remedy: z.enum(stallRemedyKinds), reason: z.string().trim().min(1).max(2000), outcome: z.enum(remedyOutcomes),
-  detail: z.string().trim().min(1).max(2000), flows: z.array(z.enum(remedyFlows)).min(1).max(3),
-}).strict();
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 // A resync names the instant its claim was made, so the answer says whether an observation saved
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
@@ -293,6 +287,19 @@ export async function readAttestations(db: { query: (text: string, values: unkno
 export async function readPlaneStalls(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, fromMs: number, untilMs: number): Promise<PlaneStall[]> {
   const rows = (await db.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.stall' AND created_at >= to_timestamp($1 / 1000.0) AND created_at <= to_timestamp($2 / 1000.0) ORDER BY created_at`, [fromMs, untilMs])).rows;
   return rows.map(row => { const details = row.details ?? {}; return { from: String(details.from), to: String(details.to) }; }).filter(stall => Number.isFinite(Date.parse(stall.from)) && Number.isFinite(Date.parse(stall.to)));
+}
+/**
+ * The deploys recorded around `fromMs`..`untilMs` (wall-clock ms): the release changes the plane's
+ * own liveness tick observed (recordPlaneLiveness), each once in the ledger with no work of its own.
+ * They are read beside the stalls wherever a lapse is classed, so a lease that ran out inside a
+ * deploy's release-skew window — the worker's release refuses every renewal client-side once the
+ * newer release answers — is explained by the plane's record rather than counted as a lost worker
+ * (GY-2177). The `created_at` index serves the read; the window is bounded by the caller.
+ */
+export async function readPlaneDeploys(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, fromMs: number, untilMs: number): Promise<PlaneDeploy[]> {
+  const rows = (await db.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.deploy' AND created_at >= to_timestamp($1 / 1000.0) AND created_at <= to_timestamp($2 / 1000.0) ORDER BY created_at`, [fromMs, untilMs])).rows;
+  return rows.map(row => { const details = row.details ?? {}; return { commit: String(details.commit), from: String(details.from), to: String(details.to) }; })
+    .filter(deploy => /^[0-9a-f]{40}$/.test(deploy.commit) && Number.isFinite(Date.parse(deploy.from)) && Number.isFinite(Date.parse(deploy.to)));
 }
 /**
  * Apply this repository's scope rule to an open request and record what it decided (GY-85).
@@ -1107,6 +1114,8 @@ export class Engine {
   }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
+  /** The commit this process first recorded itself serving (recordPlaneLiveness); undefined until its first tick named one (GY-2177). */
+  private servedCommit: string | null | undefined;
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
     if (data.head !== undefined) return this.observeSubmittedHead(actor, id, { epoch: data.epoch, head: data.head }, key);
     if (this.submissionObserver === undefined) this.submissionObserver = null;
@@ -1662,7 +1671,8 @@ export class Engine {
         // history, a silently vanished worker is an escalation the overwrite cannot erase.
         if (work.lease) {
           const lapsedStalls = await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime());
-          const explained = leaseLapseCause(work, work.lease, await readAttestations(db, work.id), lapsedStalls);
+          const lapsedDeploys = await readPlaneDeploys(db, now.getTime() - 24 * 3_600_000, now.getTime());
+          const explained = leaseLapseCause(work, work.lease, await readAttestations(db, work.id), lapsedStalls, lapsedDeploys);
           if (explained) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
             JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
@@ -2546,29 +2556,6 @@ export class Engine {
     });
   }
   /**
-   * Record the loop's attempt of the remedy a stalled row's reason binds to (GY-949). The row keeps
-   * one record per unchanged run (`recordStallRemedy` refuses a second), so the loop applies a
-   * remedy at most once for a run however many of its cycles see the row, and the attention and the
-   * escalation read what it did from the row itself. The item is evaluated with the record, so a
-   * refused remedy's escalation is queued in the same transaction rather than whenever the item is
-   * next evaluated — for an item no reconciliation job wakes, never.
-   */
-  async recordActionRemedy(actor: Principal, id: string, input: unknown) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    const data = actionRemedySchema.parse(input);
-    return this.store.transaction(async (db, now) => {
-      const work = await this.actionOwner(db, id, undefined, true);
-      demand(work, 'Action is not open on any work item', 404);
-      const row = recordStallRemedy(work!, id, data, actor.id, now);
-      const all = (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item);
-      this.evaluate(work!, all, now);
-      await this.recordDispatch(db, work!, now);
-      await save(db, work!, actor.id, 'action.remedied', now, { id, kind: row.kind, remedy: data.remedy, outcome: data.outcome, flows: data.flows, detail: data.detail, reason: data.reason });
-      if (work!.submission) await wakeJob(db, work!.id);
-      return { action: row, work: { id: work!.id, key: work!.key } };
-    });
-  }
-  /**
    * Hold a claim while the handler is still running.
    *
    * A claim is a short lease so that a dead executor's row is offered again quickly, but the
@@ -3175,13 +3162,32 @@ export class Engine {
       at ??= new Date();
       await db.query('INSERT INTO plane_liveness(id,tick_at) VALUES(true,$1) ON CONFLICT (id) DO NOTHING', [at]);
       const previous = (await db.query('SELECT tick_at FROM plane_liveness WHERE id = true FOR UPDATE')).rows[0].tick_at as Date;
+      let served: string | null | undefined;
       if (at.getTime() > previous.getTime()) {
         if (at.getTime() - previous.getTime() > planeStallMs)
           await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
             ['graphyard', 'plane.stall', JSON.stringify({ details: { from: previous.toISOString(), to: at.toISOString() } })]);
+        // GY-2177: the first tick that moves also records what this process serves, against what the
+        // tick named before it: a change is a deploy, recorded once with the window it names — from
+        // the replaced release's last tick, when its renewals started landing nowhere, to this
+        // process's first answer, from which the release before it refuses every renewal client-side
+        // with the version skew until the loop realigns. That row is what lets the plane explain the
+        // lapses its own deploy causes (leaseLapseCause), the way a stall row explains its outage.
+        // The read is one indexed query per process, and the commit comparison makes a retried tick
+        // (a failed transaction leaves the field unset) idempotent.
+        if (this.servedCommit === undefined) {
+          served = buildIdentity().commit;
+          const last = await db.query(`SELECT payload->>'commit' AS commit FROM events WHERE kind = 'plane.deploy' ORDER BY created_at DESC LIMIT 1`);
+          if (served && last.rows[0]?.commit !== served)
+            await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
+              ['graphyard', 'plane.deploy', JSON.stringify({ details: { commit: served, from: previous.toISOString(), to: at.toISOString() } })]);
+        }
         await db.query('UPDATE plane_liveness SET tick_at = $1 WHERE id = true', [at]);
       }
       await db.query('COMMIT');
+      // The field moves once the row is on the ledger: a failed transaction left it unset, and the
+      // next tick's commit comparison retries the whole check without recording anything twice.
+      if (served !== undefined) this.servedCommit = served;
     } catch {
       await db?.query('ROLLBACK').catch(() => {}); // the next beat records it
     } finally { db?.release(); }
@@ -3508,6 +3514,7 @@ export class Engine {
     // indexed, and it serves both the lapse being classed here and the standing losses a recorded
     // stall explains (GY-1791).
     const stalls = leaseLost || standingLoss ? await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime()) : [];
+    const deploys = leaseLost || standingLoss ? await readPlaneDeploys(db, now.getTime() - 24 * 3_600_000, now.getTime()) : [];
     const lost = leaseLost ? work.lease! : null;
     if (lost) {
       work.lease = null;
@@ -3518,7 +3525,7 @@ export class Engine {
       // the plane's own recorded stalls is explained by the plane's record the same way. Only an
       // epoch with no submission, no blocked report, no attestation and no stall covering its
       // expiry — a worker that silently vanished while the plane was up — still escalates.
-      const explained = leaseLapseCause(work, lost, attestations, stalls);
+      const explained = leaseLapseCause(work, lost, attestations, stalls, deploys);
       if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
       else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
       endLapsedAttempt(work, lost, now);

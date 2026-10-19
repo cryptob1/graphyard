@@ -457,8 +457,8 @@ export function verifyThroughput(work: Work[], now: number, options: { deployed:
     text: `${admitted.length} of the ${throughputClaim.minimumDeliveries} deliveries the claim is judged over were made with no master session running; ${throughputClaim.minimumDeliveries - admitted.length} more are needed` });
   if (enough && p50 > throughputClaim.submitToMergeP50Ms) missed.push({ metric: 'submit-to-merge-p50', measured: p50, budget: throughputClaim.submitToMergeP50Ms, by: p50 - throughputClaim.submitToMergeP50Ms,
     text: `submit→merge p50 ${minutes(p50)} exceeds ${minutes(throughputClaim.submitToMergeP50Ms)} by ${minutes(p50 - throughputClaim.submitToMergeP50Ms)}` });
-  if (enough && idleMs > throughputClaim.idleActionableMs) missed.push({ metric: 'idle-actionable', measured: idleMs, budget: throughputClaim.idleActionableMs, by: idleMs - throughputClaim.idleActionableMs,
-    text: `${worstIdle?.key ?? 'a delivery'} left its ${worstIdle?.idle?.kind ?? 'action'} actionable and unclaimed for ${minutes(idleMs)}, ${minutes(idleMs - throughputClaim.idleActionableMs)} past the ${minutes(throughputClaim.idleActionableMs)} bound` });
+  // GY-1984: no executor claims action rows any more — the loop's own steps run them — so how long a
+  // row stood unclaimed is reported beside the claim, never a miss of it.
 
   // The release must be the one running the claim's executors; a measurement of anything else
   // verifies nothing, whatever its figures say.
@@ -481,8 +481,6 @@ export function verifyThroughput(work: Work[], now: number, options: { deployed:
   const effects = [
     all.count && all.submitToMerge.p50Ms > throughputClaim.submitToMergeP50Ms && (p50 <= throughputClaim.submitToMergeP50Ms)
       ? `submit→merge p50 over all ${all.count} real deliveries in the window is ${minutes(all.submitToMerge.p50Ms)}, past the budget, while the ${admitted.length} admitted deliveries measure ${measuredMinutes(p50, submitToMerge.count)}` : null,
-    all.idleMaxMs !== null && all.idleMaxMs > throughputClaim.idleActionableMs && idleMs <= throughputClaim.idleActionableMs
-      ? `the longest idle-but-actionable wait over all real deliveries in the window is ${minutes(all.idleMaxMs)}, past the bound, while the admitted deliveries measure ${measuredMinutes(idleMaxMs, admitted.length)}` : null,
   ].filter((entry): entry is string => !!entry);
   const populationEffect = effects.length ? `${effects.join('; ')}. The excluded deliveries are listed with their figures and reasons; the budgets are unchanged.` : null;
 

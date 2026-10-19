@@ -13,7 +13,6 @@ import type { RuntimeSession, SessionHandle, SessionHandleInput } from '../src/m
 import { registeredLaunch } from '../src/model/session-state.js';
 import { approverSessionId, approverSessionName, closeHerdrPane, masterConfigSchema, registeredReview, runAutonomyCommand, type MasterConfig } from '../src/master.js';
 import { dispatchEffects, emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
-import { controlPlaneHandlers } from '../src/executor.js';
 import { relaunchSession } from '../src/master-daemon.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -141,7 +140,7 @@ test('integration:every-launch-registered — an approver launched through maste
   } finally { await cleanup(); }
 });
 
-test('integration:every-launch-registered — the executor, the loop\'s reviewer launches, its quota failover relaunch and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
+test('integration:every-launch-registered — the loop\'s reviewer launches, its quota failover relaunch and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
   const { root, master, cleanup } = await host();
   try {
     let item = await engine.execute(operator, 'create', null, { title: 'Launch paths', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Registered', proofs: ['unit:registered'] }] }, randomUUID());
@@ -152,19 +151,7 @@ test('integration:every-launch-registered — the executor, the loop\'s reviewer
     const order: string[] = [];
     const record = async (work: Work, handle: SessionHandleInput) => { order.push(`record:${handle.id}:${handle.state}${handle.pane ? `:${handle.pane}` : ''}`); return mutate(`work/${work.id}/session`, handle); };
 
-    // The executor's reviewer launch.
-    const handlers = controlPlaneHandlers(() => master, {
-      snapshot: async () => ({ work: [withReview(await reload(item.id))], now: new Date().toISOString() }), mutate, agents: () => [],
-      workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => { throw new Error('unused'); },
-      launchReview: async () => { order.push('start:executor-review'); return { pane: 'wA:p70', agentName: 'review-claude' }; },
-      launchProducer: async () => { throw new Error('unused'); }, recordSession: record,
-    });
-    await handlers['request-review']!({ id: 'row', work: item.id, key: item.key, kind: 'request-review', inputs: { kind: 'request-review' } } as any, { host: 'machine-a', executor: 'executor-a' } as any);
-    assert.deepEqual(order, [`record:${request.id}:running`, 'start:executor-review', `record:${request.id}:running:wA:p70`], 'registered, started, then its pane written');
-
-    // The loop's own reviewer launch, on a dispatch tick — once the executor's session, which holds
-    // the reviewer's one slot, has ended.
-    await mutate(`work/${item.id}/session`, { id: request.id, kind: 'review', runtime: 'claude', host: 'machine-a', subject: `${item.key}: review`, state: 'finished', outcome: 'judged' });
+    // The loop's own reviewer launch, on a dispatch tick.
     order.length = 0;
     const config = masterConfigSchema.parse({ ...master });
     const loopTick = await runDispatchTick(config, emptyDispatchCursor(config), { ...dispatchEffects(root, () => config, { snapshot: async () => ({ work: [withReview(await reload(item.id))], now: new Date().toISOString() }), mutate, run: () => '' }),

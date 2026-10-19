@@ -274,16 +274,15 @@ test('unit:status-degrades-per-section — master status still returns every oth
     assert.match(unavailable.error, /did not answer within|aborted due to timeout/);
     assert.equal(report.unavailable.length, 1, `only the interventions section is unavailable: ${JSON.stringify(report.unavailable)}`);
     // Every other section is still there, built from the bounded snapshot.
-    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'executors', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'throughput', 'terminalDecisions', 'runtime', 'timings'])
+    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'throughput', 'terminalDecisions', 'runtime', 'timings'])
       assert.ok(section in report && report[section] !== undefined, `master status returned its ${section} section`);
-    assert.equal(report.executors.presence.available, true, 'the executor presence was read from GET /api/actions');
     assert.ok(report.work.length >= OPEN, 'the open items are reported');
 
     // A second route failing is named beside it, and the report still returns.
-    const withoutActions = async (path: string, credential?: string, timeoutMs?: number) => path === 'actions' ? Promise.reject(new Error('The operation was aborted due to timeout')) : masterApi(path, credential, timeoutMs);
-    const degraded = await masterStatusReport(root, master, withoutActions, status, { commit: null }, { reportReadBoundMs: 300 }) as Record<string, any>;
-    assert.deepEqual(degraded.unavailable.map((entry: { section: string; route: string }) => [entry.section, entry.route]).sort(), [['executors', 'GET /api/actions'], ['interventions', 'GET /api/interventions?window=7']]);
-    assert.match(degraded.unavailable.find((entry: { section: string }) => entry.section === 'executors').error, /aborted due to timeout/);
+    const withoutGoals = async (path: string, credential?: string, timeoutMs?: number) => path === 'goals?open=1&view=summary' ? Promise.reject(new Error('The operation was aborted due to timeout')) : masterApi(path, credential, timeoutMs);
+    const degraded = await masterStatusReport(root, master, withoutGoals, status, { commit: null }, { reportReadBoundMs: 300 }) as Record<string, any>;
+    assert.deepEqual(degraded.unavailable.map((entry: { section: string; route: string }) => [entry.section, entry.route]).sort(), [['goals', 'GET /api/goals'], ['interventions', 'GET /api/interventions?window=7']]);
+    assert.match(degraded.unavailable.find((entry: { section: string }) => entry.section === 'goals').error, /aborted due to timeout/);
     assert.ok(Array.isArray(degraded.attentionItems) && degraded.board && degraded.sessions);
   } finally { await rm(root, { recursive: true, force: true }); await rm(secrets, { recursive: true, force: true }); }
 

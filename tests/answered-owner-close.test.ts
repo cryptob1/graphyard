@@ -25,21 +25,16 @@ const executed = row('request-review', [
   { at: at(12), event: 'claimed', requester: 'graphyard', executor: 'executor-a', result: null, reason: 'attempt 1 claimed by executor-a on host-a' },
   { at: at(13), event: 'completed', requester: 'graphyard', executor: 'executor-a', result: 'done', reason: '' },
 ]);
-/** A request-rework left actionable and unclaimed for ten minutes: the idle budget missed over an admitted population. */
-const staleRework = { ...row('request-rework', [
-  { at: at(12), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
-  { at: at(22), event: 'cancelled', requester: 'graphyard', executor: null, result: null, reason: 'now needs dispatch instead' },
-]), id: 'rework-runnable', attempts: 0 } as unknown as ActionRow;
 function delivery(key: string, history: ActionRow[] = [executed]): Work {
   return {
     id: key.toLowerCase(), key, title: `Delivery ${key}`, stage: 'done', gates: [], violations: [], policy: { checks: [], review: true }, implementers: ['worker-1'], workspaces: [], sessions: [],
-    submission: { pr: Number(key.split('-')[1]) }, candidate: null, updatedAt: at(40), delivery: { mergeSha: sha('a'), mergedAt: at(30) },
+    submission: { pr: Number(key.split('-')[1]) }, candidate: null, updatedAt: at(60), delivery: { mergeSha: sha('a'), mergedAt: at(50) },
     pipeline: { attempts: [{ epoch: 1, owner: 'worker-1', claimedAt: at(0), endedAt: at(10), end: 'submitted' }], submittedAt: at(10), reworkRounds: 0, interventions: { blocked: 0, requirements: 0 }, backfill: null },
     actionQueue: { actions: [], history },
   } as unknown as Work;
 }
-const deliveries = () => [...Array.from({ length: 9 }, (_, index) => delivery(`GY-${600 + index}`)), delivery('GY-468', [executed, staleRework])];
-/** The measurement of `release`: ten admitted deliveries whose budgets miss, so an escalated pursuit raises the escalated miss. */
+const deliveries = () => [...Array.from({ length: 9 }, (_, index) => delivery(`GY-${600 + index}`)), delivery('GY-468')];
+/** The measurement of `release`: ten admitted deliveries whose submit→merge p50 (40 minutes) misses its budget, so an escalated pursuit raises the escalated miss. */
 const missed = (release: string): ThroughputReport =>
   verifyThroughput(deliveries(), now, { deployed: { revision: release, version: '1', origin: 'https://example.invalid', observedAt: at(0), containsClaim: true, reason: null }, since: at(-60) });
 const decideOn = (visible: ReturnType<typeof throughputClaimVisibility>) => (visible.stall ? visible.owner.item ?? 'GY-N' : null);

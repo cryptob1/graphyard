@@ -6,6 +6,13 @@ import { decisionInput, type MasterConfig } from '../master.js';
 import { derivePlannedFiles, plannedFilesRefusal, postDeployCriterionRefusal, postDeployOnlyRefusal, type Work } from '../model/work.js';
 import { askedScopes } from '../model/scope-collapse.js';
 
+/** GY-1764: the base tree read after a fetch that succeeded. A failed fetch leaves the last fetched tree, which can lag a base that gained the file asked for, so no terminal refusal may rest on it: the read throws and the ask waits. */
+export async function currentBaseTree(root: string, baseBranch: string, run: ChildRun = defaultChildRun) {
+  try { await run('git', ['fetch', '--quiet', 'origin', baseBranch], { cwd: root, timeoutMs: 30_000 }); }
+  catch (error) { throw new Error(`the base tree of ${baseBranch} could not be refreshed (${error instanceof Error ? error.message : error}); a terminal scope refusal waits for a current read`); }
+  return baseTree(root, baseBranch, run);
+}
+
 /**
  * The files of the base branch an item will be worked on, read from the coordinator checkout
  * after a best-effort fetch: the remote-tracking branch when there is one, the local branch

@@ -7,8 +7,12 @@ import { mkdir, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ChildRun } from '../child-runner.js';
-import { readCommit, shortCommit } from '../executor-fleet.js';
+import { cliCommit } from '../protocol-version.js';
 import { agentOwner, type AttentionItem } from '../master/attention.js';
+
+/** The commit the checkout at `root` holds now; null where there is no readable checkout. */
+export const readCommit = (root: string) => cliCommit(root);
+export const shortCommit = (commit: string | null) => commit ? commit.slice(0, 12) : 'an unknown commit';
 
 /** The launcher files the checkout's own starts run (GY-1790): named on the attention when dirty. */
 export const launcherFiles = ['bin/graphyard.mjs', 'bin/held-release-hooks.mjs'];
@@ -35,12 +39,11 @@ export function readHeldCli(root: string): string | null {
 /**
  * Pins the CLI the checkout's launcher runs to `commit` while a restart is held (GY-1585), or lifts
  * the pin (null). The checkout already holds the merged tip, but every process `bin/graphyard.mjs`
- * starts — watch, claim, heartbeat, the credential push the loop and the executors spawn — must
+ * starts — watch, claim, heartbeat, the credential push the loop spawns — must
  * speak the protocol of the release production serves: a shared clone of that release is checked
  * out under `.graphyard/held-cli/`, and the pointer naming it is written by rename, so a launcher
  * reads the old pin or the new one. Snapshots other than the new pin and the one it replaces (a
- * process started under it may still be loading modules) are removed. The executor entry reads the
- * same pointer, so a supervised executor loads the snapshot and takes its commit for the checkout's.
+ * process started under it may still be loading modules) are removed.
  */
 export async function holdCliAt(root: string, run: ChildRun, commit: string | null): Promise<void> {
   const pointer = heldCliPointer(root);
@@ -69,21 +72,13 @@ export async function holdCliAt(root: string, run: ChildRun, commit: string | nu
 /**
  * GY-1790: the launcher a supervisor unit starts while the pin stands — the held snapshot's own
  * bin/graphyard.mjs, so launcher files the checkout holds dirty (bin/graphyard.mjs,
- * bin/held-release-hooks.mjs) are never the code that boots the loop or an executor. The unit hands
+ * bin/held-release-hooks.mjs) are never the code that boots the loop. The unit hands
  * the checkout to it in the environment (GRAPHYARD_CHECKOUT_ROOT), so the snapshot's launcher reads
  * the checkout's pin and configuration while its own code loads. Null when no pin stands: the
  * checkout's launcher (config.cliPath) runs, as it always has.
  */
 export const heldLauncherOf = (root: string, held = readHeldCli(root)): string | null =>
   held ? join(heldCliSnapshotAt(root, held), 'bin', 'graphyard.mjs') : null;
-/**
- * GY-1790: the entry a supervised executor slot starts while the pin stands — the held snapshot's
- * own scripts/graphyard-executor.mjs, the unit handing it the checkout as it hands the launcher —
- * so an entry the checkout holds dirty never boots a slot. Null when no pin stands: the checkout's.
- * The one definition the restart and an executor reinstall (`installExecutorSupervision`) share.
- */
-export const heldExecutorEntryOf = (root: string, held = readHeldCli(root)): string | null =>
-  held ? join(heldCliSnapshotAt(root, held), 'scripts', 'graphyard-executor.mjs') : null;
 
 /**
  * GY-1773: the commit of the held snapshot this process's modules were loaded from — the launcher
@@ -98,7 +93,7 @@ export function loadedHeldSnapshot(root: string, loadedFrom = fileURLToPath(impo
 }
 
 /**
- * GY-1773: what `master status` names while the loop and the executors run a held snapshot of a
+ * GY-1773: what `master status` names while the loop runs a held snapshot of a
  * merged commit because the coordinator checkout stood dirty when the self-upgrade ran and was
  * left where it stands — only while the pin stands at that commit (`held`, from readHeldCli):
  * the dirty paths, and the move onto the commit that lifts it.
@@ -112,10 +107,10 @@ export function leftBehindCheckoutAttention(left: { at: string; commit: string; 
   // command started through the checkout's launcher (config.cliPath) still runs its bin/graphyard.mjs,
   // which reads the pin without loading the checkout's hooks module and registers the snapshot's.
   const launcher = left.dirty.filter(path => launcherFiles.includes(path));
-  const bootstrap = launcher.length ? ` The checkout's launcher (${launcher.join(', ')}) is dirty too: the loop and the executors start the launcher held in the snapshot, so their starts never run those edits; ${launcher.includes('bin/graphyard.mjs') ? 'every command started through the checkout\'s launcher still runs its edited bin/graphyard.mjs before the pin redirects any module, so return it to the commit first' : 'the checkout\'s launcher reads the pin without loading its own bin/held-release-hooks.mjs and registers the snapshot\'s, so the edit loads nowhere while the pin stands'}.` : '';
+  const bootstrap = launcher.length ? ` The checkout's launcher (${launcher.join(', ')}) is dirty too: the loop starts the launcher held in the snapshot, so its starts never run those edits; ${launcher.includes('bin/graphyard.mjs') ? 'every command started through the checkout\'s launcher still runs its edited bin/graphyard.mjs before the pin redirects any module, so return it to the commit first' : 'the checkout\'s launcher reads the pin without loading its own bin/held-release-hooks.mjs and registers the snapshot\'s, so the edit loads nowhere while the pin stands'}.` : '';
   // A clean detached checkout moved by hand to a foreign commit while the pin stands (recorded with no dirty paths): named where it stands, never taken for the lift.
   const where = onto ? `holds that commit but is still dirty${named}` : left.dirty.length ? `stood dirty at ${shortCommit(left.checkout)}${named} when the self-upgrade ran at ${left.at} and was left where it stands` : `stands clean at ${shortCommit(left.checkout)}, moved there by hand while the pin stands, which is neither the commit the loop runs nor where the self-upgrade at ${left.at} left it`;
-  return [{ subject: 'upgrade', text: `The loop and the executors run ${shortCommit(left.commit)} from its held snapshot under ${root}/.graphyard/held-cli, not from the coordinator checkout, which ${where}; every command the checkout's launcher starts loads the snapshot while the pin stands.${bootstrap}`,
+  return [{ subject: 'upgrade', text: `The loop runs ${shortCommit(left.commit)} from its held snapshot under ${root}/.graphyard/held-cli, not from the coordinator checkout, which ${where}; every command the checkout's launcher starts loads the snapshot while the pin stands.${bootstrap}`,
     ...agentOwner('master', onto ? `Return the checkout's tracked files to the commit, which lifts the pin: git -C ${root} status --porcelain names them (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD)`
       : `Move the checkout onto the commit the loop runs and clean it there, which lifts the pin: git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach ${left.commit} moves it (graphyard master checkout-restore REASON saves the dirty paths and returns them to HEAD first)`) }];
 }

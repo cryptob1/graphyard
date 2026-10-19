@@ -5,15 +5,12 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { dispatchReserved, dispatchWork, masterConfigSchema, setupMaster, watchSupervisorRunning, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { controlPlaneHandlers } from '../src/executor.js';
-import type { ActionRow } from '../src/model/actions.js';
+import { dispatchReserved, dispatchWork, setupMaster, watchSupervisorRunning, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-273: the loop and the executors dispatch implementation work from their own snapshots of
+// GY-273: concurrent dispatchers launch implementation work from their own snapshots of
 // Herdr's agents. Two of them picking one profile used to mean two claims, two runtimes started,
 // and the loser — refused its name by Herdr — closing the pane of the worker it had just started.
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -147,56 +144,3 @@ test('unit:launch-failure-never-closes-live-pane — a rename refused after `pan
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:loop-and-executor-dispatch-safely — the loop and an executor dispatching concurrently over three ready items and three profiles make three distinct launches and no failure', async () => {
-  const fixture = await installation();
-  try {
-    const profiles = ['one', 'two', 'three'].map(name => launchProfile(name, fixture.credential));
-    const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: fixture.coordinator, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: profiles });
-    const herdr = fakeHerdr(), claims = fakeClaims(fixture.root);
-    const items = [work('GY-1', { priority: 0 }), work('GY-2', { priority: 1 }), work('GY-3', { priority: 2 })];
-    // Both read the same snapshot: every item ready, every profile free.
-    const snapshot = async () => ({ work: items, now: new Date().toISOString() });
-    const agents = () => herdr.agents.map(agent => ({ ...agent }));
-    // Every refusal either dispatcher met, to show the two really contended.
-    const refusals: string[] = [];
-    const refused = (by: string) => (error: unknown) => { if (dispatchReserved(error)) refusals.push(`${by}: ${error.message}`); throw error; };
-    const dispatch = (item: Work, profile: WorkerProfile, seen: HerdrAgent[], snap: { work: Work[]; now: string }) =>
-      dispatchWork(fixture.root, item, profile, seen, herdr.run, snap.work, claims.prepare, claims.release, 1, snap.now, { agents: async () => agents() }).catch(refused('loop'));
-
-    const loopEffects: DaemonEffects = {
-      agents, credentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])), snapshot,
-      closeSession: () => {}, dispatch, requestProof: () => {},
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
-    };
-    const state = emptyDaemonState(config);
-    // The executor's handler: the dispatch row for GY-2, run through the same launcher the executor script wires.
-    const handlers = controlPlaneHandlers(() => config, {
-      snapshot, mutate: async () => ({}), agents,
-      workerCredentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])),
-      producerCredentials: async () => ({}),
-      dispatchWorker: (item, profile, seen, snap) => dispatchWorker(item, profile, seen, snap),
-      launchReview: async () => ({}), launchProducer: async () => ({}),
-    });
-    // The executor reads Herdr through the script's launcher, which supplies no fresh reader.
-    const dispatchWorker = (item: Work, profile: WorkerProfile, seen: HerdrAgent[], snap: { work: Work[]; now: string }) =>
-      dispatchWork(fixture.root, item, profile, seen, herdr.run, snap.work, claims.prepare, claims.release, 1, snap.now).catch(refused('executor'));
-    const row = { id: 'row-2', kind: 'dispatch', work: 'id-GY-2', key: 'GY-2', inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] } } as unknown as ActionRow;
-
-    const [loop, executor] = await Promise.allSettled([runCycle(config, state, loopEffects), handlers.dispatch!(row, { id: 'executor-1', host: 'machine-a' })]);
-    assert.equal(loop.status, 'fulfilled', `the loop's cycle completes: ${loop.status === 'rejected' ? loop.reason : ''}`);
-    assert.equal(executor.status, 'fulfilled', `the executor's dispatch does not fail: ${executor.status === 'rejected' ? executor.reason : ''}`);
-
-    const launches = herdr.calls.filter(args => args[0] === 'pane' && args[1] === 'run');
-    assert.equal(launches.length, 3, 'three launches');
-    assert.deepEqual([...claims.claims.keys()].sort(), ['GY-1', 'GY-2', 'GY-3'], 'each item is claimed once');
-    assert.equal(new Set(claims.claims.values()).size, 3, 'on three distinct profiles');
-    assert.deepEqual(herdr.agents.map(agent => agent.name).sort(), ['agent-one', 'agent-three', 'agent-two'], 'every launched session carries its own profile name');
-    assert.deepEqual(claims.released, [], 'no claim was released after a failed launch');
-    assert.deepEqual(herdr.closed, [], 'no pane was closed');
-    const failed = Object.entries(state.actions).filter(([, action]) => action.kind === 'dispatch' && action.state === 'failed');
-    assert.deepEqual(failed, [], 'the loop recorded no failed dispatch');
-    assert.deepEqual(state.profiles, {}, 'no profile was put in a failure cool-off');
-    assert.ok(refusals.length >= 1 && refusals.every(refusal => /reserved by another dispatch|already visible in Herdr|left to that launch|being dispatched by another dispatcher/.test(refusal)), `the two dispatchers contended and every contention was a clean reservation refusal: ${refusals.join(' | ')}`);
-  } finally { await fixture.cleanup(); }
-});

@@ -1,4 +1,4 @@
-// Concern: the command side of `master checkout-restore` and the confined master's `master restart` and `master executors` (GY-1658) — filing the request a master identity records beside the loop's cursor and waiting for the loop's outcome, and, under GY-1680, handing a stale loop off and serving the old-HEAD case from the verified serving release itself. The requests, paths and the restore act are master-checkout-restore.ts's; the loop's side is serveCheckoutRestore there.
+// Concern: the command side of `master checkout-restore` and the confined master's `master restart` (GY-1658) — filing the request a master identity records beside the loop's cursor and waiting for the loop's outcome, and, under GY-1680, handing a stale loop off and serving the old-HEAD case from the verified serving release itself. The requests, paths and the restore act are master-checkout-restore.ts's; the loop's side is serveCheckoutRestore there.
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
@@ -27,14 +27,9 @@ import { besideCursor, type CheckoutRestoreOutcome, checkoutRestoreFreezeLedgerP
 // the process-launch channels its confinement hides, so it files a restart request the loop serves.
 // A restart the loop owes is recorded before it is asked for, against the loop's pid, and retried on
 // every pass until a process other than the one that asked reads the request — the restarted loop.
-// Its `master executors [restart]` is a third: the restart goes through the host's systemd, and the
-// liveness of the executors' host pids cannot be judged from its own PID namespace, so the loop runs
-// the command and records what it printed.
 
 /** How long the command waits for the loop to carry its request out before it reports the request as filed. */
 export const checkoutRestoreWaitMs = 120_000;
-/** An executor restart waits on held claims and re-registration for up to its timeout twice over (executor-fleet.ts). */
-export const loopExecutorsWaitMs = 1_200_000;
 
 /** The deployment observation and base branch the command's old-HEAD handoff reads from the cursor and the installation config. */
 function handoffReleaseInputs(config: Pick<MasterConfig, 'credentialFile' | 'baseBranch'>): ServingReleaseInputs {
@@ -47,8 +42,7 @@ function handoffReleaseInputs(config: Pick<MasterConfig, 'credentialFile' | 'bas
 }
 
 /**
- * `master checkout-restore REASON` (and the confined master's `master restart` and `master executors
- * [restart]`): file the request, then wait for the loop's outcome. A checkout-restore filed against a
+ * `master checkout-restore REASON` (and the confined master's `master restart`): file the request, then wait for the loop's outcome. A checkout-restore filed against a
  * loop whose loaded code predates the serve path (staleServingLoop) is handed off (GY-1680): the
  * request carries `handoff`, which that loop cannot read and so leaves standing, and a loop-restart
  * request is filed beside it, which every such loop serves; the loop its unit restarts, running the
@@ -68,8 +62,7 @@ function handoffReleaseInputs(config: Pick<MasterConfig, 'credentialFile' | 'bas
  */
 export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credentialFile' | 'baseBranch'> & Partial<Pick<MasterConfig, 'cliPath'>>, args: readonly string[], requestedBy: string, options: { waitMs?: number; pollMs?: number; act?: LoopRequestAct; run?: ChildRun; release?: () => ServingReleaseInputs; restore?: ReturnType<typeof releasePinnedRestore>; serve?: Pick<ReleaseRestoreDeps, 'timeoutMs' | 'command'> & { ledger?: Pick<WriterFreezeDeps, 'signal' | 'state'> } } = {}) {
   const act = options.act ?? 'checkout-restore';
-  const reason = act === 'executors' ? `master executors ${args.join(' ')} from the confined master session`.replace(/ {2,}/g, ' ')
-    : args.join(' ').trim() || (act === 'restart' ? 'master restart from the confined master session' : '');
+  const reason = args.join(' ').trim() || (act === 'restart' ? 'master restart from the confined master session' : '');
   if (!reason) throw new Error(checkoutRestoreUsage);
   if (reason.length > 2000) throw new Error(`The ${act} reason is limited to 2000 characters`);
   const file = loopRequestPath(config, act), now = new Date(), run = options.run ?? defaultChildRun;
@@ -138,17 +131,16 @@ export async function checkoutRestoreCommand(config: Pick<MasterConfig, 'credent
   }
   const restart = stale ? newLoopRequest(`GY-1680 handoff for checkout-restore: the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, so it would serve the request from that code; it restarts through its unit onto the checkout's HEAD, and the loop that loads it serves the standing request from the serving release`, requestedBy, now, 'restart') : null;
   // The request first, in the form the stale loop leaves standing; then the restart it serves.
-  const request = await fileCheckoutRestoreRequest(file, reason, requestedBy, now, act, act === 'executors' ? args : [], restart && stale ? { loaded: stale.loaded, restart: restart.id } : undefined);
+  const request = await fileCheckoutRestoreRequest(file, reason, requestedBy, now, act, [], restart && stale ? { loaded: stale.loaded, restart: restart.id } : undefined);
   if (restart) await atomicPrivateWrite(restartFile, restart);
   const handoff = restart && stale ? { pid: stale.pid, loaded: stale.loaded, restart: restart.id, detail: `the loop (pid ${stale.pid}) runs ${stale.loaded ? stale.loaded.slice(0, 12) : 'code it did not record'}, from before the serve path, so loop-restart request ${restart.id} was filed at ${restartFile}: it restarts through its unit onto the checkout's HEAD, and the loop that loads it serves this request from the serving release` } : null;
-  const deadline = Date.now() + (options.waitMs ?? (act === 'executors' ? loopExecutorsWaitMs : checkoutRestoreWaitMs));
+  const deadline = Date.now() + (options.waitMs ?? checkoutRestoreWaitMs);
   while (Date.now() < deadline) {
     await delay(options.pollMs ?? 2_000);
     const current = await readCheckoutRestoreRequest(file);
     if (current?.id !== request.id) return { request: request.id, act, state: 'superseded', detail: `a later ${act} request replaced this one`, ...(handoff ? { handoff } : {}) };
     if (current.outcome) {
-      const executors = (current.outcome.result as { result?: unknown } | undefined)?.result;
-      if (current.outcome.state === 'failed' || typeof executors === 'string' && executors !== 'restarted') process.exitCode = 1;
+      if (current.outcome.state === 'failed') process.exitCode = 1;
       return { request: request.id, act, ...current.outcome, ...(handoff ? { handoff } : {}) };
     }
     if (handoff) {

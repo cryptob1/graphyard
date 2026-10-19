@@ -33,7 +33,7 @@ Propose **Agent registry** from login homes: `master registry propose`, then `--
 
 ## 3. Start the master
 
-`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as an OS user whose credentials workers can't read. Reviewer: `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
+`master init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as an OS user whose credentials workers can't read. Reviewer: `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
 
 ### The loop must be supervised
 
