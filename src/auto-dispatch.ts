@@ -20,7 +20,7 @@ import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
 import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
-import { owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, wholeFindings } from './model/post-merge-review.js';
+import { launchRefusalProbeDue, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeRefusalProbeMs, wholeFindings } from './model/post-merge-review.js';
 import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
 import { readProjectMemory, recordDecisionInMemory, writeProjectMemory } from './project-memory.js';
@@ -83,9 +83,11 @@ export const bounded = (text: string, limit: number) => text.length > limit ? `$
  */
 export const closeFailureReasons = (failures: { work: string; id: string; reason: string }[]) =>
   failures.slice(0, 20).map(failure => bounded(`${failure.work} session ${failure.id}: ${failure.reason}`, cursorTextLimit));
+/** The highest refusal count a stored failure may carry: the ceiling the probes are clamped to and the schema enforces, kept one constant so they cannot drift apart. */
+export const dispatchAttemptCeiling = 1000;
 export const dispatchFailureSchema = z.object({
   kind: z.enum(['review', 'producer']), work: z.string().min(1).max(40), sha: z.string().min(1).max(40),
-  attempts: z.number().int().min(1).max(1000), reason: z.string().max(cursorTextLimit), at: z.string(), nextAt: z.string(),
+  attempts: z.number().int().min(1).max(dispatchAttemptCeiling), reason: z.string().max(cursorTextLimit), at: z.string(), nextAt: z.string(),
 }).strict();
 export type DispatchFailure = z.infer<typeof dispatchFailureSchema>;
 /**
@@ -948,7 +950,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   };
   const refuse = (kind: 'review' | 'producer', item: Work, request: DispatchRequest, error: unknown) => {
     const previous = cursor.failures[request.id];
-    const attempts = (previous?.attempts ?? 0) + 1;
+    // Bounded at the cursor schema's ceiling: a request probed hourly past its attempt limit (GY-2075)
+    // keeps counting its refusals, and the count must stay one the cursor can persist.
+    const attempts = Math.min(previous?.attempts ?? 0, dispatchAttemptCeiling - 1) + 1;
     // Bounded below the cursor's cap: the wait sentence that wraps it on later ticks must fit too.
     const failure: DispatchFailure = { kind, work: item.key, sha: request.sha, attempts, reason: bounded(message(error), dispatchFailureReasonLimit), at: new Date(now()).toISOString(), nextAt: new Date(now() + retryDelay(attempts)).toISOString() };
     cursor.failures[request.id] = failure;
@@ -1311,7 +1315,17 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       if (!herdr) { wait('review', item, request, 'Herdr session inventory is unavailable'); continue; }
       if (memoryDeferred) { wait('review', item, request, memoryDeferred); continue; }
       if (spent('review')) { wait('review', item, request, capacityWait('review')); continue; }
-      if (!retryable(request)) { wait('review', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
+      // A post-merge request the attempt limit stranded is probed again one hour after its last
+      // refusal (GY-2075): nothing else recovers it — the item is delivered, so no pre-merge
+      // request stands for `master review` to answer, and a system-driven item refuses the command
+      // — while its refusal's cause usually lives in the served control plane the loop cannot fix
+      // from here. The probe is one attempt per standstill hour; the first one past the cause's
+      // repair launches, and the launch that succeeds clears the record.
+      if (!retryable(request) && !launchRefusalProbeDue(cursor.failures[request.id], dispatchFailureLimit, now())) {
+        const failure = cursor.failures[request.id];
+        wait('review', item, request, `launch refused ${failure.attempts} time(s): ${failure.reason}; ${failure.attempts >= dispatchFailureLimit ? `probed again every ${postMergeRefusalProbeMs / 60_000} minutes (next at ${new Date(Date.parse(failure.at) + postMergeRefusalProbeMs).toISOString()}): the request launches once the refusal's cause is gone` : `next attempt at ${failure.nextAt}`}`);
+        continue;
+      }
       const { profile, reason } = selectReviewerProfile(config, 'control-plane');
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
       const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
