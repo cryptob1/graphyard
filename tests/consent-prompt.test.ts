@@ -437,10 +437,3 @@ test('integration:unconsented-session-releases-its-slot — the watch supervisor
   } finally { await rm(checkout, { recursive: true, force: true }); }
 });
 
-test('manual:consent-prompt-docs-review — docs/master-agent.md states that a runtime may stop on a first-run consent prompt, which prompts the launcher answers and with what option, which it escalates, and how a held slot is released', async () => {
-  const guide = await readMasterGuide();
-  for (const fragment of ['#### First-run consent prompts', 'awaiting consent', 'hooks-continue-untrusted', 'Continue without trusting', 'telemetry-decline', 'never one that grants hook execution or a sandbox escape',
-    'credential', 'payment', 'herdr pane attach', '**15 minutes**', '.graphyard/launch/NAME.consent', 'stops renewing', 'dispatchable']) {
-    assert.ok(guide.includes(fragment), `docs/master-agent.md states ${fragment}`);
-  }
-});

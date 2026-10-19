@@ -433,14 +433,6 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   assert.equal(mergeRecordKey({ id: 'w1' }, event), `merge-record:w1:pushed:${sha('merge1')}`);
   assert.equal(mergeRecordKey({ id: 'w1' }, { kind: 'refused', head: sha('head1'), reason: 'x' }), `merge-record:w1:refused:${sha('head1')}:refused`);
   assert.equal(wired.mergeWriter!.retrials, 3);
-  // The docs: the Merge writer section names the sequence and the reconcile rule, and grew by at most 80 words.
-  const docs = readFileSync(`${root}docs/delivery-redesign.md`, 'utf8');
-  const section = docs.split(/^## Merge writer\s*$/m)[1]!.split(/\n## /)[0]!;
-  for (const phrase of ['`merge.intent`', '`merge.pushed`', '`merge.reconciled`', '`git push --force-with-lease`', '`run.mergeWriter.deployKeyFile`', 'Reconcile rule', '`mergeWriter.queue`']) assert.ok(section.includes(phrase), `Merge writer names ${phrase}`);
-  const base = ['origin/main', 'HEAD^1'].map(ref => { try { return execFileSync('git', ['show', `${ref}:docs/delivery-redesign.md`], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }); } catch { return null; } }).find(text => text !== null) ?? null;
-  const words = (text: string) => text.split(/\s+/).filter(Boolean).length;
-  const mainSection = base?.split(/^## Merge writer\s*$/m)[1]?.split(/\n## /)[0];
-  if (mainSection) assert.ok(words(section) - words(mainSection) <= 80, `Merge writer grew by ${words(section) - words(mainSection)} words, at most 80`);
 });
 
 // ——— Against a real control plane and a bare origin ———

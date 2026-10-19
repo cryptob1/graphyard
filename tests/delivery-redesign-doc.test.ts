@@ -39,8 +39,6 @@ const STATEMENTS: [string, RegExp][] = [
   ['step 3: the exact tested commit is promoted', /^3\. .*exact tested commit is promoted/m],
   ['step 3: related-item revert on E2E failure', /^3\. .*On E2E failure.*newest item related to the failing cases.*reverted/m],
   ['step 4: one independent reviewer per item, blocking only for sensitive diffs', /^4\. .*One independent reviewer per item.*Sensitive diffs.*blocking review before step 2; the rest a non-blocking review after merge/m],
-  ['the removed list', /^Removed: GitHub Apps, branch protection, required checks/m],
-  ['the kept list', /^Kept: leases and epochs, the transactional ledger/m],
   ['the single merger', /The control plane is every install's only merge writer: nothing sets another, and old `policy\.merger\.set` events are never read/],
   ['the switch is done', /\*\*Switch\*\* `control-plane`: done, for every install/],
   ['the three weekly measures', /Weekly: defects reaching production \(escapes\), merge-queue wait, human touches/],
@@ -57,7 +55,7 @@ test('unit:delivery-redesign-doc-statements — docs/delivery-redesign.md opens 
   const rollout = section(page, 'Rollout').split('\n').filter(line => /^\d+\. /.test(line));
   assert.equal(rollout.length, 4, 'the rollout is exactly four numbered stages');
   assert.match(rollout[0], /Shadow mode/); assert.match(rollout[1], /`control-plane`/); assert.match(rollout[2], /Snake pilot/); assert.match(rollout[3], /github-mode API client.*deleted/);
-  for (const heading of ['One rule', 'Flow', 'Merge writer', 'Removed and kept', 'The merger', 'Rollout', 'Measures']) section(page, heading);
+  for (const heading of ['One rule', 'Flow', 'Merge writer', 'The merger', 'Rollout', 'Measures']) section(page, heading);
 });
 
 test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under Operate Graphyard, scripts/check-docs.mjs accepts the set, and tests/docs-budget.test.ts requires the single merger and the one rule of the page', () => {
@@ -81,10 +79,9 @@ test('unit:delivery-redesign-doc-indexed — docs/README.md lists the page under
  * less the GitHub App, pull-request push and queue-ref commands GY-2010 deleted with docs/github.md.
  */
 const NAMED_BEFORE_TRIM = [
-  '`release cut', '`release uat', '`release validate', '`release promote', '`release verify', '`release follow-up', '`release soak', '`release status', '`release GY-N EPOCH`',
-  'graphyard master config promoteEveryMinutes', '`init --scan`', '`install --plan`', '`graphyard delivery sweep`', '`graphyard delivery`', '`graphyard doctor`', '`graphyard release`',
+  '`release status`', '`release GY-N EPOCH`', '`init --scan`', '`install --plan`', '`graphyard delivery sweep`', '`graphyard delivery`', '`graphyard doctor`',
   '`POST /api/delivery/lease`', '`POST /api/delivery/build`', '`POST /api/delivery/release`', '`POST /api/delivery/approve`', '`POST /api/delivery/observe`', '`POST /api/delivery/notify`',
-  '`POST /api/validation/result`', '`GET /api/analytics/attribution`',
+  '`POST /api/validation/result`',
 ];
 const TOTAL_TARGET = 15_950;
 

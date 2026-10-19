@@ -42,9 +42,9 @@ const COVERAGE: [string, RegExp][] = [
   ['a worker agent builds each item on its own branch', /worker agent[^\n]*its own branch/i],
   ['Graphyard checks the change merged onto main (build and tests) and merges it itself', /checks the merged tree[^\n]*build[^\n]*tests[^\n]*merge to main itself/i],
   ['an independent agent reviews it, before merge for sensitive changes and after for the rest', /independent agent[^\n]*review[^\n]*before the merge for sensitive changes[^\n]*after the merge for everything else/i],
-  ['every ~10 merges a release candidate goes to a test environment and the end-to-end suite runs', /every ten merges[^\n]*release candidate[^\n]*test environment[^\n]*end-to-end/i],
-  ['passing candidates are promoted to production and verified', /promoted to production[^\n]*verified/i],
-  ['failures are reverted or fixed by a new item', /reverted or fixed[^\n]*new work item/i],
+  ['every merge deploys and health and end-to-end checks run on the live release', /every merge[^\n]*deploys[^\n]*health[^\n]*end-to-end[^\n]*live release/i],
+  ['a failed check rolls the release back and returns the change to a worker', /rolls the release back[^\n]*worker/i],
+  ['only Graphyard writes to main', /Only Graphyard writes to main/],
 ];
 
 const steps = () => section('How it works').split('\n').filter(line => /^\d+\. /.test(line)).map(line => line.replace(/^\d+\. /, ''));
@@ -82,7 +82,7 @@ test('unit:readme-flow-diagram — README.md has a Mermaid flowchart of the path
   const stepText = steps().join('\n').toLowerCase();
   for (const [id, label] of nodes) assert.ok(stepText.includes(label.toLowerCase()), `node ${id} "${label}" appears in the How it works steps`);
   const labels = [...nodes.values()];
-  for (const expected of ['Goal', 'Planner', 'Work items', 'Worker builds', 'Merge to main', 'Review', 'Release candidate', 'UAT + E2E', 'Production verified']) assert.ok(labels.includes(expected), `the path has a "${expected}" node`);
+  for (const expected of ['Goal', 'Planner', 'Work items', 'Worker builds', 'Merge to main', 'Review', 'Deploys', 'Health and end-to-end checks', 'Live release']) assert.ok(labels.includes(expected), `the path has a "${expected}" node`);
   assert.ok(labels.some(label => /checks the merged tree/i.test(label)), 'the path has the "Graphyard checks the merged tree" node');
   assert.match(block, /sensitive[^\n]*before/i, 'the review edge says sensitive changes are reviewed before the merge');
   assert.match(block, /normal[^\n]*after/i, 'the review edge says normal changes are reviewed after the merge');

@@ -823,6 +823,7 @@
     "tests/control-plane-rework-workspace.test.ts": 1500,
     "tests/no-flake-items.test.ts": 300,
     "tests/merge-writer-trial-timeout-queue.test.ts": 1000,
+    "tests/docs-current-model.test.ts": 100,
     "~": 0,
     "tests/risk-delta-base-advance.test.ts": 500
   }

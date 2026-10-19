@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 // the acknowledgements and the direct-merge windows. The unexplained commits live in
 // state.mainWatch, which only `graphyard master main-watch status` (src/cli/master/operations.ts)
 // prints. The independent review of PR #1016 found the paragraph claiming the route reads them.
-const docs = readFileSync(fileURLToPath(new URL('../docs/recovery.md', import.meta.url)), 'utf8');
+const docs = readFileSync(fileURLToPath(new URL('../docs/delivery.md', import.meta.url)), 'utf8');
 const paragraph = docs.split(/^## Main watch\s*$/m)[1]?.split(/\n## /)[0]?.trim() ?? '';
 
 test('unit:main-watch-docs-wording — the Main watch paragraph says GET /api/main-watch returns the acknowledgements and direct-merge windows', () => {

@@ -5,7 +5,7 @@ import { definitionSchema } from '../src/validation.js';
 import { reuseDecisionSchema, classifyPath } from '../src/evidence-reuse.js';
 
 /** The reuse guide's JSON samples are what an operator copies, so each must parse with the schema its command uses. */
-const guide = await readFile(new URL('../docs/evidence-reuse.md', import.meta.url), 'utf8');
+const guide = await readFile(new URL('../docs/validation.md', import.meta.url), 'utf8');
 const blocks = [...guide.matchAll(/```json\n([\s\S]*?)```/g)].map(match => JSON.parse(match[1]) as any);
 const sample = (predicate: (block: any) => boolean, label: string) => { const found = blocks.filter(predicate); assert.equal(found.length, 1, `exactly one documented sample should be ${label}`); return found[0]; };
 

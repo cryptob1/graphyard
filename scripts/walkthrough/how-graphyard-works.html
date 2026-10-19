@@ -147,14 +147,13 @@ td.today { color: var(--muted); }
     <span class="eyebrow">Graphyard · how it works</span>
     <h1>One loop, from a goal to production</h1>
     <p class="lede">You state what you want. One master loop breaks it into small work items, has AI agents build and review each one, tests it on this machine, merges it and ships it. People decide the goals. Every gate is Graphyard's own, and nothing depends on GitHub.</p>
-    <p class="status-note">This page shows the target design, being built in October 2026. The journey below compares it with how Graphyard runs today.</p>
   </header>
 
   <section aria-labelledby="watch">
     <h2 id="watch">Watch: the two-minute walkthrough</h2>
     <div class="player">
       <div class="screen">
-        <svg id="stage" viewBox="0 0 960 540" role="img" aria-label="Animated walkthrough of the target Graphyard design taking a goal to production"></svg>
+        <svg id="stage" viewBox="0 0 960 540" role="img" aria-label="Animated walkthrough of Graphyard taking a goal to production"></svg>
         <button class="poster" id="poster" type="button" aria-label="Play the walkthrough">
           <div class="big" aria-hidden="true"></div>
           <strong>How Graphyard works</strong>
@@ -173,14 +172,9 @@ td.today { color: var(--muted); }
 
   <section aria-labelledby="journey">
     <h2 id="journey">Journey of a work item</h2>
-    <p>Each step names who does the work, where it runs and the gate it must pass. Switch between the target design and today to see what goes away.</p>
-    <div class="mode" role="group" aria-label="Show the journey">
-      <button type="button" id="mode-target" aria-pressed="true">Target</button>
-      <button type="button" id="mode-today" aria-pressed="false">Today</button>
-    </div>
-    <div class="legend"><span><span class="chip ours">gate</span>Graphyard's own check</span><span><span class="chip ext">GitHub</span>a step that depends on GitHub</span></div>
+    <p>Each step names who does the work, where it runs and the gate it must pass.</p>
 
-    <ol class="journey" id="journey-target">
+    <ol class="journey">
       <li class="hop"><div class="hop-body">
         <div class="hop-head"><span class="state">Todo</span><h3>Filed and released</h3><span class="who">master or planner</span></div>
         <div class="facts">
@@ -223,74 +217,6 @@ td.today { color: var(--muted); }
       </div></li>
     </ol>
 
-    <ol class="journey" id="journey-today" hidden>
-      <li class="hop"><div class="hop-body">
-        <div class="hop-head"><h3>Filed and released</h3><span class="who">master or planner</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip place">control plane</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">ready</span> released, dependencies done, no blocker</span></div></div>
-        <div class="dep none">No GitHub.</div>
-      </div></li>
-      <li class="hop"><div class="hop-body">
-        <div class="hop-head"><h3>Dispatched</h3><span class="who">loop or executor</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip place">this machine</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">lease</span> renewed every 30 s</span></div></div>
-        <div class="dep none">No GitHub.</div>
-      </div></li>
-      <li class="hop touch"><div class="hop-body">
-        <div class="hop-head"><h3>Built</h3><span class="who">worker agent</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip place">own worktree</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">scope</span> only its listed files</span></div></div>
-        <div class="dep"><span class="chip ext">GitHub</span> pushes a branch and opens a pull request with an App token</div>
-      </div></li>
-      <li class="hop touch"><div class="hop-body">
-        <div class="hop-head"><h3>Submitted</h3><span class="who">worker</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip place">control plane</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">build</span> head inside scope</span></div></div>
-        <div class="dep"><span class="chip ext">GitHub</span> the App reads the pull request</div>
-      </div></li>
-      <li class="hop touch"><div class="hop-body">
-        <div class="hop-head"><h3>Tested</h3><span class="who">CI</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip ext">GitHub Actions</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">test</span> checks pass</span></div></div>
-        <div class="dep"><span class="chip ext">GitHub</span> Actions runs the tests</div>
-      </div></li>
-      <li class="hop touch"><div class="hop-body">
-        <div class="hop-head"><h3>Reviewed</h3><span class="who">reviewer agent</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip place">this machine</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">review</span> independent approval</span></div></div>
-        <div class="dep"><span class="chip ext">GitHub</span> verdict posted as a GitHub review by a second App</div>
-      </div></li>
-      <li class="hop touch"><div class="hop-body">
-        <div class="hop-head"><h3>Merged</h3><span class="who">GitHub</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip ext">GitHub</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">merge</span> plus GitHub's branch protection and required checks</span></div></div>
-        <div class="dep"><span class="chip ext">GitHub</span> GitHub decides the merge</div>
-      </div></li>
-      <li class="hop touch"><div class="hop-body">
-        <div class="hop-head"><h3>Release candidate and UAT</h3><span class="who">release workflow</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip ext">GitHub Actions</span> <span class="chip place">UAT</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">promotion</span> batched, UAT must pass</span></div></div>
-        <div class="dep"><span class="chip ext">GitHub</span> one flaky read here froze releases for 5 hours on 17 October</div>
-      </div></li>
-      <li class="hop touch"><div class="hop-body">
-        <div class="hop-head"><h3>Deployed and verified</h3><span class="who">platform, then the loop</span></div>
-        <div class="facts"><div class="fact"><span class="k">Where</span><span><span class="chip place">production</span></span></div><div class="fact"><span class="k">Gate</span><span><span class="chip ours">done</span> production serves this merge</span></div></div>
-        <div class="dep"><span class="chip ext">GitHub</span> the platform pulls from GitHub; items wait on the board until here</div>
-      </div></li>
-    </ol>
-    <p class="tally" id="journey-tally"></p>
-  </section>
-
-  <section aria-labelledby="change">
-    <h2 id="change">What changes</h2>
-    <div class="table-wrap">
-      <table>
-        <thead><tr><th></th><th>Target</th><th>Today</th></tr></thead>
-        <tbody>
-          <tr><td>Item states</td><td class="target">Todo → Doing → Checking → Done. Done means merged.</td><td class="today">About 9 steps. Done means verified in production.</td></tr>
-          <tr><td>Who runs it</td><td class="target">One master loop.</td><td class="today">Loop, executors, doctor, approver sessions, server tick, GitHub Actions, master agent.</td></tr>
-          <tr><td>Gates</td><td class="target">Two, both ours: tests pass and an independent review approves.</td><td class="today">Ready, lease, scope, build, test, review, merge, promotion, verified, plus GitHub's.</td></tr>
-          <tr><td>Release</td><td class="target">Deploy main continuously, roll back on a failed check.</td><td class="today">Batched candidates, a UAT gate, promotion, per-item verification.</td></tr>
-          <tr><td>When something breaks</td><td class="target">The loop retries, rolls back, or shows one status line.</td><td class="today">An item is filed, or a person is asked.</td></tr>
-          <tr><td>GitHub</td><td class="target">Not needed. Any git host works as the remote.</td><td class="today">Apps, tokens, pull requests, Actions, branch protection.</td></tr>
-          <tr><td>The board</td><td class="target">Only real work: Todo, Doing, Checking.</td><td class="today">Real work, machine-filed notices and merged items waiting to deploy.</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </section>
-
   <section aria-labelledby="who">
     <h2 id="who">Who does what</h2>
     <div class="roles">
@@ -324,29 +250,10 @@ td.today { color: var(--muted); }
     <p>If nothing has moved for too long, the loop's own stall watchdog raises it. Nothing becomes a work item unless there is code to change.</p>
   </section>
 
-  <footer>Graphyard · target design, October 2026. The journey's "Today" view describes Graphyard as it runs before the cutover.</footer>
+  <footer>Graphyard · how it runs, October 2026.</footer>
 </main>
 
 <script>
-(() => {
-  // Journey of a work item: Target / Today switch.
-  const target = document.getElementById('journey-target'), today = document.getElementById('journey-today');
-  const bTarget = document.getElementById('mode-target'), bToday = document.getElementById('mode-today'), tally = document.getElementById('journey-tally');
-  const show = mode => {
-    const isToday = mode === 'today';
-    target.hidden = isToday; today.hidden = !isToday;
-    bTarget.setAttribute('aria-pressed', String(!isToday)); bToday.setAttribute('aria-pressed', String(isToday));
-    const list = isToday ? today : target, steps = list.children.length, touches = list.querySelectorAll('.hop.touch').length;
-    tally.innerHTML = isToday
-      ? `Today: <strong>${steps} steps</strong>, GitHub involved in <strong>${touches}</strong> of them, and GitHub holds a gate at the merge.`
-      : `Target: <strong>${steps} steps</strong>, two gates, both Graphyard's, and <strong>no GitHub</strong>.`;
-    try { localStorage.setItem('journey-mode', mode); } catch {}
-  };
-  bTarget.addEventListener('click', () => show('target'));
-  bToday.addEventListener('click', () => show('today'));
-  let saved = 'target'; try { saved = localStorage.getItem('journey-mode') || 'target'; } catch {}
-  show(saved === 'today' ? 'today' : 'target');
-})();
 (() => {
   const NS = 'http://www.w3.org/2000/svg';
   const stage = document.getElementById('stage');
