@@ -7,7 +7,7 @@
 
 ### Dispatch order
 
-Within a priority, returned rework precedes unsubmitted items, ahead of starvation/cold/scope.
+Within a priority, returned rework precedes unsubmitted items, ahead of starvation/cold/scope. At most 4 items are in flight: ready work starts only while fewer than 4 are being built or waiting to merge (`Hotfix: …` exempt); the rest waits in Todo.
 
 ### Perpetual master loop
 

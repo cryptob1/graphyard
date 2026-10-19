@@ -84,13 +84,13 @@ export { confinedLaneProducer, laneProducerRouteGuard, laneProducerScope } from 
  * run with the operator's own admin credential, asks for a one-time link; opening it in a browser
  * redeems it for a short-lived session bound to that principal and declared human, so the
  * decisions only a human may make are answered in that browser with one click. A link is single
- * use and expires in minutes; the session it opens expires in hours. Only digests are held, in
+ * use and expires in minutes; the session it opens lasts 30 days (GY-2171). Only digests are held, in
  * this process: a restart signs everyone out, and nothing about either is ever written. Both
  * tables are bounded: past the cap the entry nearest expiry goes first, so repeated
  * `graphyard login` calls cannot grow them between prunes.
  */
 export const signInLinkTtlMs = 10 * 60_000;
-export const signInSessionTtlMs = 12 * 3_600_000;
+export const signInSessionTtlMs = 30 * 86_400_000;
 export const maxSignInLinks = 16;
 export const maxSignInSessions = 32;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');

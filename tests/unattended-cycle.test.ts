@@ -12,6 +12,7 @@ import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { containmentGraceMs } from '../src/quarantine.js';
 import { containmentSettleWaitBoundMs } from '../src/model/containment.js';
 import type { Work } from '../src/model.js';
+import { maxInFlight } from '../src/model/dispatch.js';
 import { decideScopeRequest } from '../src/model/scope.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
@@ -131,7 +132,7 @@ function herdr() {
  * `advance` runs everyone else: the launched worker, CI, the reviewer, GitHub merging what is green
  * (GY-1235: the loop never merges), and the approver session the loop launched for its own request.
  */
-function plane(scripts: Script[], options: { hostId?: string; host?: { root: string; master: MasterConfig }; judgements?: Judgement[]; delivered?: number } = {}) {
+function plane(scripts: Script[], options: { hostId?: string; host?: { root: string; master: MasterConfig }; judgements?: Judgement[]; delivered?: number; admit?: number } = {}) {
   const hostId = options.hostId ?? 'machine-a';
   /** GitHub's side: whether it merges a green candidate on the next tick, or holds it (a queue that does not move). */
   const github = { merging: true };
@@ -139,12 +140,17 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
   sessions.judgements.push(...options.judgements ?? []);
   let now = clockStart;
   const iso = (at: number = now) => new Date(at).toISOString();
+  // GY-2097: with `admit`, the exercise releases work as the pipeline admits it — the operator's
+  // release of the next item as slots free — so a budget over many deliveries measures each item's
+  // own passage, never its deliberate wait under the dispatcher's in-flight cap.
+  const admit = options.admit ?? scripts.length;
+  const scripted = (item: Work) => scripts.some(entry => entry.key === item.key);
   const work: Work[] = scripts.map((script, index) => ({
     id: `id-${script.key}`, key: script.key, title: `Deliver ${script.key}`, description: '', type: 'feature', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven end to end', proofs: ['integration:loop'] }],
     policy: { checks: ['test'], review: true }, plannedFiles: [`src/${script.key.toLowerCase()}.ts`],
     stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(now - 30 * minute), updatedAt: iso(), stageEnteredAt: iso(now - minute),
-    ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    ready: index < admit, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [],
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
     pr: 100 + index,
@@ -289,7 +295,17 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     agents: () => wired ? wired.agents() : [],
     ...(wired ? { herdr: wired.herdr } : {}),
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-    snapshot: async () => ({ work: work.map(item => ({ ...item })), now: iso() }),
+    snapshot: async () => {
+      // Release the next admitted item the instant a slot frees, so its released-at stamp is the
+      // admission, and its ready→claim measures the loop, not the cap.
+      if (admit < scripts.length) {
+        const inFlight = work.filter(item => scripted(item) && item.stage !== 'done'
+          && (item.lease && Date.parse(item.lease.expiresAt) > now || !!item.submission && !item.reworkRequested)).length;
+        const next = work.find(item => scripted(item) && !item.ready);
+        if (next && inFlight < admit) { next.ready = true; next.stageEnteredAt = iso(); next.updatedAt = iso(); recompute(next); }
+      }
+      return { work: work.map(item => ({ ...item })), now: iso() };
+    },
     closeSession: pane => { if (wired) return wired.closeSession(pane); },
     dispatch: async (item, worker) => {
       const target = find(item.id);
@@ -508,7 +524,9 @@ test('integration:mergeable-dwell-budget — a candidate whose gates are green m
   // and keeps cycling long after its own: the budget is of the passages this loop watched, and a
   // delivered item is history, not a passage that completes again every cycle.
   const history = 79;
-  const simulation = plane(scripts, { delivered: history });
+  // The exercise admits work as the cap frees slots, so the budget measures each delivery's own
+  // passage; the cap's own wait is deliberate and is proven in tests/wip-limit.test.ts.
+  const simulation = plane(scripts, { delivered: history, admit: maxInFlight });
   const master = config({ workers: scripts.map((_, index) => profile(`claude-${index}`)) });
   const state = emptyDaemonState(master);
   const effects = simulation.effects();
@@ -516,7 +534,7 @@ test('integration:mergeable-dwell-budget — a candidate whose gates are green m
   await cycle(state, master, simulation, effects, 2 * minute);
   assert.equal(state.latency.length, 0, 'a delivery this loop never watched is not a sample');
   assert.equal(latencyBudget(state.latency).met, null, 'and history alone does not make the ten deliveries the targets are judged over');
-  for (let pass = 0; pass < 10 && open().length; pass++) await cycle(state, master, simulation, effects, 2 * minute);
+  for (let pass = 0; pass < 60 && open().length; pass++) await cycle(state, master, simulation, effects, 2 * minute);
   for (let pass = 0; pass < 40; pass++) await cycle(state, master, simulation, effects);
 
   assert.equal(simulation.work.filter(item => item.stage === 'done').length, history + 11, 'every item was delivered by the loop alone');
@@ -679,15 +697,19 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   assert.deepEqual(['stale', 'withdrawn', 'failed'].map(ended => approvalStep(watch, { state: ended }, working, at + minute).step), ['rerequest', 'rerequest', 'rerequest']);
 });
 
-test('integration:dispatch-latency-budget — ready work reaches a free worker inside two minutes and its first push inside fifteen, measured over ten items, and a long configured interval cannot push a claim past that bound', async () => {
+test('integration:dispatch-latency-budget — ready work reaches a free worker inside two minutes and its first push inside fifteen, measured over ten items the in-flight cap admits in turn, and a long configured interval cannot push a claim past that bound', async () => {
   const scripts = Array.from({ length: 10 }, (_, index) => ({ key: `GY-${500 + index}`, rounds: ['pass' as const] }));
-  const simulation = plane(scripts);
+  // The exercise releases each item as the cap frees a slot (GY-2097): the budget then measures the
+  // loop's dispatch responsiveness, never the deliberate wait under the cap, which
+  // tests/wip-limit.test.ts proves.
+  const simulation = plane(scripts, { admit: maxInFlight });
   const master = config({ workers: scripts.map((_, index) => profile(`claude-${index}`)) });
   const state = emptyDaemonState(master);
   const effects = simulation.effects();
-  // The loop's first cycle sees ten released items and ten free profiles; each subsequent pass is
-  // the worker's own work, which the push budget — not the dispatch budget — is judged on.
-  for (let pass = 0; pass < 8 && simulation.work.some(item => item.stage !== 'done'); pass++) await cycle(state, master, simulation, effects, 3 * minute);
+  // The loop's first cycles fill the cap's slots from free profiles; each subsequent pass is
+  // the workers' own work and the next release, which the push budget — not the dispatch budget —
+  // is judged on.
+  for (let pass = 0; pass < 60 && simulation.work.some(item => item.stage !== 'done'); pass++) await cycle(state, master, simulation, effects, 3 * minute);
   await cycle(state, master, simulation, effects);
 
   assert.equal(simulation.work.filter(item => item.stage === 'done').length, 10);

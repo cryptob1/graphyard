@@ -1709,3 +1709,117 @@ test('manual:fault-class-decision — intervention-pattern|interventions|2026-10
   const real = foldInterventions([refused, authorized] as never[], [gy2166Delivered()[2]!], at);
   assert.deepEqual(real.interventions.map(entry => `${entry.kind}|${entry.stage}|${entry.trigger}`), ['bypass|test|operator-authorized'], 'a delivery past the record, with its provenance, is still counted');
 });
+
+// GY-2174 names this file for its proof: manual:fault-class-decision. The master loop filed 3
+// decision faults in 24 hours on 19 October 2026 — `owed-decision` lines on GY-2078 at
+// 09:39:17.811Z (owed 36m), GY-1984 at 09:41:06.829Z (36m) and GY-2171 at 09:45:25.802Z (30m),
+// each an item refused at the test gate `merge writer has not trialled … on 146787d168f1` whose
+// ledger held the writer's own `base failure` refusal of that exact head from a trial minutes
+// before. The base tip was red (GY-2173 repairs it, trialled first per GY-2150), so every trial
+// on it failed as the base's, and the writer held each head `baseFailureHoldMs` — dropping it
+// from `mergeQueue` (GY-1834) until intentAt + 30 minutes. But the GY-2015 hold reads only the
+// queue and the flight: a head the writer parks on its own record is in neither, so the item's
+// trial-refusal line stood unbounded, and one red base counted a decision fault per parked head
+// while the loop was working as designed — the repair item's own `base-failure` line was what
+// the cycle should have counted.
+//
+// The shared cause: the owed-decision readers never read the same base-failure ledger state the
+// queue drops on. The candidate grounds the line in that record: a head the writer's `base
+// failure` refusal of the exact candidate holds, inside `baseFailureHoldMs` of its `intentAt`,
+// carries its line `inMotionUntil` intentAt + baseFailureHoldMs — the instant the queue re-enters
+// the head on whatever the base tip then is — so the wait is the writer's motion for exactly as
+// long as the writer itself imposed it, and past the bound the queued head is held as GY-2015
+// holds it. Each instance is replayed as the record stood when the loop counted it, with the line
+// master status reported. Against the base each subtest fails: the instance reproduces.
+
+const gy2174Base = '146787d168f1'.padEnd(40, '0');
+const gy2174Heads: Record<string, string> = { 'GY-2078': '3211c14fd2cb'.padEnd(40, '0'), 'GY-1984': '0c8e360ca4a5'.padEnd(40, '0'), 'GY-2171': 'c699d954c78c'.padEnd(40, '0') };
+const gy2174Instances = [
+  { subject: 'GY-2078', at: '2026-10-19T09:39:17.811Z', owed: '36m', owedMs: 36 * 60_000 + 30_000 },
+  { subject: 'GY-1984', at: '2026-10-19T09:41:06.829Z', owed: '36m', owedMs: 36 * 60_000 + 30_000 },
+  { subject: 'GY-2171', at: '2026-10-19T09:45:25.802Z', owed: '30m', owedMs: 30 * 60_000 + 30_000 },
+];
+/** How long before its count the writer refused each head: well inside the 30-minute hold the replay judges. */
+const gy2174IntentBefore = 24 * 60_000;
+
+/**
+ * An instance's item as the red base left it: build and review passed, the test gate refusing the
+ * trial the ledger's own `base failure` refusal of this exact head says the base failed, and the
+ * head out of the queue on that refusal — the writer's hold, not a judgment nobody owes.
+ */
+function gy2174Item(subject: string, countedAt: string, owedMs: number): Work {
+  const work = standing({ subject, detail: '', owedMs: 0, owed: '' }, new Date(Date.parse(countedAt) - owedMs).toISOString());
+  const sha = gy2174Heads[subject]!, refusal = trialRefusal(sha, gy2174Base);
+  const action: NextAction = { kind: 'escalate', work: work.id, key: subject, gate: 'test', refusal,
+    reason: `${subject} is refused at the test gate and no executor step answers it: ${refusal}`,
+    inputs: { kind: 'escalate', trigger: 'test', detail: refusal } as NextAction['inputs'], llmRole: null,
+    binding: `test:1:${sha.slice(0, 12)}:${gy2174Base.slice(0, 12)}:${refusal}` };
+  const intentAt = new Date(Date.parse(countedAt) - gy2174IntentBefore).toISOString();
+  const reason = mergeExecutor.baseFailureReason({ tip: gy2174Base, files: ['tests/module-budgets.test.ts', 'tests/docs-budget.test.ts'], tests: ['unit:module-budgets — the split master, daemon and master CLI modules each stay within 800 lines'] });
+  Object.assign(work, {
+    stage: 'test', submission: { epoch: 1, pr: 2174 }, candidate: { sha, baseSha: gy2174Base, pr: 2174, branch: `graphyard/${subject.toLowerCase()}-1`, author: 'implementer' },
+    observation: { candidate: { sha, baseSha: gy2174Base }, source: 'control-plane', reviews: [], merged: false, mergeSha: null, checks: [], protected: false, files: [], at: intentAt } as unknown as Work['observation'],
+    nextAction: { ...action, needsHuman: humanNeeded(action)! },
+    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] }, { name: 'test', passed: false, reasons: [refusal] }],
+    mergeLedger: { key: subject, state: 'refused', head: sha.toLowerCase(), baseTip: gy2174Base, mergeSha: 'b'.repeat(40), risk: 'sensitive', intentAt, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason }, events: 4 },
+  });
+  Object.assign(work.actionQueue!.actions[0], { kind: 'escalate', gate: 'test', binding: action.binding, refusal, reason: action.reason });
+  return work;
+}
+
+/** The writer as the red base left it at the count: every queued head parked on its `base failure` refusal, nothing in flight, no delivery since the trials. */
+function gy2174Writer(at: string): MergeWriterSummary {
+  const now = Date.parse(at);
+  return { lastMergeAt: new Date(now - 44 * 60_000).toISOString(), queue: [], inFlight: null,
+    refusals: gy2174Instances.map(entry => ({ key: entry.subject, head: gy2174Heads[entry.subject]!.toLowerCase(), reason: 'base failure: tests fail on the base tip too', at: new Date(now - gy2174IntentBefore).toISOString() })),
+    reworks: [], progress: undefined, motionBoundMs: mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 }) };
+}
+
+for (const entry of gy2174Instances) test(`manual:fault-class-decision — owed-decision|${entry.subject}|${entry.at}: the head parked on the writer's own base-failure hold reproduces`, () => {
+  const now = Date.parse(entry.at), work = gy2174Item(entry.subject, entry.at, entry.owedMs), writer = gy2174Writer(entry.at);
+  const ledger = (work as { mergeLedger: MergeLedgerState }).mergeLedger;
+  // The shared record: the ledger's `base failure` refusal of the exact candidate head is what takes the head out of the queue...
+  assert.equal(mergeExecutor.parseBaseFailureReason(ledger.refusal!.reason)!.tip, gy2174Base);
+  assert.deepEqual(mergeExecutor.mergeQueue([work], { [entry.subject]: ledger }, now).queue.map(row => row.key), [],
+    `${entry.subject}'s head is parked on the writer's base-failure hold, not lost`);
+  // ...so the GY-2015 hold cannot apply: the head is in neither the queue nor the flight, and the line stood unbounded.
+  assert.equal(owed.mergeWriterHolds(work, writer, now), null);
+  // The candidate reads the same record the queue drops on: the hold bounds the line to the instant the head re-enters.
+  assert.equal(owed.baseFailureHoldUntil(work, now), Date.parse(ledger.intentAt!) + mergeExecutor.baseFailureHoldMs);
+  const { reported, counted } = observedFaults([work], entry.at, writer);
+  assert.deepEqual(reported.map(line => line.text),
+    [`${entry.subject} is refused at the test gate and no executor step answers it: merge writer has not trialled ${gy2174Heads[entry.subject]!.slice(0, 12)} on ${gy2174Base.slice(0, 12)} — no executor may run it; resolving ${entry.subject}'s test refusal has been owed for ${entry.owed}`]);
+  assert.equal(reported[0]!.inMotionUntil, new Date(Date.parse(ledger.intentAt!) + mergeExecutor.baseFailureHoldMs).toISOString(), 'the writer\'s own hold dates the line\'s motion, not any judgment');
+  assert.deepEqual(counted.map(fault => `${fault.kind}|${fault.subject}`), [], 'the parked head is the writer\'s motion while its hold stands: against the base the instance reproduces here');
+});
+
+test('manual:fault-class-decision — the base-failure hold grounds nothing past its bound, for another refusal, another head, or a trial failure, and the re-queued head is held as GY-2015 holds it', () => {
+  const entry = gy2174Instances[0]!, at = entry.at, now = Date.parse(at);
+  const item = (fields: Record<string, unknown>) => Object.assign(gy2174Item(entry.subject, at, entry.owedMs), fields) as Work;
+  const ledgerWith = (overrides: Record<string, unknown>) => ({ ...(item({}) as { mergeLedger: MergeLedgerState }).mergeLedger, ...overrides });
+  // Past the hold the queue re-enters the head: the ledger grounds no bound any more, and the GY-2015 hold takes the line over.
+  const expired = item({ mergeLedger: ledgerWith({ intentAt: new Date(now - mergeExecutor.baseFailureHoldMs - 60_000).toISOString() }) });
+  assert.equal(owed.baseFailureHoldUntil(expired, now), null, 'the hold ends at intentAt + baseFailureHoldMs');
+  assert.deepEqual(mergeExecutor.mergeQueue([expired], { [entry.subject]: (expired as { mergeLedger: MergeLedgerState }).mergeLedger }, now).queue.map(row => row.key), [entry.subject], 'past the hold the queue re-enters the head on whatever the tip then is');
+  const requeued = { ...gy2174Writer(at), queue: [{ key: entry.subject, id: expired.id, head: gy2174Heads[entry.subject]!.toLowerCase(), submittedAt: at, waitingMs: 61_000 }] };
+  assert.equal(owed.mergeWriterHolds(expired, requeued, now), 'moving', 'the re-entered head is the queued writer\'s work again');
+  // A trial-failure refusal of the exact head (the GY-2166 shape) is the rework round, never this hold; nor a refusal of an older head.
+  const trialfailed = item({ mergeLedger: ledgerWith({ refusal: { kind: 'merge', reason: 'trial failed: tests tests/docs-budget.test.ts' } }) });
+  const otherhead = item({ mergeLedger: ledgerWith({ head: 'c'.repeat(40) }) });
+  assert.deepEqual([expired, trialfailed, otherhead].map(work => owed.baseFailureHoldUntil(work, now)), [null, null, null], 'only a base-failure refusal of the exact candidate head bounds the line');
+  // The hold bounds only the writer's trial-refusal line: any other refusal of the item stands as it did.
+  const unobserved = item({});
+  const refusal = githubUnobservedRefusal;
+  const action: NextAction = { kind: 'escalate', work: unobserved.id, key: unobserved.key, gate: 'test', refusal,
+    reason: `${unobserved.key} is refused at the test gate and no executor step answers it: ${refusal}`,
+    inputs: { kind: 'escalate', trigger: 'test', detail: refusal } as NextAction['inputs'], llmRole: null, binding: 'test:unobserved' };
+  Object.assign(unobserved, { nextAction: { ...action, needsHuman: humanNeeded(action)! } });
+  Object.assign(unobserved.actionQueue!.actions[0], { kind: 'escalate', gate: 'test', binding: action.binding, refusal, reason: action.reason });
+  assert.equal(owed.baseFailureHoldUntil(unobserved, now), null, 'a refusal that is not the writer\'s trial refusal is nobody\'s hold to bound');
+  assert.deepEqual(observedFaults([unobserved], at, gy2174Writer(at)).counted.map(fault => fault.kind), ['owed-decision'], 'that line still counts');
+  // The record grounds the line with no writer summary at all: an older caller's read is bounded by the same ledger.
+  const work = gy2174Item(entry.subject, at, entry.owedMs);
+  const reported = humanNeededAttention({ work: [work], now: at });
+  assert.equal(reported[0]!.inMotionUntil, new Date(Date.parse((work as { mergeLedger: MergeLedgerState }).mergeLedger.intentAt!) + mergeExecutor.baseFailureHoldMs).toISOString());
+  assert.deepEqual(cycleFaults(emptyDaemonState(config()), [work], now, { config: config(), reported }).filter(fault => fault.faultClass === 'decision').map(fault => fault.kind), [], 'no writer summary, the ledger still bounds it');
+});
