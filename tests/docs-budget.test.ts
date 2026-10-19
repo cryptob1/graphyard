@@ -89,7 +89,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/delivery.md', /`release\.onFailure` `hold` \(default `revert`\) names each failing case, step and would-be target or `no map matched`, reverting\/reopening nothing; `release\.revertUnmatched: false` holds an unmatched failure instead of the newest item/],
   // GY-1555 AC-6: setup-from-zero's control-plane merger subsection; steps 5 and 7 fold into step 4, where doctor's fixes point.
   ['docs/setup-from-zero.md', /### Control-plane merger\n\n`up` creates an ed25519 deploy key and registers it read-write on OWNER\/REPO .*no App, no branch protection/],
-  ['docs/setup-from-zero.md', /## 4\. Register the GitHub App\n\n.*Reviewer and revert-approver Apps: /],
+  ['docs/setup-from-zero.md', /## 4\. Register the GitHub App\n\n.*Not required for the control-plane merger.*Reviewer and revert-approver Apps: /],
   // GY-1523 AC-8: the head form of submit, its CLI and the change number it allocates.
   ['docs/protocol/work-commands.md', /`\{"epoch":1,"head":SHA\}` \(`complete GY-N EPOCH --head \[SHA\]`.*allocates one change number per head into `candidate\.pr`\/`submission\.pr`/],
   // GY-1529 AC-5: the Coordinator recovery section names its symptoms, the recover command and how promotion resumes.

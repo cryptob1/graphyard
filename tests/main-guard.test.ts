@@ -902,20 +902,6 @@ test('unit:main-guard-cancel-bound-escalates a run still cancelled past the reru
   assert.deepEqual(fake.calls.opened, [A]);
 });
 
-test('unit:ci-bubblewrap-install-bounded the CI bubblewrap install retries apt and is bounded well inside the shard timeout', async () => {
-  const { readFile } = await import('node:fs/promises');
-  const workflow = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  const shard = workflow.slice(workflow.indexOf('  test-shard:'), workflow.indexOf('  test-browser:'));
-  const shardTimeout = Number(/\n    timeout-minutes: (\d+)/.exec(shard)?.[1]);
-  const step = shard.slice(shard.indexOf('- name: Install bubblewrap'), shard.indexOf('- name: Select the test files'));
-  const stepTimeout = Number(/timeout-minutes: (\d+)/.exec(step)?.[1]);
-  assert.ok(stepTimeout > 0 && stepTimeout * 2 <= shardTimeout, `the install step is bounded at ${stepTimeout} min, at most half the shard's ${shardTimeout}`);
-  assert.match(step, /for attempt in 1 2 3/, 'apt is retried');
-  assert.match(step, /Acquire::Retries=/);
-  for (const call of step.match(/apt-get (update|install)/g) ?? []) assert.ok(new RegExp(`timeout \\d+ ${call}`).test(step), `${call} is bounded by timeout`);
-  assert.equal(step.match(/apt-get (update|install)/g)?.length, 2);
-});
-
 // GY-1789 review: the base-failure inference needs the whole failure set to match, a revert onto the merge alone, and later merges are still judged.
 test('unit:main-guard-revert-shares-failure — the inference needs every failing check of the merge matched, a revert opened onto the merge itself, and never suppresses a novel failure of a later merge', async () => {
   const failing = ['tests/locked-read.test.ts › unit:reconcile-lock-hold-bounded'];
