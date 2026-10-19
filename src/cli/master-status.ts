@@ -7,7 +7,7 @@ import { standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
 import { type Work } from '../model/work.js';
 import { pendingCaseChanges } from './master-status-case-changes.js';
 import { installationMerger } from '../executor.js';
-import { leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
+import { deployLine, leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { loopCodeRoot } from '../daemon/checkout-state.js';
 import { baseFailureAttention, daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
 import { timeToMergeBySize } from '../decomposition.js';
@@ -170,8 +170,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // GY-1511: the Herdr server holding this install's agents, and the command that opens them.
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,
-    // The promotion drive (GY-1302): last promoted SHA, production lag, next due promotion.
-    promotion,
+    // The release reading (GY-1302): last deployed SHA, production lag; `deploy`, the one line on a failed continuous deploy (GY-1982).
+    promotion: { ...promotion, deploy: deployLine(cursor?.promotion?.deployFailed) },
     launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
     itemSize,
     // Every open item the control plane names no action for, with the account it names and how

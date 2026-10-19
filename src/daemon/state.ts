@@ -198,6 +198,8 @@ export const promotionStateSchema = z.object({
   soaksReadAt: z.string().nullable().optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
+  /** GY-1982: the base tip whose continuous deploy failed, the step and why, and what the loop did about it. */
+  deployFailed: z.object({ sha: z.string().max(64), step: z.string().max(32), reason: z.string().max(500), rolledBackTo: z.string().max(64).nullable(), kept: z.boolean(), attempts: z.number().int().min(1), at: z.string().max(64) }).strict().nullable().optional(),
 }).strict();
 export type PromotionState = z.infer<typeof promotionStateSchema>;
 

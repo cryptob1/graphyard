@@ -14,9 +14,8 @@ import { fileURLToPath } from 'node:url';
 import type { ChildRun } from '../child-runner.js';
 import { shortCommit, type ExecutorRestartResult } from '../executor-fleet.js';
 import type { MasterConfig } from '../master.js';
-import { promotionHolds, promotionWait } from '../master/release-lag.js';
 import { carryUndeclared } from './state-cursor.js';
-import { storeAction, touchStanding, message, type DaemonState, type UpgradeStallCause } from './state.js';
+import { storeAction, touchStanding, message, type DaemonState, type PromotionState, type UpgradeStallCause } from './state.js';
 import { detailChanged } from './decisions.js';
 import { checkoutState, loopCodeRoot, reconcileLoadedRelease, unquotePath, type CheckoutState } from './checkout-state.js';
 import { heldCliSnapshots, heldExecutorEntryOf, holdCliAt, sameCommit } from './held-cli.js';
@@ -118,6 +117,75 @@ export interface SelfUpgradeDeps {
   loadedFrom?: string;
   now?: () => number;
   persist?: (state: DaemonState) => Promise<void>;
+  /** GY-1982: the install's continuous deploy ports, or the one line naming why this install has none. */
+  deploy?: () => Promise<DeployPorts | string>;
+}
+
+/** GY-1982: the action every continuous deploy is recorded on. */
+export const deployKey = 'upgrade:deploy';
+/**
+ * GY-1982: what continuous deploy runs a commit through, each throwing its failure's reason:
+ * `deploy` the upgrade sequence after the checkout move (npm ci, database backup, redeploy through
+ * the install adapter), `health` the served revision's /healthz, `e2e` every case under e2e/cases/
+ * against the install's own URL. `schemas` reads, before the deploy, the commit's schema generation
+ * and the database's; `pin` marks a deployed commit known good.
+ */
+export interface DeployPorts {
+  deploy(commit: string): Promise<void>;
+  health(commit: string): Promise<void>;
+  e2e(commit: string): Promise<void>;
+  schemas(commit: string): Promise<{ target: number | null; database: number | null }>;
+  pin?(commit: string): Promise<unknown>;
+}
+type DeployFailure = NonNullable<PromotionState['deployFailed']>;
+
+/** The cursor's release reading with `fields` set; a fresh one when the cursor holds none. */
+export const promotionReading = (previous: PromotionState | null | undefined, at: string, fields: Partial<PromotionState>): PromotionState => ({
+  mainSha: null, promotedSha: null, promotedAt: null, behind: null, ledgerReadAt: null, inFlight: false, runsReadAt: null, dispatchedAt: null, lastDispatchAt: null, nextDueAt: null, reason: null,
+  ...previous, checkedAt: at, ...fields });
+
+/** The one master status line about a failed deploy (GY-1982); null when none failed. */
+export const deployLine = (failed: DeployFailure | null | undefined) => !failed ? null
+  : `deploy of ${shortCommit(failed.sha)} failed at ${failed.step}: ${failed.reason}; ${failed.kept ? 'the release was kept because the database was migrated' : failed.rolledBackTo ? `rolled back to ${shortCommit(failed.rolledBackTo)}` : 'it was not rolled back'}`;
+
+/**
+ * GY-1982: one continuous deploy of the base tip, between cycles. The release already recorded is
+ * no deploy, and a tip that failed twice waits for the base branch to move. Otherwise the checkout
+ * moves onto the tip, which is deployed, health-checked and run end to end; passing, the release
+ * reading names it, it is pinned known good, and null lets the alignment restart onto it. Failing,
+ * the recorded release is redeployed the same way (end to end excepted), the checkout returned and
+ * the failure recorded — unless the tip migrated the database past what the older release accepts:
+ * then it is kept, and the restart onto it goes ahead.
+ */
+async function deployTip(state: DaemonState, tip: string, from: string, ports: DeployPorts, ctx: { git: (...args: string[]) => Promise<string> | string; at: () => string; persist: () => Promise<void>; note: (detail: string, failure: boolean) => Promise<void> }): Promise<SelfUpgradeOutcome | null> {
+  const recorded = state.promotion?.promotedSha ?? state.release?.commit ?? null;
+  if (sameCommit(recorded, tip)) return null;
+  const prior = state.promotion?.deployFailed, attempts = prior && sameCommit(prior.sha, tip) ? prior.attempts + 1 : 1;
+  if (attempts > 2) return { outcome: 'skipped', reason: `${deployLine(prior)}; it failed twice, so it waits for the base branch to move` };
+  const sequence = async (commit: string, steps: readonly ('deploy' | 'health' | 'e2e')[]) => {
+    try { await ctx.git('checkout', '--detach', '--quiet', commit); } catch (error) { return { step: 'checkout', reason: message(error).slice(0, 240) }; }
+    for (const step of steps) try { await ports[step](commit); } catch (error) { return { step, reason: message(error).slice(0, 240) }; }
+    return null;
+  };
+  const schemas = await ports.schemas(tip).catch(() => ({ target: null, database: null }));
+  const failure = await sequence(tip, ['deploy', 'health', 'e2e']);
+  if (!failure) {
+    state.promotion = promotionReading(state.promotion, ctx.at(), { mainSha: tip, promotedSha: tip, promotedAt: ctx.at(), deployFailed: null });
+    await ctx.persist();
+    await ports.pin?.(tip).catch(() => {});
+    await ctx.note(`Deployed base tip ${shortCommit(tip)}: health and end to end passed`, false);
+    return null;
+  }
+  const kept = schemas.target !== null && schemas.database !== null && schemas.target > schemas.database;
+  const back = kept || !recorded ? null : await sequence(recorded, ['deploy', 'health']);
+  if (!kept) await Promise.resolve().then(() => ctx.git('checkout', '--detach', '--quiet', from)).catch(() => '');
+  const deployFailed: DeployFailure = { sha: tip, step: failure.step, reason: (back ? `${failure.reason}; redeploying ${shortCommit(recorded)} failed at ${back.step}: ${back.reason}` : failure.reason).slice(0, 500),
+    rolledBackTo: kept || back ? null : recorded, kept, attempts, at: ctx.at() };
+  state.promotion = promotionReading(state.promotion, ctx.at(), { mainSha: tip, ...(kept ? { promotedSha: tip, promotedAt: ctx.at() } : {}), deployFailed });
+  await ctx.persist();
+  const line = deployLine(deployFailed)!;
+  await ctx.note(line, true);
+  return kept ? null : { outcome: 'failed', reason: line };
 }
 
 /**
@@ -127,8 +195,7 @@ export interface SelfUpgradeDeps {
  * holds code the running loop did not load — is still finished: the checkout is aligned with the
  * base tip and the owed restart attempted each pass, so an observation that never arrives cannot
  * pin the loop to stale code; a checkout an earlier pass already processed from the loaded commit
- * without loaded code is idle, never fetched again. A production observed serving none of the
- * awaited deliveries yet is no such gap: the promotion wait holds. Each pass that cannot complete
+ * without loaded code is idle, never fetched again. Each pass that cannot complete
  * the restart records one named stall on the cursor (`upgrade.stalled`: its cause and latest
  * attempt); the pass that completes it removes it. Only a restart attempt refreshes the release's
  * action, the owed restart's attempt clock: a failure before one (a fetch, the checkout, a diff)
@@ -146,10 +213,9 @@ export interface SelfUpgradeDeps {
  * the next cycle to finish; the loop's own re-execution is last, and everything the next process
  * needs to know is on the cursor before it goes. A refusal that has stood `fleetWaitMs` no longer
  * holds the loop (GY-1473): it re-executes onto the checkout alone, and the executor restart stays
- * owed for the process that starts. A loaded-code move production is observed not serving yet is
- * held (GY-1585): the checkout moves, but the executors and the loop restart onto it only once the
- * served release contains it, under the `release-lagged` stall. Nothing here throws: every failure
- * is a recorded action.
+ * owed for the process that starts. With `deploy` (GY-1982) the base tip is deployed before
+ * anything restarts onto it (`deployTip`), and nothing waits on a served-release observation.
+ * Nothing here throws: every failure is a recorded action.
  */
 export async function performSelfUpgrade(config: MasterConfig, state: DaemonState, deps: SelfUpgradeDeps): Promise<SelfUpgradeOutcome> {
   const now = deps.now ?? Date.now, at = () => new Date(now()).toISOString();
@@ -159,7 +225,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   const codeRoot = loopCodeRoot(config.cliPath, deps.root);
   const git = (...args: string[]) => deps.run('git', ['-C', codeRoot, ...args]);
   const persist = async () => { if (deps.persist) await deps.persist(state); };
-  const key = `upgrade:${state.deployment?.sha ?? 'none'}`, heldKey = 'upgrade:held';
+  const key = `upgrade:${state.deployment?.sha ?? 'none'}`;
   const holdCli = deps.holdCli ?? (commit => holdCliAt(codeRoot, deps.run, commit));
   /** GY-1790: the executor units' entry follows the pin — the snapshot's script while it stands, the checkout's when it lifts. No unit is aligned where none is supervised. */
   const alignExecutorUnits = async (script: string | null): Promise<string | null> => {
@@ -262,31 +328,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       : `the held snapshot pin is lifted for the restart onto ${shortCommit(to)}, but the loop's supervisor unit still names the snapshot's launcher and could not be returned to the checkout's (upgrade:unit names why); the restart stays owed and is retried next cycle`, 'snapshot-failed');
   };
   /**
-   * The release production is observed serving, when it does not contain `commit` yet (GY-1585):
-   * null while production is unobserved (GY-1445/GY-1464: an unobservable plane never pins the loop
-   * on stale code), when the served release is the commit or descends from it, and when git cannot
-   * place the two — only a definite "not an ancestor" (exit status 1) holds a restart.
-   */
-  const lagging = async (commit: string): Promise<string | null> => {
-    if (!observed) return null;
-    const served = observation!.sha!;
-    if (sameCommit(served, commit)) return null;
-    try { await git('merge-base', '--is-ancestor', commit, served); return null; }
-    catch (error: any) { return error?.status === 1 ? served : null; }
-  };
-  /**
-   * Completes the restarts one alignment owes, with the checkout already at the tip. A held restart
-   * (GY-1585) the served release has since moved past aligns no release: the pass after it aligns
-   * the checkout with what production serves now, so the loop does not stay on the held commit
-   * until a later promotion.
-   */
-  /** One pin per pass, whichever step places it first: the move pins before its checkout, the hold after. */
-  let pinning: { commit: string; result: Promise<string> } | null = null;
-  const pin = (commit: string) => {
-    if (pinning?.commit !== commit) pinning = { commit, result: holdCli(commit).then(() => '', error => `; the CLI it spawns could not be pinned to ${shortCommit(commit)}: ${message(error)}`) };
-    return pinning.result;
-  };
-  /**
    * `left` (GY-1773): the checkout is dirty and stays where it stands, so the restart goes onto a
    * held snapshot of `pending.to` instead: the launcher is pinned to the snapshot before anything
    * restarts, the executors and the loop restart onto it as they would onto the checkout, and the
@@ -306,8 +347,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
    * dirty launcher for the operator to return to the commit, and the units go back to the
    * checkout's launcher when the pin lifts.
    */
-  const finish = async (pending: { from: string | null; to: string; code: boolean }, held = false, left: LeftBehind | null = null): Promise<SelfUpgradeOutcome> => {
-    const aligned = held && !sameCommit(release, pending.to) ? state.upgrade.alignedRelease : release ?? state.upgrade.alignedRelease;
+  const finish = async (pending: { from: string | null; to: string; code: boolean }, left: LeftBehind | null = null): Promise<SelfUpgradeOutcome> => {
+    const aligned = release ?? state.upgrade.alignedRelease;
     if (!pending.code && !left) {
       state.upgrade.pending = null;
       state.upgrade.last = { at: at(), from: pending.from, to: pending.to, code: false, executors: null, self: false };
@@ -350,34 +391,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
         return { outcome: 'failed', reason };
       }
       return { outcome: 'upgraded', from: pending.from, to: pending.to, code: false, executors: null, self: true, ...(left ? { left } : {}) };
-    }
-    // GY-1585: loaded code restarted before the plane serves it speaks a protocol the serving
-    // registry's strict schemas still refuse (400 Invalid input on every launch). While production
-    // is observed serving a release that does not contain the move, the restart is held, owed on
-    // the cursor under a named stall, and the first pass whose observation serves it completes it.
-    // The hold is one `upgrade:held` row whichever release it was observed under, its attempts grown
-    // only when what it names changes, its time the latest held pass (the owed restart's attempt clock
-    // master status reads), and settled by the pass that lifts it: a standing hold grows nothing, and
-    // no waiting row outlives the hold it describes.
-    // The CLI processes the loop and the executors spawn run from the checkout, which already holds
-    // the move: they are pinned to the served release for as long as the hold stands.
-    const lag = await lagging(pending.to);
-    if (lag) {
-      const pinned = left && sameCommit(left.checkout, loaded) ? '' : await pin(lag);
-      const reason = `restart held: production serves release ${shortCommit(lag)}, which does not contain ${shortCommit(pending.to)} yet; the executors and the loop restart onto ${shortCommit(pending.to)}${left ? ` (a held snapshot of it: the coordinator checkout is dirty at ${shortCommit(left.checkout)} and stays where it is)` : ''} on the first pass whose deployment observation serves it${pinned}`;
-      state.upgrade.pending = { from: pending.from, to: pending.to, code: true };
-      stall('release-lagged', reason);
-      const standing = state.actions[heldKey];
-      if (standing?.state !== 'waiting' || detailChanged(standing, reason))
-        storeAction(state, heldKey, { kind: 'config', work: null, principal: null, state: 'waiting', detail: reason, attempts: (standing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() });
-      else standing.at = at();
-      await persist();
-      return { outcome: 'pending', reason, to: pending.to };
-    }
-    if (state.actions[heldKey]?.state === 'waiting') {
-      const lifted = observed ? `production serves release ${shortCommit(observation!.sha!)}, which contains ${shortCommit(pending.to)}` : 'production is no longer observed, and an unobserved plane never holds the loop on stale code';
-      storeAction(state, heldKey, { kind: 'config', work: null, principal: null, state: 'done', detail: `The restart onto ${shortCommit(pending.to)} is no longer held: ${lifted}`, attempts: state.actions[heldKey]!.attempts, epoch: null, cycle: state.cycle, at: at() });
-      await persist();
     }
     if (left) {
       const unmade = await holdCli(pending.to).then(() => null, error => message(error));
@@ -525,9 +538,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   //    release already aligned — leaves the checkout where it stands, but a checkout holding code
   //    the loop did not load still owes the restart onto its own HEAD (GY-1464): a re-execution
   //    that failed or never ended the process, or a move the loop did not make, must not pin the
-  //    loop on stale code until the next promotion. Only the promotion wait the loaded-revision
-  //    reading excuses holds it: the loop runs the release production serves and the promotion
-  //    that would serve the rest is on schedule.
+  //    loop on stale code until the next promotion.
   const observation = state.deployment;
   const observed = !!observation && observation.source !== 'unavailable' && !!observation.sha;
   const release = observed && observation!.deployed.length ? observation!.sha : null;
@@ -561,7 +572,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       const last = state.upgrade.last;
       state.upgrade.pending = { from: loaded, to: left!.commit, code: last && sameCommit(last.to, left!.commit) ? last.code : true };
       await persist();
-      return finish(state.upgrade.pending, false, { checkout: head, dirty: standing!.dirtyPaths });
+      return finish(state.upgrade.pending, { checkout: head, dirty: standing!.dirtyPaths });
     }
     // GY-1790: a checkout moved by hand to another commit while the pin stands keeps the pin and
     // is named as left behind where it now stands — never taken for the pin's lift, which only a
@@ -574,9 +585,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       }
       return { outcome: 'skipped', reason: standing!.dirty === false && standing!.detached === true ? `the coordinator checkout stands clean at ${shortCommit(head)}, moved there by hand while the loop runs its held snapshot of ${shortCommit(left!.commit)}; the pin stands until it is moved onto that commit` : idle };
     }
-    if (!cleaned && (!head || head === loaded || processed(head))) return { outcome: 'skipped', reason: idle };
-    if (observed && !cleaned) {
-      if (promotionHolds(promotionWait(state), loaded, now())) return { outcome: 'skipped', reason: idle };
+    // GY-1982: a loop that deploys continuously fetches every pass: the base tip it has not deployed is its trigger.
+    if (!deps.deploy && !cleaned && (!head || head === loaded || processed(head))) return { outcome: 'skipped', reason: idle };
+    if (!deps.deploy && observed && !cleaned && head) {
       // GY-1790: a status that cannot be read is never taken for clean: the failed read is
       // recorded and the restart is retried on the first pass that can read the checkout.
       if (standing!.dirty === null) return unaligned(`the restart onto ${shortCommit(head)} is owed, but whether the coordinator checkout at ${shortCommit(head)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
@@ -589,25 +600,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       // GY-1790: the checkout may have been dirtied after the restart onto it was first refused or
       // failed — a retried restart never runs the dirty tree: it goes onto a held snapshot of the
       // commit, the checkout left behind with its dirty paths.
-      return standing!.dirty === true ? finish(state.upgrade.pending, false, { checkout: head, dirty: standing!.dirtyPaths }) : finish(state.upgrade.pending);
+      return standing!.dirty === true ? finish(state.upgrade.pending, { checkout: head, dirty: standing!.dirtyPaths }) : finish(state.upgrade.pending);
     }
-  }
-
-  // A restart held for the release (GY-1585) completes on the first pass whose observation serves
-  // the commit the checkout holds — or on which production is unobserved — before a newer tip is fetched: moving on to a tip the promotion
-  // has not served yet would hold it again, and a busy base branch would hold the loop forever.
-  // While the release still lags, the pass holds the same target without fetching: advancing it to
-  // every newer tip would keep it ahead of each promotion, and the loop would never restart.
-  const held = state.upgrade.pending;
-  if (held?.code && state.upgrade.stalled?.cause === 'release-lagged') {
-    const holding = await checkoutState(codeRoot, deps.run);
-    // GY-1773: a hold completes onto a snapshot whenever the checkout is dirty — one dirtied after
-    // the hold moved it onto the commit included: the restart never runs a dirty tree's code.
-    if (holding.dirty === true) return finish(held, true, { checkout: holding.commit, dirty: holding.dirtyPaths });
-    // GY-1790: a status that cannot be read is never taken for clean: the hold stands one more
-    // pass, the failed read recorded, rather than finishing the restart from an unknown tree.
-    if (holding.dirty === null && holding.commit === held.to) return unaligned(`the restart onto ${shortCommit(held.to)} held for the served release is still owed, but whether the coordinator checkout at ${shortCommit(holding.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
-    if (holding.commit === held.to) return finish(held, true);
   }
 
   // 2. The base tip, from a fresh fetch.
@@ -621,7 +615,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // pass that can fetch.
     const owed = state.upgrade.pending, holding = owed ? await checkoutState(codeRoot, deps.run) : null;
     // GY-1773: a snapshot restart owed from a dirty checkout needs no fetch either: the commit is already held.
-    if (owed?.code && holding!.dirty === true) return finish(owed, false, { checkout: holding!.commit, dirty: holding!.dirtyPaths });
+    if (owed?.code && holding!.dirty === true) return finish(owed, { checkout: holding!.commit, dirty: holding!.dirtyPaths });
     // GY-1790: an unreadable status is never taken for clean: the owed restart waits, recorded.
     if (owed?.code && holding!.dirty === null) return unaligned(`the restart onto ${shortCommit(owed.to)} is still owed, but whether the coordinator checkout at ${shortCommit(holding!.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
     if (owed && holding!.commit === owed.to) return finish(owed);
@@ -631,6 +625,15 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   // 3. How this checkout stands, before anything touches it.
   const checkout = await checkoutState(codeRoot, deps.run);
   if (!checkout.commit) return unaligned(`the coordinator checkout at ${codeRoot} could not be read`);
+  // GY-1982: continuous deploy, from a clean detached checkout. A tip the install does not run is
+  // deployed first; only a deployed (or kept) tip goes on to the alignment and the restarts below.
+  const ports = deps.deploy && await deps.deploy();
+  if (typeof ports === 'string' && state.promotion?.reason !== ports) { state.promotion = promotionReading(state.promotion, at(), { reason: ports }); await persist(); }
+  if (ports && typeof ports !== 'string' && checkout.dirty === false && checkout.detached === true) {
+    const deployed = await deployTip(state, to, checkout.commit, ports, { git, at, persist, note: (detail, failure) => note(detail, failure, deployKey) });
+    if (deployed) return deployed;
+    Object.assign(checkout, await checkoutState(codeRoot, deps.run));
+  }
   if (to === checkout.commit) {
     // The checkout already holds the tip: finish what an earlier pass still owes, or align and
     // clear a refusal that no longer describes anything.
@@ -639,7 +642,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // waits, the failed read recorded, rather than finishing from a checkout of unknown dirtiness.
     if (state.upgrade.pending) {
       if (checkout.dirty === null) return unaligned(`the restart onto ${shortCommit(to)} is still owed, but whether the coordinator checkout at ${shortCommit(checkout.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
-      return checkout.dirty === true ? finish(state.upgrade.pending, false, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
+      return checkout.dirty === true ? finish(state.upgrade.pending, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
     }
     // The tip itself is code the running loop never loaded: the restart onto it is owed, verified
     // or not (GY-1464), unless a completed pass already processed it without loaded code.
@@ -650,7 +653,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       catch (error) { return unaligned(`the diff from ${shortCommit(loaded)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
       state.upgrade.pending = { from: loaded, to, code };
       await persist();
-      return checkout.dirty === true ? finish(state.upgrade.pending, false, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
+      return checkout.dirty === true ? finish(state.upgrade.pending, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
     }
     const cleared = !!state.upgrade.refused;
     state.upgrade.alignedRelease = release ?? state.upgrade.alignedRelease;
@@ -683,12 +686,12 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       await note(`Snapshotting base tip ${shortCommit(to)} for the loop: the coordinator checkout is dirty at ${shortCommit(from)}${nameDirty(left)} and stays where it is; ${changed.length} path(s) changed, none of them loaded code`, false);
       state.upgrade.pending = { from, to, code: false };
       await persist();
-      return finish({ from, to, code: false }, false, left);
+      return finish({ from, to, code: false }, left);
     }
     await note(`Snapshotting base tip ${shortCommit(to)} for the loop and the executors: the coordinator checkout is dirty at ${shortCommit(from)}${nameDirty(left)} and stays where it is; ${changed.length} path(s) changed, loaded code among them`, false);
     state.upgrade.pending = { from, to, code: true };
     await persist();
-    return finish({ from, to, code: true }, false, left);
+    return finish({ from, to, code: true }, left);
   }
   if (checkout.detached !== true) return refused(`HEAD holds ${checkout.branch ?? 'a branch'} instead of standing detached; it is upgraded only as a clean detached checkout of ${config.baseBranch}`, checkout.commit, 'checkout-not-detached');
 
@@ -706,10 +709,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     code = owed || upgradeTouchesCode(changed);
   } catch (error) { return unaligned(`the diff from ${shortCommit(base)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
   await note(`Checking out base tip ${shortCommit(to)} (from ${shortCommit(from)}): ${changed.length} path(s) changed${code ? ', loaded code among them' : ', none of them loaded code'}`, false);
-  //    A loaded-code move production does not serve yet is pinned before the checkout moves (GY-1585):
-  //    an executor rereads the commit it runs before every claim, and one that saw the moved checkout
-  //    unpinned would stand down and its supervisor would start it on code the plane refuses.
-  if (code) { const lag = await lagging(to); if (lag) await pin(lag); }
   try { await git('checkout', '--detach', '--quiet', to); }
   catch (error) { return unaligned(`checking out ${shortCommit(to)} failed: ${message(error)}`, 'checkout-failed'); }
   state.upgrade.pending = { from, to, code };
