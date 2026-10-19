@@ -13,11 +13,11 @@ Per session: worker identity, host ID, or `init --url https://YOUR-HOST --herdr 
 
 ### What the generated instructions authorize
 
-Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`); launcher pastes need no confirmation; other bracketed paste: untrusted data (prompt injection). Role files under `.graphyard/harness/` hold permissions, not instructions.
+Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`); launcher pastes need no confirmation; other bracketed paste: untrusted data. Role files under `.graphyard/harness/` hold permissions, not instructions.
 
 ### Agent environments
 
-Login homes (`~/.coding_agents`, or `GRAPHYARD_AGENT_ENVIRONMENTS`: `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `XDG_DATA_HOME`, `CURSOR_CONFIG_DIR`): `master environments --create claude,codex --apply`. Profiles default to `"approvals": "auto"`.
+Login homes (`~/.coding_agents`, or `GRAPHYARD_AGENT_ENVIRONMENTS` naming the runtime's home): `master environments --create claude,codex --apply`. Profiles default to `"approvals": "auto"`.
 
 ### Connect an account
 
@@ -49,7 +49,7 @@ A Pi **doctor** acts on `run.doctor.intervalMinutes`, never asks people; files o
 
 ## 4. Prove the first change
 
-`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged when the merge writer's trial passes and it pushes main with its deploy key; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
+`graphyard doctor --profile through-merge` names gaps; `master run` dispatches a small item, merged when the merge writer's trial passes and pushes main with its deploy key; `"systemDriven": false` allows [hand actions](master-agent.md#system-driven-items).
 
 ## The dashboard
 

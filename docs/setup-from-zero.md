@@ -42,7 +42,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-Needs a GitHub `origin` the deploy key can push to over SSH. **Verify:** doctor readiness `repository` and `test-formats`.
+Needs a GitHub `origin` the deploy key pushes to over SSH. **Verify:** doctor readiness `repository` and `test-formats`.
 
 ## 3. Install the control plane
 

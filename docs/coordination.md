@@ -27,4 +27,4 @@ Workers build, run the request-named fast gates and `graphyard verify GY-N` (own
 
 `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`: only deletion refuses; `sync` regenerates.
 
-[Speed](master-agent-reference.md#pipeline-speed), CI proofs. `graphyard diagnose GY-N` names holds; docs-only conflicts get [docs-sync](development.md#documentation-that-rarely-conflicts). Permanent installation-level stall reasons raise setup attention: `Deployment endpoint answered 4xx` → fix `deploymentUrl`; a credential-401 claim refusal → the credential-401 remedy; a refused reviewer launch (4xx) → repair the reviewer identity (GY-2008).
+[Speed](master-agent-reference.md#pipeline-speed), CI proofs. `graphyard diagnose GY-N` names holds; docs-only conflicts get [docs-sync](development.md#documentation-that-rarely-conflicts). Permanent installation-level stall reasons raise setup attention: `Deployment endpoint answered 4xx` → fix `deploymentUrl`; a credential-401 refusal → its remedy; a refused reviewer launch → repair the reviewer identity (GY-2008).

@@ -39,7 +39,7 @@ Container writes; attestor, collector read; never add the runner account. Collec
 
 **Required `uat` cases run on every deploy** as the loop's `e2e` suite (`GRAPHYARD_UAT_URL`, `GRAPHYARD_SUITE_DETAIL`); `e2e record REPORT` records attempts ([`e2e:record` agent](delivery.md#release-filing-credential)). Static sites (no `GRAPHYARD_UAT_URL`): loopback serves `GRAPHYARD_UAT_STATIC`.
 
-`validation capacity` names `queued-starved`, `queued-resource-held`/`awaiting-settlement`, `unacknowledged`/`retryable` (`validation retry`), `heartbeat-missing`, `collection-stalled`.
+`validation capacity` names `queued-starved`, `awaiting-settlement`, `retryable` (`validation retry`), `heartbeat-missing`, `collection-stalled`.
 
 ## Release verdicts
 
@@ -49,7 +49,7 @@ One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun
 
 ## Goals and acceptance
 
-`goal FILE` records (`statement`/`users`/`constraints`/`deployTarget`). The `acceptance` role drafts outcomes (one required `uat` case each); the merge writer lands that commit on another identity's approver verdict, and `goal land` records it (any other route refused). Protected case or `e2e/contract.json` changes need the item's `goal case-change`, approved by neither requester nor implementer. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production. One hold per failed outcome clears when every attached case passes on a newer candidate the serving release carries.
+`goal FILE` records (`statement`/`users`/`constraints`/`deployTarget`). The `acceptance` role drafts outcomes (one required `uat` case each); the merge writer lands that commit on another identity's approver verdict, and `goal land` records it (any other route refused). Protected case or `e2e/contract.json` changes need the item's `goal case-change`, approved by neither requester nor implementer. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production. A failed outcome's hold clears when every attached case passes on a newer served candidate.
 
 ## Evidence reuse and replay
 

@@ -39,7 +39,7 @@ Never attest a stop you have not confirmed.
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`; `daemon.stepStalls` names one verified remedy per signature. Returned rework dispatches first.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`; `daemon.stepStalls` names one verified remedy per signature.
 
 ## Lost worker before submission
 
@@ -47,7 +47,7 @@ Leases expire 120s after last heartbeat (plane stall: 30s `stallRenewalWindowMs`
 
 ## Supervisor died leaving a containment quarantine
 
-[`master settle-containment`](#recovery-recipes) verifies nothing survives; refused: confirm stop, then rework, or `recover-containment` once delivered.
+[`master settle-containment`](#recovery-recipes) verifies nothing survives; refused: confirm stop, then rework, or `recover-containment`.
 
 ## Retro synthesis
 
@@ -95,7 +95,7 @@ Remedies: `graphyard master run --once`, `herdr pane close PANE`, raise a role's
 
 ## Withdrawal, credentials, grants
 
-Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A merge outside the gates is a permanent violation: never bypass; a delivered item with a failed smoke proof stays Done — fix forward.
+Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A merge outside the gates is a permanent violation: never bypass; a delivered item with a failed smoke proof stays Done.
 
 ## Merge bypass
 

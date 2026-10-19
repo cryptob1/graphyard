@@ -15,7 +15,7 @@ Non-master launches get own checkouts, the coordinator's unwritable (Codex sandb
 
 Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`.
 
-Launches take the first account under `run.quotaCeilingPercent`, else **fail over**; limit notices hold the account (`capacity.exhausted`), relaunch elsewhere. Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
+Launches take the first account under `run.quotaCeilingPercent`, else fail over; limit notices hold the account (`capacity.exhausted`). Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
 
 ## The loop's own master session
 
