@@ -1,10 +1,13 @@
 import { constants as cryptoConstants, createDecipheriv, createPublicKey, generateKeyPairSync, privateDecrypt, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { chmod, link, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { Work } from '../model.js';
 import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type HumanRequestRow } from '../model/human-request.js';
-import { configHome } from '../install/secrets.js';
+import { configHome, installDirectory, readInstallRecord, readToken } from '../install/secrets.js';
+import { installIdFor } from '../install/types.js';
+import { repositoryFromRemote } from '../onboarding.js';
 import { scopeBlockedBudgetMs, scopeRequestOutcome } from '../model/scope.js';
 import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
@@ -230,16 +233,37 @@ export const answerHumanCommand: CliCommand = {
   },
 };
 /**
+ * GY-2171: the operator's admin credential this machine's install of ROOT's repository recorded
+ * (the human admin of ~/.config/graphyard/<install>/install.json, its token beside it), and the
+ * tailnet address `graphyard up` served the dashboard on, if any. Null when no such credential is here.
+ */
+export async function recordedOperator(root: string): Promise<{ token: string; reachableUrl: string | null } | null> {
+  let repository: string | null;
+  try { repository = repositoryFromRemote(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); } catch { return null; }
+  if (!repository) return null;
+  const directory = installDirectory(installIdFor(repository));
+  const admins = (await readInstallRecord(directory).catch(() => null))?.principals.filter(principal => principal.role === 'admin') ?? [];
+  const admin = admins.find(principal => principal.sessionKind === 'human') ?? admins[0];
+  const token = admin ? await readToken(directory, admin.id).catch(() => null) : null;
+  if (!token) return null;
+  const up = await readFile(join(root, '.graphyard/up.json'), 'utf8').then(JSON.parse, () => null);
+  return { token, reachableUrl: typeof up?.tailnetUrl === 'string' && up.tailnetUrl ? up.tailnetUrl : null };
+}
+/**
  * The human operator's way into the dashboard (GY-738): a one-time link that opens a human
- * session in the browser, so no token is ever pasted into the page. Run with the operator's own
- * admin credential; the link is single use and expires in ten minutes.
+ * session in the browser, so no token is ever pasted into the page. With no credential named, it
+ * uses the one the install recorded on this machine and links to the tailnet address when the
+ * dashboard is served there (GY-2171); the link is single use and expires in ten minutes.
  */
 export const loginCommand: CliCommand = {
   name: 'login',
-  help: ['  login                        Print a one-time link that signs the operator into the', '                                dashboard as a human (single use, expires in 10 minutes)'],
-  async run({ api, base, print }) {
+  help: ['  login                        Print a one-time link that signs the operator into the', '                                dashboard as a human for 30 days (the link is single use, 10 minutes)'],
+  async run({ api, base, print, repositoryRoot }) {
+    const recorded = process.env.GRAPHYARD_TOKEN_FILE || process.env.GRAPHYARD_TOKEN ? null : await recordedOperator(repositoryRoot());
+    // The request helper reads its credential on first use: the recorded one stands in for GRAPHYARD_TOKEN.
+    if (recorded) process.env.GRAPHYARD_TOKEN = recorded.token;
     const link = await api('sign-in-links', {}) as { code: string; principal: string; expiresAt: string };
-    return print({ signIn: `${base.replace(/\/+$/, '')}/#sign-in=${link.code}`, principal: link.principal, expiresAt: link.expiresAt, singleUse: true });
+    return print({ signIn: `${(recorded?.reachableUrl ?? base).replace(/\/+$/, '')}/#sign-in=${link.code}`, principal: link.principal, expiresAt: link.expiresAt, singleUse: true });
   },
 };
 /** A wait as a person reads it: minutes under an hour, then hours, then days. */
