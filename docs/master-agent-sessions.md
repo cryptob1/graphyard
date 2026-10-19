@@ -1,68 +1,48 @@
 <!-- page: Operate Graphyard | 6 | profiles, launches. -->
 # Master-agent sessions
 
-## Launch profiles
+`master worker add FILE`, `master reviewer add FILE`; `master producer replace|remove` applies next tick; `master status` `sessions` lists handles.
 
-`master worker add FILE`: workers ([template](../examples/master/claude-worker.json)); `master reviewer add FILE` reviewers ([Claude](../examples/master/claude-reviewer.json), [opencode](../examples/master/opencode-reviewer.json)); `master producer replace`, `master producer remove`, `master reviewer remove` apply next tick; `setup.attention` reports blockers.
+## Approval modes
 
-### Session handles
+[`"approvals": "auto"`](onboarding.md#agent-environments) adds per-runtime unattended flags: Claude Code `--permission-mode bypassPermissions`; Codex `--ask-for-approval never --sandbox workspace-write`; opencode `OPENCODE_PERMISSION`; others likewise; Pi none. Never started: `"prompt"`, `refusedLaunchKinds`, runtimes without command-line requests; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}`.
 
-`master status` `sessions`.
+## The coordinator checkout is confined at the OS level
 
-### Approval modes
+Non-master launches get own checkouts, the coordinator's unwritable (Codex sandbox, others bubblewrap); unconfinable refused.
 
-`"approvals": "auto"` adds: Claude Code `--permission-mode bypassPermissions`, `.claude.json` trust; Codex `--ask-for-approval never --sandbox workspace-write`, network, `--add-dir`, `config.toml` `[projects."DIR"] trust_level = "trusted"`, missing `.agents`/`.codex` created, symlinked ones refused; Cursor `--force --trust` (binary `agent`); opencode allow-all `OPENCODE_PERMISSION`; Gemini, Qwen `--yolo`; Copilot `--allow-all-tools --allow-all-paths`; Muse `--approval-mode never --trust-workspace`; Antigravity `agy` `--dangerously-skip-permissions`, `trustedWorkspaces`, `--prompt-interactive`; Pi none. Never started: `"prompt"`, `refusedLaunchKinds`, runtimes without command-line requests; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}`.
+### Worker sandbox
 
-### The coordinator checkout is confined at the OS level
+Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`.
 
-Non-master launches get own checkouts (master: `.graphyard` writable, host acts loop-served), coordinator's unwritable (Codex `--sandbox workspace-write`, others bubblewrap, session bus a [keyring-only proxy](operations.md#worker-host-keyring-proxy)); unconfinable refused; loop refuses dirty/moved checkouts ([details](master-agent.md#operate)).
-
-#### Worker sandbox
-
-Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`. Reviewers/producers: same grants and probe plus `.git/worktrees`; fetch `--no-write-fetch-head`.
-
-Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) absent registry roles. Launches take first account under `run.quotaCeilingPercent`, else (or failed start) **fail over** (`dispatch.accounts`). Runtime limit notices (never agent text: agy `Individual quota reached`, pi 429 `Weekly/Monthly Limit Exhausted`, Claude's unanswered usage-limit menu or `/usage-credits`) or silent done with unpushed `WIP:` hold the launch account (`capacity.exhausted`, until reset/`account set`), relaunch elsewhere. An item's two latest epochs' account (within 2h, reset unpassed) is re-held first; unwritable holds refuse dispatch. Reviewers/producers: profile `kind` only (else `cross-runtime`).
-
-A rework worktree starts from the submission head registered in the shared object store, fetching and pushing no worker branch.
+Launches take the first account under `run.quotaCeilingPercent`, else fail over; limit notices hold the account (`capacity.exhausted`). Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` (unset: none): one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it; `run.masterHeartbeatMinutes` (30) sends heartbeat (`daemon.master`); undeliverable wakes rotate it (`deaf`, ≤3 straight).
+`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it.
 
 ### The request is the session's first message
 
-Never pasted ([authorization](onboarding.md#what-the-generated-instructions-authorize)).
+Never pasted.
 
 #### How the request reaches the runtime
 
-Written to `.graphyard/launch/NAME.request` (Claude also `NAME.role`), mode 0600, removed with the checkout; typed line is bounded at **512 bytes** whatever the request is:
+Written to `.graphyard/launch/NAME.request` (Claude also `NAME.role`), 0600, removed with the checkout; the typed line is bounded at **512 bytes**:
 
 ```
-GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/producer-PROFILE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
+claude … --settings …/.graphyard/harness/ROLE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
 ```
 
 #### The start bound reads the pane
 
-**Ready**: Herdr active without prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`), never Herdr's own `agent_not_found`; retrying `Automatic producer launch for GY-N refused 1 time(s)`.
-
-**Approvers**: replaced panes' bounds run from first sight; failed relaunches adopt a started same-name approver or listed holder, else end session and pane, retrying once.
+**Ready**: Herdr active without prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line, never Herdr's own `agent_not_found`.
 
 #### First-run consent prompts
 
-**`awaiting consent`**: answers only `hooks-continue-untrusted` (**Continue without trusting**), `telemetry-decline`, never one that grants hook execution or a sandbox escape; others (**credential**, **payment**) escalate; workspace-trust prompts (`Yes, I trust this folder`) fail launch; dropped trust records refuse the start. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** supervisor stops renewing, item dispatchable.
+**`awaiting consent`**: answers only `hooks-continue-untrusted` (**Continue without trusting**), `telemetry-decline`, never one that grants hook execution or a sandbox escape; others (**credential**, **payment**) escalate. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing; the item dispatches.
 
-Reviewers/producers are `awaiting acknowledgement` until 30s active (`counts.dispatchAwaiting`), re-prompted once quiet past `run.acknowledgementSeconds` (90); resultless is **`never started`**: relaunched ≤3 times (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
+Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted once quiet past `run.acknowledgementSeconds` (90); resultless is **`never started`**: relaunched ≤3 times (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
-**Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision, listed threads; control-plane `mode`, `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Control-plane posts as App `SLUG[bot]`. Verdicts post once via `graphyard review post --event APPROVE|REQUEST_CHANGES|COMMENT` (body stdin) to `/api/work/KEY/review-verdict` with the launch's one-time token (no GitHub review). Refused: missing binding, wrong `GRAPHYARD_REVIEW`, moved head, unlisted thread, approval leaving threads unclassified, a pull-request-era GitHub binding. Re-reviews get the earlier diff, findings, answering each `Earlier: … — FIXED|NOT FIXED`; `BLOCKING` on `PATH:LINE` unchanged since `previousHead` refuses; use `Nit:` (earlier paths, `AC-N` excepted).
+**Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
 
-**Self-review**: before `complete`, workers run `graphyard review self GY-N` — the reviewer's standard for their diff.
-
-**Idle-with-lease** (25 quiet minutes, nothing open): one re-prompt; quiet 45min after first idle, 10 after re-prompt: new attempt on its branch <60min from last activity. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown, stalled-gate fault past 120min; without progress (PR or head in 15min) the loop stops the supervisor; reclaim requeues, keeping branch and worktree; from 130min renewal refused (`no-submission-bound`, not lease loss). Open scope requests exempt. **Blocked**: destructive prompts declined; usage-limit menu fails over; folder-trust dialog relaunches; others fail after **5min**, unreadable ones untimed.
-
-### Panes are closed and reclaimed
-
-Ended sessions' panes close; ≤12 more per cycle, never a standing attempt's: agentless worktree shells after **120s**, namesakes **60s**. `master status` counts them; over 20: `daemon.escalations`.
-
-### The dispatcher's own state
-
-Dispatcher bounds its own state where it composes it, marking each cut with an ellipsis; schema-failing cursor is repaired, not fatal, logged once with the failing path. Tick failures are attributed (`dispatch.lastFailure`); three in a row raise one attention item (no reviewer or producer session launches for any item); `graphyard master restart` repairs it. A session exiting **at launch** is classified by `herdr pane read`: a **provider limit notice** fails over like a mid-session exhaustion; others refused with the pane's last words, retried.
+**Idle-with-lease** (25 quiet minutes): one re-prompt; from 45min quiet a new attempt starts. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown, stalled-gate fault past 120min; from 130min renewal refused. Open scope asks exempt. **Blocked**: destructive prompts declined; usage-limit menu fails over; others fail after **5min**.

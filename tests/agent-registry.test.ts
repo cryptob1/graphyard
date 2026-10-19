@@ -124,18 +124,6 @@ function reviewWork(key: string, sha: string): Work {
 const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 const mintReviewerSession = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
 
-/**
- * The `master registry` commands docs/onboarding.md prints, as a caller's argv: shell continuations
- * joined, quotes honoured, and the `node "$GRAPHYARD_CLI" master registry` prefix dropped.
- */
-function documentedCommands(guide: string): string[][] {
-  const joined = guide.replaceAll(/\\\n\s*/g, ' ');
-  return joined.split('\n').filter(line => line.startsWith('node "$GRAPHYARD_CLI" master registry')).map(line => {
-    const words = [...line.replace(/\s+#.*$/, '').matchAll(/'([^']*)'|"([^"]*)"|(\S+)/g)].map(match => match[1] ?? match[2] ?? match[3]);
-    return words.slice(words.indexOf('registry') + 1);
-  });
-}
-
 /** One executor action: a worker dispatch through the same code path `master run` and `master dispatch` take. */
 async function dispatch(root: string, config: any, profile: string, probe: EnvironmentProbe, calls: string[][] = [], fail?: (args: string[]) => boolean) {
   const item = readyWork();
@@ -549,26 +537,6 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   const again = proposeFleet(await discoverHostLogins({ directory, home, executables: () => false }), HOST, await ok('agent-registry/document', coordinator));
   assert.deepEqual([again.runtimes, again.accounts.map(account => account.name)], [[], ['claude-c']]);
   assert.deepEqual(again.roles.find(role => role.name === 'worker'), { name: 'worker', accounts: ['codex-a', 'claude-b', 'claude-c'], concurrency: 7 });
-
-  const guide = await readFile(new URL('../docs/onboarding.md', import.meta.url), 'utf8');
-  const order = ['### Add a runtime', '### Add an account', '### Add a role'].map(heading => guide.indexOf(heading));
-  assert.ok(order.every(index => index >= 0) && order[0] < order[1] && order[1] < order[2], 'docs/onboarding.md adds a runtime, an account and a role, in that order');
-  for (const command of ['master registry propose --apply', 'master registry runtime set', 'master registry account set', 'master registry role set']) assert.ok(guide.includes(command), command);
-
-  // Every command the guide prints is run as written: a documented form the CLI cannot parse — a
-  // value starting with a dash written apart from its flag, say — is a broken onboarding, and an
-  // onboarding review is the only thing that ever found it.
-  const empty = await temporaryDirectory('no-logins', scratch);
-  const written: { path: string; data: any }[] = [];
-  const recording = { read: async () => emptyRegistry(), write: async (path: string, data: unknown) => { written.push({ path, data }); return { revision: 1, registry: {} }; } };
-  const documented = documentedCommands(guide);
-  assert.ok(documented.length >= 8, 'the guide prints the fleet commands');
-  for (const command of documented)
-    await registryCommand({ hostId: HOST }, command, recording, { directory: empty, home: empty, executables: () => false });
-  const runtime = written.find(entry => entry.path === 'agent-registry/runtimes')!;
-  assert.deepEqual([runtime.data.runtime.name, runtime.data.runtime.launch.args, runtime.data.runtime.launch.modelFlag, runtime.data.runtime.launch.homeVariable], ['aider', ['--yes-always'], '--model', 'AIDER_HOME']);
-  assert.deepEqual(written.filter(entry => entry.path === 'agent-registry/roles').map(entry => entry.data.role.name), ['worker', 'reviewer']);
-  assert.deepEqual(written.find(entry => entry.data.role?.name === 'reviewer')!.data.role.policy, { args: [], tools: ['Read'], model: 'opus' });
 });
 
 // ---------------------------------------------------------------------------

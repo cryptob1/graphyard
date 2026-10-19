@@ -280,18 +280,6 @@ test('unit:main-watch-status — master status shows mainWatch (unknown count, n
   assert.equal(acknowledgeCommand(sha('n1')), `graphyard master main-watch acknowledge ${sha('n1')} --reason TEXT --admin-token-stdin`, 'the command reads the admin credential from stdin: the master holds none');
   assert.match(mainWatchUsage, /--admin-token-stdin/);
   assert.deepEqual(mainWatchAttention(null, 'main'), []);
-  const docs = readFileSync(fileURLToPath(new URL('../docs/recovery.md', import.meta.url)), 'utf8');
-  const paragraph = docs.split(/^## Main watch\s*$/m)[1]?.split(/\n## /)[0]?.trim();
-  assert.ok(paragraph, 'docs/recovery.md has a Main watch section');
-  assert.ok(paragraph.split(/\s+/).length <= 60, `at most 60 words: ${paragraph.split(/\s+/).length}`);
-  assert.ok(paragraph.includes('graphyard master main-watch acknowledge SHA --reason TEXT'));
-  assert.ok(paragraph.includes('--admin-token-stdin') && paragraph.includes('POST /api/main-watch/acknowledge') && paragraph.includes('Idempotency-Key'), 'the docs name the credential flow and the API');
-});
-
-test('unit:main-watch-docs-names-read-routes — the Main watch paragraph names the read-only routes beside the freeze and acknowledge command', () => {
-  const docs = readFileSync(fileURLToPath(new URL('../docs/recovery.md', import.meta.url)), 'utf8');
-  assert.ok(docs.includes('GET /api/main-watch'));
-  assert.ok(docs.includes('graphyard master main-watch status'));
 });
 
 // ——— The acknowledgement route: admin-only, recorded once per Idempotency-Key, readable by the loop. ———

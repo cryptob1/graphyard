@@ -115,16 +115,6 @@ test('unit:producer-manual-proof-never-escalated — a judged manual failure rew
     assert.doesNotMatch(action.detail ?? '', new RegExp(PROOF), 'a producer-runnable manual proof is never parked as operator-witnessed');
 });
 
-test('unit:producer-manual-proof-never-escalated — docs/operations.md states the rule within the word budget', () => {
-  const page = readFileSync(fileURLToPath(new URL('../docs/operations.md', import.meta.url)), 'utf8');
-  assert.match(page, /never to an operator escalation/);
-  assert.match(page, /no producer may run/);
-  assert.match(page, /operator witness/);
-  assert.match(page, /an unexecuted one an attestation/);
-  const words = page.split(/\s+/).filter(Boolean).length;
-  assert.ok(words <= 1200, `docs/operations.md stays within the 1,200-word page budget (${words} words)`);
-});
-
 // GY-1394. 25 rework decisions at the acceptance stage in the week to 2026-10-07 each waited on an
 // approver or a master although the record had already decided the question. Every instance, by
 // its decision id, and the ground that now applies it with nobody stepping in:

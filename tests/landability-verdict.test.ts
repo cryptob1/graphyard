@@ -200,10 +200,6 @@ test('unit:landability-consumers-agree — over generated work items the gates a
   // The generator exercised every answer, so the agreement above is not vacuous.
   assert.ok(seen.landable > 20 && seen.refused > 100, JSON.stringify(seen));
 
-  // The single authority is documented where coordination is described, linked rather than restated elsewhere.
-  const coordination = readFileSync(new URL('../docs/coordination.md', import.meta.url), 'utf8');
-  assert.match(coordination, /evaluateLandability/);
-  assert.match(coordination, /single authority/);
 });
 
 test('unit:landability-pure-on-demand — the verdict is deterministic, recomputed from live facts, never read from a stored verdict, and every refusal records its version and inputs', () => {

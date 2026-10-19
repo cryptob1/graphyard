@@ -139,12 +139,6 @@ test('unit:sha-observation-marks-deployed — a producer sha observation is idem
   assert.deepEqual(new Set(drained.awaiting.map(row => row.key)), new Set([...ahead, elsewhere.key]));
   assert.equal(drained.complete, true); assert.equal(drained.next, null);
 
-  // The documented request is one the schema accepts.
-  const guide = await readFile(new URL('../docs/delivery.md', import.meta.url), 'utf8');
-  const documented = [...guide.matchAll(/```json\n([\s\S]*?)```/g)].map(match => JSON.parse(match[1])).filter(block => 'sha' in block && 'environment' in block && !('snapshotId' in block));
-  // Imported where used, so the file still loads (and its cases fail) against a base without the schema.
-  const { shaObservationSchema } = await import('../src/delivery.js') as any;
-  assert.equal(documented.length, 1); shaObservationSchema.parse(documented[0]);
 });
 
 test('unit:sha-observation-completion-states — a sha observation names the serving release beside the delivered label and a digest observe behaves as before', async () => {

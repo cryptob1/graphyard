@@ -1,41 +1,70 @@
-<!-- page: Build integrations | 2 | cases, runners. -->
+<!-- page: Build integrations | 2 | cases -->
 # E2E validation
 
-An `e2e:` proof passes from pinned candidate/bundle/separate [collector](runner-setup.md). `validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`: `admin` defines cases (**Settings → Test cases**, `scenario scenario.json`); runners (`worker`) poll/ack/heartbeat; builders/collectors (`producer`) attest/publish, never both; `e2e:ID` pins latest immutable revision; only trusted attempts append **Tests** runs.
+An `e2e:` proof passes from pinned candidate/bundle/separate collector; `validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`. `admin` defines cases; runners (`worker`) poll/ack/heartbeat; builders/collectors (`producer`) attest/publish, never both; only trusted attempts append **Tests** runs. [Evidence](protocol/work-commands.md#evidence-and-pipeline) carries trust and grants.
+
+## Approve the bundle and run an attempt
+
+```bash
+graphyard runner inspect [packages/web]
+graphyard runner snapshot selected-files.json > oracle-source.json
+graphyard runner bundle-digest ./oracle
+```
+
+`validation define` pins `digest` and `runnerImageDigest`. `graphyard runner attempt runner.json` runs as a non-root `runAsUser` with a boundary-group GID; the attestor (`graphyard runner supervise`) enumerates offline, executes read-only, signs what it saw.
+
+### The acknowledgement is retried, never repeated
+
+Each send carries request key `ATTEMPT_ID-ack`, identical body; an already-acknowledged answer is success, other 2xx refuse. A confirmed refusal is a decision, never retried; transport failures, timeouts, 408, 429, 5xx retry: At most **5 sends**, paused 1, 2, 4 and 8 seconds apart; no send starts more than **60 seconds** after the first. Until the acknowledgement is confirmed, no heartbeat is sent nor the attestor told to proceed.
+
+### Attempt boundary
+
+```bash
+groupadd --gid 20001 graphyard-boundary
+useradd -r --uid 10001 -g graphyard-boundary graphyard-container
+useradd -r graphyard-collector
+usermod -aG graphyard-boundary graphyard-attestor
+usermod -aG graphyard-boundary graphyard-collector
+install -d -o graphyard-attestor -g graphyard-boundary -m 2750 /srv/graphyard/attempts
+setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
+```
+
+Container writes; attestor, collector read; never add the runner account. Collect with a proof-scoped `producer` credential: `graphyard runner collect collector.json` verifies signature, inventory, teardown, uploads artifacts; `observations` bracket the run within `maxGapMs`.
 
 ## E2E case repository
 
-`e2e/cases/ID.json`, code-reviewed: `id` (file name)/`title`, optional `description`/`tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`:
+`e2e/cases/ID.json`, code-reviewed: `id`/`title`, optional `description`/`tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`: `http` (`method`, `path`, `status`, `expect` on dotted paths, `save`, GET `waitSeconds`); `browser` (Playwright Chromium: `open`, `fill`, `click`/`expectText`); `command`: `run` in the checkout with `TARGET_URL`, exit 0 passes, last 50 lines kept: `{"kind":"command","run":"npx playwright test"}`; `agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS|FAIL - reason`, screenshot kept: `{"kind":"agent","goal":"Win tic-tac-toe","success":["Board says You win"],"path":"/games"}`.
 
-- `http`: `method`, `path`, optional `body`, `status`; `expect` checks dotted `path` (`equals`/`exists`/`type`/`includes`); `save` persists; GET `waitSeconds` (≤3600; pending 0; shared 1800 s release deadline) retries; an install delivering nothing (`github` merger, no App) pends its `candidates`/`delivery`/`production` cases (`suspendedDeliveries`; holds' post-suite probe must agree).
-- `browser` (Playwright Chromium): `open` `path`, `fill` `label` with `value`, `click`/`expectText` `text`, optionally by `role`.
-- `command`: `run` in the checkout with `TARGET_URL`, exit 0 passes, last 50 lines kept: `{"kind":"command","run":"npx playwright test"}`.
-- `agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS|FAIL - reason`, screenshot kept: `{"kind":"agent","goal":"Win tic-tac-toe","success":["Board says You win"],"path":"/games"}`.
+`timeoutSeconds` (600). `secrets: ["NAME"]` from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600, uncommitted) as variables and `{{secret:NAME}}`, redacted. `e2e list` refuses malformed cases; `e2e run CASE|--tag T|--all --url URL` prints failing steps and exits non-zero.
 
-Both: `timeoutSeconds` (600). `secrets: ["NAME"]` from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600, uncommitted) as variables and `{{secret:NAME}}`, redacted; missing fails, named. Saved: `{{token}}`/`{{run}}`/`{{case}}`. `e2e list` refuses malformed cases. `e2e sync` (`admin`, `e2e:record`) registers scenario revisions; edits make new ones; proofs keep theirs. `e2e run CASE|--tag T|--target uat|--all --url URL` (`GRAPHYARD_TOKEN`/`--token-file`, `--step-timeout` 30s, `--retries N` (none), `--no-record`): prints failing steps, exits non-zero.
+**Required `uat` cases run on every deploy** as the loop's `e2e` suite (`GRAPHYARD_UAT_URL`, `GRAPHYARD_SUITE_DETAIL`); `e2e record REPORT` records attempts ([`e2e:record` agent](delivery.md#release-filing-credential)). Static sites (no `GRAPHYARD_UAT_URL`): loopback serves `GRAPHYARD_UAT_STATIC`.
 
-**Every release candidate runs `uat` cases** in order as [`release validate`](delivery.md#release-candidates)'s `e2e` suite (`GRAPHYARD_UAT_URL`/`GRAPHYARD_UAT_TOKEN`, `GRAPHYARD_SUITE_DETAIL`), GOAL-1's seven cases on a fresh `init`-onboarded candidate-checkout plane (`scripts/onboarding-delivery-fixture.mjs`); `e2e record REPORT` records attempts ([`e2e:record` agent](delivery.md#release-filing-credential)). Static sites (no `GRAPHYARD_UAT_URL`): loopback serves `GRAPHYARD_UAT_STATIC`, built by `GRAPHYARD_UAT_BUILD`.
+`validation capacity` names `queued-starved`, `awaiting-settlement`, `retryable` (`validation retry`), `heartbeat-missing`, `collection-stalled`.
 
 ## Release verdicts
 
-One retry: **passed**; **failed** (both); **flaky** (retry passed at same SHA; `RUN:attempt-1`/`-2`); **unrun** (stopped by failed required case); **blocked** (imported, couldn't run: `reason`); **pending** (required case whose outcome no done item serves: blocks only if a delivered outcome shares it or under [`e2e.pendingOutcomes: blocking`](delivery.md#managed-repositories)). Only failed or unaccepted flaky required cases block (imported: blocked/unrun/skipped too).
+One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun**; **blocked**; **pending** (blocks only if a delivered outcome shares it or `e2e.pendingOutcomes: blocking`). Only failed or unaccepted flaky required cases block; promotion waits on an `evidence` decision. `POST /api/validation/import` (`external-runs:import` producers) binds external runs to a `sha`, idempotent per `producer`+`runId`; the `imports` job seals released holds.
 
-Flaky required cases block promotion until an `evidence` decision (`{"case":ID,"runId":RUN,"sha":FULL_SHA}` on hold item) accepts; `release promote` reads only that run's/SHA's decisions.
-
-`POST /api/validation/import` (`external-runs:import` producers only; no evidence authority) binds runs to `sha`'s `rc/` candidate (tags read with git from the coordinator checkout), first importer only (409), idempotent per `producer`+`runId`, keeping verdicts, `evidence` and provenance; `GET /api/validation/import/SHA[?candidate=ID]`: runs, hold (held/unread blocks promotion until window end/superseding cut; once-`required` cases release only passing); uat `imports` job (`release imports ID`, `GRAPHYARD_RELEASE_TOKEN`) seals released holds (`POST …/SHA/seal`; later imports 409), handing promotion `GRAPHYARD_PROMOTION_IMPORTS`. Import-only producers reach only it, own runs/hold, `GET /api/principals` (self); a `delivery:observe-sha` producer reaches only [`POST /api/delivery/observe-sha`](delivery.md#observe-and-verify) and self, never imports, seals, digests, evidence, grants, work or ledger reads; reviewer slots count proof-granted producers only (409 past `GRAPHYARD_MAX_REVIEWERS`). `{"format":"graphyard-external-run-v1","producer":"huck","sha":"<40-hex>","runId":"r7","cases":[{"id":"login","verdict":"skipped","required":true}]}`; malformed fields or links refused.
-
-`e2e/contract.json` lists required customer outcomes: `id`/`title`, optional `criteria`, proving `cases`. `release contract` refuses a cut whose bound case is missing/invalid/optional/not `uat`-targeted or proves nothing.
-
-`tests/fixtures/gy-1907-slow-tick-receipt`: `unit:slow-tick-names-cause`'s receipt; `integration:slow-tick-exact-head-twenty-consecutive` re-executes.
+`e2e/contract.json` lists required customer outcomes; `release contract` refuses a release whose bound case is missing/invalid/optional/not `uat`-targeted or proves nothing.
 
 ## Goals and acceptance
 
-`goal FILE` records (`statement`/`users`/`constraints`/`deployTarget`), listed in `master status`. The `acceptance` role (`run.diagnostician` models) drafts outcomes (one required `uat` case each) and contract bindings as one unpushed `graphyard/goal-N-acceptance-R` commit; the merge writer lands it on another identity's approver verdict on its exact head, and `goal land` records the merge commit it pushed (an acceptance pull request is refused). Stuck a day: `goal closed GOAL-N change -- REASON`. `complete`/later heads refuse protected case or `e2e/contract.json` changes lacking that item's `goal case-change`, approved by neither requester nor implementer; the loop's approver judges each; `master status`: `pendingCaseChanges`. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production.
+`goal FILE` records (`statement`/`users`/`constraints`/`deployTarget`). The `acceptance` role drafts outcomes (one required `uat` case each); the merge writer lands that commit on another identity's approver verdict, and `goal land` records it (any other route refused). Protected case or `e2e/contract.json` changes need the item's `goal case-change`, approved by neither requester nor implementer. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production. A failed outcome's hold clears when every attached case passes on a newer served candidate.
 
-## Release holds
+## Evidence reuse and replay
 
-One hold per failed outcome (`rc-hold/OUTCOME/CANDIDATE`) lists failed/flaky cases; later failures attach; clears once every attached case passes on a newer candidate UAT serves at its SHA (`release holds`). Folding: two-party `fold` decision, then `release fold A --decision ID`.
+Under a reuse policy the newest compatible pass covers new heads:
 
-## Candidates, requests, reports
+```json
+{"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,"freshnessSeconds":86400,"artifacts":"identical","relevant":{"dependencies":["package.json","**/package.json"],"lockfiles":["package-lock.json"],"buildInputs":["Dockerfile","tsconfig.json"],"configuration":["config/**"],"migrations":["migrations/**"],"services":{"api":["src/**"]}},"ignorable":["docs/**"]}
+```
 
-`kind: bundle` pins `scenario`/`scenarioRevision`/`scenarioHash`, `digest`/`runnerImageDigest`, `reportFormat` (`graphyard-playwright-v1`/`junit-xml-v1`; skips/retries/timeouts/miscounts fail; `runner verify-report junit-xml-v1 inventory.json report.xml`). Runners `ack` ≤30s, heartbeat/20s; passes need `matched` target/verified artifacts/settled run; recover: `cancel`/`settle`/`retry`; `validation capacity` [diagnoses](recovery.md#runner-capacity-and-request-diagnostics).
+`relevant.services` covers every service; changed relevant or unknown paths refuse.
+
+Per attested head, `graphyard validation reuse decision.json`; fresh settled passes on identical pins qualify:
+
+```json
+{"workId":"9a7d6b2f-4e1c-4c5a-9f3e-2b8d1c0a7e51","expectedWorkRevision":12,"proof":"e2e:confirmed-booking-sends-sms","policy":{"id":"preview-reuse","revision":1},"buildAttestationId":"5c2e9a1b-7d3f-4a8e-b6c4-0f1d2e3a4b5c"}
+```
+
+`graphyard validation replay REQUEST ATTEMPT` (authorizes nothing) keeps each attempt's time, evaluator, outcome; `evaluator-error` reruns ≤2×, `fail` never. `graphyard validation analytics`: outcomes, faults, cost.

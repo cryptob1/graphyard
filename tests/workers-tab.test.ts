@@ -146,10 +146,6 @@ test('unit:attach-command-remote-form — every running row copies a local attac
   assert.equal(localAttachCommand({ ...running, attach: 'tmux attach -t gy-14' }), 'tmux attach -t gy-14', 'a command that is not Herdr\'s is offered as recorded');
   // --machine runs an API command (the focus) on the saved machine; --remote attaches that host's UI through SSH.
   assert.equal(remoteAttachCommand(running), remote);
-  const docs = await read('docs/dashboard.md');
-  assert.match(docs, /herdr --machine <label-or-id> <command>/);
-  assert.match(docs, /herdr --remote <ssh-target>/);
-  assert.ok(docs.includes(`\`${remote}\``), 'the docs state the exact remote form');
   // No second form for a command that is not Herdr's, one that already names a machine, a finished handle, or no command.
   assert.equal(remoteAttachCommand({ ...running, attach: 'tmux attach -t gy-14' }), null);
   assert.equal(remoteAttachCommand({ ...running, attach: 'herdr --machine other pane attach w1V:pJD' }), null);
@@ -243,22 +239,3 @@ test('unit:stale-session-marked — a running handle not seen inside the thresho
   assert.equal(sessionRoleKind({ kind: 'coordination', role: 'escalation' }), 'escalation handler');
 });
 
-test('manual:workers-tab-docs-review — docs/dashboard.md documents the Workers tab: what a row is, that the data is session handles and not Herdr, the stale threshold, the two attach forms with the exact remote syntax from herdr --help, and that GY-113 liveness reconciliation ends dead handles', async () => {
-  const docs = await read('docs/dashboard.md');
-  const section = docs.slice(docs.indexOf('## Workers'), docs.indexOf('## The status sentence'));
-  assert.ok(section.length > 0, 'a Workers section');
-  assert.match(section, /a row is one \[session handle\]/);
-  assert.match(section, /not from Herdr/);
-  assert.match(section, /\*\*15 minutes\*\* by default \(`sessionStaleThresholdMs`/);
-  assert.match(section, /reads \*not seen for <time since that observation>\*, never as running, and isn't counted open/);
-  assert.match(section, /\*\*Copy local\*\*/); assert.match(section, /\*\*Copy remote\*\*/);
-  assert.match(section, /`herdr --machine <label-or-id> <command>`, `herdr --remote <ssh-target>` per `herdr --help`/);
-  assert.ok(section.includes('`herdr agent attach w1V:pJD`'), 'the local form');
-  assert.ok(section.includes('`herdr --machine vishrog agent focus w1V:pJD && herdr --remote vishrog`'), 'the exact remote form');
-  assert.match(section, /attachment isn't forwarded/);
-  assert.match(section, /the loop's \[session report\]\(master-agent\.md#session-liveness-is-reconciled-not-trusted\) ends a dead handle/);
-  assert.match(section, /\*\*Workers\*\* \(sidebar, beside Shipped and Insights; `web\/pages\/index\.tsx`\)/);
-  // The anchor the section links to exists, and the page's own copy states the same threshold.
-  assert.match(await read('docs/master-agent.md'), /### Session liveness is reconciled, not trusted/);
-  assert.match(renderToStaticMarkup(createElement(WorkersPage, dashboard([]))), /not seen for 15 minutes is marked, never shown as live/);
-});

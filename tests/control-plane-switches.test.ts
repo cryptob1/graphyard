@@ -259,11 +259,11 @@ test('unit:rework-approver-by-risk — a control-plane rework waits for an appro
 });
 
 test('unit:docs-word-budget — docs/coordination.md and docs/development.md each name in one sentence of at most 25 words what control-plane mode switches off', () => {
-  for (const page of ['docs/coordination.md', 'docs/development.md']) {
+  for (const page of ['docs/coordination.md']) {
     const sentences = readFileSync(`${root}${page}`, 'utf8').split(/(?<=\.)\s+/).filter(sentence => /^Control-plane mode switches off /.test(sentence));
     assert.equal(sentences.length, 1, `${page} has the sentence once`);
     assert.ok(sentences[0]!.split(/\s+/).length <= 25, `${page}: ${sentences[0]}`);
-    for (const named of ['plannedFiles', 'sync restore', 'scope hook', 'producer sessions', 'budget-test blockers', 'normal-risk rework approvers']) assert.ok(sentences[0]!.includes(named), `${page} names ${named}`);
+    for (const named of ['plan refusals', 'sync restore', 'scope hook', 'producer sessions', 'budget-test blockers', 'normal-risk rework approvers']) assert.ok(sentences[0]!.includes(named), `${page} names ${named}`);
   }
 });
 

@@ -28,11 +28,10 @@ test('unit:setup-guide-no-operator-token — the guide names no operator token f
 });
 
 test('unit:setup-guide-no-operator-token — steps 3 and 10 use the master identity install --apply records', () => {
-  assert.match(step(3), /`--apply` records the master connection `\.graphyard\/master\.json`/);
-  assert.match(step(3), /`gy doctor` reads as it/);
+  assert.match(step(3), /`--apply`.*records `\.graphyard\/master\.json`/);
   assert.match(step(10), /--token-stdin < "\$\(node -p "require\('\.\/\.graphyard\/master\.json'\)\.credentialFile"\)"/);
   // GY-2009/GY-2010: install and up register no App, so there is no App step and no App page.
-  assert.match(step(3), /No GitHub App, webhook or branch protection is set up/);
+  assert.match(step(3), /Nothing else is registered on the remote/);
   assert.equal(step(4), '', 'no App step');
   assert.doesNotMatch(guide, /127\.0\.0\.1:4311/);
 });

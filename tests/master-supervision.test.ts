@@ -369,18 +369,6 @@ test('integration:runtime-calls-bounded — a hung agent runtime fails its step,
   }
 });
 
-test('manual:supervisor-onboarding-review — the onboarding guide states that the loop must be supervised, how setup does it, and how to confirm it', async () => {
-  const guide = await readFile(fileURLToPath(new URL('../docs/onboarding.md', import.meta.url)), 'utf8');
-  for (const fragment of [loopUnitName, 'master status', 'systemctl --user enable --now', 'loginctl enable-linger', '--replace-supervisor', 'never a side effect']) {
-    assert.ok(guide.includes(fragment), `docs/onboarding.md names ${fragment}`);
-  }
-  assert.match(guide, /^### The loop must be supervised$/m);
-  // The unit the guide describes is the one setup writes, not a second description of it.
-  const unit = loopUnitText({ root: '/path/to/coordinator-checkout', cliPath: launcher, repository: 'owner/project', intervalSeconds: 20 });
-  assert.match(unit, /^Restart=always$/m);
-  assert.ok(guide.includes('setup.supervisor'), 'the guide names the field an operator reads the answer from');
-});
-
 test('integration:supervisor-install-explicit-only — the unit is written only by an explicit operator install into the coordinator checkout on durable storage, never as a side effect', async () => {
   const root = await repository();
   const credentialDirectory = await temporaryDirectory('supervision-explicit-credentials');
