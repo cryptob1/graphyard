@@ -159,3 +159,17 @@ test('unit:lead-time-events-read — merges with no recorded release widen the r
   assert.deepEqual(report.last, { medianMs: 30 * minute, count: 10 });
   assert.deepEqual(report.previous, { medianMs: 30 * minute, count: 10 });
 });
+
+test('unit:lead-time-events-read — the read pages to its end, so a release after thousands of other items’ ready events still counts (AC-2)', async () => {
+  // One of the newest twenty merges was created long ago, so the read starts early; eleven pages
+  // of other items' ready events precede the window's own releases, which arrive on the twelfth.
+  const all = Array.from({ length: 20 }, (_, index) => take((40 - index) * hour, 30 * minute));
+  const rows = all.map(({ item, releasedMs }) => ({ work_id: item.id, created_at: iso(releasedMs) }));
+  const filler = Array.from({ length: 300 }, (_, index) => ({ work_id: `other-${index}`, created_at: iso(minute) }));
+  let pages = 0;
+  const reader = async () => ++pages <= 11 ? { events: filler, page: { hasMore: true, nextCursor: String(pages) } } : { events: rows, page: { hasMore: false, nextCursor: null } };
+  const report = await leadTimeReport(all.map(entry => entry.item), reader);
+  assert.equal(pages, 12, 'the read continues past the default ten-page bound');
+  assert.deepEqual(report.last, { medianMs: 30 * minute, count: 10 });
+  assert.deepEqual(report.previous, { medianMs: 30 * minute, count: 10 });
+});

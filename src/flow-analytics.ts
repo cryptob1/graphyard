@@ -2168,7 +2168,8 @@ export async function readReadyInstants(readEvents: (path: string) => Promise<an
  * The one speed number (GY-1989) over the ledger's own release records: the median released→merged
  * time over the last 10 merges and the previous 10's beside it (`leadTime` in src/pipeline-speed.ts),
  * with each item's release instant read from its first `ready` event, reaching back as far as the
- * window's own history goes (`leadTimeSince`). A merge with no recorded release is skipped, never
+ * window's own history goes (`leadTimeSince`) and paging to the read's end, so a release recorded
+ * after thousands of other items' is still found. A merge with no recorded release is skipped, never
  * guessed, so while the two windows come up short the read doubles its reach over older merges
  * until they fill or every merge is covered.
  */
@@ -2176,7 +2177,7 @@ export async function leadTimeReport(work: Work[], readEvents: (path: string) =>
   const mergedCount = work.filter(item => acceptedMergeAt(item)).length;
   for (let reach = 20; ; reach *= 2) {
     const since = leadTimeSince(work, reach);
-    const ready = since ? await readReadyInstants(readEvents, since) : { readyAt: new Map<string, string>() };
+    const ready = since ? await readReadyInstants(readEvents, since, Infinity) : { readyAt: new Map<string, string>() };
     const report = leadTimeFigure(work, ready.readyAt);
     if (report.last.count + report.previous.count >= 20 || reach >= mergedCount) return report;
   }
