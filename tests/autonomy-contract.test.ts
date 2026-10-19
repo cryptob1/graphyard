@@ -348,11 +348,11 @@ test('unit:contract-reaches-runtimes-without-role-flag — a codex and an openco
 });
 
 test('unit:onboarding-agents-md-carries-contract — the coordination section onboarding writes into a connected repository\'s AGENTS.md carries the contract, and this repository\'s own does', async () => {
-  const section = managedInstructions('# Rules\n', 'https://graphyard.example');
+  const section = managedInstructions('# Rules\n');
   const block = section.slice(section.indexOf('<!-- graphyard -->'), section.indexOf('<!-- /graphyard -->'));
   assert.ok(block.includes(autonomyContract), 'the generated Graphyard section carries the contract verbatim');
   assert.equal(block.split(autonomyContract).length - 1, 1);
-  assert.equal(managedInstructions(section, 'https://graphyard.example'), section, 'regenerating keeps it exactly once');
+  assert.equal(managedInstructions(section), section, 'regenerating keeps it exactly once');
   const agents = await readFile(join(repositoryRoot, 'AGENTS.md'), 'utf8');
   assert.ok(agents.includes(autonomyContract), 'this repository\'s AGENTS.md was regenerated with it');
 });
