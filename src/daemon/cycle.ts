@@ -18,7 +18,6 @@ import { hostSupervisionStep } from './cycle-host.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
-import { flakeStep } from './cycle-flakes.js';
 import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
@@ -239,8 +238,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 3a. A required check that fails on the base head too is set aside before anything decides on
   //     the item (GY-528): the decisions and the approver capacity dispatch counts read it.
   cycle.baseFailed = await timings.step('base failures', () => baseFailureStep(cycle));
-  // 3b. Pass-on-rerun outcomes go to the flake ledger, and a repeatedly flaky test gets one fix item (GY-1498); no gate reads it.
-  await timings.step('flakes', () => cycle.isolate('fault', null, 'flake ledger', () => flakeStep(cycle)));
   spent('decisions');
 
   const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));
@@ -304,7 +301,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
   // not a recomputation beside it, so what reclasses a subject is what the step decided.
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
-  const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
+  const { stages, lead } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
   timings.add('measure', now() - measuredFrom);
@@ -313,7 +310,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // GY-1344: time spent on requests the control plane never answered is the plane's outage, not the loop's work.
   const report = timings.report(), planeWaitMs = Math.min(durationMs - childWaitMs, report.planeWaitMs ?? 0);
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs - planeWaitMs, ...(planeWaitMs ? { planeWaitMs } : {}), steps, timings: report, open: open.length, actions: performed.length,
-    actionable: actionable.length, stages, lead, production, postDeploy, postDeployFailures,
+    actionable: actionable.length, stages, lead,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
   state.cycle += 1;

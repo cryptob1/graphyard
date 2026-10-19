@@ -3,7 +3,6 @@ import { caseDirectory, caseId, contractFile } from '../e2e/case.js';
 import { criteriaSchema } from './policy.js';
 import { demand } from './refusal.js';
 import { pathScopesOverlap } from './scope.js';
-import { deliveryState } from './delivery.js';
 import type { Work } from './work.js';
 import type { Goal, GoalContext } from './goal.js';
 
@@ -177,16 +176,12 @@ export function planNext(goal: Goal): { who: string; command: string } | null {
   if (goal.stage === 'planning') return { who: 'planner role (the master loop launches it once its operator-agent and approver identities are provisioned)', command: `graphyard goal plan ${goal.key} PLAN.json` };
   if (goal.stage === 'plan-review') return { who: `an approver other than ${goal.plan!.author}`, command: `graphyard goal plan-approve ${goal.key} -- REASON (or goal plan-refuse)` };
   if (goal.stage === 'planned') return { who: 'the loop: Graphyard creates and releases the approved plan\'s items, carrying their dependencies', command: `graphyard goal release ${goal.key}` };
-  if (goal.stage === 'delivering' && goal.items?.length) return { who: `the loop: the dispatcher delivers ${goal.items.map(item => item.key).join(', ')} in dependency order; the goal is delivered once every one is done and production serves it`, command: `graphyard goal deliver ${goal.key} ${goal.items.map(item => item.key).join(' ')} -- REASON` };
+  if (goal.stage === 'delivering' && goal.items?.length) return { who: `the loop: the dispatcher delivers ${goal.items.map(item => item.key).join(', ')} in dependency order; the goal is delivered once every one is merged`, command: `graphyard goal deliver ${goal.key} ${goal.items.map(item => item.key).join(' ')} -- REASON` };
   return null;
 }
 
-/**
- * An item delivers its goal once it is done and production serves it: a deployment observed
- * covering its merge, and the smoke proof passed when its policy asks for one. Read by the deliver
- * route and the loop alike.
- */
-export const servedInProduction = (work: Work | undefined) => !!work && work.stage === 'done' && !!work.delivery?.deployment && ['delivered', 'smoke-passed'].includes(deliveryState(work) ?? '');
+/** An item delivers its goal once it is merged (GY-1981: done = merged). Read by the deliver route and the loop alike. */
+export const mergedItem = (work: Work | undefined) => !!work && work.stage === 'done' && !work.closure && !!work.delivery;
 /** The first line of a released plan item's description: the durable mark a retried release finds it by, whatever receipts expired. */
 export const planItemMark = (goal: Pick<Goal, 'key'>, plan: { draftedAt: string }, item: Pick<PlanItem, 'ref'>) => `Plan item ${item.ref} of ${goal.key}'s plan drafted ${plan.draftedAt}.`;
 /** What creating one approved plan item sends: its criteria and file boundary, the dependencies already created, and the goal, outcomes, required cases and architecture note it serves. */

@@ -660,12 +660,11 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   };
   const passed = request.install ?? {};
   // Supervised installs register no reviewer App (GY-1501): the operator is the reviewer.
-  // Control-plane merger (GY-1552) registers no App at all: install --no-github-app, no --reviewer.
-  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(controlPlaneMerger ? ['--no-github-app'] : supervised ? [] : ['--reviewer', request.reviewer]), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []),
+  // Control-plane merger (GY-1552) registers no App at all: install binds none (GY-2009), no --reviewer.
+  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(supervised || controlPlaneMerger ? [] : ['--reviewer', request.reviewer]), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []),
     // GY-1851: a re-issue restarts a host install's loop on a fresh cursor where it runs; other installs ignore it.
     ...(mode === '--apply' && state.reissue?.length ? ['--fresh-cursor'] : []),
-    ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : []),
-    ...(controlPlaneMerger ? [] : (request.reuseApps ?? []).flatMap(slug => ['--reuse-app', slug]))];
+    ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : [])];
   const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.agent ? ' --agent' : ''}`;
   /** GY-1552: create OWNER/NAME with the operator's gh login when it does not exist yet. */
   const ensureRepository = async () => {
@@ -784,7 +783,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         const result = await deps.cli(installArgs('--apply'));
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
-        return 'control plane installed without a GitHub App (--no-github-app)';
+        return 'control plane installed without a GitHub App';
       }
       // The install waits on the App pages itself, as long as this run waits on a person (900 s
       // without a bound); it then pauses (exit 1) and a rerun resumes it. The page's clock starts
@@ -1720,7 +1719,7 @@ export async function redeemSignInClaim(link: string, fetcher: typeof fetch = fe
 }
 
 /** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
-export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', '.github/workflows'] as const;
+export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json'] as const;
 export { onboardingBranch };
 /** The onboarding files every apply writes; a publish without one refuses (GY-1480). */
 export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;
