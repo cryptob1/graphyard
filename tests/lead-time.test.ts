@@ -173,3 +173,30 @@ test('unit:lead-time-events-read — the read pages to its end, so a release aft
   assert.deepEqual(report.last, { medianMs: 30 * minute, count: 10 });
   assert.deepEqual(report.previous, { medianMs: 30 * minute, count: 10 });
 });
+
+test('unit:lead-time-events-read — an older merge released after the read’s bound never fills a window ahead of newer merges released before it (AC-2)', async () => {
+  // The newest twenty merges: four were created ready and carry no ready event, so they yield
+  // sixteen samples, and the oldest of them was created long ago, so the first read's bound is early.
+  const newest = Array.from({ length: 20 }, (_, index) => take((60 - index) * hour, 30 * minute));
+  newest[19] = { ...newest[19], item: { ...newest[19].item, createdAt: iso(0) } as Work };
+  // The next merges have non-monotonic releases: the two newer were released before that bound,
+  // the four after them later, within it.
+  const before = [40, 39].map(at => specimen(-hour, at * hour));
+  const after = [38, 37, 36, 35].map(at => take(at * hour, 2 * hour));
+  const older = [34, 33, 32, 31].map(at => specimen(-2 * hour, at * hour));
+  const all = [...newest, ...before, ...after, ...older];
+  const rows = [...newest.slice(4), ...before, ...after, ...older].map(({ item, releasedMs }) => ({ work_id: item.id, created_at: iso(releasedMs) }));
+  const sinces: string[] = [];
+  const reader = async (path: string) => {
+    const since = new URLSearchParams(path.slice(path.indexOf('?'))).get('since')!;
+    sinces.push(since);
+    return { events: rows.filter(row => row.created_at >= since), page: { hasMore: false, nextCursor: null } };
+  };
+  const report = await leadTimeReport(all.map(entry => entry.item), reader);
+  assert.equal(sinces.length, 2, 'the first read covers only the newest twenty merges, so it widens');
+  assert.deepEqual(report.last, { medianMs: 30 * minute, count: 10 });
+  // Six newest-reach samples, then the two merged before the late-released four: never the four
+  // in their place, which would read 75 min.
+  assert.deepEqual(report.previous, { medianMs: 30 * minute, count: 10 });
+  assert.equal(report.line, 'Lead time 30 min · last 10 merges · was 30 min');
+});

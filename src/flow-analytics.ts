@@ -2174,12 +2174,14 @@ export async function readReadyInstants(readEvents: (path: string) => Promise<an
  * until they fill or every merge is covered.
  */
 export async function leadTimeReport(work: Work[], readEvents: (path: string) => Promise<any>): Promise<LeadTimeReport> {
-  const mergedCount = work.filter(item => acceptedMergeAt(item)).length;
+  const merged = work.filter(item => time(acceptedMergeAt(item)) !== null).sort((a, b) => time(acceptedMergeAt(b))! - time(acceptedMergeAt(a))!);
   for (let reach = 20; ; reach *= 2) {
-    const since = leadTimeSince(work, reach);
+    // Only the merges the read's bound covers are measured, so an older merge whose release happens
+    // to fall after the bound never fills a window ahead of a newer one released before it.
+    const covered = merged.slice(0, reach), since = leadTimeSince(covered, reach);
     const ready = since ? await readReadyInstants(readEvents, since, Infinity) : { readyAt: new Map<string, string>() };
-    const report = leadTimeFigure(work, ready.readyAt);
-    if (report.last.count + report.previous.count >= 20 || reach >= mergedCount) return report;
+    const report = leadTimeFigure(covered, ready.readyAt);
+    if (report.last.count + report.previous.count >= 20 || reach >= merged.length) return report;
   }
 }
 /**
