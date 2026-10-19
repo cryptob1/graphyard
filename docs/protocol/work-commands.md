@@ -3,13 +3,17 @@
 
 All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations `Idempotency-Key`, reused only for identical retries. Errors: `{"error":"reason"}`; `409`: refusal, not retried.
 
-`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `split`, `producerProofs`. Others: `POST /api/work/KEY/COMMAND`:
+`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs` (`manual:` proofs); `parent`/`children` only split sets. Others: `POST /api/work/KEY/COMMAND`:
 
-- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin`, operator agents additively.
-- `ready`, `unblock`, `resolve` (human `admin`, or an attestation explaining `lease-loss`); `rework`, `recover` `{"reason":…,"previousWorkerStopped":true}`.
-- `claim` `{}`; `heartbeat`, `release`, `blocked` `{"epoch":1,…}`; `blocker-probe` (`pass` clears a routine [blocker](#blocked-work-unblocks-itself)); `review-launch`/`review-verdict`; `workspace` `{epoch, host, path, branch}`.
+- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin`, operator agents additively; omitted `split` kept; stale revisions refused before lease/quarantine checks. `rule: "successor"` (operator agents, additive) marks the loop's re-plan onto split or renamed files; interventions skip it.
+- `decomposition` (coordinator): `{event:"started"|"decided"|"failed",…}`; `decided` (`payload.children`) [splits](#splitting-an-item).
+- `ready`, `unblock`: `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3). Two-party `release`/`unblock`/pinned `close` decisions survive bookkeeping; others settle `stale`. `ready`/`release`/dispatch refuse loop-owned items.
+- `resolve`: human `admin`, or an attestation explaining `lease-loss`; head-bound `rework` (`input.binding` `SHA:GROUNDS`) is refused while another candidate stands, approval settling `stale`.
+- `rework`, `recover` (delivered quarantine): `{"reason":…,"previousWorkerStopped":true}`; `repair` `{"reason":…}` (coordinator/admin) rebuilds a head carrying another item's unlanded commits.
+- `claim` `{}`; `heartbeat`; `release` `{"epoch":1}` (`"cause"` or `"failure":{…}` → `workspace.failed`; untouched claims keep epochs); `blocked` `{"epoch":1,"reason":…,"partialWork":…}` (reason releases; null clears); `blocker-probe` (`pass` clears a routine [blocker](#blocked-work-unblocks-itself)); `review-launch`/`review-verdict`/`review-withdraw` ([review](../coordination.md#review-gate-verdicts-not-threads)); `workspace` `{"epoch":1,"host":…,"path":…,"branch":…}`, optional `preserved`.
 - `submit`: `{"epoch":1,"head":SHA}` (`complete GY-N EPOCH --head [SHA]`; nothing is pushed): the control plane, the only [merger](../delivery-redesign.md#the-merger), allocates one change number per head into `candidate.pr`/`submission.pr`; the older `{"epoch":1,"pr":123}` form answers only for pre-merge-writer changes. `409` if applied retro check fails.
-- `deployment`, `triage` (coordinator); `POST /api/retro/synthesize` and `POST /api/retro/ID/approve|refuse` ([retro artefacts](../operations.md#retro-synthesis)).
+- `deployment`, `triage` `{judgement}` (coordinator): approver-refused closures return to triage; the same closure on an unchanged item is dropped unrecorded.
+- `POST /api/retro/synthesize` and `POST /api/retro/ID/approve|refuse` ([retro artefacts](../operations.md#retro-synthesis)).
 
 No endpoint sets lifecycle state.
 

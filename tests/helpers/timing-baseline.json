@@ -709,6 +709,7 @@
     "tests/soak-reclaim-refusal.test.ts": 2659,
     "tests/soak-red-regression.test.ts": 1000,
     "tests/soak-release-filing.test.ts": 4721,
+    "tests/capped-withdrawal-control-plane.test.ts": 5000,
     "tests/soak-rework-ground.test.ts": 1213,
     "tests/soak-scope-race.test.ts": 4281,
     "tests/soak-scope-settling.test.ts": 1146,
