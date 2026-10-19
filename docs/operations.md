@@ -23,7 +23,7 @@ graphyard master checkout-restore "reason"
 
 Never attest a stop you have not confirmed.
 
-`master checkout-restore` serves the verified snapshot under the loop's loader; an unstartable serve dies at its startup bound, never hanging.
+`master checkout-restore` serves the verified snapshot under the loop's loader, dying at its startup bound when unstartable.
 
 ## Safety facts that never change
 
@@ -85,7 +85,7 @@ Reconcile evaluates changed and due rows, ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` 
 
 ## Observation
 
-Graphyard observes no remote thread, check run or commit status; no request budget, webhook or observation cadence; every candidate is observed from the shared checkout.
+Graphyard observes no remote thread, check run or commit status — no request budget, webhook or cadence; every candidate is observed from the shared checkout.
 
 ## Bootstrap mode for a self-proving change
 
@@ -97,7 +97,7 @@ Remedies: `graphyard master run --once`, `herdr pane close PANE`, raise a role's
 
 ## Withdrawal, credentials, grants
 
-Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A merge outside the gates is a permanent violation: never bypass; a delivered item with a failed smoke proof stays Done.
+Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself, never bypass; a delivered item with a failed smoke proof stays Done.
 
 ## Merge bypass
 

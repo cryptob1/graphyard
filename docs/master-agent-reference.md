@@ -3,7 +3,7 @@
 
 ## Items, scope and human waits
 
-`scope-request` files nothing, the plan is not a lock (GY-1991). Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([the dashboard](onboarding.md#the-dashboard)); `answer GY-N …`; criterion-rewrite asks refused.
+`scope-request` files nothing (GY-1991). Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([the dashboard](onboarding.md#the-dashboard)); `answer GY-N …`; criterion-rewrite asks refused.
 
 ## Promotion to autonomy
 
@@ -31,7 +31,7 @@ Unacted producer requests relaunch on untried profile.
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): a past-threshold class is one attention line, never an item; a cycle over 60s is attention, never an item; an unbound [stall](operations.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing; a queue-held trial, push or `base failure` refusal is the writer's motion, never a fault. Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`.
+`faultClass` (`master status` `faults`): a past-threshold class or a cycle over 60s is one attention line, never an item; an unbound [stall](operations.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing; a queue-held trial, push or `base failure` refusal is the writer's motion, never a fault. Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`.
 
 ## Merge trial
 
