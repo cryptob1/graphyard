@@ -233,18 +233,23 @@ export const answerHumanCommand: CliCommand = {
   },
 };
 /**
- * GY-2171: the operator's admin credential this machine's install of ROOT's repository recorded
- * (the human admin of ~/.config/graphyard/<install>/install.json, its token beside it), and the
- * tailnet address `graphyard up` served the dashboard on, if any. Null when no such credential is here.
+ * GY-2171: the operator's admin credential this machine's install of ROOT's repository recorded, and
+ * the tailnet address `graphyard up` served the dashboard on, if any. The token sits under
+ * <install>/tokens/: a local install keeps <install> under the config home with install.json naming
+ * the human admin; a self-contained host writes only the tokens, its loop's GRAPHYARD_CONFIG_HOME
+ * being <install> itself, and the operator is the planned `<install>-operator`. Null when neither is here.
  */
 export async function recordedOperator(root: string): Promise<{ token: string; reachableUrl: string | null } | null> {
   let repository: string | null;
   try { repository = repositoryFromRemote(execFileSync('git', ['remote', 'get-url', 'origin'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })); } catch { return null; }
   if (!repository) return null;
-  const directory = installDirectory(installIdFor(repository));
-  const admins = (await readInstallRecord(directory).catch(() => null))?.principals.filter(principal => principal.role === 'admin') ?? [];
-  const admin = admins.find(principal => principal.sessionKind === 'human') ?? admins[0];
-  const token = admin ? await readToken(directory, admin.id).catch(() => null) : null;
+  const installId = installIdFor(repository);
+  let token: string | null = null;
+  for (const directory of [installDirectory(installId), configHome()]) {
+    const admins = (await readInstallRecord(directory).catch(() => null))?.principals.filter(principal => principal.role === 'admin') ?? [];
+    const operator = admins.find(principal => principal.sessionKind === 'human')?.id ?? admins[0]?.id ?? `${installId}-operator`;
+    if ((token = await readToken(directory, operator).catch(() => null))) break;
+  }
   if (!token) return null;
   const up = await readFile(join(root, '.graphyard/up.json'), 'utf8').then(JSON.parse, () => null);
   return { token, reachableUrl: typeof up?.tailnetUrl === 'string' && up.tailnetUrl ? up.tailnetUrl : null };

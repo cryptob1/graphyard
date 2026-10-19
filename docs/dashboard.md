@@ -5,7 +5,7 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## From your phone
 
-Serves `127.0.0.1:4310` or the install's free port ([install](install.md)). With Tailscale, `up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` plus tailnet URL; `--share-tailnet` runs it (never `funnel`), `reachableUrl` (`up.json`) feeds sign-in links. A green `up` ends with a single-use `signIn` link (10min). Later, `graphyard login` (no options; the sign-in screen shows it) mints one with the install's operator credential under `~/.config/graphyard/<install>/`, on that tailnet URL; the session lasts 30 days (until a server restart).
+Serves `127.0.0.1:4310` or the install's free port ([install](install.md)). With Tailscale, `up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` plus tailnet URL; `--share-tailnet` runs it (never `funnel`), `reachableUrl` (`up.json`) feeds sign-in links. A green `up` ends with a single-use `signIn` link (10min). Later, `graphyard login` (no options; the sign-in screen shows it) mints one with the install's operator credential under `~/.config/graphyard/<install>/tokens/` (a self-contained host's too), on that tailnet URL; the session lasts 30 days (until a server restart).
 
 ## Work
 
