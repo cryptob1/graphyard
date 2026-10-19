@@ -58,8 +58,11 @@ const gate = (item: Work, name: string) => item.gates.find(entry => entry.name =
 const createdAtOf = (item: Pick<Work, 'createdAt'>) => Date.parse(item.createdAt) || 0;
 /** A hotfix (an item titled `Hotfix: …`) is merged before every other queued head, so a fix to a bottleneck never waits out the queue. */
 export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.title ?? '');
+/** The item the loop's base-failure step files for a failing base test (`baseFailureItem`'s title): it unblocks every held head, so it goes first too. */
+export const isBaseRepair = (item: Pick<Work, 'title'>) => /^base branch \S+ fails \S+ test: /i.test(item.title ?? '');
+const mergesFirst = (item: Pick<Work, 'title'>) => isHotfix(item) || isBaseRepair(item);
 /**
- * The control-plane candidates owed a merge, hotfixes first then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
+ * The control-plane candidates owed a merge, hotfixes and base-failure repairs first then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
  * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
  * and `review` gates passed as the control plane served them: its review gate fails a delta reviewed before
  * merge (a sensitive one, or any under a repository declaring `review.normalChanges: pre-merge`) until its
@@ -88,11 +91,11 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     return true;
   // The oldest item first, by when it was filed, not by its latest submission: lead time runs from release, so a head
   // redone after a refusal goes ahead of newer work instead of rejoining at the back.
-  }).sort((a, b) => Number(isHotfix(b)) - Number(isHotfix(a)) || createdAtOf(a) - createdAtOf(b) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
+  }).sort((a, b) => Number(mergesFirst(b)) - Number(mergesFirst(a)) || createdAtOf(a) - createdAtOf(b) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
   const queue = owed.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
   return { next: blocking ? null : owed[0] ?? null, due: blocking ? [] : owed, queue, blockedBy: blocking?.key ?? null };
 }
-/** The oldest-submitted candidate due a merge (hotfixes first), or null while nothing is due or an open intent blocks the queue (AC-1). */
+/** The oldest-submitted candidate due a merge (hotfixes and base-failure repairs first), or null while nothing is due or an open intent blocks the queue (AC-1). */
 export const nextToMerge = (work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number) => mergeQueue(work, ledger, now).next;
 
 // ---- The ledger events the executor records --------------------------------------------------------
