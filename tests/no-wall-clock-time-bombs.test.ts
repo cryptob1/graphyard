@@ -796,7 +796,7 @@ test('unit:no-wall-clock-time-bombs — an allowance is bound to the dates and u
  */
 export const allowances: Record<string, Allowance> = {
   'tests/action-priority.test.ts': { why: 'the 2000-01-01 lease expiry forces a lapse that stays lapsed, 2026-09-22 resetsAt is a past record the note quotes, and 2026-09-21 `at` is the fixed now handed to nextAction', dates: ['2000-01-01', '2026-09-21', '2026-09-22'], readings: 11 },
-  'tests/action-queue.test.ts': { why: 'the 2026-09-01 boundAt is reviewer config and the 2026-09-20 `at`/clock is the fixed now handed to reconcileActions and evaluate; Date.now() serves only the live engine tests', dates: ['2026-09-01', '2026-09-20'], readings: 55 },
+  'tests/action-queue.test.ts': { why: 'the 2026-09-01 boundAt is reviewer config and the 2026-09-20 `at`/clock is the fixed now handed to reconcileActions and evaluate; Date.now() serves only the live engine tests', dates: ['2026-09-01', '2026-09-20'], readings: 54 },
   'tests/action-totality.test.ts': { why: 'the 2026-09-21 `now` is handed explicitly to nextAction and actionAccount over fixtures built from it; new Date() serves the engine tests and stamps observations', dates: ['2026-09-21'], readings: 3 },
   'tests/agent-registry.test.ts': { why: 'the 2026-09-20 at/now/resetsAt trio is the fixed clock handed to fleetView, chooseSession and sessionEnded; Date.now() only builds relative expiries and reset times', dates: ['2026-09-20'], readings: 13 },
   'tests/answered-owner-close.test.ts': { why: 'the 2026-10-07 base instants are throughput fixtures judged by verifyThroughput against the explicit `now` derived from base; Date.now() only stamps closures and steps cycles', dates: ['2026-10-07'], readings: 8 },
@@ -884,7 +884,6 @@ export const allowances: Record<string, Allowance> = {
   'tests/master-browser.test.ts': { why: '2026-09-18T12:00 is the stub flow\'s ticking `now` and the recording page', dates: ['2026-09-18'], readings: 3 },
   'tests/master-loop-resilience.test.ts': { why: 'the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, alre', dates: ['2026-09-19', '2026-10-09'], readings: 24 },
   'tests/master-supervision.test.ts': { why: 'the 2026-10-07 upgrade.last.at is a cursor record loopSupervisorEvidence', dates: ['2026-10-07'], readings: 6 },
-  'tests/master-verification.test.ts': { why: 'the 2030-01-01 clock is passed as `now` to assessDeploymentVerification ', dates: ['2030-01-01'], readings: 8 },
   'tests/master.test.ts': { why: 'every 2030-01-01 instant is judged at a 2030 `now`/observedAt the test p', dates: ['2029-12-31', '2030-01-01'], readings: 2 },
   'tests/mechanical-findings.test.ts': { why: "Time-bomb allowance (GY-1694): the 2026-09-30 commit and verdict instants are already past their 60-minute mechanical bound and only recorded; the holds asserted come from approvals stamped new Date() and judged at Date.now(). The plan report's stamps (planOf, and the hold-freshness test's one Date.now() every plan instant derives from) are the loop's own report of a ledger the test just read, judged against the same reading.", dates: ['2026-09-30'], readings: 14 },
   'tests/merge-executor-owner.test.ts': { why: 'the 2026-09-20 merge instant is a recorded observation the status only r', dates: ['2026-09-20'], readings: 5 },

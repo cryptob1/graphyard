@@ -131,7 +131,7 @@ external blocker recorded in Graphyard; and (2) every merged change is deployed 
 live-verified against the exact deployed release, or a genuinely external deployment
 blocker is recorded in Graphyard. Delivered work is immutable, so a deployment
 blocker is recorded as a follow-up work item naming the delivered item, its merge
-commit, and the external cause; the delivery stays pending until the release serves it.
+commit, and the external cause; delivered at merge; release health is one status line.
 An observed merge alone does not end the loop. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.

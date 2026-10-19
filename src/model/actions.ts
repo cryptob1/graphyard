@@ -218,13 +218,11 @@ export function settleDelivered(work: Work, all: Work[], now: Date): boolean {
  * Every row an executor may take now, in claim order (`claimOrder`): the item's priority, then rows
  * that unblock a merge, then the oldest request.
  *
- * A delivered item owes nothing an executor can run but the deployment that carries it: whatever
- * else it still holds is left over from before it was delivered, and running it is refused every
- * time (GY-185). Only its `verify-deployment` row is offered; the rest wait to be retired.
+ * A delivered item owes nothing an executor can run: whatever it still holds is left over from
+ * before it was delivered, and running it is refused every time (GY-185); it waits to be retired.
  */
 export function openActions(all: Work[], now: Date, kinds?: readonly NextActionKind[]): { work: Work; row: ActionRow }[] {
-  return all.flatMap(work => (work.actionQueue?.actions ?? [])
-    .filter(row => work.stage !== 'done' || row.kind === 'verify-deployment')
+  return all.filter(work => work.stage !== 'done').flatMap(work => (work.actionQueue?.actions ?? [])
     .filter(row => claimable(row, now) && (!kinds || kinds.includes(row.kind)))
     .map(row => ({ work, row })))
     .sort(claimOrder);
