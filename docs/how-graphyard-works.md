@@ -34,7 +34,7 @@ All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: bootstrap: operator supervises one worker; later master runs a credentialed fleet.
+Text equivalent: in bootstrap the human operator supervises one worker; later master runs a credentialed fleet.
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
