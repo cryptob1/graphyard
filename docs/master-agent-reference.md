@@ -41,6 +41,6 @@ The merge writer's trial, the only trial: the merge commit's build and affected 
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`/`waitMs`/`reworkRounds`/`interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`. `leadTime` is the report's first field: the median released→merged time over the last 10 merges, the previous 10's beside it; items merged with no recorded release are skipped, and under ten merges the line counts what it covers ([the speed number](protocol/pipeline-speed.md)).
+Target: submit→merge p50 ≤30 minutes, p90 ≤60 minutes. Row `speed`: `executionMs`/`waitMs`/`reworkRounds`/`interventions`; verdict `speed.submitToMerge`; `scripts/measure-pipeline-speed.mjs` feeds `manual:speed-target-met`. `leadTime` leads the report: median released→merged over the last 10 merges ([the speed number](protocol/pipeline-speed.md)).
 
 Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread. Master/merge-mode/record/triage-phase calls too.
