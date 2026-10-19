@@ -378,6 +378,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...readingEffects(current, mutate, asCoordinator, { root, run }), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
+    readWork: async work => await asCoordinator(`work/${encodeURIComponent(work.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
