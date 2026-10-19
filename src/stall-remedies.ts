@@ -1,8 +1,3 @@
-import { demand } from './model/refusal.js';
-import { actionStall } from './model/action-progress.js';
-import type { ActionRow } from './model/actions.js';
-import type { Work } from './model/work.js';
-
 /**
  * The reason→remedy registry (GY-949): what clears each unchanged reason a stalled action row
  * keeps failing for, or which bounded decision owns it.
@@ -18,11 +13,9 @@ import type { Work } from './model/work.js';
  * Each entry recognises one family of reasons and binds it to its remedy:
  *
  * - `installation-accept` — the control-plane App lacks a permission its installation has a
- *   pending request for. The loop applies it itself (`applies: 'loop'`): it runs the master browser
- *   installation-accept flow, app-permissions first when the flow reports the App does not yet
- *   request the permission, verifies through the API, and records the attempt and its outcome on
- *   the row exactly once per unchanged run (`recordStallRemedy`). A refused remedy escalates once
- *   with the refusal named (liveness.ts) and is never retried for that run.
+ *   pending request for. The master runs the master browser installation-accept flow,
+ *   app-permissions first when the App does not yet request the permission. The loop no longer
+ *   applies it itself (GY-1984): the action-row remedy record went with the executor fleet.
  * - `capacity` — a role at its concurrency limit. Nothing the loop can run clears it: it is a
  *   capacity decision, owned by the master, and the lever is named — the role's concurrency in the
  *   agent registry, or a live session of the role ending.
@@ -33,7 +26,7 @@ import type { Work } from './model/work.js';
  *   installation-level setup line rather than a per-item stalled-action (GY-2014).
  * - `credential-401` — a dispatched worker's claim was refused with the control plane's own 401
  *   ("A valid Graphyard bearer token is required"). The same lever the step-stall registry names
- *   for 401s; one attempt may be recorded per unchanged run via `recordStallRemedy` (GY-2014).
+ *   for 401s (GY-2014).
  * - `reviewer-identity` — the control plane refused a reviewer launch with a 4xx. The master owns
  *   the reviewer-identity remedy (the condition GY-2008 clears); attention raises that line rather
  *   than a per-item stalled-action (GY-2014).
@@ -43,18 +36,13 @@ import type { Work } from './model/work.js';
 
 export const stallRemedyKinds = ['installation-accept', 'capacity', 'installation-suspended', 'installation-setup', 'credential-401', 'reviewer-identity'] as const;
 export type StallRemedyKind = typeof stallRemedyKinds[number];
-/** The master browser flows a loop-applied remedy may run, in the order it may run them. */
-export const remedyFlows = ['installation-accept', 'app-permissions'] as const;
-export type RemedyFlow = typeof remedyFlows[number];
-
 export interface BoundRemedy {
   kind: StallRemedyKind;
-  /** `loop`: the loop applies the remedy itself; `decision`: a bounded decision `owner` makes. */
-  applies: 'loop' | 'decision';
+  /** Who makes the bounded decision the remedy is. */
   owner: 'master' | 'human';
-  /** The remedy named in one line, for an escalation's detail and the loop's own record. */
+  /** The remedy named in one line, for an escalation's detail. */
   remedy: string;
-  /** What the attention names as the next step while no attempt of the remedy is recorded. */
+  /** What the attention names as the next step. */
   next: string;
 }
 
@@ -62,16 +50,16 @@ export interface BoundRemedy {
 export const credential401Remedy = 'renew the refused host-owned credential — a worker or producer profile\'s from the credential the install issued for its principal, or the merge writer\'s deploy key — then verify it authenticates; the coordinator\'s own credential is the operator\'s to rotate';
 
 const installationAccept = (app: string, permission: string, url: string): BoundRemedy => ({
-  kind: 'installation-accept', applies: 'loop', owner: 'master',
+  kind: 'installation-accept', owner: 'master',
   remedy: `graphyard master browser installation-accept (app-permissions first when the App does not yet request it), accepting App ${app}'s pending request for ${permission} at ${url}`,
-  next: `Nothing to run by hand: the loop applies the sanctioned remedy itself — graphyard master browser installation-accept, app-permissions first when the App does not yet request ${permission} — once for this unchanged run, verifies the grant through the API and records the outcome on the row; the row's own recheck picks the granted permission up`,
+  next: `Run graphyard master browser installation-accept — graphyard master browser app-permissions first when the App does not yet request ${permission} — to accept App ${app}'s pending request at ${url}; the row's own recheck picks the granted permission up`,
 });
 
 /** Each family of stall reasons and the remedy it binds to; the first entry that recognises a reason binds it. */
 export const stallRemedyRegistry: readonly { kind: StallRemedyKind; bind: (reason: string) => BoundRemedy | null }[] = [
   {
     kind: 'installation-suspended',
-    bind: reason => /\binstallation(?:\s+\S+)?\s+is suspended\b/i.test(reason) ? { kind: 'installation-suspended', applies: 'decision', owner: 'human',
+    bind: reason => /\binstallation(?:\s+\S+)?\s+is suspended\b/i.test(reason) ? { kind: 'installation-suspended', owner: 'human',
       remedy: 'reinstate the suspended GitHub App installation from the account that owns it',
       next: 'Reinstate the suspended GitHub App installation from the account that owns it; nothing the loop runs can, and the row\'s recheck picks the reinstated installation up' } : null,
   },
@@ -91,28 +79,28 @@ export const stallRemedyRegistry: readonly { kind: StallRemedyKind; bind: (reaso
       if (!full) return null;
       const [, role, live, limit] = full;
       const lever = `raise role ${role}'s concurrency in the agent registry (graphyard master registry role set ${role} ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON, N above ${limit}) or let a live ${role} session end`;
-      return { kind: 'capacity', applies: 'decision', owner: 'master', remedy: `a capacity decision: ${lever}`,
+      return { kind: 'capacity', owner: 'master', remedy: `a capacity decision: ${lever}`,
         next: `Role ${role} is full (${live} of ${limit} live), and retrying moves nothing: it is a capacity decision the master owns — ${lever}. The row is escalated to that decision with this lever named if it keeps failing, and is claimed within one recheck of a slot freeing` };
     },
   },
   {
     // observeDeployment (src/daemon/deployment.ts) words a 4xx from the configured deploymentUrl this way.
     kind: 'installation-setup',
-    bind: reason => /Deployment endpoint answered 4\d\d\b/.test(reason) ? { kind: 'installation-setup', applies: 'decision', owner: 'master',
+    bind: reason => /Deployment endpoint answered 4\d\d\b/.test(reason) ? { kind: 'installation-setup', owner: 'master',
       remedy: 'fix the installation\'s configured deploymentUrl (graphyard master init --deployment-url) so the endpoint answers 2xx with the build SHA at deploymentShaField, or clear the misconfigured URL',
       next: 'Fix the installation\'s configured deploymentUrl so the endpoint answers 2xx with the build SHA (graphyard master init --deployment-url), or clear the misconfigured URL; the setup path already raises this, and each verify-deployment row\'s recheck picks the repaired endpoint up' } : null,
   },
   {
     // demand (src/server/auth.ts) refuses every claim whose bearer resolves to no principal this way; GY-1998 owns the condition.
     kind: 'credential-401',
-    bind: reason => /A valid Graphyard bearer token is required/.test(reason) ? { kind: 'credential-401', applies: 'loop', owner: 'master',
+    bind: reason => /A valid Graphyard bearer token is required/.test(reason) ? { kind: 'credential-401', owner: 'master',
       remedy: credential401Remedy,
-      next: `Nothing to run by hand: renew the refused host-owned credential once for this unchanged run (the credential-401 remedy the step-stall registry names for 401s) — ${credential401Remedy} — and record the attempt on the row; the row's recheck picks a working credential up` } : null,
+      next: `Renew the refused host-owned credential (the credential-401 remedy the step-stall registry names for 401s) — ${credential401Remedy}; the row's recheck picks a working credential up` } : null,
   },
   {
     // launchReview (src/reviewer.ts) surfaces a control-plane 4xx this way; GY-2008 owns the reviewer-identity condition.
     kind: 'reviewer-identity',
-    bind: reason => /The control plane refused the reviewer launch of \S+ \(4\d\d\):/.test(reason) ? { kind: 'reviewer-identity', applies: 'decision', owner: 'master',
+    bind: reason => /The control plane refused the reviewer launch of \S+ \(4\d\d\):/.test(reason) ? { kind: 'reviewer-identity', owner: 'master',
       remedy: 'repair the reviewer identity the control plane registers for launches (graphyard master reviewer setup or graphyard master reviewer bind); the condition GY-2008 clears',
       next: 'Repair the reviewer identity the control plane registers for launches (graphyard master reviewer setup or graphyard master reviewer bind) — the condition GY-2008 clears; each request-review row\'s recheck picks the repaired identity up' } : null,
   },
@@ -123,108 +111,6 @@ export function stallRemedy(reason: string): BoundRemedy | null {
   return null;
 }
 
-// ---- The remedy record on the row ---------------------------------------------------------------
-
-export const remedyOutcomes = ['applied', 'unchanged', 'refused'] as const;
-export type RemedyOutcome = typeof remedyOutcomes[number];
-/** One attempt of a loop-applied remedy, recorded on the row it was applied for. */
-export interface RemedyRecord {
-  remedy: StallRemedyKind;
-  /** The unchanged reason the run failed for when the remedy was applied. */
-  reason: string;
-  at: string; by: string;
-  outcome: RemedyOutcome;
-  /** What the remedy did or why it was refused, as the flow reported it. */
-  detail: string;
-  /** The flows it ran, in order. */
-  flows: RemedyFlow[];
-}
-
-/**
- * The remedy recorded for the row's current unchanged run of `reason`, or null when none is. A run
- * spans every copy of the row — an escalation retires the row and a lifted one opens it afresh — so
- * every copy is read. A record stands while nothing after it moved the row: no completion, no
- * reopening and no failure for another reason. The run's first failure is not the test, because a
- * long run outgrows the row's retained history and its first failure is trimmed away.
- */
-export function standingRemedy(work: Pick<Work, 'actionQueue'>, id: string, reason: string): RemedyRecord | null {
-  const copies = [...(work.actionQueue?.history ?? []), ...(work.actionQueue?.actions ?? [])].filter(row => row.id === id);
-  const record = copies.map(row => row.remedy).filter((entry): entry is RemedyRecord => !!entry && entry.reason === reason)
-    .sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1);
-  if (!record) return null;
-  const after = copies.flatMap(row => row.history).filter(entry => Date.parse(entry.at) > Date.parse(record.at));
-  return after.some(entry => entry.event === 'completed' || entry.event === 'reopened' || entry.event === 'failed' && entry.reason !== reason) ? null : record;
-}
-
-/**
- * The stall a completed row's last event ended, or null. A remedy that clears the condition lets the
- * held job resume, and its executor can complete the row before the loop's record of the remedy
- * lands; the record still belongs to the run it ended (GY-1586).
- */
-function endedStall(row: ActionRow) {
-  return row.state === 'done' && row.history.at(-1)?.event === 'completed' ? actionStall({ ...row, history: row.history.slice(0, -1) }) : null;
-}
-
-/**
- * Record one attempt of a loop-applied remedy on the row it was applied for. Refused unless the
- * row is still stalled on the reason the remedy was applied for, or completed straight out of that
- * run (`endedStall`), and no attempt is recorded for that run yet: one record per unchanged run,
- * whoever asks. A completed row the item's reconciliation already retired is found in the queue's
- * history: settlement wakes that reconciliation, so it can run before the record lands (GY-1586).
- */
-export function recordStallRemedy(work: Work, id: string, input: Omit<RemedyRecord, 'at' | 'by'>, by: string, now: Date): ActionRow {
-  const open = work.actionQueue?.actions.find(entry => entry.id === id);
-  const row = open ?? work.actionQueue?.history.findLast(entry => entry.id === id && endedStall(entry));
-  demand(row, 'Action is not open on this work item', 404);
-  const live = open ? actionStall(row!) : null, stall = live ?? endedStall(row!);
-  demand(stall && stall.reason === input.reason, 'The row is no longer stalled on the reason the remedy was applied for', 409);
-  const bound = stallRemedy(input.reason);
-  demand(bound?.applies === 'loop' && bound.kind === input.remedy, `The reason does not bind to the ${input.remedy} remedy`, 409);
-  // The completion that ended the run would read as a fresh run to `standingRemedy`, so an ended run is
-  // read without it. Not the run's first failure either: a long run outgrows the row's retained history.
-  const ended = (entry: ActionRow) => entry === row ? { ...entry, history: entry.history.slice(0, -1) } : entry;
-  const run = live ? work : { actionQueue: { actions: work.actionQueue!.actions.map(ended), history: work.actionQueue!.history.map(ended) } };
-  demand(!standingRemedy(run, id, input.reason), 'A remedy is already recorded for this unchanged run', 409);
-  row!.remedy = { ...input, at: now.toISOString(), by };
-  return row!;
-}
-
-// ---- Applying a loop remedy ---------------------------------------------------------------------
-
-/** What one master browser flow reported: its ledger outcome, whether the API verified it, and why. */
-export interface FlowResult { outcome: 'applied' | 'unchanged' | 'refused'; verified: boolean; reason: string }
-/** The refusal installation-accept gives while the App itself does not yet request the permission. */
-export const appPermissionsFirst = 'run master browser app-permissions first';
-
-/**
- * Apply the installation-accept remedy through `flow`: installation-accept, and when it is refused
- * because the App does not yet request the permission, app-permissions and installation-accept
- * again. A flow that throws is a refusal carrying its message. Never more than those three runs.
- */
-export async function applyInstallationAccept(flow: (name: RemedyFlow) => Promise<FlowResult>): Promise<Pick<RemedyRecord, 'outcome' | 'detail' | 'flows'>> {
-  const flows: RemedyFlow[] = [];
-  const attempt = async (name: RemedyFlow): Promise<FlowResult> => {
-    flows.push(name);
-    try { return await flow(name); } catch (error) { return { outcome: 'refused', verified: false, reason: error instanceof Error ? error.message : String(error) }; }
-  };
-  let accepted = await attempt('installation-accept');
-  if (accepted.outcome === 'refused' && accepted.reason.includes(appPermissionsFirst)) {
-    const raised = await attempt('app-permissions');
-    if (raised.outcome === 'refused') return { outcome: 'refused', detail: `app-permissions was refused: ${raised.reason}`.slice(0, 2000), flows };
-    accepted = await attempt('installation-accept');
-  }
-  const outcome = accepted.outcome === 'refused' || !accepted.verified ? 'refused' : accepted.outcome;
-  return { outcome, detail: `installation-accept ${accepted.outcome}${accepted.verified ? ', verified through the API' : ''}: ${accepted.reason}`.slice(0, 2000), flows };
-}
-
-/** The remedy as the attention and escalation name it once an attempt is recorded. */
-export function describeRemedyRecord(record: RemedyRecord) {
-  const ran = record.flows.join(', then ');
-  return record.outcome === 'refused'
-    ? `the loop's ${record.remedy} remedy (${ran}) was refused at ${record.at}: ${record.detail}`
-    : `the loop applied the ${record.remedy} remedy (${ran}) at ${record.at}, ${record.outcome}: ${record.detail}`;
-}
-
 // ---- Step-stall remedies (GY-1854) ---------------------------------------------------------------
 
 /**
@@ -232,7 +118,7 @@ export function describeRemedyRecord(record: RemedyRecord) {
  * Where the action-row registry above binds a stalled row's unchanged reason, this one binds a
  * stalled call's signature, and the loop's stall step (src/daemon/step-stalls.ts) applies each
  * bound remedy once per run and records the attempt on the stall. Pure here: nothing runs until a
- * caller hands the port in, exactly as `applyInstallationAccept` runs only the flow it is given.
+ * caller hands the port in.
  */
 export const stepStallRemedyKinds = ['profile-unknown', 'credential-401', 'merge-record-idempotency'] as const;
 export type StepStallRemedyKind = typeof stepStallRemedyKinds[number];

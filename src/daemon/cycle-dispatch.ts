@@ -27,7 +27,7 @@ import { researchHold, researchRunner, researchSettings, researchStep } from '..
 import { decompositionHold, decompositionSettings } from '../decomposition.js';
 import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
-import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
+import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, deploySkewFailure, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
 import { closeStanding, closingItems } from './stale-closes.js';
 import { guardCarried, settleCarriedWrites } from './carried-writes.js';
 import { carriedCall, launchWrite, owedWrite, recordCarried, stepCallCarried, supersedeOwed, unboundedEffects, withinStepBudget } from './step-budget.js';
@@ -500,12 +500,15 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
         // already released the claim with its git message, which hands the epoch back, and the
         // item's record here keeps that message.
         // GY-1345: nor does a plane-wide failure, which says nothing about the profile that met it.
-        const workspace = workspaceDispatchFailure(message(error)), planeWide = planeWideFailure(message(error));
-        if (!workspace && !planeWide) recordProfileFailure(state, current.profile, message(error), now());
+        // GY-2177: nor a deploy's release-skew window — the deploy is the loop's own lifecycle, and
+        // until the upgrade pass aligns the held CLI to the served release, every claim refuses with
+        // the skew named, whatever the item: it cools no profile, counts zero and files no fault.
+        const workspace = workspaceDispatchFailure(message(error)), planeWide = planeWideFailure(message(error)), deployWide = deploySkewFailure(message(error));
+        if (!workspace && !planeWide && !deployWide) recordProfileFailure(state, current.profile, message(error), now());
         const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}${run.count ? ` (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)` : planeWide ? ' (a plane-wide control-plane failure, which cools no profile and never counts toward a dispatch-failure blocker)' : ' (a fleet-idle cause, which never counts toward a dispatch-failure blocker)'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist,
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}${run.count ? ` (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)` : planeWide ? ' (a plane-wide control-plane failure, which cools no profile and never counts toward a dispatch-failure blocker)' : deployWide ? " (the deploy's release-skew window, which cools no profile and never counts toward a dispatch-failure blocker)" : ' (a fleet-idle cause, which never counts toward a dispatch-failure blocker)'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist,
           // GY-1375: nor is it a session-liveness fault of the item's: the outage is the one fault, and the retry redispatches.
-          planeWide ? null : undefined));
+          planeWide || deployWide ? null : undefined));
         if (run.count && run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
         return;
       }

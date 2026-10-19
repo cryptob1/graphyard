@@ -291,12 +291,11 @@ test('unit:upgrade-external-install — an external install an earlier loop alre
     state.upgrade.pending = { from: 'a'.repeat(40), to: loaded, code: true };
     state.upgrade.snapshot = { at: iso(0), commit: loaded, checkout: 'b'.repeat(40), dirty: ['src/master.ts'] };
     state.upgrade.stalled = { cause: 'executors-refused', reason: 'a claim was in flight', since: iso(0), at: iso(0) };
-    const pins: (string | null)[] = [], executorEntries: (string | null)[] = [];
+    const pins: (string | null)[] = [];
     let unitRewrites = 0, unitRefused = true;
     const { run, operations } = recordingRun();
     const legacyDeps = { ...deps(managed, run),
       holdCli: async (commit: string | null) => { pins.push(commit); },
-      alignExecutorUnits: async (script: string | null) => { executorEntries.push(script); return { wrote: 'updated', reason: null }; },
       alignUnit: async () => { unitRewrites++; return unitRefused ? { wrote: 'refused', reason: 'unit not writable', launcherStale: true } : { wrote: 'updated', reason: null }; } };
 
     // A step that fails keeps the record, says why once, and is retried next pass.
@@ -308,7 +307,6 @@ test('unit:upgrade-external-install — an external install an earlier loop alre
     unitRefused = false;
     assert.equal((await performSelfUpgrade(master, state, legacyDeps)).outcome, 'refused');
     assert.deepEqual(pins, [null, null], 'the pin is lifted, never placed');
-    assert.deepEqual(executorEntries, [null, null], 'the executor units go back to the checkout’s launcher');
     assert.equal(unitRewrites, 2);
     assert.equal(state.upgrade.pending, null, 'the owed restart is retired');
     assert.equal(state.upgrade.snapshot, undefined, 'the held snapshot record is retired');
@@ -341,15 +339,15 @@ test('unit:upgrade-external-install — a held snapshot of a still-dirty checkou
     state.upgrade.pending = { from: 'a'.repeat(40), to: loaded, code: true };
     state.upgrade.snapshot = { at: iso(0), commit: loaded, checkout: loaded, dirty: ['README.md'] };
     await writeFile(join(checkout, 'README.md'), 'work in progress\n');
-    const pins: (string | null)[] = [], executorEntries: (string | null)[] = [];
+    const pins: (string | null)[] = [];
+    let unitRewrites = 0;
     const { run } = recordingRun();
     const dirtyDeps = { ...deps(managed, run),
       holdCli: async (commit: string | null) => { pins.push(commit); },
-      alignExecutorUnits: async (script: string | null) => { executorEntries.push(script); return { wrote: 'updated', reason: null }; },
-      alignUnit: async () => ({ wrote: 'updated', reason: null }) };
+      alignUnit: async () => { unitRewrites++; return { wrote: 'updated', reason: null }; } };
 
     assert.equal((await performSelfUpgrade(master, state, dirtyDeps)).outcome, 'refused');
-    assert.deepEqual([pins, executorEntries], [[], []], 'the pin and the units keep naming the snapshot while the checkout is dirty');
+    assert.deepEqual([pins, unitRewrites], [[], 0], 'the pin and the loop unit keep naming the snapshot while the checkout is dirty');
     assert.equal(state.upgrade.snapshot?.commit, loaded, 'the snapshot record stands');
     assert.equal(state.upgrade.pending, null, 'the owed restart is retired');
     assert.match(state.actions['upgrade:align']!.detail, /stays pinned until the checkout is clean/);
@@ -358,7 +356,7 @@ test('unit:upgrade-external-install — a held snapshot of a still-dirty checkou
 
     git(checkout, 'checkout', '-q', '--', 'README.md');
     assert.equal((await performSelfUpgrade(master, state, dirtyDeps)).outcome, 'refused');
-    assert.deepEqual([pins, executorEntries], [[null], [null]], 'once clean, the pin lifts and the units return to the checkout\u2019s launcher');
+    assert.deepEqual([pins, unitRewrites], [[null], 1], 'once clean, the pin lifts and the loop unit returns to the checkout\u2019s launcher');
     assert.equal(state.upgrade.snapshot, undefined);
     assert.match(state.actions['upgrade:align']!.detail, /^Retired the held snapshot of /);
   } finally {

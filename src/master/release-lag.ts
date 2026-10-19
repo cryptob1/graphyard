@@ -1,7 +1,6 @@
 // Concern: GY-437 — how far what runs lags the base tip, and the attention that names it.
 //
-// The loop upgrades itself between cycles and `master executors restart` brings the fleet along,
-// but an upgrade that cannot run (a dirty checkout, a refused restart, a loop nothing supervises)
+// The loop upgrades itself between cycles, but an upgrade that cannot run (a dirty checkout, a refused restart, a loop nothing supervises)
 // used to be invisible: every component went on running the release it had loaded. This module
 // says, per component, what it loaded against the base tip, and names any component that stays
 // more than one delivery behind for over ten minutes — one delivery behind is the ordinary gap
@@ -10,7 +9,7 @@
 // promotion window by design (GY-1400): the loop loads only what production serves, so it is never
 // counted toward the lag, and the report names when that promotion is due.
 import { agentOwner, type AttentionItem } from './attention.js';
-import { shortCommit } from '../executor-fleet.js';
+import { shortCommit } from '../daemon/held-cli.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { isExternalUpgradeRefusal } from '../daemon/upgrade-ownership.js';
 
@@ -166,19 +165,17 @@ export function upgradeRefusalAttention(refused: { at: string; reason: string; c
   // GY-1958: an external install's refusal is no checkout to clear — the loop never aligns it, so
   // the remedy is the command upgrade, and nothing in the managed repository at `root` is touched.
   if (isExternalUpgradeRefusal(refused.reason)) return [{ subject: 'upgrade', text: `This install's managed repository is another project than the Graphyard checkout its loop runs from, so the loop runs no self-upgrade: it leaves that checkout at ${shortCommit(refused.commit)} untouched and never fetches in it, and the install upgrades by command.`,
-    ...agentOwner('master', 'Upgrade the install by command when a Graphyard release should run: move the Graphyard checkout the CLI runs from to that release, then run graphyard up, which restarts the loop and the executors onto it; the managed repository is never fetched in or checked out for this') }];
+    ...agentOwner('master', 'Upgrade the install by command when a Graphyard release should run: move the Graphyard checkout the CLI runs from to that release, then run graphyard up, which restarts the loop onto it; the managed repository is never fetched in or checked out for this') }];
   return [{ subject: 'upgrade', text: `The loop left the coordinator checkout at ${shortCommit(refused.commit)} untouched: ${refused.reason} (seen ${refused.at}). It aligns the checkout with ${baseBranch} between cycles once it is a clean, detached checkout of ${baseBranch}.`,
     ...agentOwner('master', `Clear the coordinator checkout at ${root} — git -C ${root} status --porcelain names what is in it, and git -C ${root} checkout --detach "origin/${baseBranch}" returns it to what the loop upgrades onto`) }];
 }
 
-/** The loop-side facts `master status` feeds the lag report: what the cursor and the fleet recorded. */
+/** The loop-side facts `master status` feeds the lag report: what the cursor recorded. */
 export interface LagStatusInputs {
   /** The CLI checkout's commit, when the cursor holds no recorded release. */
   cliCommit: string | null;
   /** The daemon summary's loop facts: its loaded release, its lock, its upgrade state. */
   loop: { release: { commit: string | null; dirty: boolean | null } | null; lock: { startedAt: string } | null; upgrade: { refused: { at: string; reason: string; commit: string | null } | null } | null } | null;
-  /** The live fleet rows (running or standing down): each executor's release and how it comes back. */
-  executors: { name: string; state: string; release: { commit: string | null; dirty: boolean | null }; startedAt: string; restart: string }[];
   /** The promotion wait the loop's cursor records (GY-1400); absent or null when unread. */
   promotion?: PromotionWait | null;
 }
@@ -195,8 +192,6 @@ export async function releaseLagStatus(root: string, baseBranch: string, work: r
   const lag = await releaseLag(await readBaseTip(root, baseBranch), deliveries, [
     { name: 'loop', label: 'The master loop', release: inputs.loop?.release ?? { commit: inputs.cliCommit, dirty: null }, startedAt: inputs.loop?.lock?.startedAt ?? null,
       restart: 'systemctl --user restart graphyard-master (the loop also upgrades itself between cycles once a delivery is verified deployed)' },
-    ...inputs.executors.filter(row => row.state === 'running' || row.state === 'standing-down')
-      .map(row => ({ name: row.name, label: `Executor ${row.name}`, release: row.release, startedAt: row.startedAt, restart: row.restart })),
   ], { root, now: Date.now(), promotion: inputs.promotion });
   // The lag and a checkout the loop's upgrade refused are attention; the report is what status prints.
   return { attention: [...lag.attention, ...upgradeRefusalAttention(inputs.loop?.upgrade?.refused, root, baseBranch)],

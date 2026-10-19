@@ -814,7 +814,7 @@ for (const instance of gy1354Instances) {
 // moved from fc04aa78f209 (the commit it loaded) to c67ed34548f2 (GY-1338's merge, a descendant) while
 // it ran. The guard refused restart and self-upgrade on any move, so the loop stood down on stale
 // code and every later merge stayed inert. A clean, detached descendant that the base branch holds is
-// now recovered onto: the executors restart onto it and the loop re-executes itself. Any other move —
+// now recovered onto: the loop re-executes itself onto it. Any other move —
 // an unmerged feature-branch head among them — stays drift.
 
 /**
@@ -847,7 +847,7 @@ function serving(state: DaemonState, sha: string) {
   return state;
 }
 function recoveringGuard(root: string, state: DaemonState, options: { restartSelf?: () => Promise<void> } = {}) {
-  const restarts = { executors: [] as string[], self: 0, recovers: 0 };
+  const restarts = { self: 0, recovers: 0 };
   const run = (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8' });
   const guard = coordinatorCheckoutGuard({
     state: () => state, read: () => readCoordinatorCheckout(root), agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(Date.now()) }),
@@ -855,7 +855,6 @@ function recoveringGuard(root: string, state: DaemonState, options: { restartSel
     recover: (current, from, to) => {
       restarts.recovers++;
       return upgradeModule.recoverMovedHead(config(), current, from, to, { root, run, now: () => Date.parse('2026-10-06T05:31:54.601Z'),
-        restartExecutors: async commit => { restarts.executors.push(commit); return { result: 'restarted', reason: null, coordinator: { commit }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
         restartSelf: options.restartSelf ?? (async () => { restarts.self++; }) });
     },
   });
@@ -863,7 +862,7 @@ function recoveringGuard(root: string, state: DaemonState, options: { restartSel
 }
 const skippedUpgrade = async () => ({ outcome: 'skipped' as const, reason: 'no delivered item is verified deployed yet' });
 
-test('unit:upgrade-head-divergence-recovers — a HEAD moved forward to a descendant under the running loop is recovered onto: the executors restart and the loop re-executes, with no drift escalation', async () => {
+test('unit:upgrade-head-divergence-recovers — a HEAD moved forward to a descendant under the running loop is recovered onto: the loop re-executes, with no drift escalation', async () => {
   assert.equal(typeof upgradeModule.recoverMovedHead, 'function', 'the loop has a recovery for a moved HEAD');
   const repo = await divergence();
   const state = serving(emptyDaemonState(config()), repo.successor);
@@ -875,7 +874,6 @@ test('unit:upgrade-head-divergence-recovers — a HEAD moved forward to a descen
   const { refusal, upgraded } = await guard.betweenCycles(skippedUpgrade);
   assert.equal(refusal, null, 'the loop does not refuse restart on a forward move');
   assert.equal(upgraded?.outcome, 'upgraded');
-  assert.deepEqual(restarts.executors, [repo.successor], 'the executors restart onto the successor');
   assert.equal(restarts.self, 1, 'the loop re-executes itself onto the successor');
   assert.equal(guard.expected(), repo.successor, 'the successor is now the commit the loop runs');
   assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'no escalation:dirty-checkout is recorded');
@@ -984,7 +982,6 @@ test('unit:upgrade-head-divergence-recovers — a move that is not a clean detac
       if (move !== 'dirty') assert.equal(upgraded, null);
     }
     assert.equal(restarts.self, 0, `${move}: nothing restarts onto it`);
-    assert.deepEqual(restarts.executors, []);
     assert.equal(restarts.recovers, move === 'dirty' ? 0 : 1, `${move}: a dirty tree is never offered, a refused HEAD is tried once`);
     assert.equal(guard.expected(), repo.loaded);
     assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', `${move}: the drift is attention`);
@@ -1059,7 +1056,6 @@ test('unit:forward-drift-escalation-names-restart — a forward move the loop ca
   repo.git('checkout', '--quiet', '--detach', repo.successor);
   const { refusal, upgraded } = await guard.betweenCycles(skippedUpgrade);
   assert.equal(upgraded, null);
-  assert.deepEqual(restarts.executors, [repo.successor], 'the executors were restarted onto it');
   assert.match(refusal ?? '', /no graphyard-master supervisor unit/);
   assert.match(refusal ?? '', new RegExp(`restart the loop onto its own HEAD`));
   assert.doesNotMatch(refusal ?? '', /checkout --detach/);

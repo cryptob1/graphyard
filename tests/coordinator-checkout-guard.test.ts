@@ -6,16 +6,14 @@ import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import type { ActionRow } from '../src/model/actions.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, workerProfileSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { accountLaunch } from '../src/master/environments.js';
 import { installWorkerHarness, prepareSessionHarness, sessionHarnessPlan, workerHarnessPlan } from '../src/master/harness.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, workerConfinementRefusal } from '../src/master/profiles.js';
-import { controlPlaneHandlers, type ControlPlaneEffects } from '../src/executor.js';
 import { grantWorkerPaths, runtimeSandboxes, workerPaths, writablePaths } from '../src/worker-sandbox.js';
 
-// GY-857: workers are confined to their assigned worktrees, and neither the loop nor an executor
+// GY-857: workers are confined to their assigned worktrees, and the loop never
 // starts, self-upgrades or restarts from a coordinator checkout holding uncommitted work — the
 // two halves of the containment that was missing when worker sessions wrote half-finished files
 // into the coordinator checkout by absolute path and a restart loaded them into the live loop.
@@ -118,8 +116,8 @@ test('unit:worker-confined-to-worktree — every worker profile is launched with
   } finally { await fixture.dispose(); }
 });
 
-/** Effects both the loop and the executor read: a snapshot over `work`, and stubs for everything else. */
-function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects & ControlPlaneEffects {
+/** Effects the loop reads: a snapshot over `work`, and stubs for everything else. */
+function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects {
   const base = {
     agents: () => [] as never[],
     credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
@@ -130,13 +128,13 @@ function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): 
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
-  return { ...base, ...overrides } as DaemonEffects & ControlPlaneEffects;
+  return { ...base, ...overrides } as DaemonEffects;
 }
 const loopOptions = (fixture: Fixture, extra: Partial<Parameters<typeof runDaemon>[3]> = {}) => ({
   once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: [] as NodeJS.Signals[], log: () => {}, ...extra,
 });
 
-test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from a dirty coordinator checkout, raises attention naming the paths and the live leases they match, skips the self-upgrade, and an executor refuses every claim', async () => {
+test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from a dirty coordinator checkout, raises attention naming the paths and the live leases they match, skips the self-upgrade', async () => {
   const fixture = await coordinatorFixture();
   try {
     const { main, config } = fixture;
@@ -192,24 +190,13 @@ test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from
     await runDaemon(config, upgradeState, loopEffects(work, { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped', reason: 'nothing deployed yet' }; } }), loopOptions(fixture));
     assert.equal(upgrades, 0, 'the self-upgrade never moves a dirty checkout');
 
-    // The executor: every claim is refused with the same paths, and nothing else is read first.
-    const row = { id: 'a1', key: 'GY-852', work: 'w1', kind: 'dispatch', inputs: { kind: 'dispatch', target: 'implementation', epoch: 3 } } as unknown as ActionRow;
-    let snapshotReads = 0;
-    const dirtyHandlers = controlPlaneHandlers(() => config, loopEffects(work, { snapshot: async () => { snapshotReads++; return { work: work as Work[], now: iso(0) }; } }));
-    const run = (handler: typeof dirtyHandlers.dispatch, action: ActionRow) => (handler as (action: unknown, identity: unknown) => Promise<unknown>)(action, { id: 'exec', host: 'machine-a' });
-    await assert.rejects(run(dirtyHandlers.dispatch!, row), (error: Error) => /holds uncommitted work/.test(error.message) && /src\/loop\.ts/.test(error.message));
-    assert.equal(snapshotReads, 0, 'a refused executor reads nothing and runs nothing');
-
-    // Clean again: the loop starts, and an executor's handlers run.
+    // Clean again: the loop starts.
     await writeFile(join(main, 'src', 'loop.ts'), original);
     await rm(join(main, 'tests', 'scratch.test.ts'));
     await rm(join(main, 'notes.txt'));
     const resumed = emptyDaemonState(config);
     const resumedRun = await runDaemon(config, resumed, loopEffects([]), loopOptions(fixture));
     assert.equal(resumedRun.cycles.length, 1, 'a cleaned checkout starts the loop again');
-    const cleanConfig: MasterConfig = { ...config, url: '' };
-    const cleanHandlers = controlPlaneHandlers(() => cleanConfig, loopEffects(work));
-    await assert.rejects(run(cleanHandlers.dispatch!, row), /no worker profile can take GY-852/, 'with a clean checkout the executor handler runs');
   } finally { await fixture.dispose(); }
 });
 

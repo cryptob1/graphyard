@@ -17,7 +17,7 @@ Start with the numbered path; the other pages are references to open when a task
 - [Master-agent operating mode](master-agent.md) — loop
 - [Delivery redesign](delivery-redesign.md) — merge writer, rollout.
 - [Master-agent sessions](master-agent-sessions.md) — profiles, launches.
-- [Master-agent reference](master-agent-reference.md) — executors
+- [Master-agent reference](master-agent-reference.md) — typed actions
 - [Operations and recovery](operations.md) — checklist, incidents.
 - [Coordination](coordination.md) — criteria
 

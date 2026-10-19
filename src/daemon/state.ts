@@ -383,11 +383,11 @@ export type DoctorFinding = z.infer<typeof doctorFindingsSchema>;
 export type DoctorAction = z.infer<typeof doctorActionSchema>;
 export type DoctorFiled = z.infer<typeof doctorFiledSchema>;
 export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
-/** The release this loop's own process loaded, read once at its startup exactly as an executor reads its (GY-437) and overwritten by every new process: what every action it takes runs, until its supervisor replaces it. */
+/** The release this loop's own process loaded, read once at its startup (GY-437) and overwritten by every new process: what every action it takes runs, until its supervisor replaces it. */
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
 
-/** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault; `snapshot-failed` (GY-1773): the held-cli snapshot a dirty checkout's upgrade restarts onto could not be made; `checkout-dirty` is kept for cursors written before GY-1773. */
+/** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault; `snapshot-failed` (GY-1773): the held-cli snapshot a dirty checkout's upgrade restarts onto could not be made; `checkout-dirty` is kept for cursors written before GY-1773, and the `executors-` causes for cursors written before GY-1984. */
 export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged', 'snapshot-failed'] as const;
 export type UpgradeStallCause = typeof upgradeStallCauses[number];
 export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
@@ -400,10 +400,10 @@ export type UpgradeStall = z.infer<typeof upgradeStallSchema>;
 export const upgradeStateSchema = z.object({
   /** The verified deployed release the checkout was last aligned with: a new sha is a new trigger. */
   alignedRelease: z.string().regex(/^[0-9a-f]{7,40}$/).nullable().default(null),
-  /** The checkout moved to `to` and the restarts it owes are not done yet: the fleet, then the loop itself. */
+  /** The checkout moved to `to` and the restart it owes, the loop's own, is not done yet. */
   pending: z.object({ from: z.string().nullable(), to: z.string(), code: z.boolean() }).strict().nullable().default(null),
-  /** The last alignment that completed: what was checked out, whether loaded code moved, and what was restarted. */
-  last: z.object({ at: z.string(), from: z.string().nullable(), to: z.string(), code: z.boolean(), executors: z.string().max(300).nullable(), self: z.boolean() }).strict().nullable().default(null),
+  /** The last alignment that completed: what was checked out, whether loaded code moved, and whether the loop re-executed; `executors` only on cursors written before GY-1984. */
+  last: z.object({ at: z.string(), from: z.string().nullable(), to: z.string(), code: z.boolean(), executors: z.string().max(300).nullable().optional(), self: z.boolean() }).strict().nullable().default(null),
   /** Why the checkout was left untouched (dirty, not detached): master status names it until it clears. */
   refused: z.object({ at: z.string(), reason: z.string().max(500), commit: z.string().nullable() }).strict().nullable().default(null),
   /**
@@ -412,7 +412,7 @@ export const upgradeStateSchema = z.object({
    * aligns or upgrades. Absent while nothing stalls it.
    */
   stalled: upgradeStallSchema.optional(),
-  /** GY-1773: the loop (and the executors, when code moved) run a held-cli snapshot of `commit`, not the coordinator checkout, which stood dirty when the self-upgrade ran and was left at `checkout` with its `dirty` tracked paths; `master status` names it while the pin stands, and moving the checkout onto `commit` lifts the pin and removes this. Absent while the loop runs the checkout itself. */
+  /** GY-1773: the loop runs a held-cli snapshot of `commit`, not the coordinator checkout, which stood dirty when the self-upgrade ran and was left at `checkout` with its `dirty` tracked paths; `master status` names it while the pin stands, and moving the checkout onto `commit` lifts the pin and removes this. Absent while the loop runs the checkout itself. */
   snapshot: z.object({ at: z.string(), commit: z.string(), checkout: z.string().nullable(), dirty: z.array(z.string().max(300)).max(20) }).strict().optional(),
 }).strict().default(() => ({ alignedRelease: null, pending: null, last: null, refused: null }));
 export type UpgradeState = z.infer<typeof upgradeStateSchema>;

@@ -5,7 +5,7 @@ import { rm } from 'node:fs/promises';
 import { performance } from 'node:perf_hooks';
 import { releaseLag, releaseLagGraceMs, type LagComponent, type LagDelivery, type PromotionWait, type ReleaseLagReport } from '../src/master/release-lag.js';
 import { agentOwner, type AttentionItem } from '../src/master/attention.js';
-import { shortCommit } from '../src/executor-fleet.js';
+import { shortCommit } from '../src/daemon/held-cli.js';
 import { alignedWithDeployment, describePromotion, promotionOnSchedule } from '../src/master/release-lag.js';
 import type { ChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

@@ -108,6 +108,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:59c9d79237ce1c121a492cbe90295cf29ccc925aa0e5b22e327b5503a4ac6e11',
   // GY-2010: the GitHub response cache, charge ledger and webhook receipt tables left the registry; existing databases keep them, unread.
   'sha256:bc04377e454f8a3c4945201349fd3c9d498e41ae9738b5e8ed59b99e9c7d3ee8',
+  // GY-1984: the executor presence table left the registry with the executor fleet; existing databases keep it, unread.
+  'sha256:34fae2ef3d8c7bdca6deb1125befb52554bc9d6fbbebec5f733815f8d043215f',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

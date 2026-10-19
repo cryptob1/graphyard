@@ -24,9 +24,9 @@ const { describeSelfUpgrade, heldCliPointer, heldCliSnapshotAt, leftBehindChecko
  * an operator editing in the coordinator checkout left the loop on stale code until a
  * checkout-restore. The snapshot a held restart already uses (holdCliAt) needs no clean checkout:
  * the merged commit is checked out under .graphyard/held-cli, the launcher is pinned to it, the
- * executors and the loop restart onto it, and the checkout — never touched — is recorded as left
- * behind with its dirty paths. Real repositories and the shipped git throughout; the fleet and the
- * supervisor are recorded fakes. Each test is named for the proof it produces:
+ * loop restarts onto it, and the checkout — never touched — is recorded as left
+ * behind with its dirty paths. Real repositories and the shipped git throughout; the supervisor is a
+ * recorded fake. Each test is named for the proof it produces:
  * unit:dirty-checkout-upgrades-by-snapshot and unit:snapshot-pin-reported-and-lifted.
  */
 
@@ -35,7 +35,6 @@ const iso = (offsetMs = 0) => new Date(clock + offsetMs).toISOString();
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const run = async (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const verified = (sha: string): DaemonState['deployment'] => deploymentObservationSchema.parse({ source: 'endpoint', sha, at: iso(), reason: null, deployed: ['GY-1'], pending: [] });
-const restarted = (to: string) => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
 const status = (root: string) => execFileSync('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trimEnd();
 
 /**
@@ -77,11 +76,10 @@ async function world(label: string, tipTouches: 'code' | 'docs' = 'code') {
   return { origin, root, directory, loaded, tip, master, launch };
 }
 
-/** The upgrade's dependencies: the real checkout and git, a recorded fleet restart and self re-execution, the fixed clock. */
+/** The upgrade's dependencies: the real checkout and git, a recorded self re-execution, the fixed clock. */
 function recording(root: string) {
-  const calls = { executors: [] as string[], self: 0 };
+  const calls = { self: 0 };
   const deps = (extra: Partial<SelfUpgradeDeps> = {}): SelfUpgradeDeps => ({ root, run,
-    restartExecutors: async to => { calls.executors.push(to); return restarted(to); },
     restartSelf: async () => { calls.self += 1; }, persist: async () => {}, now: () => clock, ...extra });
   return { calls, deps };
 }
@@ -110,8 +108,8 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   const { before, state, calls, deps, upgraded, snapshot } = await snapshotUpgrade(w);
 
   // The outcome: a restart onto the snapshot, naming the checkout it left behind.
-  assert.deepEqual(upgraded, { outcome: 'upgraded', from: loaded, to: tip, code: true, executors: restarted(tip), self: true, left: { checkout: loaded, dirty: ['README.md'] } });
-  assert.match(describeSelfUpgrade(upgraded), /^restarted onto a held snapshot of [0-9a-f]{12}; the coordinator checkout stays dirty at [0-9a-f]{12}; loaded code moved; executors restarted; the loop re-executes itself$/);
+  assert.deepEqual(upgraded, { outcome: 'upgraded', from: loaded, to: tip, code: true, self: true, left: { checkout: loaded, dirty: ['README.md'] } });
+  assert.match(describeSelfUpgrade(upgraded), /^restarted onto a held snapshot of [0-9a-f]{12}; the coordinator checkout stays dirty at [0-9a-f]{12}; loaded code moved; the loop re-executes itself$/);
   // The checkout: never touched — HEAD where it stood, the operator's edit intact, nothing stashed or reset.
   assert.equal(git(root, 'rev-parse', 'HEAD'), loaded, 'HEAD is unchanged');
   assert.equal(status(root), before, 'the tracked files are unchanged');
@@ -124,14 +122,14 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   assert.equal(readHeldCli(root), tip);
   assert.equal(w.launch('watch', 'GY-1', '1').release, 'B', 'a command the checkout\'s launcher spawns loads the snapshot');
   assert.deepEqual(w.launch('master', 'run'), { release: 'B', argv: join(root, 'src', 'cli.ts'), schema: 'object' }, 'and so does the loop its supervisor restarts, with the checkout\'s entry as its argv and the checkout\'s dependencies');
-  // The restarts: the executors onto exactly B, then the loop itself.
-  assert.deepEqual(calls, { executors: [tip], self: 1 });
+  // The restart: the loop itself, onto B.
+  assert.deepEqual(calls, { self: 1 });
   // The cursor: the alignment complete, the checkout left behind recorded with its dirty paths, nothing refused or stalled.
-  assert.deepEqual(state.upgrade, { alignedRelease: tip, pending: null, last: { at: iso(), from: loaded, to: tip, code: true, executors: 'restarted', self: true }, refused: null,
+  assert.deepEqual(state.upgrade, { alignedRelease: tip, pending: null, last: { at: iso(), from: loaded, to: tip, code: true, self: true }, refused: null,
     snapshot: { at: iso(), commit: tip, checkout: loaded, dirty: ['README.md'] } });
   assert.equal(state.actions['upgrade:refused'], undefined, 'no refusal is recorded');
   const done = Object.values(state.actions).find(action => action.state === 'done' && action.detail.startsWith('Snapshotted base tip'));
-  assert.match(done!.detail, /^Snapshotted base tip [0-9a-f]{12} under \.graphyard\/held-cli for the loop and the executors; the coordinator checkout stays dirty at [0-9a-f]{12}: README\.md; loaded code moved, the executors were restarted \(restarted\)$/);
+  assert.match(done!.detail, /^Snapshotted base tip [0-9a-f]{12} under \.graphyard\/held-cli for the loop; the coordinator checkout stays dirty at [0-9a-f]{12}: README\.md; loaded code moved$/);
 
   // The restarted loop: the launcher loaded it from the snapshot, but its startup read the release
   // from the checkout, dirty at A. The first pass records the snapshot's commit as what it runs,
@@ -140,7 +138,7 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   const restartedLoop = deps({ loadedFrom: join(snapshot, 'src', 'daemon', 'upgrade.ts') });
   assert.deepEqual(await performSelfUpgrade(master, state, restartedLoop), { outcome: 'skipped', reason: `release ${tip.slice(0, 12)} was already aligned` });
   assert.deepEqual(state.release, { commit: tip, dirty: false }, 'the loop is recorded as running the snapshot\'s commit');
-  assert.deepEqual(calls, { executors: [tip], self: 1 }, 'nothing restarts again');
+  assert.deepEqual(calls, { self: 1 }, 'nothing restarts again');
   assert.equal(git(root, 'rev-parse', 'HEAD'), loaded);
   assert.equal(loadedHeldSnapshot(root, join(snapshot, 'src', 'daemon', 'upgrade.ts')), tip, 'the guard reads the snapshot this process was loaded from');
   assert.equal(loadedHeldSnapshot(root, join(root, 'src', 'daemon', 'upgrade.ts')), null, 'and nothing for a process loaded from the checkout');
@@ -148,7 +146,7 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   state.release = { commit: loaded, dirty: true };
   const owed = await performSelfUpgrade(master, state, deps({ loadedFrom: join(root, 'src', 'daemon', 'upgrade.ts') }));
   assert.deepEqual({ outcome: owed.outcome, to: 'to' in owed && owed.to, self: 'self' in owed && owed.self }, { outcome: 'upgraded', to: tip, self: true });
-  assert.deepEqual(calls, { executors: [tip, tip], self: 2 });
+  assert.deepEqual(calls, { self: 2 });
   assert.equal(git(root, 'rev-parse', 'HEAD'), loaded, 'the checkout is still where it stood');
 
   // A clean detached checkout: moved exactly as before, and no pin is written for it.
@@ -162,12 +160,11 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   assert.equal(git(clean.root, 'rev-parse', 'HEAD'), clean.tip, 'the checkout moved onto the tip');
   assert.equal(existsSync(heldCliPointer(clean.root)), false, 'no pin is written');
   assert.equal(cleanState.upgrade.snapshot, undefined);
-  assert.deepEqual(moving.calls, { executors: [clean.tip], self: 1 });
+  assert.deepEqual(moving.calls, { self: 1 });
   assert.equal(clean.launch('watch', 'GY-1', '1').release, 'B', 'the launcher runs the moved checkout');
 
   // A dirty checkout and a tip touching no loaded code: still a restart onto a held snapshot — the
-  // snapshot made, the launcher pinned, the loop re-executed onto it — while the executors, whose
-  // code did not move, never restart, and the checkout stays where it stands.
+  // snapshot made, the launcher pinned, the loop re-executed onto it — and the checkout stays where it stands.
   const docs = await world('dirty-docs', 'docs');
   await dirtied(docs.root);
   const docsState = emptyDaemonState(docs.master);
@@ -175,16 +172,16 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   docsState.deployment = verified(docs.tip);
   const quiet = recording(docs.root);
   const docsUpgraded = await performSelfUpgrade(docs.master, docsState, quiet.deps());
-  assert.deepEqual(docsUpgraded, { outcome: 'upgraded', from: docs.loaded, to: docs.tip, code: false, executors: null, self: true, left: { checkout: docs.loaded, dirty: ['README.md'] } });
+  assert.deepEqual(docsUpgraded, { outcome: 'upgraded', from: docs.loaded, to: docs.tip, code: false, self: true, left: { checkout: docs.loaded, dirty: ['README.md'] } });
   assert.match(describeSelfUpgrade(docsUpgraded), /^restarted onto a held snapshot of [0-9a-f]{12}; the coordinator checkout stays dirty at [0-9a-f]{12}; no loaded code moved; the loop re-executes itself$/);
-  assert.deepEqual(quiet.calls, { executors: [], self: 1 }, 'the executors keep running: no loaded code moved');
+  assert.deepEqual(quiet.calls, { self: 1 }, 'the loop alone re-executes: no loaded code moved');
   assert.equal(git(docs.root, 'rev-parse', 'HEAD'), docs.loaded, 'the checkout is unchanged');
   assert.equal(status(docs.root), ' M README.md');
   const docsSnapshot = heldCliSnapshotAt(docs.root, docs.tip);
   assert.equal(git(docsSnapshot, 'rev-parse', 'HEAD'), docs.tip, 'the snapshot holds the merged commit even though it is docs-only');
   assert.deepEqual(JSON.parse(await readFile(heldCliPointer(docs.root), 'utf8')), { commit: docs.tip, root: docsSnapshot, loop: true }, 'the launcher is pinned to it');
   assert.deepEqual(docs.launch('watch', 'GY-1', '1'), { release: 'A', argv: join(docs.root, 'src', 'cli.ts'), schema: 'object' }, 'a command the checkout\'s launcher spawns loads the snapshot\'s modules — release A, the code it already ran — with the checkout\'s entry as its argv');
-  assert.deepEqual(docsState.upgrade, { alignedRelease: docs.tip, pending: null, last: { at: iso(), from: docs.loaded, to: docs.tip, code: false, executors: null, self: true }, refused: null,
+  assert.deepEqual(docsState.upgrade, { alignedRelease: docs.tip, pending: null, last: { at: iso(), from: docs.loaded, to: docs.tip, code: false, self: true }, refused: null,
     snapshot: { at: iso(), commit: docs.tip, checkout: docs.loaded, dirty: ['README.md'] } });
   // The re-executed loop's first pass: the snapshot's commit is what it runs, and the checkout left
   // behind is no restart target.
@@ -195,14 +192,14 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
 
   // A second merged head while the checkout still stands dirty where it was left: the snapshot is
   // re-made onto the new tip and the loop re-executed onto it — one snapshot, pin and re-execution
-  // per head, the checkout never touched, the executors never restarted.
+  // per head, the checkout never touched.
   await writeFile(join(docs.origin, 'docs.md'), 'docs for C\n');
   git(docs.origin, 'commit', '-q', '-am', 'release C');
   const secondTip = git(docs.origin, 'rev-parse', 'HEAD');
   docsState.deployment = verified(secondTip);
   const again = await performSelfUpgrade(docs.master, docsState, quiet.deps({ now: () => clock + 60_000 }));
-  assert.deepEqual(again, { outcome: 'upgraded', from: docs.loaded, to: secondTip, code: false, executors: null, self: true, left: { checkout: docs.loaded, dirty: ['README.md'] } });
-  assert.deepEqual(quiet.calls, { executors: [], self: 2 }, 'one re-execution per head');
+  assert.deepEqual(again, { outcome: 'upgraded', from: docs.loaded, to: secondTip, code: false, self: true, left: { checkout: docs.loaded, dirty: ['README.md'] } });
+  assert.deepEqual(quiet.calls, { self: 2 }, 'one re-execution per head');
   const secondSnapshot = heldCliSnapshotAt(docs.root, secondTip);
   assert.equal(git(secondSnapshot, 'rev-parse', 'HEAD'), secondTip);
   assert.deepEqual(JSON.parse(await readFile(heldCliPointer(docs.root), 'utf8')), { commit: secondTip, root: secondSnapshot, loop: true }, 'the pin advanced to the new head\'s snapshot');
@@ -211,8 +208,7 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   assert.deepEqual(Object.keys(docsState.actions).filter(key => key.startsWith('upgrade:')).length, 2, 'one upgrade action row per head, the cursor bounded by the heads');
 
   // A docs-only snapshot whose re-execution failed: the next pass still owes the restart onto the
-  // snapshot — the loop's alone, as the alignment decided, never a fleet restart nothing the
-  // executors run calls for.
+  // snapshot, as the alignment decided.
   const retry = await world('dirty-docs-retry', 'docs');
   await dirtied(retry.root);
   const retryState = emptyDaemonState(retry.master);
@@ -224,16 +220,16 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   assert.equal(readHeldCli(retry.root), retry.tip, 'the snapshot stands pinned');
   const retried = await performSelfUpgrade(retry.master, retryState, retrying.deps({ now: () => clock + 60_000 }));
   assert.deepEqual({ outcome: retried.outcome, code: 'code' in retried && retried.code, self: 'self' in retried && retried.self }, { outcome: 'upgraded', code: false, self: true });
-  assert.deepEqual(retrying.calls, { executors: [], self: 1 }, 'the retry re-executes the loop alone: no loaded code moved');
+  assert.deepEqual(retrying.calls, { self: 1 }, 'the retry re-executes the loop alone: no loaded code moved');
   assert.equal(retryState.upgrade.stalled, undefined);
 
   // The loop already running a snapshot diffs the next tip from that snapshot, not from the checkout
   // it left behind: the checkout's HEAD says nothing about what is loaded. B moved loaded code, so a
-  // docs-only C over it moves none (the executors keep running B), and a D that reverts B's code —
-  // sharing the checkout's src/ tree — moves it (the executors restart onto D).
+  // docs-only C over it moves none, and a D that reverts B's code —
+  // sharing the checkout's src/ tree — moves it.
   const chain = await world('dirty-chain');
   const { state: chainState, calls: chainCalls, deps: chainDeps } = await snapshotUpgrade(chain);
-  assert.deepEqual(chainCalls, { executors: [chain.tip], self: 1 });
+  assert.deepEqual(chainCalls, { self: 1 });
   await writeFile(join(chain.origin, 'docs.md'), 'docs for C\n');
   git(chain.origin, 'commit', '-q', '-am', 'release C: docs only over B');
   const chainC = git(chain.origin, 'rev-parse', 'HEAD');
@@ -242,7 +238,7 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   const onB = chainDeps({ loadedFrom: join(heldCliSnapshotAt(chain.root, chain.tip), 'src', 'daemon', 'upgrade.ts'), now: () => clock + 60_000 });
   const toC = await performSelfUpgrade(chain.master, chainState, onB);
   assert.deepEqual({ outcome: toC.outcome, to: 'to' in toC && toC.to, code: 'code' in toC && toC.code, left: 'left' in toC && toC.left }, { outcome: 'upgraded', to: chainC, code: false, left: { checkout: chain.loaded, dirty: ['README.md'] } });
-  assert.deepEqual(chainCalls, { executors: [chain.tip], self: 2 }, 'docs over the running snapshot: the loop alone re-executes');
+  assert.deepEqual(chainCalls, { self: 2 }, 'docs over the running snapshot: the loop alone re-executes');
   assert.equal(readHeldCli(chain.root), chainC);
   await writeFile(join(chain.origin, 'src', 'cli.ts'), await readFile(join(chain.root, 'src', 'cli.ts'), 'utf8'));
   git(chain.origin, 'commit', '-q', '-am', 'release D: revert the loaded-code change of B');
@@ -253,7 +249,7 @@ test('unit:dirty-checkout-upgrades-by-snapshot — with a dirty checkout and a n
   const onC = chainDeps({ loadedFrom: join(heldCliSnapshotAt(chain.root, chainC), 'src', 'daemon', 'upgrade.ts'), now: () => clock + 120_000 });
   const toD = await performSelfUpgrade(chain.master, chainState, onC);
   assert.deepEqual({ outcome: toD.outcome, to: 'to' in toD && toD.to, code: 'code' in toD && toD.code }, { outcome: 'upgraded', to: chainD, code: true });
-  assert.deepEqual(chainCalls, { executors: [chain.tip, chainD], self: 3 }, 'the revert moves the code the executors run: they restart onto D');
+  assert.deepEqual(chainCalls, { self: 3 }, 'the revert moves loaded code: the loop restarts onto D');
   assert.equal(readHeldCli(chain.root), chainD);
   assert.equal(git(chain.root, 'rev-parse', 'HEAD'), chain.loaded, 'the checkout never moved');
 });
@@ -278,7 +274,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   // The checkout is named as left behind, with its dirty paths and the move that lifts the pin.
   const named = report.attentionItems.filter(item => item.subject === 'upgrade');
   assert.equal(named.length, 1);
-  assert.match(named[0].text, new RegExp(`^The loop and the executors run ${tip.slice(0, 12)} from its held snapshot under .*/\\.graphyard/held-cli, not from the coordinator checkout, which stood dirty at ${loaded.slice(0, 12)} \\(dirty: README\\.md\\) when the self-upgrade ran at ${iso()} and was left where it stands`));
+  assert.match(named[0].text, new RegExp(`^The loop runs ${tip.slice(0, 12)} from its held snapshot under .*/\\.graphyard/held-cli, not from the coordinator checkout, which stood dirty at ${loaded.slice(0, 12)} \\(dirty: README\\.md\\) when the self-upgrade ran at ${iso()} and was left where it stands`));
   assert.equal(named[0].role, 'master');
   assert.ok(named[0].next.includes(`git -C ${root} checkout --detach ${tip}`), 'the remedy is the move that lifts the pin');
   assert.ok(!report.attentionItems.some(item => /left the coordinator checkout .* untouched/.test(item.text)), 'no refusal is reported');
@@ -290,7 +286,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   // Moving the checkout onto the snapshot's commit — the operator's edit carried along, the tree
   // still dirty — does not lift the pin yet: the checkout guard (GY-857) refuses any process started
   // from a tracked edit, loaded code or not, so a lift onto the dirty tree would stop the next
-  // executor and loop start. The pin stays, the cursor names the checkout as it stands now, and
+  // loop start. The pin stays, the cursor names the checkout as it stands now, and
   // master status says what lifts it; cleaned at the commit, the pin lifts, the launcher runs the
   // checkout again, and nothing is named.
   git(root, 'checkout', '-q', '--detach', tip);
@@ -320,7 +316,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   assert.equal(existsSync(heldCliPointer(root)), false, 'the pin is lifted');
   assert.equal(readHeldCli(root), null);
   assert.equal(state.upgrade.snapshot, undefined, 'the checkout is no longer recorded as left behind');
-  assert.deepEqual(calls, { executors: [tip], self: 1 }, 'nothing restarts: the checkout holds the commit the loop runs');
+  assert.deepEqual(calls, { self: 1 }, 'nothing restarts: the checkout holds the commit the loop runs');
   assert.match(Object.values(state.actions).find(action => action.detail.startsWith('The checkout is current'))!.detail, /moved onto the commit the loop runs from its held snapshot, so the pin on the snapshot is lifted$/);
   assert.equal(w.launch('watch', 'GY-1', '1').release, 'B');
   await writeDaemonState(master, state);
@@ -349,7 +345,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   assert.match((await checkoutLoaded.guard.start(loaded)) ?? '', /refuses to start, self-upgrade or restart/, 'a loop whose modules came from the dirty tree is refused at startup');
   const escalated = checkoutLoaded.guardState.actions['escalation:dirty-checkout'];
   assert.equal(escalated?.state, 'failed');
-  assert.match(escalated!.detail, /The self-upgrade is not held by it: a merged release restarts the loop and the executors onto a held snapshot of it, the checkout left where it stands\.$/);
+  assert.match(escalated!.detail, /The self-upgrade is not held by it: a merged release restarts the loop onto a held snapshot of it, the checkout left where it stands\.$/);
   const between = await checkoutLoaded.guard.betweenCycles(checkoutLoaded.selfUpgrade);
   assert.ok(between.refusal, 'the dirty tree is still escalated');
   assert.equal(checkoutLoaded.upgrades.length, 1, 'but the self-upgrade runs');
@@ -406,7 +402,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   assert.deepEqual([refused.cycles.length, refusedUpgrades.count, refusedState.release], [0, 0, { commit: loaded, dirty: true }], 'a loop loaded from the dirty checkout still cycles nothing');
 });
 
-test('unit:snapshot-pin-survives-dirty-head-move — a dirty checkout whose HEAD moves to another commit while the pin stands is no restart target: the aligned release owes nothing, the loop and the executors keep running the snapshot, and the pin stands', async () => {
+test('unit:snapshot-pin-survives-dirty-head-move — a dirty checkout whose HEAD moves to another commit while the pin stands is no restart target: the aligned release owes nothing, the loop keeps running the snapshot, and the pin stands', async () => {
   const w = await world('head-move');
   const { root, origin, loaded, tip, master } = w;
   const { state, calls, deps, snapshot } = await snapshotUpgrade(w);
@@ -425,7 +421,7 @@ test('unit:snapshot-pin-survives-dirty-head-move — a dirty checkout whose HEAD
     assert.equal(moved.outcome, 'skipped', JSON.stringify(moved));
   }
   assert.equal(state.upgrade.pending ?? null, null, 'no restart is owed onto the dirty checkout');
-  assert.deepEqual(calls, { executors: [tip], self: 1 }, 'nothing restarted beyond the snapshot upgrade');
+  assert.deepEqual(calls, { self: 1 }, 'nothing restarted beyond the snapshot upgrade');
   assert.equal(readHeldCli(root), tip, 'the pin stands');
   assert.equal(w.launch('watch', 'GY-1', '1').release, 'B', 'the launcher still loads the snapshot');
 });
@@ -446,7 +442,6 @@ test('unit:owed-restart-onto-dirtied-head-snapshots — a restart owed onto load
   assert.equal(readHeldCli(root), tip, 'the launcher is pinned to the snapshot');
   assert.equal(state.upgrade.snapshot?.commit, tip);
   assert.equal(w.launch('watch', 'GY-1', '1').release, 'B');
-  assert.deepEqual(calls.executors, [tip]);
   assert.equal(status(root), ' M README.md', 'the dirty checkout is untouched');
 });
 
@@ -464,7 +459,6 @@ test('unit:dirty-checkout-holding-the-tip-snapshots-it — a dirty checkout that
   assert.equal(done.outcome, 'upgraded', JSON.stringify(done));
   assert.equal(readHeldCli(root), tip, 'the launcher is pinned to the snapshot');
   assert.equal(state.upgrade.snapshot?.commit, tip);
-  assert.deepEqual(calls.executors, [tip]);
   assert.equal(status(root), ' M README.md', 'the dirty checkout is untouched');
 });
 
@@ -511,13 +505,13 @@ test('unit:dirty-launcher-snapshots-foreign-head-and-tsconfig-keep-the-pin — a
   const { calls, deps } = recording(l.root);
   const done = await performSelfUpgrade(l.master, state, deps());
   assert.deepEqual({ outcome: done.outcome, left: 'left' in done && done.left }, { outcome: 'upgraded', left: { checkout: launched, dirty: ['bin/graphyard.mjs', 'bin/held-release-hooks.mjs'] } });
-  assert.deepEqual([calls.executors, calls.self, readHeldCli(l.root)], [[l.tip], 1, l.tip], 'the executors and the loop restart onto the snapshot, the launcher pinned to it');
+  assert.deepEqual([calls.self, readHeldCli(l.root)], [1, l.tip], 'the loop restarts onto the snapshot, the launcher pinned to it');
   assert.deepEqual([git(l.root, 'rev-parse', 'HEAD'), status(l.root)], [launched, ' M bin/graphyard.mjs\n M bin/held-release-hooks.mjs'], 'the checkout and its launcher are untouched');
   assert.equal(state.upgrade.pending, null, 'nothing stays owed');
   assert.deepEqual(state.upgrade.snapshot, { at: iso(), commit: l.tip, checkout: launched, dirty: ['bin/graphyard.mjs', 'bin/held-release-hooks.mjs'] });
   assert.equal(state.upgrade.stalled, undefined);
   const named = leftBehindCheckoutAttention(state.upgrade.snapshot, l.tip, l.root);
-  assert.match(named[0].text, /stood dirty at [0-9a-f]{12} \(dirty: bin\/graphyard\.mjs, bin\/held-release-hooks\.mjs\) when the self-upgrade ran .* The checkout's launcher \(bin\/graphyard\.mjs, bin\/held-release-hooks\.mjs\) is dirty too: the loop and the executors start the launcher held in the snapshot, so their starts never run those edits; every command started through the checkout's launcher still runs its edited bin\/graphyard\.mjs before the pin redirects any module, so return it to the commit first\.$/);
+  assert.match(named[0].text, /stood dirty at [0-9a-f]{12} \(dirty: bin\/graphyard\.mjs, bin\/held-release-hooks\.mjs\) when the self-upgrade ran .* The checkout's launcher \(bin\/graphyard\.mjs, bin\/held-release-hooks\.mjs\) is dirty too: the loop starts the launcher held in the snapshot, so its starts never run those edits; every command started through the checkout's launcher still runs its edited bin\/graphyard\.mjs before the pin redirects any module, so return it to the commit first\.$/);
   assert.equal(l.launch('watch', 'GY-1', '1').release, 'B', 'the edited launcher still reads the pin and loads the snapshot');
   // A clean detached HEAD that is neither the snapshot nor the commit the operator left is a foreign move.
   const f = await world('foreign-head');
@@ -531,7 +525,7 @@ test('unit:dirty-launcher-snapshots-foreign-head-and-tsconfig-keep-the-pin — a
   assert.equal(status(f.root), '');
   const foreign = await performSelfUpgrade(f.master, after, fdeps({ loadedFrom: join(snapshot, 'src', 'daemon', 'upgrade.ts') }));
   assert.equal(foreign.outcome, 'skipped', JSON.stringify(foreign));
-  assert.deepEqual([fleet.executors.length, fleet.self, readHeldCli(f.root)], [1, 1, f.tip], 'no restart onto the foreign HEAD; the pin stands');
+  assert.deepEqual([fleet.self, readHeldCli(f.root)], [1, f.tip], 'no restart onto the foreign HEAD; the pin stands');
   // Moved onto the snapshot's commit with tsconfig.json dirty: the launcher would run the edit, so the pin stays.
   const t = await world('tsconfig-dirty');
   const { state: moved, deps: tdeps } = await snapshotUpgrade(t);
@@ -555,7 +549,7 @@ test('unit:unreadable-status-never-lifts-the-pin-or-moves-the-checkout — a che
   assert.equal(status(root), '', 'the checkout is clean where it stood');
   const unread = await performSelfUpgrade(master, state, onSnapshot(30_000, { run: unreadable }));
   assert.deepEqual(unread, { outcome: 'skipped', reason: `release ${tip.slice(0, 12)} was already aligned` });
-  assert.deepEqual([git(root, 'rev-parse', 'HEAD'), readHeldCli(root), calls, state.upgrade.snapshot?.commit], [loaded, tip, { executors: [tip], self: 1 }, tip], 'not moved, the pin and the record stand, nothing restarts');
+  assert.deepEqual([git(root, 'rev-parse', 'HEAD'), readHeldCli(root), calls, state.upgrade.snapshot?.commit], [loaded, tip, { self: 1 }, tip], 'not moved, the pin and the record stand, nothing restarts');
   // Readable again, the clean detached checkout left behind is moved onto the commit, which lifts the pin.
   const moved = await performSelfUpgrade(master, state, onSnapshot(60_000));
   assert.equal(moved.outcome, 'upgraded', JSON.stringify(moved));
@@ -572,7 +566,7 @@ test('unit:unreadable-status-never-lifts-the-pin-or-moves-the-checkout — a che
   assert.equal(readHeldCli(owed.root), owed.tip, 'the snapshot stands pinned');
   const waiting = await performSelfUpgrade(owed.master, owedState, owing.deps({ run: unreadable, now: () => clock + 60_000 }));
   assert.deepEqual(waiting, { outcome: 'skipped', reason: `the restart onto the held snapshot of ${owed.tip.slice(0, 12)} is still owed, but whether the coordinator checkout at ${owed.loaded.slice(0, 12)} is dirty could not be read; retried next cycle` });
-  assert.deepEqual([owing.calls, git(owed.root, 'rev-parse', 'HEAD'), readHeldCli(owed.root), owedState.upgrade.snapshot?.dirty], [{ executors: [owed.tip], self: 0 }, owed.loaded, owed.tip, ['README.md']]);
+  assert.deepEqual([owing.calls, git(owed.root, 'rev-parse', 'HEAD'), readHeldCli(owed.root), owedState.upgrade.snapshot?.dirty], [{ self: 0 }, owed.loaded, owed.tip, ['README.md']]);
   const retried = await performSelfUpgrade(owed.master, owedState, owing.deps({ now: () => clock + 120_000 }));
   assert.deepEqual({ outcome: retried.outcome, self: 'self' in retried && retried.self }, { outcome: 'upgraded', self: true }, 'readable again, the owed restart goes through');
 });
@@ -593,7 +587,7 @@ test('unit:retried-snapshot-restart-records-the-dirty-paths-as-they-stand — a 
   const retried = await performSelfUpgrade(w.master, state, deps({ now: () => clock + 60_000 }));
   assert.deepEqual({ outcome: retried.outcome, left: 'left' in retried && retried.left }, { outcome: 'upgraded', left: { checkout: w.loaded, dirty: ['docs.md'] } });
   assert.deepEqual(state.upgrade.snapshot, { at: iso(60_000), commit: w.tip, checkout: w.loaded, dirty: ['docs.md'] }, 'the dirty paths as they stood at the successful restart, not at the failed one');
-  assert.deepEqual(calls, { executors: [w.tip, w.tip], self: 1 });
+  assert.deepEqual(calls, { self: 1 });
   assert.deepEqual(leftBehindCheckoutAttention(state.upgrade.snapshot, w.tip, w.root)[0].text.includes('(dirty: docs.md)'), true);
 });
 

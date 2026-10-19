@@ -11,7 +11,6 @@ import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '.
 import { agentRequestAttention } from './cli/loop-report.js';
 import { owedAttention, scopeRequestAttention } from './cli/owed-report.js';
 import type { MergeWriterSummary } from './daemon/cycle-merge-writer.js';
-import { executorFleet } from './cli/executor-report.js';
 import { stuckRequestReport } from './cli/stuck-requests.js';
 import { stalledItemAttention } from './cli/status-attention.js';
 import { stalledActionAttention } from './cli/stalled-actions.js';
@@ -186,7 +185,7 @@ export function faulted(items: AttentionItem[]) {
  * The lines `master status` builds from the snapshot, the session ledgers and the host after
  * `buildMasterStatus` (GY-173): scope and agent requests, consent holds, review conflicts, stuck and
  * unanswered requests, reviews no session can obtain, stalled items and actions, overlong sessions, the
- * GitHub budget, unserved executors and owed judgments. The report and the loop both read them from
+ * GitHub budget and owed judgments. The report and the loop both read them from
  * here, so every class the report shows is one the loop counts. The report passes the rows and
  * checkouts it already has; the loop, reading them `standalone`, has them derived here and also reads
  * the setup and the dispatcher, which the report reads before everything else.
@@ -206,8 +205,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const stalledItems = stalledItemAttention(snapshot);
   // A submitted item with no review, producer or rework request and no named wait (GY-191).
   const actorless = actorlessAttention(snapshot, observed.approvals as Parameters<typeof actorlessAttention>[1]);
-  // An action no live executor can claim is not queued behind other work (GY-105); it is named with its wait and the unit to start.
-  const executors = await executorFleet(root, masterApi, snapshot);
   // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
   const conflicted = reviewConflictAttention(snapshot.work, observed.reviews).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
   // A row that keeps failing for the same reason: owed, attempted, and going nowhere.
@@ -237,6 +234,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
   // GY-2010: no GitHub budget attention — the App request budget is gone with the API client.
-  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, executors, conflicted, stalled, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
-    items: [...host, ...executors.attention, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...triage, ...owed.items] };
+  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, conflicted, stalled, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
+    items: [...host, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...triage, ...owed.items] };
 }

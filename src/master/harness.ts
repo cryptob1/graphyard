@@ -5,9 +5,9 @@ import { homedir } from 'node:os';
 import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
-import { executorUnitDirectory, launchAuthorization } from '../repository-setup.js';
+import { launchAuthorization } from '../repository-setup.js';
 import { type HarnessHook, type HarnessPlan, type HarnessRule, writeHarnessPermissions, mergeHarnessHooks, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
-import { executorInstance, foreignUnitText, initialiseUnitsCommand, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, perInstallUnits, proposedInstallUnits, readInstallUnits, recordInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
+import { foreignUnitText, initialiseUnitsCommand, userUnitDirectory, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, perInstallUnits, proposedInstallUnits, readInstallUnits, recordInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { coordinatorCheckoutRoot, promotionCommand, workerConfinementRefusal } from './profiles.js';
@@ -54,7 +54,7 @@ function withMasterOwnedRules(plan: HarnessPlan, config: MasterConfig, root: str
 /**
  * The master's unit rules (GY-1441): every systemctl command it may run names this install's own
  * loop unit exactly, and every other Graphyard unit on the host is denied, so a master started from
- * a second install can never restart another install's loop or executors. A glob cannot say "every
+ * a second install can never restart another install's loop. A glob cannot say "every
  * graphyard-* unit but mine", so the denies are the shapes that can never be this install's (the
  * legacy names for a per-install unit, the per-install names for a legacy alias) plus every other
  * install's unit found installed beside it; a deny that would match one of the install's own
@@ -71,17 +71,16 @@ export function installUnitRules(root: string, unitDirectory: string): { allow: 
     { rule: 'Bash(systemctl --user daemon-reload)', why: 'Reload the loop\'s user unit after it is edited.' },
     { rule: `Bash(journalctl --user -u ${master}:*)`, why: 'Read the loop\'s launch, failover and refusal log; the unit is pinned to the loop\'s own.' },
   ];
-  const why = 'Another Graphyard installation on this host owns this unit; restarting, stopping or enabling it would disrupt that install\'s loop or executors (GY-1441).';
-  const shapes = units.alias ? ['graphyard-master-*', 'graphyard-executor-*'] : [`${legacyLoopUnit}*`, 'graphyard-master', 'graphyard-executor@*'];
+  const why = 'Another Graphyard installation on this host owns this unit; restarting, stopping or enabling it would disrupt that install\'s loop (GY-1441).';
+  const shapes = units.alias ? ['graphyard-master-*'] : [`${legacyLoopUnit}*`, 'graphyard-master'];
   const others: string[] = [];
   try {
     for (const name of readdirSync(unitDirectory)) {
-      if (name === master || name === units.executorTemplate) continue;
+      if (name === master) continue;
       if (/^graphyard-master[A-Za-z0-9._-]*\.service$/.test(name)) others.push(name, `${name} *`, name.replace(/\.service$/, ''));
-      else if (/^graphyard-executor[A-Za-z0-9._-]*@\.service$/.test(name)) others.push(name.replace('@.service', '@*'));
     }
   } catch { /* no unit directory: only the structural shapes apply */ }
-  const own = [...allow.map(entry => /^Bash\((.*)\)$/.exec(entry.rule)![1].replace(/:\*$/, '')), ...[1, 2, 32].map(slot => `systemctl --user restart ${executorInstance(units, slot)}`)];
+  const own = allow.map(entry => /^Bash\((.*)\)$/.exec(entry.rule)![1].replace(/:\*$/, ''));
   const deny = [...new Set([...shapes, ...others])].map(target => ({ rule: `Bash(systemctl --user * ${target})`, why }))
     .filter(entry => !claudeRuleProblem(entry.rule) && !own.some(command => bashRuleMatches(entry.rule, command)));
   return { allow, deny };
@@ -405,7 +404,7 @@ function launchedCheckout(text: string, root: string, home: string): string | nu
  * its file cannot be read or runs elsewhere, or its name is not the one ROOT would record.
  */
 export async function recordServingUnits(root: string, repository: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}): Promise<InstallUnits | null> {
-  const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
+  const unitDirectory = options.unitDirectory ?? userUnitDirectory(), home = options.home ?? homedir();
   if (!options.servingUnit || existsSync(resolve(root, installUnitsFile))) return null;
   let text: string;
   try { text = readFileSync(resolve(unitDirectory, options.servingUnit), 'utf8'); } catch { return null; }
@@ -418,7 +417,7 @@ export async function recordServingUnits(root: string, repository: string, optio
   return resolveInstallUnits(root, repository, unitDirectory, home);
 }
 export function harnessApplyCheckout(root: string, options: { servingUnit?: string | null; unitDirectory?: string; home?: string } = {}) {
-  const unitDirectory = options.unitDirectory ?? executorUnitDirectory(), home = options.home ?? homedir();
+  const unitDirectory = options.unitDirectory ?? userUnitDirectory(), home = options.home ?? homedir();
   let units: InstallUnits;
   try { units = readInstallUnits(root, unitDirectory, home); }
   catch (error) {
@@ -444,7 +443,7 @@ export function harnessApplyCheckout(root: string, options: { servingUnit?: stri
 }
 export function masterHarness(root: string, config: MasterConfig, harness: string, options: { unitDirectory?: string } = {}) {
   const credentialHome = dirname(dirname(config.credentialFile));
-  const plan = withMasterOwnedRules(masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome }), config, root, options.unitDirectory ?? executorUnitDirectory());
+  const plan = withMasterOwnedRules(masterHarnessPlan({ harness, root, cliPath: config.cliPath, repository: config.repository, baseBranch: config.baseBranch, credentialHome }), config, root, options.unitDirectory ?? userUnitDirectory());
   return plan.file ? { ...plan, deny: [...plan.deny, ...autonomyDeny(credentialHome)] } : plan;
 }
 
@@ -478,7 +477,7 @@ export const submissionPolicyRule = 'The full test suite is CI\'s gate, not your
 export const emptySourceStarts = [...'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', ...'_.-/@\'"$`{~'];
 /**
  * The coordinator checkout's own files, denied to a worker session's Edit and Write (GY-857).
- * That checkout runs the loop and the executors, and worker sessions once wrote their
+ * That checkout runs the loop, and worker sessions once wrote their
  * half-finished work there by absolute path; a restart then loaded it. Every area the loaded
  * code lives in is denied in both files the worker reads — its worktree's settings and its role
  * file — while the worktree itself, and the managed state beside it under `.graphyard/`, stay
@@ -489,7 +488,7 @@ const checkoutAreas = ['src', 'tests', 'scripts', 'bin', 'docs', 'examples', 'in
 export function coordinatorWriteDenials(coordinatorRoot: string): HarnessRule[] {
   if (!coordinatorRoot || coordinatorRoot === '/') return [];
   const absolute = `//${coordinatorRoot.replace(/^\//, '')}`;
-  const why = (area: string) => `The coordinator checkout runs the loop and the executors; this session writes only its assigned worktree, never ${area}/ there (GY-857).`;
+  const why = (area: string) => `The coordinator checkout runs the loop; this session writes only its assigned worktree, never ${area}/ there (GY-857).`;
   return checkoutAreas.flatMap(area => [{ rule: `Edit(${absolute}/${area}/**)`, why: why(area) }, { rule: `Write(${absolute}/${area}/**)`, why: why(area) }]);
 }
 /**

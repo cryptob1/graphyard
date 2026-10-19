@@ -14,7 +14,6 @@ import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import type { MergeWriterSummary } from './cycle-merge-writer.js';
 import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
-import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { RefusedResponse } from '../model/refusal.js';
 
 /** GY-1713: body `error` + zod `issues` so attention names the refused field; else stringify. */
@@ -66,7 +65,6 @@ import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import type { ReadingEffects } from './reading-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
-import { readRelease, restartExecutors } from '../executor-fleet.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
@@ -77,8 +75,6 @@ import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
-import type { FlowResult, RemedyFlow, RemedyRecord } from '../stall-remedies.js';
-import { browserFlowChild } from './cycle-remedies.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
@@ -105,6 +101,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
+  /** GY-1984: the control plane's reconciliation of an item whose lease lapsed with nothing submitted (`POST work/:id/resync`). */
+  reclaimLease?: (work: Work) => Promise<unknown>;
   /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
   observe?: (work: Work, waitMs: number) => Promise<Work | null>;
   /** The review findings standing against the item's head (unresolved threads, latest change request; review-scope.ts), read outside every transaction. */
@@ -168,10 +166,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
   /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the base branch, checks out its tip when the
-   * checkout is a clean detached checkout, and, when the diff touches code the loop or the executors load, restarts the fleet and then
-   * re-executes the loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on the release it loaded.
+   * checkout is a clean detached checkout, and, when the diff touches code the loop loads, re-executes the loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on the release it loaded.
    */
-  /** `keepAlive` feeds the supervisor's watchdog while the upgrade waits on the executors. */
   selfUpgrade?: (state: DaemonState, keepAlive?: () => Promise<void>) => Promise<SelfUpgradeOutcome>;
   /** GY-1356: adopts a coordinator HEAD that moved forward from `from` to `to` under the running loop, restarting onto it. */
   recoverHead?: (state: DaemonState, from: string, to: string, keepAlive?: () => Promise<void>) => Promise<SelfUpgradeOutcome>;
@@ -195,8 +191,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   planeHealth?: () => Promise<string | null>;
   /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
   hostMemory?: () => Promise<HostMemoryReading | null>;
-  /** GY-1428: revive this host's silent user manager and start its declared slots found down, as the step allows (user-manager.ts). */
-  healHostSupervision?: (allow: UserSupervisionAllowance) => Promise<UserSupervisionHeal>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /** GY-1740: hold an unleased post-deploy follow-up on the instant its blocker names, clearing it (`window`). */ deferWindow?: (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => Promise<Work>;
   /**
@@ -276,10 +270,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
   blockDispatch?: (work: Work, reason: string) => Promise<unknown>; // GY-1078: an item's repeated dispatch-failure cause as its blocker; absent, the loop holds it
-  /** Run one master browser flow as a child command (GY-949); a refusal resolves, only a child that printed no result rejects. */
-  browserFlow?: (flow: RemedyFlow) => Promise<FlowResult>;
-  /** Record the loop's attempt of a remedy on the stalled row it was applied for (`POST /api/actions/:id/remedy`). */
-  recordRemedy?: (row: string, attempt: Omit<RemedyRecord, 'at' | 'by'>) => Promise<unknown>;
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
@@ -343,7 +333,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   stopSupervisor?: (orphan: OrphanSupervisor, signal: NodeJS.Signals) => void | Promise<void>;
   /**
    * Records a launched session's durable handle on the item: the runtime, host, Herdr coordinates
-   * and transcript a human or an executor attaches to it with. A loop configured without it keeps
+   * and transcript a human attaches to it with. A loop configured without it keeps
    * cycling; the sessions it launches are then only visible in this host's own local ledgers,
    * which is the relaying the handle exists to end.
    */
@@ -372,12 +362,12 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   faultClassPolicy?: FaultClassPolicy;
   /**
    * The control plane's status, read with the coordinator's visibility, whose status-level problems
-   * (App permissions, held jobs, production, a GitHub pause, unserved executors) are classified and
+   * (App permissions, held jobs, production, a GitHub pause) are classified and
    * tracked each cycle. A read that fails makes the cycle partial: it opens what it saw and ends nothing.
    */
   controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
   /**
-   * The attention `master status` adds after `buildMasterStatus` (generated-file drift, context overflows, intervention patterns, executors,
+   * The attention `master status` adds after `buildMasterStatus` (generated-file drift, context overflows, intervention patterns,
    * terminal decisions, throughput, resources, and the requests, review conflicts, stalls, overlong sessions, owed judgments, setup and
    * dispatcher lines of derivedAttention), read with the control plane's status so the loop tracks every class the report shows. `attribute`
    * is the report's last step over the whole list — a ledger refusal in place of the launch symptoms it causes, a resource at its bound

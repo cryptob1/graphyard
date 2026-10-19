@@ -43,7 +43,7 @@ An environment registers `{"kind":"environment","services":[…]}`; an observer 
 
 ## Rollback
 
-Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (never automatic with `none`); `POST /api/delivery/rollback` requests one; executors `POST /api/delivery/rollback-claim`, then `rollback-settle` (`applied`/`failed`/`unknown`); `unknown` blocks until `rollback-resolve` names the provider operation and evidence. `"automaticRollback": true` reverts degraded generations.
+Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (never automatic with `none`); `POST /api/delivery/rollback` requests one; the rollback actor `POST`s `/api/delivery/rollback-claim`, then `rollback-settle` (`applied`/`failed`/`unknown`); `unknown` blocks until `rollback-resolve` names the provider operation and evidence. `"automaticRollback": true` reverts degraded generations.
 
 ## Coordinator recovery
 

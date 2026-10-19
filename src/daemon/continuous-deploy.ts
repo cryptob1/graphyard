@@ -2,7 +2,7 @@
 // the cursor's promotion reading and failed-deploy line, and the one deploy of the base tip the
 // alignment performs before anything restarts onto it. Split out of upgrade.ts, which re-exports
 // the public pieces, so every existing import keeps working.
-import { shortCommit } from '../executor-fleet.js';
+import { shortCommit } from './held-cli.js';
 import { message, type DaemonState, type PromotionState } from './state.js';
 import { sameCommit } from './held-cli.js';
 import type { SelfUpgradeOutcome } from './upgrade.js';

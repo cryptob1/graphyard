@@ -37,7 +37,7 @@ for (const from of ['snapshot', 'launcher'] as const) {
 
   test(`unit:held-snapshot-setup-records-checkout-launcher — repository setup run from the ${from === 'snapshot' ? 'held snapshot' : "checkout's launcher"} records the checkout's launcher in connection.json`, async () => {
     const world = await checkout(`held-cli-path-repo-${from}`);
-    await setupRepository(world.root, { url: 'https://graphyard.example', cliPath: world[from], hostId: 'host-a', token: 'worker-token-'.padEnd(40, 'x') }, { fetcher: worker, executors: false });
+    await setupRepository(world.root, { url: 'https://graphyard.example', cliPath: world[from], hostId: 'host-a', token: 'worker-token-'.padEnd(40, 'x') }, { fetcher: worker });
     assert.equal((await json(join(world.root, '.graphyard', 'connection.json'))).cliPath, world.launcher);
   });
 }
