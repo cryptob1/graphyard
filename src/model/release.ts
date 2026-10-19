@@ -7,11 +7,8 @@ import { defaultProductionEnvironment, flowExitAt, noProductionHold, productionH
  * status as `productionEnvironment`), and — only where the production watch has observed what
  * production serves (status `production`) — the merged items it does not serve yet and those
  * whose deployment failed, and when it last looked. With no production observation both sets are
- * empty: a merged item is then Shipped, reading "Merged, not yet seen live" (GY-161 AC-11: never in
- * Moving or at Deploy because `delivery.deployment` is absent). That is the board's grouping only:
- * the delivery still counts as not live — "shipped this week" counts only observed releases — and
- * the master loop still owes `master verify-deployment` for it, which `master status` keeps under
- * `pending` until the release serves it (AGENTS.md).
+ * empty. A merged item is Shipped either way (GY-1981: done = merged), reading "Merged" until a
+ * release is observed serving it, and "shipped this week" counts only observed releases.
  */
 export interface ReleaseView extends ProductionHold {
   environment: string;
@@ -42,12 +39,9 @@ export function servedFor(work: Work, release: ReleaseView = noRelease): string 
   return servedAt(work, release.environment);
 }
 
-/**
- * When a merged item left the flow as the board reads it: `flowExitAt`, the same rule the steps
- * history and the Insights replay are built from, under this installation's production watch.
- */
-export function leftFlowAt(work: Work, release: ReleaseView = noRelease): string | null {
-  return flowExitAt(work, release.environment, release);
+/** When a merged item left the flow as the board reads it: `flowExitAt`, its merge (GY-1981). */
+export function leftFlowAt(work: Work, _release?: ReleaseView): string | null {
+  return flowExitAt(work);
 }
 
 /**

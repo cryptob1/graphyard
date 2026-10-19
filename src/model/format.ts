@@ -20,21 +20,13 @@ export function safeExternalUrl(value?: string) {
   if (!value) return undefined;
   try { const url = new URL(value); return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password ? value : undefined; } catch { return undefined; }
 }
-/**
- * Each delivery state's own headline (GY-1845): the production state, never the word Done, and
- * never Merged alone, so merged code cannot read as shipped. A policy that asks for no
- * post-deployment check is `delivered` at its merge; the other labels name how far production has
- * carried it and what, if anything, still stands between the merge and a verified release.
- */
-export const deliveryLabel: Record<NonNullable<ReturnType<typeof deliveryState>>, string> = {
-  delivered: 'Delivered', 'awaiting-deployment': 'Merged, awaiting deployment', 'awaiting-smoke': 'Deployed, awaiting verification', 'smoke-passed': 'Production verified', 'delivered-with-failure': 'Deployed with a failure',
-};
+/** Each delivery state's own headline (GY-1845); a merged item is delivered (GY-1981: done = merged). */
+export const deliveryLabel: Record<NonNullable<ReturnType<typeof deliveryState>>, string> = { delivered: 'Delivered' };
 
 /**
  * A done item's outcome, as every surface headlines it (GY-1845): the delivery state's own label,
- * with the observed release that serves the merge named beside it when the delivery carries its
- * deployment record (`delivery.deployment`, the commit production was seen serving). Null until
- * the item has merged.
+ * with the release recorded serving the merge on older deliveries (`delivery.deployment`) named
+ * beside it. Null until the item has merged.
  */
 export function deliveryOutcome(work: Work): string | null {
   const state = deliveryState(work);

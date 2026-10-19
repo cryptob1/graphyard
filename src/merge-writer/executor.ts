@@ -46,6 +46,8 @@ export interface QueuedMerge { key: string; id: string; head: string; submittedA
 export interface MergeQueue {
   /** The candidate the writer merges next, or null: nothing is due, or an open intent blocks the queue. */
   next: Work | null;
+  /** Every candidate due a merge, oldest first (`next` leading it), or none while an open intent blocks the queue: what a batch takes from (GY-2088). */
+  due: Work[];
   queue: QueuedMerge[];
   /** The item whose open intent (or unreconciled push) holds the queue until it is reconciled; null when none does. */
   blockedBy: string | null;
@@ -53,8 +55,11 @@ export interface MergeQueue {
 const open = (state: MergeLedgerState) => state.state === 'intent' || state.state === 'pushed';
 const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)?.passed === true;
 
+const createdAtOf = (item: Pick<Work, 'createdAt'>) => Date.parse(item.createdAt) || 0;
+/** A hotfix (an item titled `Hotfix: …`) is merged before every other queued head, so a fix to a bottleneck never waits out the queue. */
+export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.title ?? '');
 /**
- * The control-plane candidates owed a merge, oldest submission first: submitted (a candidate the
+ * The control-plane candidates owed a merge, hotfixes first then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
  * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
  * and `review` gates passed as the control plane served them: its review gate fails a delta reviewed before
  * merge (a sensitive one, or any under a repository declaring `review.normalChanges: pre-merge`) until its
@@ -81,11 +86,13 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     // GY-1834: a head held for a base failure waits `baseFailureHoldMs` before it is trialled again on whatever the tip then is.
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;
     return true;
-  }).sort((a, b) => submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
+  // The oldest item first, by when it was filed, not by its latest submission: lead time runs from release, so a head
+  // redone after a refusal goes ahead of newer work instead of rejoining at the back.
+  }).sort((a, b) => Number(isHotfix(b)) - Number(isHotfix(a)) || createdAtOf(a) - createdAtOf(b) || submittedAtOf(a) - submittedAtOf(b) || a.key.localeCompare(b.key));
   const queue = owed.map(item => { const at = submittedAtOf(item); return { key: item.key, id: item.id, head: item.candidate!.sha.toLowerCase(), submittedAt: new Date(at).toISOString(), waitingMs: Math.max(0, now - at) }; });
-  return { next: blocking ? null : owed[0] ?? null, queue, blockedBy: blocking?.key ?? null };
+  return { next: blocking ? null : owed[0] ?? null, due: blocking ? [] : owed, queue, blockedBy: blocking?.key ?? null };
 }
-/** The oldest-submitted candidate due a merge, or null while nothing is due or an open intent blocks the queue (AC-1). */
+/** The oldest-submitted candidate due a merge (hotfixes first), or null while nothing is due or an open intent blocks the queue (AC-1). */
 export const nextToMerge = (work: readonly Work[], ledger: Readonly<Record<string, MergeLedgerState>>, now: number) => mergeQueue(work, ledger, now).next;
 
 // ---- The ledger events the executor records --------------------------------------------------------

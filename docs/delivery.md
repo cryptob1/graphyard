@@ -34,7 +34,7 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard
 
 ### Main guard
 
-Every 30s the guard reverts merges failing parent-passed checks; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon. Reverts failing the merge's named tests close `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun (merge, base): [flakes](validation.md#flake-ledger) land; base failures file P0.
+Every 30s the guard reverts merges failing parent-passed checks; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon. Reverts failing the merge's named tests close `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun (merge, base): a pass on the rerun lands, filing nothing; base failures file P0.
 
 ## Managed repositories
 

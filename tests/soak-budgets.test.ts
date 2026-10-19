@@ -115,7 +115,7 @@ test('unit:soak-invariants-hold — a control plane too slow to observe within t
 test('unit:soak-invariants-hold — a release observation too slow to answer within the deployment step\'s budget for an hour and a quarter: the step is cut while the observation is in flight, never more than one such read is in flight however many cycles run, every cycle stays within the interval, the read in flight is taken once it lands, every delivery still gets its deployment record and smoke request, no loop-cost fault opens, and every invariant holds', { timeout: 600_000 }, async () => {
   // GY-1354: cycle 12624's window, longer. The release observation answers fifteen minutes after it
   // is asked, so a cut read stays in flight across a dozen one-minute cycles while the day's items are
-  // delivered; each asks for a smoke proof, so its deployment record and smoke request wait on the read.
+  // delivered.
   const slow = { from: 60 * minute, to: 135 * minute, observationMs: 15 * minute };
   const { final, violations, failures, lost, deploymentDay, state } = await simulateDay({
     hours: 4, slowDeployment: slow,
@@ -135,11 +135,8 @@ test('unit:soak-invariants-hold — a release observation too slow to answer wit
   assert.deepEqual(cycles.filter(entry => entry.elapsed >= slow.to + 2 * minute && entry.cut).map(entry => `+${Math.round(entry.elapsed / minute)} min`), [], 'once the release answers, no observation is cut');
   assert.equal(deploymentStep.deploymentReadsPending(state), 0, 'nothing is left in flight at the end of the day');
   assert.match(state.actions['deployment:deferred']?.detail ?? '', /^The deployment step verified within its budget/);
-  // The second confidence layer resumes once the window passes: every delivery is recorded as served and its smoke proof requested, once.
-  const keys = final.map(item => item.key).sort();
-  assert.deepEqual([...deploymentDay.records].sort(), keys, 'each delivery is recorded as deployed exactly once');
-  assert.deepEqual([...deploymentDay.smokes].sort(), keys, 'each deployed delivery has its smoke proof requested exactly once');
-  assert.ok(final.every(item => item.delivery?.deployment), 'every delivery carries its deployment observation');
+  // Done = merged (GY-1981): every delivery is delivered at its merge, with no per-item record the slow read holds back.
+  assert.ok(final.every(item => item.stage === 'done' && item.delivery), 'every item is delivered');
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'loop-cost').map(entry => entry.text), [], 'no loop-cost instance opens for a slow release observation');
 });
 

@@ -59,10 +59,9 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = ended ? 'done' : 'failed';
       next.detail = ended ? `Resumed: Graphyard shows attempt ${action.epoch} ended, so the item is re-queued` : 'Resumed: the failover was interrupted; the session is read again on this cycle';
     } else if (action.kind === 'deployment' && action.work) {
-      // Recording a deployment either landed on the delivery snapshot or it did not; a repeat of a
-      // landed record is refused by Graphyard, so retrying is safe.
-      next.state = item?.delivery?.deployment ? 'done' : 'failed';
-      next.detail = next.state === 'done' ? 'Resumed: Graphyard holds the deployment observation' : 'Resumed: no deployment observation was recorded; it may be recorded again';
+      // A per-item deployment record from before GY-1981 (done = merged): nothing records or retries one now.
+      next.state = 'done';
+      next.detail = 'Resumed: per-item deployment records are retired; the item was delivered at its merge';
     } else if (action.kind === 'decision') {
       // Both halves are safe to repeat: a request already standing on the item is adopted rather
       // than made twice, and a session already listed under the decision's name is adopted rather
