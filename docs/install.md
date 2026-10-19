@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 
 ## Step 3: deploy key
 
-`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` (title `graphyard-merge-writer-HOST`). It is the only credential Graphyard holds on the remote: no API client, no minted tokens, no webhook (`/api/github/*` is 404). The merge writer trial-merges each submitted head and pushes the base with it alone. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
+`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` unless listed. It is the only credential Graphyard holds on the remote: no API client, no minted tokens, no webhook (`/api/github/*` is 404); GitHub is asked only through `gh` subcommands over an SSH origin, and the loop re-registers a missing key each setup run. The merge writer trial-merges each submitted head and pushes the base with it alone. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
 
 ## Step 4: summary
 
@@ -58,9 +58,9 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-change); the merge write
 
 ## Upgrading an existing installation
 
-an existing installation
+## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--plan]`: backs up, redeploys, restarts loop and executors, waits for a healthy `/healthz`; refuses older schemas.
+`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs a clean checkout with `DATABASE_URL` and `GRAPHYARD_URL`; backs up, redeploys a build stamped from the target (`install --source-root DIR`; default the CLI's code root), restarts loop and executors, rescans and applies setup, waits for a healthy `/healthz`; refuses older schemas; failures name step and rollback (migrated: roll-forward); `--apply` fixes `delegationLimits` drift and undeclared `sessionKind`.
 
 ## Failure handling
 
