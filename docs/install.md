@@ -65,7 +65,7 @@ Price: `--confirm-price`/`--max-monthly`; `--migrate` stops loop, fences `GRAPHY
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; checkout+`npm ci`/backup/recorded-roster redeploy/loop+executor restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (migrated: roll-forward). The redeploy builds and stamps the image from the checked-out target (`install --source-root DIR`; default: the CLI's code root). `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
+`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; checkout+`npm ci`/backup/recorded-roster redeploy/loop restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (migrated: roll-forward). The redeploy builds and stamps the image from the checked-out target (`install --source-root DIR`; default: the CLI's code root). `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
 
 ## Failure handling
 
