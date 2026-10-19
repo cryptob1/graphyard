@@ -83,8 +83,8 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/validation.md', /`command`: `run` in the checkout with `TARGET_URL`.*`{"kind":"command","run":"npx playwright test"}`/],
   ['docs/validation.md', /`agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS\|FAIL - reason`.*"goal":"Win tic-tac-toe"/],
   ['docs/validation.md', /`secrets: \["NAME"\]` from `~\/\.config\/graphyard\/INSTALL\/e2e-secrets\.TARGET\.env` \(0600, uncommitted\) as variables and `\{\{secret:NAME\}\}`, redacted/],
-  // GY-1526 AC-6: the loop-driven cut and the related-item revert of control-plane mode.
-  ['docs/delivery.md', /The loop cuts \(`run\.candidates\.everyMerges` 5, `idleMinutes` 15\), validates, promotes and verifies .*no workflow.*a failed required E2E case reverts the newest candidate item a matching verification map covers \(`candidateReverts`; reopened\); a main-watch freeze holds all/],
+  // GY-1982: the loop deploys each new base tip and rolls a failed one back.
+  ['docs/delivery.md', /\*\*The master loop deploys continuously\*\*.*`promotion\.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`/],
   // GY-1848: the repository's release failure-action keys and their defaults.
   ['docs/delivery.md', /`release\.onFailure` `hold` \(default `revert`\) names each failing case, step and would-be target or `no map matched`, reverting\/reopening nothing; `release\.revertUnmatched: false` holds an unmatched failure instead of the newest item/],
   // GY-1555 AC-6, GY-2010: setup-from-zero's control-plane merger subsection; no GitHub App step remains.
@@ -96,7 +96,7 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   // GY-1529 AC-5: the Coordinator recovery section names its symptoms, the recover command and how promotion resumes.
   // GY-1607 AC-4: the deployment page says CI and release-candidate runners pull Docker Hub images through the mirror.
   ['docs/deployment.md', /CI and release-candidate runners pull Docker Hub images through the `mirror\.gcr\.io` mirror/],
-  ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; verified promotions repin\./],
+  ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; deploys repin\./],
   // GY-1778 AC-2: plan-read bounds live on the protocol read-endpoints page (docs/github.md deleted in GY-2010).
   ['docs/protocol/read-endpoints.md', /`\/api\/work`: the fleet \(open items whole, settled deliveries summarized\), `\?pr=N` only the item whose candidate or submission names pull request N \(else `\[\]`\)/],
   // GY-2010: no GitHub App is held, so both master-agent pages say the App browser flows refuse (GY-1686's capture remedy is gone).

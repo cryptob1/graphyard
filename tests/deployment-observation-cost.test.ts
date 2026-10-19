@@ -443,11 +443,11 @@ test('unit:deployment-step-idle-cycle-cost — on a two-cycle replay with an unc
   });
   const first = await runCycle(master, state, effects, now);
   assert.equal(observations, 1);
-  assert.ok(first.metrics.steps!.deployment.ms >= 12_000, `the first cycle reads live: ${first.metrics.steps!.deployment.ms}ms`);
+  assert.ok(first.metrics.steps!.deployment.ms >= 9_000, `the first cycle reads live: ${first.metrics.steps!.deployment.ms}ms`);
   running += 300_000;
   const second = await runCycle(master, state, effects, now);
   assert.equal(observations, 1, 'the unchanged release is not read again');
-  assert.equal(ledgerReads, 1, 'nor is the promotion ledger, inside its 15-minute window');
+  assert.equal(ledgerReads, 0, 'nor any promotion ledger: the loop drives no promotion (GY-1982)');
   assert.ok(second.metrics.steps!.deployment.ms < 5_000, `deployment bucket ${second.metrics.steps!.deployment.ms}ms`);
   assert.ok(second.metrics.durationMs < 30_000, `the whole cycle stays under the 30s cycle-p90 bound: ${second.metrics.durationMs}ms`);
   assert.ok(Object.values(second.metrics.steps!).reduce((sum, step) => sum + step.ms, 0) < 30_000);
