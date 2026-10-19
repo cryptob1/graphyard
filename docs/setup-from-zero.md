@@ -16,43 +16,44 @@ No step needs a human.
 
 Hetzner waits (exit 3) for price approval: `--confirm-price`, `--max-monthly` or `--ssh-key`.
 
-`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop, goal — filed with the operator's admin credential, else the master's operator-agent identity holding intent:create (neither: exit 2; never the install's worker credential). The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` (and rebinding stale host executor launchers) until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); the loop self-upgrades only when managing its own project, else `upgrade:refused` and `up` upgrades, lifting any [`.graphyard/held-cli` pin](deployment.md#production-deployment-observation).
+`up` runs, in order: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts (host logins), harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity holding intent:create; neither present: exit 2, never the install's worker credential). The loop merges onboarding's pull request (host install: a person); goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's clean commit (`doctor`: `loop-code`); stale host executor launchers rebind (declared slots restart); foreign refused; the loop reports its CLI's checkout, never the managed repository's, self-upgrading only when managing its project (same directory, worktree, origin); else `upgrade:refused`; `up` upgrades. Its `.graphyard/held-cli` pin and snapshots live there: `master status` names, `up` lifts, units read.
 
 ## The Setup page
 
-A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`, valid 10 minutes, [phone](dashboard.md#from-your-phone)) and waits until green. Items:
+A step needing a person prints one Setup-page link (`SERVER/#sign-in=CODE&setup`, valid 10 minutes), waits until green, then a fresh link; [phone access](dashboard.md#from-your-phone). Items:
 
 | Item | Button
 | --- | ---
 | GitHub App, reviewer App | Done, not required ([merger](delivery-redesign.md#the-merger))
 | Coding and reviewing accounts | **Connect an account** (API key or subscription sign-in)
+| Coordinator running | none (automatic)
 | Onboarding change: its wait | **Open the change**
 
 Once green, **Describe what you want built** records a goal.
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]`; exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting), `step-failed` naming argv and stderr. Default: no Apps, browser profile or `--reviewer`; missing repo: `gh repo create --source . --push`. Apps in signed-in Chrome profile (passed, master's, same-login install's; none without `--reuse-app`/saved Apps: exit `2`) in `.graphyard/master-actions/`. Human handoffs: subscription login approval, *Confirm access* Mobile number, App page (http://127.0.0.1:4311), sudo (`up --sudo-code`); import both: `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` → `3`). `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: from `master.json` or install); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting), `step-failed` naming argv and stderr. No GitHub App, branch protection, ruleset or `--reviewer`: the merge writer's deploy key is the only GitHub access, and `--reuse-app` is refused (GY-2009). Missing repo: `gh repo create --source . --push`; no `--local`. Handoff: subscription login approval. `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
 
 ## Troubleshooting: manual steps
 
-`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite; **HUMAN** marks human-only steps.
+`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite; **HUMAN** marks agent-impossible steps.
 
 ## 1. Machine prerequisites
 
 ```sh
 node --version          # v24+
-gh auth status          # scope repo; non-compose providers also admin:repo_hook
+gh auth status          # scope repo (deploy-key registration); no provider needs admin:repo_hook
 docker compose version
 herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**Verify:** each exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as a repository admin; user namespaces for `bwrap`; a free-plan private repository goes public.
+**Verify:** each exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as a repository admin; user namespaces for `bwrap`.
 
 ## 2. Graphyard and the repository
 
-Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
+Needs a GitHub `origin`. Install writes no Actions workflows; the merge writer's trial is the gate. **Verify:** doctor readiness `repository` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -60,19 +61,19 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ### Control-plane merger
 
-`up` creates an ed25519 deploy key and registers it read-write on OWNER/REPO for the [merge writer](delivery-redesign.md#the-merger) (SSH push; no App, no branch protection); the loop re-registers a missing one. **Verify:** `github-app` and `reviewer-app` print `PASS ... not required (merger: control-plane)`.
+`up` creates an ed25519 deploy key and registers it read-write on OWNER/REPO for the [merge writer](delivery-redesign.md#the-merger), which pushes through an SSH origin; no App, no branch protection. The loop re-registers a missing key each setup run. **Verify:** `github-app` and `reviewer-app` print `PASS ... not required (merger: control-plane)`.
 
 ## 4. Register the GitHub App
 
-Only `install --apply` without `--no-github-app` (never `up`) serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
+Not required for the control-plane merger: install and `up` register no App and write no branch protection ([github](github.md)). Doctor `github-app` / `reviewer-app` print `PASS ... not required`. Optional legacy observation-only binding remains via `graphyard app import` / `app bind`. Reviewer and revert-approver Apps: only when an observation-only install still uses them.
 
 ## 6. Onboard the checkout
 
-`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). `--no-github-app` onboards App-less. Scans skip `.claude`. **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json` to the base (never `.graphyard/` or `.github/workflows` — setup writes none). Scans skip `.claude`. **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 8. Agent environments
 
-Connect accounts ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's `workers/` credentials. An unknown reviewer profile is one `gy master status` attention, retried every five minutes. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
+Connect accounts ([dashboard](dashboard.md#settings-agents)); host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`; up runs both where the loop runs (host: `install --profiles-only`), issuing the install's `workers/` credentials and naming refused ones; account lines wait for both. Unknown-reviewer-profile refusals: one `gy master status` attention, uncounted five-minute retries. **Verify:** one `agent-environment:NAME` line passes per environment; then [roles](onboarding.md#configure-the-fleet).
 
 ## 9. Worker sandbox and harness rules
 
@@ -96,4 +97,4 @@ Set `RAILWAY_API_TOKEN` (**HUMAN:** issued by its owner) and size `GRAPHYARD_DAT
 
 ## 12. First item end to end
 
-The Setup page's goal, or `gy master create item.json REASON` ([work.json](../examples/work.json)). **Verify:** `gy status GY-1` reaches `done`; doctor `production.serving` reaches the merge commit, `production.incidents` `[]`.
+The Setup page's goal, or `gy master create item.json REASON` ([work.json](../examples/work.json)). **Verify:** `gy status GY-1` reaches `done`; doctor `production.serving` reaches the merge commit, `production.incidents` `[]` ([production observation](deployment.md#production-deployment-observation)).

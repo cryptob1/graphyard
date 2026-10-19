@@ -123,7 +123,7 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   assert.ok(!result.completed.includes('master-autonomy'), 'master-autonomy is not run');
   assert.ok(events.some(event => event.kind === 'step' && event.step === 'master-autonomy' && event.state === 'skipped' && /supervised/.test(event.detail ?? '')));
   assert.ok(!w.calls.some(call => call.args[0] === 'master' && ['autonomy', 'reviewer', 'approver'].includes(call.args[1])), 'no identity or reviewer App is set up');
-  for (const call of w.calls.filter(entry => entry.args[0] === 'install')) assert.ok(!call.args.includes('--reviewer') && call.args.includes('--no-github-app'), `install registers no App: ${call.args.join(' ')}`);
+  for (const call of w.calls.filter(entry => entry.args[0] === 'install')) assert.ok(!call.args.includes('--reviewer') && !call.args.some(arg => /^--(no-github-app|github-app|reuse-app)$/.test(arg)), `install registers no App (GY-2009: no App flag at all): ${call.args.join(' ')}`);
   assert.ok(result.completed.includes('deploy-key') && w.deployKeys === 1, 'the merge writer\'s deploy key is registered, so the control plane can merge');
   assert.ok(w.supervised >= 1, 'master.json records supervised mode');
   assert.deepEqual(result.checklist.map(item => item.id), supervisedIds);

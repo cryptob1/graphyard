@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
-import { admin, demand, deploymentUnrecorded, type Principal, type ReleaseDelivery, type Work } from './model.js';
+import { admin, demand, type Principal, type ReleaseDelivery, type Work } from './model.js';
 import { save } from './store.js';
 import { deliveryPolicy, type Environment, type Registration, type RollbackFencing, type Validation } from './validation.js';
 import { digestHash } from './attribution.js';
@@ -733,7 +733,7 @@ export class Delivery {
       const deployed: string[] = [], awaiting: { key: string; reason: string }[] = [];
       for (const candidate of candidates) {
         const work = (await db.query('SELECT document FROM work_items WHERE id=$1', [candidate.id])).rows[0]?.document as Work | undefined;
-        if (!work || !deploymentUnrecorded(work) || work.delivery!.mergeSha !== candidate.mergeSha) continue;
+        if (!work || work.stage !== 'done' || work.closure || !work.delivery || work.delivery.deployment || work.delivery.mergeSha !== candidate.mergeSha) continue;
         const mergeSha = work.delivery!.mergeSha, verdict = byMerge.get(mergeSha.toLowerCase());
         if (verdict !== true) { awaiting.push({ key: work.key, reason: verdict === false ? `${observation.sha.slice(0, 12)} does not contain merge ${mergeSha.slice(0, 12)}` : `Whether ${observation.sha.slice(0, 12)} contains merge ${mergeSha.slice(0, 12)} could not be told` }); continue; }
         if (Date.parse(observation.observedAt) < Date.parse(work.delivery!.mergedAt) - 60_000) { awaiting.push({ key: work.key, reason: 'The observation predates the merge' }); continue; }

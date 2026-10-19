@@ -5,9 +5,9 @@ import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonA
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
 import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
-import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics, trackSilence } from './metrics.js';
+import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics } from './metrics.js';
 import { profileHealth } from './sessions.js';
-import { boundedPersist } from './liveness.js';
+import { boundedPersist, progressAttention } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
 import { masterSessionStep } from './cycle-master.js';
@@ -18,7 +18,6 @@ import { hostSupervisionStep } from './cycle-host.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
-import { flakeStep } from './cycle-flakes.js';
 import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
@@ -239,8 +238,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // 3a. A required check that fails on the base head too is set aside before anything decides on
   //     the item (GY-528): the decisions and the approver capacity dispatch counts read it.
   cycle.baseFailed = await timings.step('base failures', () => baseFailureStep(cycle));
-  // 3b. Pass-on-rerun outcomes go to the flake ledger, and a repeatedly flaky test gets one fix item (GY-1498); no gate reads it.
-  await timings.step('flakes', () => cycle.isolate('fault', null, 'flake ledger', () => flakeStep(cycle)));
   spent('decisions');
 
   const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));
@@ -289,7 +286,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   await settleLaunches();
 
   // 8. Measure. Every cycle records stage p50/p90 whether or not it acted, what it could have
-  //    acted on and how long the longest of those has waited, and the passage of every item it
+  //    acted on, and the passage of every item it
   //    watches: ready→claim, ready→first push, approval→merge and how long a mergeable candidate
   //    stayed mergeable. All of it from the snapshot this cycle acted on, so no figure can
   //    disagree with the state that produced it.
@@ -300,12 +297,17 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   }
   // GY-1890: the dispatch step's own saturation report answers whether any launch profile was free
   // when it dispatched. With none free a claimable item's wait is the fleet's slot capacity, so its
-  // silence subject is a capacity one; the bound then files the class that owns slot starvation,
-  // never the loop's. The flag is the step's own stop (`saturatedFleet` in the launch step), not a
-  // recomputation beside it, so what reclasses a subject is what the step decided.
+  // subject is a capacity one; the master session's wake reads the kinds, so a held fleet reads as
+  // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
+  // not a recomputation beside it, so what reclasses a subject is what the step decided.
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
-  const silence = trackSilence(state, actionable, performed, clock);
-  const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
+  // The loop's progress watchdog (GY-2005): its lines (progressAttention, GY-1980) began standing
+  // this cycle. The onset — not every cycle the stall stands — is the resolver's cue: a run is
+  // marked due and the next cycle's doctorStep launches it at once instead of waiting the interval.
+  const watchdogStanding = progressAttention(snapshot.work, state.promotion, clock).length > 0;
+  if (watchdogStanding && !state.doctor.watchdogStanding) state.doctor.watchdogDue = true;
+  state.doctor.watchdogStanding = watchdogStanding;
+  const { stages, lead } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
   timings.add('measure', now() - measuredFrom);
@@ -314,7 +316,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // GY-1344: time spent on requests the control plane never answered is the plane's outage, not the loop's work.
   const report = timings.report(), planeWaitMs = Math.min(durationMs - childWaitMs, report.planeWaitMs ?? 0);
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs - planeWaitMs, ...(planeWaitMs ? { planeWaitMs } : {}), steps, timings: report, open: open.length, actions: performed.length,
-    actionable: silence.actionable, idleMs: silence.longestIdleMs, stages, lead, production, postDeploy, postDeployFailures,
+    actionable: actionable.length, stages, lead,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
   state.cycle += 1;
@@ -332,7 +334,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   });
   pruneDaemonState(state);
   await effects.persist(state);
-  return { actions: performed, metrics, deployment: state.deployment, health, silence, budget: latencyBudget(state.latency), scope: budget };
+  return { actions: performed, metrics, deployment: state.deployment, health, actionable, budget: latencyBudget(state.latency), scope: budget };
 }
 
 /**
@@ -376,7 +378,7 @@ export interface Cycle {
   launch: (kind: DaemonActionKind, item: Work | null, key: string, holds: string[], body: (sink: DaemonAction[]) => Promise<void>) => boolean;
   /** Whether launches outlive this cycle (the loop's launcher), or are settled within it (a cycle run on its own). */
   detached: boolean;
-  /** GY-1890: the dispatch step stopped on a saturated fleet this cycle — no launch profile free while work is claimable, by `saturatedFleet`. The measure reads this, the step's own decision, to count a claimable item's wait under capacity instead of the loop's silence. Absent where the step never stopped. */
+  /** GY-1890: the dispatch step stopped on a saturated fleet this cycle — no launch profile free while work is claimable, by `saturatedFleet`. The measure reads this, the step's own decision, to name a claimable item's wait a capacity subject instead of a dispatch one. Absent where the step never stopped. */
   fleetHeld?: boolean;
   /** The decision histories read on earlier cycles of this loop (GY-1142), which the decisions step keeps while their ledger has not moved. */
   heldDecisions: HeldDecisions;

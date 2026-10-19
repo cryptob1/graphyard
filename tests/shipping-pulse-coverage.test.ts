@@ -6,15 +6,24 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
-import { Engine } from '../src/engine.js';
+import { save } from '../src/store/store.js';
+import type { Work } from '../src/model.js';
 import { FLOW_DEPLOYMENT_ENDPOINT, PRODUCTION_OBSERVATION_ENDPOINT, shippingPulse, type ShippingPulse } from '../src/shipping-pulse.js';
 import { ProductionDelivery } from '../src/production-delivery.js';
 import { ShippingPulseView } from '../web/shipping-pulse.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-129: the PR-to-production split must say when it has no inputs at all, must count a
-// delivery the master verified with `master verify-deployment`, and must never show a
-// coverage figure without the reason behind it.
+// delivery an older ledger recorded a deployment for, and must never show a coverage figure
+// without the reason behind it.
+
+/** The `deployment` event an older ledger holds for a delivery (GY-1981 removed the command that wrote it). */
+const recordDeployment = (id: string, sha: string, mergeSha: string, observedAt: string) => store.transaction(async (db, now) => {
+  const work = (await db.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0].document as Work;
+  work.delivery!.deployment = { sha, mergeSha, source: 'endpoint', observedAt, covers: sha === mergeSha ? 'exact' : 'descendant', at: now.toISOString(), observer: 'master' };
+  await save(db, work, 'master', 'deployment', now, { sha, mergeSha, source: 'endpoint', observedAt });
+  return work;
+});
 
 let database: EmbeddedPostgres; let store: Store;
 before(async () => {
@@ -94,11 +103,11 @@ test('unit:unconfigured-production-endpoint-stated — with no production observ
   assert.ok(unconfigured.includes(FLOW_DEPLOYMENT_ENDPOINT), 'names POST /api/deployments and says it does not feed the metric');
   assert.match(unconfigured, /POST \/api\/deployments records deployments for flow analytics and does not feed this metric/);
   assert.match(unconfigured, /producer credential whose deploymentProviders scope names the provider/);
-  assert.match(unconfigured, /master verify-deployment also counts/);
+  assert.match(unconfigured, /A deployment an older delivery recorded also counts/);
   assert.doesNotMatch(unconfigured, /Sparse sample/);
   // Coverage is still explained on the same page.
   assert.match(unconfigured, /0 included of 6 \(0% coverage\) · 6 excluded, most often no verifiable production deployment/);
-  assert.match(unconfigured, /no deployment-provider observation is recorded · 0 in this window verified with master verify-deployment/);
+  assert.match(unconfigured, /no deployment-provider observation is recorded · 0 in this window with a recorded deployment/);
 
   // Three provider observations, each containing one delivered merge: the metric now has
   // inputs and three included deliveries, which is a thin sample rather than a missing source.
@@ -123,7 +132,7 @@ test('unit:unconfigured-production-endpoint-stated — with no production observ
   assert.match(sparse, /3 included of 6 \(50% coverage\) · 3 excluded, most often no verifiable production deployment \(3, every exclusion\)\./);
 });
 
-test('integration:verified-delivery-counts-as-production — a delivery verified through master verify-deployment is included with its merge-to-production duration', async () => {
+test('integration:verified-delivery-counts-as-production — a delivery whose deployment an older ledger recorded is included with its merge-to-production duration', async () => {
   const before = await shippingPulse(store.pool);
   const verified = await ledgerDelivery('310', 3);
   const excludedStill = await shippingPulse(store.pool);
@@ -131,12 +140,10 @@ test('integration:verified-delivery-counts-as-production — a delivery verified
   assert.equal(excludedStill.prToProduction.sampleSize, before.prToProduction.sampleSize, 'an unverified delivery with no provider observation is excluded');
   assert.equal(excludedStill.prToProduction.exclusions['no-verifiable-production-deployment'], (before.prToProduction.exclusions['no-verifiable-production-deployment'] ?? 0) + 1);
 
-  // The record `master verify-deployment` writes through the coordinator credential: the
-  // release it observed serving this delivery's merge, bound to the delivery by the engine.
-  const engine = new Engine(store, [15368], 120, 'owner/project');
+  // The release recorded serving this delivery's merge, as an older ledger holds it.
   const release = 'e'.repeat(40);
   const observedAt = new Date(Date.now() - 5_000).toISOString();
-  const recorded = await engine.execute({ id: 'master', role: 'coordinator' }, 'deployment', verified.id, { sha: release, mergeSha: verified.mergeSha, source: 'endpoint', observedAt }, randomUUID());
+  const recorded = await recordDeployment(verified.id, release, verified.mergeSha, observedAt);
   assert.equal(recorded.delivery!.deployment!.sha, release); assert.equal(recorded.delivery!.deployment!.covers, 'descendant');
   const ledger = await store.pool.query("SELECT payload->'work'->'delivery'->'deployment' AS deployment FROM events WHERE work_id=$1 AND kind='deployment'", [verified.id]);
   assert.equal(ledger.rows.length, 1, 'the verification is an append-only ledger event, the table the pulse reads');
@@ -157,12 +164,12 @@ test('integration:verified-delivery-counts-as-production — a delivery verified
   assert.equal(after.prToProduction.averageHours, Math.round((6 * (included + 1) + priorTotal + expectedMergeToProduction) / (included + 1) * 10) / 10);
   // A second delivery already covered by a provider observation keeps the provider's instant:
   // the verification stands in only where no provider reported.
-  const covered = await engine.execute({ id: 'master', role: 'coordinator' }, 'deployment', (await store.pool.query("SELECT id FROM work_items WHERE document->>'key'='GY-301'")).rows[0].id, { sha: release, mergeSha: '301'.padStart(40, 'c'), source: 'endpoint', observedAt }, randomUUID());
+  const covered = await recordDeployment((await store.pool.query("SELECT id FROM work_items WHERE document->>'key'='GY-301'")).rows[0].id, release, '301'.padStart(40, 'c'), observedAt);
   assert.ok(covered.delivery!.deployment);
   const both = await shippingPulse(store.pool);
   assert.equal(both.prToProduction.sources.verifiedDeliveries, 2);
   assert.equal(both.prToProduction.sampleSize, after.prToProduction.sampleSize, 'GY-301 was already included through its provider observation');
   assert.equal(both.prToProduction.split.mergeToProductionAverageHours, after.prToProduction.split.mergeToProductionAverageHours, 'the provider instant is kept over the later verification instant');
   const markup = text(render(both));
-  assert.match(markup, /deployment-provider observations are recorded · 2 in this window verified with master verify-deployment/);
+  assert.match(markup, /deployment-provider observations are recorded · 2 in this window with a recorded deployment/);
 });

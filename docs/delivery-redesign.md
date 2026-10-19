@@ -14,7 +14,7 @@ Only Graphyard writes to main.
 
 ## Merge writer
 
-Oldest first, one in flight: `merge.intent`; merge-commit trial (affected and proof tests; no tests without `scripts/ci-tests.mjs`, build without `package.json`; failed probes: runner failures; host-sized shards; one retry on timeout, cancel, host failure; recorded as `merge.trial`); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved-tip rejection waits; a failed trial reworks (`mergeWriter.reworks`). A timed-out trial yields: retried after every queued head; timed out twice while another head passes, it is refused to rework (`trial failed`, the slow files). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Record keys name persisted attempts: lost replies replay exactly (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger, then retry anew. `master status`: `mergeWriter.queue`.
+Four oldest heads share one trial and push, each delivered at its commit; a failed batch merges singly: `merge.intent`; merge-commit trial (affected and proof tests; no tests without `scripts/ci-tests.mjs`, build without `package.json`; host-sized shards; one retry on timeout, cancel, host failure (`merge.trial`)); `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone; `merge.pushed`; fetch; `merge.reconciled` delivers. A moved tip re-trials (`retrials`, 3); an unmoved rejection waits; a conflict or failed trial reworks (`mergeWriter.reworks`). A timed-out head goes alone, last; timed out twice while others pass, it reworks (`trial failed`, the slow files). Reconcile rule: an unpushed intent main's first parent holds delivers, else re-queues. Keys name persisted attempts: lost replies replay (`mergeWriter.unconfirmed`); reused-key refusals adopt the ledger, then retry anew. `master status`: `mergeWriter.queue`.
 
 ## Removed and kept
 
@@ -24,7 +24,7 @@ Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinn
 
 ## The merger
 
-The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read (`/api/status` `mergeWriter`). Launches get no push credential or keyring proxy. Setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`. Pull-request candidates come from the shared object store.
+The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` pass `github-app` and `reviewer-app` as `not required (merger: control-plane)`. Candidates: object store, `Hotfix:`/base-repair first, then oldest item.
 
 `POST /api/work/:id/merge-record` (coordinator, `Idempotency-Key`) records each step; `pushed`/`reconciled` name the open intent's merge commit, else 409.
 
@@ -37,4 +37,4 @@ The control plane is every install's only merge writer: nothing sets another, an
 
 ## Measures
 
-Weekly: defects reaching production (escapes), merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk, batched merge validation, a per-test flake ledger.
+Weekly: defects reaching production (escapes), merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk, a per-test flake ledger.

@@ -57,8 +57,8 @@ export function installationOwner(source: typeof installationSources[number], te
   // deployment of what production tracks, never a deploy of main past the release gates (GY-1207).
   // The branch is the one the watch reported (GRAPHYARD_PRODUCTION_BRANCH when set), never a fixed name (GY-1256).
   return agentOwner('master', productionBranch
-    ? `Fix the failing deployment of ${productionBranch}, the branch production tracks, with the configured provider, never deploying main past graphyard release; then graphyard master verify-deployment GY-N for each pending delivery`
-    : 'Fix the failing deployment of the base branch, which production tracks, with the configured provider; then graphyard master verify-deployment GY-N for each pending delivery');
+    ? `Fix the failing deployment of ${productionBranch}, the branch production tracks, with the configured provider, never deploying main past graphyard release`
+    : 'Fix the failing deployment of the base branch, which production tracks, with the configured provider');
 }
 /** Why a work item raises attention; each cause is also its fault kind. */
 export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',

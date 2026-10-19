@@ -10,7 +10,6 @@ import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, dedupDoctorFiles, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects, type DoctorFile } from '../src/daemon/doctor.js';
 import { applyDoctorRun, doctorTool, filingDigest } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
-import { silenceBudgetMs, type SilenceEntry } from '../src/daemon/metrics.js';
 import { faultClassOf, faultClassPolicyDefaults, recurringClasses, type FaultInstance } from '../src/model/fault-classes.js';
 import { doctorRunRecordSchema, type DoctorRunRecord } from '../src/daemon/state.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
@@ -70,19 +69,19 @@ const words = (...values: string[]) => values.map(value => ({ value, dynamic: fa
 const liveAgent = (name: string) => ({ name, agent_status: 'working', pane_id: 'p1' } as any);
 const summary = (at_: string, runState: 'reported' | 'running' = 'reported'): DoctorRunRecord => ({ at: at_, state: runState, runs: [], findings: [], actions: [], filed: [], detail: '' });
 
-test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by default on a configurable interval, its session holds only the sanctioned commands with a refusal recorded rather than run, and the shipped template is the resolver\'s short act-don\'t-ask charter', async () => {
+test('unit:doctor-scheduled-and-scoped — the doctor runs every five minutes by default on a configurable interval, its session holds only the sanctioned commands with a refusal recorded rather than run, and the shipped template is the resolver\'s short act-don\'t-ask charter', async () => {
   const settings = doctorSettingsSchema.parse({});
   assert.equal(settings.enabled, true, 'the doctor is on by default');
-  assert.equal(settings.intervalMinutes, 10, 'the doctor runs every ten minutes by default');
+  assert.equal(settings.intervalMinutes, 5, 'the doctor runs every five minutes by default');
   assert.notEqual(settings.fallbackModel, settings.model, 'the fallback model is stronger than the default model');
   const master = config();
   const state = emptyDaemonState(master);
-  // The schedule: never run, it is due; nine minutes after a run it is not; at ten it is.
+  // The schedule: never run, it is due; four minutes after a run it is not; at five it is.
   state.doctor.runs = [summary(at(0))];
-  assert.equal(doctorDue(state, Date.parse(at(9 * 60_000)), settings), false, 'nine minutes after the last run the doctor is not due');
-  assert.equal(doctorDue(state, Date.parse(at(10 * 60_000)), settings), true, 'ten minutes after the last run the doctor is due');
+  assert.equal(doctorDue(state, Date.parse(at(4 * 60_000)), settings), false, 'four minutes after the last run the doctor is not due');
+  assert.equal(doctorDue(state, Date.parse(at(5 * 60_000)), settings), true, 'five minutes after the last run the doctor is due');
   // A run still in flight is never overlapped, whatever the interval.
-  state.doctor.runs.push(summary(at(10 * 60_000), 'running'));
+  state.doctor.runs.push(summary(at(5 * 60_000), 'running'));
   assert.equal(doctorDue(state, Date.parse(at(30 * 60_000)), settings), false, 'a run in flight is not overlapped');
   // The interval is the operator's: run.doctor.intervalMinutes=30 moves the bound.
   const slower = doctorSettingsSchema.parse({ intervalMinutes: 30 });
@@ -650,7 +649,7 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
 });
 
 // GY-1295: the six instances of "Recurring loop faults: 6 in 24 hours", replayed as the loop recorded them.
-test('fault-class-loop — a doctor command its allowlist refused and a decision waiting on its approver are not loop faults', async () => {
+test('fault-class-loop — a doctor command its allowlist refused is not a loop fault', async () => {
   // Instances 1–5: one doctor run whose read-only attempts the allowlist refused, each adapted around.
   const refused = [
     ['node /home/vish/code/graphyard/bin/graphyard.mjs --help | head -60', 'Allowlist refusal (pipe outside the doctor\'s allowlist); not retried — CLI surface was read from src/cli/master.ts instead'],
@@ -668,21 +667,6 @@ test('fault-class-loop — a doctor command its allowlist refused and a decision
   assert.equal(recorded.length, 5, 'every refusal is still recorded, so master status shows what the doctor could not run');
   assert.deepEqual(recorded.map(action => action.state), Array(5).fill('done'), 'a refusal the doctor adapted around is not a failed loop action');
   assert.deepEqual(replay.state.faults.instances.filter(entry => faultClassOf(entry.kind) === 'loop'), [], 'and opens no loop fault instance');
-
-  // Instance 6: GY-949's rework decision waiting on its approver past the silence bound.
-  const liveness = { state: 'running', detail: 'cycling', restart: 'restart' } as unknown as LoopLiveness;
-  const silent = (entry: Pick<SilenceEntry, 'kind' | 'work' | 'detail'>) => {
-    const longest = { key: `${entry.kind}:${entry.work}`, since: observedAt, idleMs: 34 * 60_000, ...entry };
-    return loopAttention({ liveness, silence: { actionable: 7, longestIdleMs: longest.idleMs, longest, budgetMs: silenceBudgetMs, breached: true, lastActionAt: observedAt, subjects: [longest] } })[0];
-  };
-  const approver = silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949\'s rework decision 8b62b40b-0f3d-4cd6-b3c0-3920340a512b is requested and waiting for approver session graphyard-approver-gy-949-8b62b4 to judge it' });
-  assert.match(approver.text, /^Nothing has acted on GY-949's rework decision .+ past the 20-minute bound, while 7 subject\(s\) were actionable/, 'the wait is still raised');
-  assert.deepEqual([approver.kind, approver.faultClass], ['decision-unanswered', 'decision'], 'as the decision fault it is, not the loop failing to cycle');
-  const exhausted = silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949\'s rework decision 8b62b40b is unjudged after 3 approver session(s)' });
-  assert.equal(exhausted.faultClass, 'decision', 'an approver wait past its launches is a decision fault too');
-  // What the loop itself owes stays loop silence.
-  assert.equal(silent({ kind: 'decision', work: 'GY-949', detail: 'GY-949 needs a rework decision requested and approved' }).faultClass, 'loop', 'a decision nobody requested is the loop\'s to request');
-  assert.equal(silent({ kind: 'dispatch', work: 'GY-949', detail: 'GY-949 is claimable and waiting for a worker' }).kind, 'loop-silence');
 });
 
 // GY-1318 instance 2: doctor:2026-10-05T15:21:52.963Z — "no report: zai/glm-5.3-flash exit; zai/glm-5.3

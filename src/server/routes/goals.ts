@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { CHECK_NAME, demand, operatorCapability, type OperatorCapability, type Principal, type Work } from '../../model.js';
 import { appendGoal, applyGoalCommand, goalCommandSchemas, goalHistory, goalKeyPattern, goalSummary, implementersOf, readGoals, recordGoal, type Goal, type GoalCommand, type Landing } from '../../model/goal.js';
-import { planItemInput, planItemMark, planOrder, servedInProduction } from '../../model/goal-plan.js';
+import { planItemInput, planItemMark, planOrder, mergedItem } from '../../model/goal-plan.js';
 import type { Engine } from '../../engine.js';
 import { landableCarried } from '../../landable-check.js';
 import type { GitHub } from '../../github.js';
@@ -297,8 +297,8 @@ export const goalRoutes = defineRoutes('goals', [
         // A case change names an item that exists, and is judged against everyone who has implemented it:
         // a grant for an item not yet created could be approved by whoever later implements it.
         let implementers: string[] = [], undelivered: string[] | undefined;
-        // Delivery waits on every named item being done and served by production, never a bare assertion.
-        if (command === 'deliver') { undelivered = []; for (const key of goalCommandSchemas.deliver.parse(input).items) if (!servedInProduction(await workByKey(db, key))) undelivered.push(key); }
+        // Delivery waits on every named item being merged, never a bare assertion.
+        if (command === 'deliver') { undelivered = []; for (const key of goalCommandSchemas.deliver.parse(input).items) if (!mergedItem(await workByKey(db, key))) undelivered.push(key); }
         if (command === 'case-change') demand(await workByKey(db, goalCommandSchemas[command].parse(input).work), `${input.work} is no work item; a case change names the existing item that needs it`, 404);
         if (command === 'case-change-approve' || command === 'case-change-refuse') {
           const change = goal.caseChanges.find(entry => entry.id === goalCommandSchemas[command].parse(input).change);

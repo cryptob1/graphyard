@@ -283,7 +283,7 @@ test('unit:plan-validation-accepts-declared-post-deploy-criterion — the plan p
 });
 
 test('unit:planner-approval-and-dispatch-order — only an approver who did not write the plan approves it, only then are its items created and released with their dependencies, the dispatcher holds each until those are delivered, and the goal moves planned, delivering, delivered', async () => {
-  const { clearPlans, currentGoal, planItemInput, planJudgementTool, planOrder, plansSettled, plannerStep, planTool, servedInProduction } = await planner();
+  const { clearPlans, currentGoal, planItemInput, planJudgementTool, planOrder, plansSettled, plannerStep, planTool, mergedItem } = await planner();
   clearPlans();
   // A goal whose acceptance merged, in the ledger as the land route leaves it.
   const goal = mergedGoal('GOAL-1');
@@ -385,28 +385,21 @@ test('unit:planner-approval-and-dispatch-order — only an approver who did not 
   work = await allWork();
   assert.doesNotThrow(() => assertDispatchable(work.find(entry => entry.id === ui.id)!, work, at), 'once its dependency is delivered, ui is dispatched');
 
-  // Delivered only once every item is done and production serves it.
+  // Delivered once every item is merged (GY-1981: done = merged), with no deployment observation.
   await step(); await step(5 * 60_000);
   current = await read();
   assert.equal(current.stage, 'delivering');
-  assert.match(state.actions[`planner:${goal.id}`].detail, new RegExp(`${ui.key}, ${billing.key} are not yet done and served by production`));
+  assert.match(state.actions[`planner:${goal.id}`].detail, new RegExp(`${ui.key}, ${billing.key} are not yet merged`));
   const early = await call(planAuthor, 'POST', `goals/${goal.key}/deliver`, { items: [api.key], reason: 'Said so' });
   assert.equal(early.status, 422); assert.match(early.text, new RegExp(`name ${ui.key}, ${billing.key} too`));
   await deliver(ui, merged);
-  // A default-policy item merged with no deployment observed covering it is not served either.
-  assert.equal(servedInProduction((await allWork()).find(entry => entry.id === ui.id)), false);
-  // A smoke-gated item merged but not yet deployed is not served.
+  assert.equal(mergedItem((await allWork()).find(entry => entry.id === ui.id)), true, 'a merged item with no deployment observed delivers its goal');
+  await step(5 * 60_000);
+  assert.equal((await read()).stage, 'delivering', 'billing is not merged yet');
+  // A smoke-gated item merged with no deployment or smoke recorded delivers too.
   await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{policy,deploySmoke}', 'true') WHERE id = $1`, [billing.id]);
   await deliver(billing, merged);
-  assert.equal(servedInProduction((await allWork()).find(entry => entry.id === billing.id)), false);
-  const unserved = await call(planAuthor, 'POST', `goals/${goal.key}/deliver`, { items: [api.key, ui.key, billing.key], reason: 'All merged' });
-  assert.equal(unserved.status, 422); assert.match(unserved.text, new RegExp(`${ui.key}, ${billing.key} are not delivered`), 'ui has no observed deployment and billing no smoke proof');
-  await step(5 * 60_000);
-  assert.equal((await read()).stage, 'delivering');
-  await deliver(billing, { ...merged, deployment, smoke: { evidenceId: randomUUID(), result: 'pass', sha: 'c'.repeat(40), mergeSha: 'c'.repeat(40), producer: 'smoke', at, executed: 1, skipped: 0 } });
-  await step(5 * 60_000);
-  assert.equal((await read()).stage, 'delivering', 'ui merged, but production was never observed serving it');
-  await deliver(ui, { ...merged, deployment });
+  assert.equal(mergedItem((await allWork()).find(entry => entry.id === billing.id)), true);
   await step(5 * 60_000);
   current = await read();
   assert.equal(current.stage, 'delivered');

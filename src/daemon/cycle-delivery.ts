@@ -1,9 +1,9 @@
-// Concern: cycle steps 5–7 — shepherd reviews, reconcile what GitHub merged, deployment verification.
+// Concern: cycle steps 5–7 — shepherd reviews, reconcile what GitHub merged, the release-level deployment reading.
 import { createHash } from 'node:crypto';
-import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, deploySmokeRequired, deliveryState, rollbackGuidance } from '../model.js';
+import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
-import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, maxProofAttempts, message, retainedActions, storeAction } from './state.js';
+import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, message, retainedActions, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { canonicalJson } from '../onboarding.js';
 import { decisionInput } from '../master.js';
@@ -87,9 +87,9 @@ export async function mergeStep(cycle: Cycle) {
   }
 }
 
-/** Step 7: verify what is actually deployed, and request the smoke proofs deliveries ask for. */
+/** Step 7: observe what is actually deployed, as one release-level reading; a merged item is already done (GY-1981). */
 export async function deploymentStep(cycle: Cycle) {
-  const { config, state, effects, now, snapshot, performed, isolate } = cycle;
+  const { config, state, effects, now, snapshot, performed } = cycle;
   // 7. Verify what is actually deployed. This is an observation, never a gate: Graphyard already
   //    marked the work Done on an observed merge, and a lagging rollout must stay visible as lag.
   const delivered = snapshot.work.filter(item => item.stage === 'done' && item.delivery)
@@ -186,54 +186,7 @@ export async function deploymentStep(cycle: Cycle) {
     await throughputOwnerStep(cycle, verified.sha, snapshot.work, stall);
   }
 
-  // 7b. The second confidence layer. For each delivery whose policy asks for a smoke proof: record
-  //     the observation on Graphyard once the release serves its merge, ask the provider to run the
-  //     trusted smoke workflow against exactly that commit, and escalate a failed verdict with
-  //     rollback guidance. The loop never produces the verdict: the workflow's producer does.
   const served = state.deployment;
-  let smokeDeferred = 0;
-  for (const item of delivered.filter(candidate => deploySmokeRequired(candidate.policy))) await isolate('smoke', item, item.key, async () => {
-    // Past the budget nothing more is started: every record and request below is keyed, so the next cycle resumes where this one stopped.
-    if (now() >= deadline) { smokeDeferred++; return; }
-    const delivery = item.delivery!;
-    if (!delivery.deployment) {
-      if (served?.source === 'unavailable' || !served?.sha || !served.deployed.includes(item.key)) return;
-      const key = `deployment:record:${item.id}:${served.sha}`;
-      if (state.actions[key] && state.actions[key].state !== 'failed') return;
-      if (!readyToRetry(state.actions[key], state.cycle)) return;
-      const attempts = (state.actions[key]?.attempts ?? 0) + 1;
-      await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'started', detail: `Recording that ${served.sha.slice(0, 12)} from ${served.source} serves ${item.key}`, attempts, cycle: state.cycle }, now(), effects.persist);
-      try {
-        await effects.recordDeployment(item, { sha: served.sha, source: served.source as 'endpoint' | 'github-deployment', observedAt: served.at });
-        performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'done', detail: `Recorded deployment ${served.sha.slice(0, 12)} (${served.source}) covering ${item.key} merge ${delivery.mergeSha.slice(0, 12)}; the smoke proof may now be requested`, attempts, cycle: state.cycle }, now(), effects.persist));
-      } catch (error) {
-        performed.push(await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'failed', detail: `Could not record the deployment for ${item.key}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
-      }
-      return;
-    }
-    const outcome = deliveryState(item);
-    if (outcome === 'delivered-with-failure') {
-      const key = `escalation:smoke:${item.id}:${delivery.smoke!.evidenceId}`;
-      if (state.actions[key]?.state !== 'done') performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: rollbackGuidance(item, config.baseBranch)!, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    if (outcome !== 'awaiting-smoke') return;
-    const key = `smoke:${item.id}:${delivery.deployment.sha}`;
-    const previous = state.actions[key];
-    if (previous && (previous.state === 'done' || previous.attempts >= maxProofAttempts || !readyToRetry(previous, state.cycle))) return;
-    if (!config.run.smokeWorkflow) {
-      if (previous?.state !== 'failed') performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'failed', detail: `${item.key} is deployed at ${delivery.deployment.sha.slice(0, 12)} and needs its post-deployment smoke proof; configure master init --smoke-workflow so the loop can request it from the trusted producer workflow`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'started', detail: `Requesting ${config.run.smokeWorkflow} for ${item.key} at ${delivery.deployment.sha.slice(0, 12)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-    try {
-      await effects.requestSmoke(item);
-      performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'done', detail: `Requested trusted smoke workflow ${config.run.smokeWorkflow} for ${item.key} against deployed ${delivery.deployment.sha.slice(0, 12)} (merge ${delivery.mergeSha.slice(0, 12)})`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    } catch (error) {
-      performed.push(await record(state, key, { kind: 'smoke', work: item.key, principal: null, state: 'failed', detail: `Could not request ${config.run.smokeWorkflow} for ${item.key}: ${message(error)}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
-    }
-  });
-  if (smokeDeferred) deferred.push(`${smokeDeferred} deliveries' deployment records and smoke requests`);
   // 7c. GY-1779: the loop's own due readings of loop-owned observation items on the release verified above
   //     (cycle-readings.ts). An observation still in flight verifies nothing this cycle: the due readings
   //     are deferred with it, never taken on the release the last cycle observed.

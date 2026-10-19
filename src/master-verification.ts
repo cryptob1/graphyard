@@ -1,101 +1,23 @@
 import { execFileSync } from 'node:child_process';
-import { copyFile, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { copyFile, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { implementerIdentities, postDeployProofPrefix, postDeployProofs, type Create, type Work } from './model.js';
-import { observationWindowFor, patternOfProof, postDeployFollowUpId, postDeployMarker, type PatternProjection, type PatternProjections, type PatternReader } from './model/observation-window.js';
+import { observationWindowFor, postDeployFollowUpId, postDeployMarker, type PatternProjection, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import type { MasterConfig } from './master.js';
-import { observeDeployment, type DeploymentObservation } from './master-daemon.js';
 import { repositoryFromRemote } from './onboarding.js';
 
 /**
- * The deployment-verification step of the perpetual master loop, for one delivered item.
- *
- * Done marks an observed merge. Whether the release that is actually serving carries the change
- * is a separate fact, and this module establishes it the only way the loop accepts: a fresh
- * observation of the deployed release, checked against the instructions that exact release
- * emits — `master guide`, and a fresh `init` into a scratch checkout outside the repository —
- * and recorded on the delivered item as the deployment observation Graphyard binds later
- * post-deployment proof to. Anything weaker is refused with the reason: a stale observation, a
- * checkout that is not the deployed release, a release that does not serve the merge yet, or
- * emitted instructions that lack the loop. A refusal keeps the loop cycling; it never claims the
- * step. A coordinator checkout at another commit than the observed release — the supervised
- * master upgrades past what production serves — emits nothing itself: the instructions come from
- * an isolated clean checkout of exactly the observed commit (GY-1409), or the step is refused.
+ * The observed release's own post-deploy checks (GY-1732): an isolated clean checkout of exactly the
+ * serving commit decides them, so the loop's readings (src/daemon/cycle-readings.ts) never rest on a
+ * coordinator checkout at another commit. Per-item deployment verification is gone (GY-1981).
  */
 
-/** How long a deployment observation may be relied on before the release must be observed again. */
-export const deploymentFreshnessMs = 300_000;
-
-const phrase = (text: string) => new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/ /g, '\\s+'));
-/** The statements every emitted instruction set must carry for the loop to be the one the docs describe. */
-export const masterLoopStatements = [
-  { name: 'the perpetual cycle', pattern: /keep cycling/i },
-  { name: 'deployment verification as a step of the cycle', pattern: phrase('deployment verification') },
-  { name: 'the terminal condition', pattern: phrase('genuinely external blocker recorded in Graphyard') },
-  { name: 'verification against the exact deployed release', pattern: phrase('against the exact deployed release') },
-  { name: 'the non-stopping conditions', pattern: phrase('Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions') },
-  { name: 'the finished-agent closure duty', pattern: phrase('Close finished agent sessions') },
-] as const;
-export const missingLoopStatements = (text: string) => masterLoopStatements.filter(statement => !statement.pattern.test(text)).map(statement => statement.name);
-
-/** The release identity of the checkout whose CLI emitted the instructions, and the repository it is a checkout of. */
+/** The release identity of a CLI checkout, and the repository it is a checkout of. */
 export interface InstructionRelease { sha: string | null; clean: boolean; repository: string | null; reason: string | null }
-/** What the release emitted: the master guide, and the AGENTS.md a fresh init wrote into a scratch checkout. */
-export interface EmittedInstructions { guide: string; init: string }
-/**
- * `repository` is the managed repository. The emitted instructions are the live check when the
- * launcher's checkout is a checkout of it — Graphyard verifying its own release; a checkout of
- * an unrelated repository can only be judged on whether the release serves the merge.
- */
-export interface VerificationInput { observation: DeploymentObservation; release: InstructionRelease; emitted?: EmittedInstructions; now: number; freshnessMs?: number; repository?: string }
-export type InstructionCheck = 'pass' | 'fail' | 'unobserved' | 'not-applicable';
 export const emitsManagedInstructions = (release: InstructionRelease, repository?: string) => !repository || !release.repository || release.repository.toLowerCase() === repository.toLowerCase();
-export interface VerificationRecord { sha: string; mergeSha: string; source: 'endpoint' | 'github-deployment'; observedAt: string }
-
-/**
- * Pure: decide whether one observation verifies one delivery. Every refusal is a sentence the
- * master can act on. `emitted` is optional so the executor can refuse before spending a scratch
- * checkout on a release that cannot verify anyway; a full assessment always supplies it.
- */
-export function assessDeploymentVerification(work: Work, input: VerificationInput) {
-  const refusals: string[] = [];
-  const freshnessMs = input.freshnessMs ?? deploymentFreshnessMs;
-  const { observation, release } = input;
-  const delivery = work.stage === 'done' ? work.delivery : undefined;
-  if (!delivery) refusals.push(`${work.key} is not delivered; deployment verification follows the observed merge`);
-  if (observation.source === 'unavailable' || !observation.sha) refusals.push(`The deployed release is unobserved: ${observation.reason ?? 'no deployment observation is configured'}`);
-  const age = input.now - Date.parse(observation.at);
-  if (!Number.isFinite(age) || age < 0) refusals.push(`Deployment observation time ${observation.at} is invalid or ahead of the coordinator clock`);
-  else if (age > freshnessMs) refusals.push(`Deployment observation from ${observation.at} is stale (${Math.round(age / 1000)}s old; limit ${freshnessMs / 1000}s); observe the release again`);
-  if (delivery && observation.sha) {
-    if (delivery.deployment && delivery.deployment.sha !== observation.sha) refusals.push(`${work.key} already records deployment ${delivery.deployment.sha} for merge ${delivery.mergeSha}; a later rollout to ${observation.sha} is verified through a follow-up item`);
-    if (!observation.deployed.includes(work.key)) refusals.push(`Deployed release ${observation.sha} does not serve ${work.key} merge commit ${delivery.mergeSha}${observation.pending.includes(work.key) ? ' yet' : ''}`);
-  }
-  const emits = emitsManagedInstructions(release, input.repository);
-  if (observation.sha && emits) {
-    if (!release.sha) refusals.push(`The checkout emitting the instructions has no release identity: ${release.reason ?? 'not a git checkout'}`);
-    else if (release.sha !== observation.sha || !release.clean) refusals.push(`Instructions were emitted by a local checkout at ${release.sha}${release.clean ? '' : ' with uncommitted changes'}, not by the deployed release ${observation.sha}; check out the deployed release and verify again`);
-  }
-  const initial: InstructionCheck = emits ? 'unobserved' : 'not-applicable';
-  const checks: { guide: InstructionCheck; init: InstructionCheck } = { guide: initial, init: initial };
-  // A launcher that is not a checkout of the managed repository emits nothing about it; the
-  // release's coverage of the merge is then the whole check.
-  if (emits && input.emitted) {
-    const guide = missingLoopStatements(input.emitted.guide), init = missingLoopStatements(input.emitted.init);
-    checks.guide = guide.length ? 'fail' : 'pass'; checks.init = init.length ? 'fail' : 'pass';
-    if (guide.length) refusals.push(`master guide from the deployed release lacks ${guide.join(', ')}`);
-    if (init.length) refusals.push(`A fresh init from the deployed release emits instructions lacking ${init.join(', ')}`);
-  }
-  const verifiable = !refusals.length && (!emits || !!input.emitted);
-  const record: VerificationRecord | null = verifiable
-    ? { sha: observation.sha!, mergeSha: delivery!.mergeSha, source: observation.source as VerificationRecord['source'], observedAt: observation.at }
-    : null;
-  return { verifiable, refusals, checks, record, covers: record ? record.sha === record.mergeSha ? 'exact' as const : 'descendant' as const : null };
-}
-
 type Run = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; input?: string }) => string;
 const defaultRun: Run = (command, args, options = {}) => execFileSync(command, args, { ...options, encoding: 'utf8', stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'], timeout: 90_000 });
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -113,28 +35,11 @@ export function checkoutRelease(cliPath: string, run: Run = defaultRun): Instruc
 }
 
 /**
- * What the release emits, read the way an operator would: `master guide` on stdout, and the
- * AGENTS.md a fresh `init --url` writes into a scratch git checkout outside every repository.
- * No Graphyard credential reaches either process, so the init contacts no server and the
- * scratch checkout is removed whether or not it succeeded.
+ * An isolated clean checkout of exactly the observed release, whose CLI decides the post-deploy
+ * checks (GY-1732): their identity, text and observation window are that release's, never the
+ * coordinator checkout's.
  */
-export async function emitInstructions(config: MasterConfig, run: Run = defaultRun): Promise<EmittedInstructions> {
-  const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith('GRAPHYARD_')));
-  const scratch = await mkdtemp(join(tmpdir(), 'graphyard-verify-'));
-  try {
-    run('git', ['init', '-q', scratch]);
-    const guide = run(process.execPath, [config.cliPath, 'master', 'guide'], { cwd: scratch, env });
-    run(process.execPath, [config.cliPath, 'init', '--url', config.url, '--cli-path', config.cliPath], { cwd: scratch, env });
-    return { guide, init: await readFile(join(scratch, 'AGENTS.md'), 'utf8') };
-  } finally { await rm(scratch, { recursive: true, force: true }); }
-}
-
-/**
- * An isolated clean checkout of exactly the observed release, whose CLI emits the instructions and
- * (GY-1732) decides the post-deploy follow-ups: their identity, text and observation window are that
- * release's, never the coordinator checkout's.
- */
-export interface IsolatedRelease { release: InstructionRelease; emit: () => Promise<EmittedInstructions>; checks?: PostDeployFiler; dispose: () => Promise<void> }
+export interface IsolatedRelease { release: InstructionRelease; checks?: PostDeployFiler; dispose: () => Promise<void> }
 
 /**
  * The release's own filer: `master post-deploy-checks` from the checkout at `cliPath`, the input on
@@ -178,82 +83,8 @@ export async function isolateRelease(config: MasterConfig, sha: string, run: Run
     const cliPath = join(checkout, relative(top, config.cliPath));
     // The scratch checkout has no origin, so the repository is the coordinator's.
     const release = { ...checkoutRelease(cliPath, run), repository: checkoutRelease(config.cliPath, run).repository };
-    return { release, emit: () => emitInstructions({ ...config, cliPath }, run), checks: releaseChecks(cliPath, run), dispose };
+    return { release, checks: releaseChecks(cliPath, run), dispose };
   } catch (error) { await dispose(); return { reason: `Could not check out deployed release ${sha} in isolation: ${message(error)}` }; }
-}
-
-export interface VerificationEffects {
-  snapshot: () => Promise<{ work: Work[]; now: string }>;
-  observe: (delivered: Work[]) => Promise<DeploymentObservation>;
-  release: () => InstructionRelease;
-  emit: () => Promise<EmittedInstructions>;
-  /** Materialize the observed release when the coordinator checkout is at another commit. */
-  isolate?: (sha: string) => Promise<IsolatedRelease | { reason: string }>;
-  /** `POST work/:id/deployment`; the control plane binds it to the delivery and refuses a second one. */
-  record: (work: Work, data: VerificationRecord) => Promise<unknown>;
-  /** The managed repository; see `VerificationInput.repository`. */
-  repository?: string;
-  /** The intervention report's under-threshold reading for a pattern (GY-1698): the follow-up's observation window is taken from it. */
-  patterns?: PatternReader;
-  /** The coordinator checkout's own filer, used only when it is at the observed release's commit (or has none to compare); `postDeployChecks` by default. */
-  checks?: PostDeployFiler;
-  now?: () => number;
-}
-
-/**
- * One verification attempt. The observation is taken fresh, the instructions are emitted only
- * once the cheap refusals pass, and the record is written only when the full assessment holds
- * — with `now` read again after emitting, so a slow emission cannot ride on an observation that
- * has since gone stale. A coordinator checkout at another commit than the observed release is
- * replaced, for emission and for the post-deploy follow-ups it files (GY-1732), by an isolated
- * checkout of exactly that release; the coordinator's own commit and dirt then emit nothing and
- * decide nothing. Where that checkout cannot be had or its filer cannot run, the follow-ups are
- * deferred — owed, unfiled, the observation unrecorded so a later attempt files them — never filed
- * by the coordinator's code, which may predate the release's observation windows.
- */
-export async function verifyDeployment(work: Work, effects: VerificationEffects, freshnessMs = deploymentFreshnessMs) {
-  const now = effects.now ?? Date.now;
-  const snapshot = await effects.snapshot();
-  const current = snapshot.work.find(item => item.id === work.id);
-  if (!current) throw new Error(`Unknown work item ${work.key}`);
-  // The probe reads each item's merge commit, so only a delivered item reaches it; undelivered
-  // work is refused by the assessment with nothing to observe, never by a crash in the probe.
-  const observation = await effects.observe(current.stage === 'done' && current.delivery ? [current] : []);
-  const coordinator = effects.release();
-  const emits = emitsManagedInstructions(coordinator, effects.repository);
-  // GY-1732 AC-1: a checkout of the observed release's repository at another commit files nothing with its own code.
-  // A checkout of another repository has no commit comparable to the release, and the release carries no Graphyard
-  // filer to run (its commit is never in the launcher's store), so the coordinator's Graphyard code is the only filer.
-  const isolate = emits && !!observation.sha && !!coordinator.sha && coordinator.sha !== observation.sha;
-  let release = coordinator, isolated: boolean = false;
-  const result = (assessment: ReturnType<typeof assessDeploymentVerification>, recorded: 'now' | 'existing' | null, postDeploy: ReportedPostDeployCheck[] = []) => ({
-    key: current.key, result: assessment.verifiable ? 'verified' as const : 'refused' as const,
-    release: { sha: observation.sha, source: observation.source, observedAt: observation.at, covers: assessment.covers },
-    checkout: { sha: coordinator.sha, clean: coordinator.clean }, emittedFrom: emits ? { sha: release.sha, clean: release.clean, isolated } : null,
-    checks: assessment.checks, refusals: assessment.refusals, recorded, postDeploy,
-  });
-  // Before spending a scratch checkout, the release identity is presumed to be the one isolation
-  // will produce; the full assessment judges the identity git reads back from it.
-  const presumed = isolate ? { ...coordinator, sha: observation.sha, clean: true } : coordinator;
-  const preflight = assessDeploymentVerification(current, { observation, release: presumed, now: now(), freshnessMs, repository: effects.repository });
-  if (preflight.refusals.length) return result(preflight, null);
-  let checkout: IsolatedRelease | null = null;
-  if (isolate) {
-    const materialized = effects.isolate ? await effects.isolate(observation.sha!) : { reason: 'no isolated checkout of the observed release can be made' };
-    if ('reason' in materialized) return result({ ...preflight, verifiable: false, refusals: [materialized.reason] }, null);
-    // The release's checkout is a clone of the coordinator's, so it is judged as the coordinator's repository.
-    checkout = materialized; release = { ...checkout.release, repository: coordinator.repository }; isolated = true;
-  }
-  try {
-    const emitted = !emits ? undefined : checkout ? await checkout.emit() : await effects.emit();
-    const assessment = assessDeploymentVerification(current, { observation, release, emitted, now: now(), freshnessMs, repository: effects.repository });
-    if (!assessment.verifiable) return result(assessment, null);
-    // An unobserved post-deploy criterion is reported in the result, never filed as a work item (2026-10-17).
-    const postDeploy = reportPostDeployChecks(current, assessment.record!.sha, new Date(now()));
-    const existing = current.delivery!.deployment?.sha === assessment.record!.sha;
-    if (!existing) await effects.record(current, assessment.record!);
-    return result(assessment, existing ? 'existing' : 'now', postDeploy);
-  } finally { await checkout?.dispose(); }
 }
 
 export interface PostDeployCheck {
@@ -268,9 +99,8 @@ export interface PostDeployChecksInput { work: Work; release: string; now: strin
 /** The code that decides a delivered item's post-deploy checks and their follow-ups: the observed release's own, wherever it differs from the coordinator's. */
 export type PostDeployFiler = (input: PostDeployChecksInput) => Promise<PostDeployCheck[]>;
 /**
- * The filer for the observed release `sha` outside `verifyDeployment` (GY-1732): the executor's verify-deployment
- * files through it. The coordinator checkout's own code at that commit (or of another repository, or with no commit, as in
- * `verifyDeployment`); otherwise the release's isolated checkout, disposed by the caller; or the reason it cannot be had,
+ * The filer for the observed release `sha` (GY-1732): the coordinator checkout's own code at that commit (or of
+ * another repository, or with no commit); otherwise the release's isolated checkout, disposed by the caller; or the reason it cannot be had,
  * for which each owed follow-up is deferred rather than filed by the coordinator's code.
  */
 export async function releasePostDeployFiler(config: MasterConfig, sha: string, run: Run = defaultRun, isolate: typeof isolateRelease = isolateRelease): Promise<{ filer: PostDeployFiler; dispose: () => Promise<void> } | { reason: string }> {
@@ -285,7 +115,7 @@ const noReleaseFiler: PostDeployFiler = async () => { throw new Error('the isola
 /** `postDeployChecks` over a filer's input: what this checkout's code decides, and what `master post-deploy-checks` prints. */
 export const localPostDeployChecks: PostDeployFiler = async input => postDeployChecks(input.work, input.release, new Date(input.now), input.projections ?? {}, input.servedAt ? new Date(input.servedAt) : undefined);
 /**
- * `master verify-deployment`'s check of the delivered item's declared post-deploy criteria (GY-1660)
+ * The check of a delivered item's declared post-deploy criteria (GY-1660)
  * on the serving release `release`: a proof is observed only by evidence the acceptance gate would
  * itself accept there — trusted, unrevoked, under the item's current policy, unexpired, from no
  * implementer, and passing by its family's rule — recorded at that release, against the delivered
@@ -321,32 +151,11 @@ export function postDeployChecks(work: Work, release: string, now = new Date(), 
     return { criterion: criterion.id, proof, result: 'owed' as const, followUp: { title, requestId, input: {
       title, type: 'chore' as const, priority: 1, dependencies: [work.id], reason: `${work.key} ${criterion.id}'s declared post-deploy verification ${proof} is unobserved on the serving release ${short}`.slice(0, 2000),
       // The marker leads, so no truncation of a long criterion can cut the identity a later check matches by.
-      description: `${postDeployMarker}${requestId}\n\n${work.key} was delivered with ${criterion.id} declared a post-deploy verification (${proof}). master verify-deployment found no trusted passing ${proof} observation on the serving release ${release}, so this item owes it: observe the outcome on that release and record the proof.${observationWindow ? `\n\nObservation window: the reading can first exist at ${observationWindow.notBefore} — ${observationWindow.detail}. The item is not dispatched before then.` : ''}\n\n${work.key} ${criterion.id}: ${criterion.text}`.slice(0, 20000),
+      description: `${postDeployMarker}${requestId}\n\n${work.key} was delivered with ${criterion.id} declared a post-deploy verification (${proof}). the post-deploy check found no trusted passing ${proof} observation on the serving release ${release}, so this item owes it: observe the outcome on that release and record the proof.${observationWindow ? `\n\nObservation window: the reading can first exist at ${observationWindow.notBefore} — ${observationWindow.detail}. The item is not dispatched before then.` : ''}\n\n${work.key} ${criterion.id}: ${criterion.text}`.slice(0, 20000),
       criteria: [{ id: 'AC-1', text, proofs: [`manual:${name.replace(/\//g, '-')}-on-serving-release`] }], ...(observationWindow ? { observationWindow } : {}) } } };
   }));
 }
 
-/** A post-deploy check as verify-deployment reports it: observed or owed on the serving release; nothing is filed for an owed one. */
-export type ReportedPostDeployCheck = Omit<PostDeployCheck, 'followUp'>;
-export const reportPostDeployChecks = (work: Work, release: string, now = new Date()): ReportedPostDeployCheck[] =>
-  postDeployChecks(work, release, now).map(({ followUp: _followUp, ...check }) => check);
-
-/**
- * The report's reading for every declared intervention-pattern proof the item carries, read once per
- * proof before the checks run (GY-1698). A reader that fails, or none, leaves the proof without a
- * reading: the follow-up then falls back to the merge time plus the criterion's window, and is still
- * filed — the window is the follow-up's convenience, never a reason to lose it.
- */
-export async function patternProjections(work: Pick<Work, 'criteria'>, patterns?: PatternReader): Promise<PatternProjections> {
-  const projections: Record<string, PatternProjection | null> = {};
-  if (!patterns) return projections;
-  for (const proof of new Set(work.criteria.flatMap(postDeployProofs))) {
-    const pattern = patternOfProof(proof);
-    if (!pattern) continue;
-    try { projections[proof] = await patterns(pattern); } catch { projections[proof] = null; }
-  }
-  return projections;
-}
 /**
  * A reader over `GET /api/interventions` (the coordinator credential reads it; an operator agent may
  * not): the pattern's row and its under-threshold reading, or null when the report holds none.
@@ -356,21 +165,5 @@ export function patternReader(read: (path: string) => Promise<unknown>): Pattern
     const report = await read('interventions') as { patterns?: { kind: string; stage: string; underThreshold?: PatternProjection }[] } | null;
     const row = report?.patterns?.find(entry => entry.kind === pattern.kind && entry.stage === pattern.stage);
     return row?.underThreshold ? { since: row.underThreshold.since ?? null, projected: row.underThreshold.projected ?? null } : null;
-  };
-}
-
-/** Effects bound to the real coordinator process, mirroring the daemon's. */
-export function verificationEffects(config: MasterConfig, deps: { root: string; snapshot: () => Promise<{ work: Work[]; now: string }>; mutate: (path: string, data: unknown, requestId?: string) => Promise<any>; read?: (path: string) => Promise<unknown>; run?: Run }): VerificationEffects {
-  const run = deps.run ?? defaultRun;
-  return {
-    snapshot: deps.snapshot, repository: config.repository,
-    ...(deps.read ? { patterns: patternReader(deps.read) } : {}),
-    // Containment is derived in the managed repository's checkout, never the launcher's directory.
-    observe: delivered => observeDeployment(config, delivered, run, fetch, () => Date.now(), { root: deps.root }),
-    release: () => checkoutRelease(config.cliPath, run),
-    emit: () => emitInstructions(config, run),
-    isolate: sha => isolateRelease(config, sha, run),
-    record: (work, data) => deps.mutate(`work/${work.id}/deployment`, data),
-    checks: localPostDeployChecks,
   };
 }
