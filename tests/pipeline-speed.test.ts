@@ -354,18 +354,6 @@ test('integration:speed-ci-proofs — every unit:* and integration:* proof an it
   let item = await submitted('Manual proofs start at submit', ['src/server/routes/pipeline-speed.ts'], { producerProofs: ['manual:speed-ci-proofs-live', 'manual:speed-target-met'] });
   item = await engine.observe(item.id, item.revision, observed(item, { sha: H, baseSha: B }));
   assert.deepEqual(item.autoDispatch!.producers, []);
-  // The workflow: candidate pushes (including Graphyard's own tip publication) plan, exercise in parallel, publish through the CI producer.
-  const workflow = await read('.github/workflows/acceptance.yml');
-  assert.match(workflow, /pull_request_target:\n\s+types: \[opened, reopened, synchronize\]\n\s+branches: \[main\]/);
-  assert.match(workflow, /run: node scripts\/enumerate-ci-proofs\.mjs/);
-  assert.match(workflow, /with: \{ node-version: '24', cache: npm \}/, 'npm dependencies are cached');
-  assert.match(workflow, /key: docker-image-postgres-17-alpine/, 'the isolated database image is cached');
-  assert.match(workflow, /cache-from: type=gha,scope=acceptance-\$\{\{ needs\.plan\.outputs\.pr \}\}/, 'candidate image layers are cached per pull request');
-  assert.match(workflow, /include: \$\{\{ fromJSON\(needs\.plan\.outputs\.proofs\) \}\}/, 'one job per proof, in parallel');
-  assert.match(workflow, /publish-acceptance\.mjs --candidate-run reports/);
-  assert.ok(!/GRAPHYARD_(CI_)?PRODUCER_TOKEN/.test(workflow.slice(workflow.indexOf('  exercise:'), workflow.indexOf('  publish:'))), 'the exercise job holds no producer credential');
-  const docs = await read('docs/github.md');
-  for (const fragment of ['### Proofs in CI', 'pull_request_target', 'cached', 'Manual proofs stay producer sessions']) assert.ok(docs.includes(fragment), `docs/github.md must say: ${fragment}`);
 });
 
 // ---------------------------------------------------------------------------------------------

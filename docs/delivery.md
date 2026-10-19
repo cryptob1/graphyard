@@ -38,7 +38,7 @@ Every 30s the guard reverts merges failing parent-passed checks; the [revert app
 
 ## Managed repositories
 
-`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway`|`command` (`deploy.uat`/`deploy.production`, given `GRAPHYARD_CANDIDATE_SHA`). `--delivery local|per-pr` overrides; `install --plan` lists.
+`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` writes the policy to `graphyard.json` (`candidateSchedule`/`--candidate-cron CRON|off`), writes no `.github/workflows` file and removes generated `graphyard-release-candidate.yml`/`graphyard-promotion.yml` copies. `deploy.adapter`: `railway`|`command` (`deploy.uat`/`deploy.production`, given `GRAPHYARD_CANDIDATE_SHA`). `--delivery local|per-pr` overrides; `install --plan` lists.
 
 `mode: local` (`control-plane` default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, generated workflows removed; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application; invalid refuse `init`/`install`/`/api/status` (`project.error`); **Delivery** shows it.
 

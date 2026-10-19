@@ -308,7 +308,8 @@ test('unit:observe-only-bind-app-writes-only-app-variables — graphyard app bin
 
 test('unit:bind-app-holds-protection-wiring-profiles-herdr — graphyard app bind writes no branch protection, release ref or wiring, check run, auto-merge or merge-queue setting, principal, profile or Herdr link; a later install --observe-only --apply keeps the binding and binds nothing; --observe-only takes no App flag; docs/install.md documents app bind after an observation-only install', async () => {
   const ARGS_APPLY = [...ARGS, '--apply'];
-  for (const flag of [['--github-app', 'app.json'], ['--reuse-app', SLUG]]) assert.throws(() => installRequestFromArgs([...ARGS_APPLY, ...flag]), new RegExp(`--observe-only changes nothing the repository owns.*${flag[0]}`));
+  // GY-2009: install takes no App flag at all, so --observe-only refuses them as unknown options.
+  for (const flag of [['--github-app', 'app.json'], ['--reuse-app', SLUG]]) assert.throws(() => installRequestFromArgs([...ARGS_APPLY, ...flag]), new RegExp(`Unknown option '${flag[0]}'`));
   assert.throws(() => installRequestFromArgs([...ARGS_APPLY, '--bind-app', SLUG]), /Unknown option '--bind-app'/);
   const docs = await readFile(new URL('../docs/install.md', import.meta.url), 'utf8');
   assert.ok(!docs.includes('--bind-app'), 'docs/install.md still documents --bind-app');
