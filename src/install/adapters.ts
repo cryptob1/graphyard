@@ -348,8 +348,13 @@ export async function composePort(ctx: AdapterContext): Promise<PreflightItem> {
  * A checkout with changes HEAD does not hold gets no stamp: its bytes are not HEAD's release.
  */
 export function imageBuildArgs(sourceRoot: string, dirty = sourceTreeDirty) {
+  // A deploy that names both stamp values vouches the commit it moved onto (GY-2167): they are the
+  // build args verbatim, so the tree's untracked files or a failed git read under load cannot
+  // leave the image unstamped and /healthz reporting `unreleased unknown` instead of the commit.
+  const named = process.env.GRAPHYARD_VERSION?.trim(), revision = process.env.GRAPHYARD_BUILD_REVISION?.trim();
+  if (named && revision) return ['--build-arg', `GRAPHYARD_VERSION=${named}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${revision}`];
   if (dirty(sourceRoot)) return [];
-  const release = checkoutRelease(sourceRoot, process.env.GRAPHYARD_BUILD_REVISION || 'unknown');
+  const release = checkoutRelease(sourceRoot, revision || 'unknown');
   return ['--build-arg', `GRAPHYARD_VERSION=${release.version}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${release.revision}`];
 }
 

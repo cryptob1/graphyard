@@ -185,7 +185,7 @@ test('unit:install-observe-only-changes-nothing — an existing installation who
     await applyInstall(first, await buildPlan(first));
     for (const args of [['add', 'huck-runner', '--role', 'worker'], ['add', 'huck-engineer', '--role', 'producer', '--grant', 'external-runs:import']]) await principalCommand(args, { ...fixture.deps, cwd: fixture.root });
     const record = JSON.parse(await readFile(join(first.directory, 'install.json'), 'utf8'));
-    assert.deepEqual(record.principals.map((principal: { id: string; role: string }) => [principal.id, principal.role]), [['owner-project-operator', 'admin'], ['owner-project-master', 'coordinator'], ['owner-project-dashboard', 'reader'], ['huck-runner', 'worker'], ['huck-engineer', 'producer']]);
+    assert.deepEqual(record.principals.map((principal: { id: string; role: string }) => [principal.id, principal.role]), [['owner-project-operator', 'admin'], ['owner-project-master', 'coordinator'], ['owner-project-dashboard', 'reader'], ['owner-project-e2e', 'admin'], ['huck-runner', 'worker'], ['huck-engineer', 'producer']]);
     const deployed = deployedRoster(fixture.transport);
     const session = await prepare('apply');
     const plan = await buildPlan(session);

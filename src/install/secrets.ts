@@ -251,6 +251,9 @@ export function removeRosterEntry(roster: RosterPrincipal[], id: string) {
   return { roster: existing ? roster.filter(principal => principal.id !== id) : roster, changed: !!existing };
 }
 
+/** The principal the deployment's own end-to-end cases run as (GY-2167): the installer issues it with the rest of the roster. */
+export const e2ePrincipalId = (installId: string) => `${installId}-e2e`;
+
 export function plannedPrincipals(installId: string, options: { workers?: number; producerProofs?: string[] } = {}): PlannedPrincipal[] {
   const workers = Math.min(Math.max(options.workers ?? 1, 1), 20);
   const proofs = [...new Set(options.producerProofs ?? [])].sort();
@@ -263,6 +266,9 @@ export function plannedPrincipals(installId: string, options: { workers?: number
     { id: `${installId}-master`, role: 'coordinator' as Role, sessionKind: 'ai' as DeclaredSessionKind },
     ...Array.from({ length: workers }, (_, index) => ({ id: `${installId}-worker-${index + 1}`, role: 'worker' as Role, sessionKind: 'ai' as DeclaredSessionKind })),
     { id: `${installId}-dashboard`, role: 'reader' as Role, sessionKind: 'ai' as DeclaredSessionKind },
+    // The e2e identity runs the deployment's own end-to-end cases (GY-2167): a case's first step
+    // creates an item, and an admin is the roster role whose principal the create path admits.
+    { id: e2ePrincipalId(installId), role: 'admin' as Role, sessionKind: 'ai' as DeclaredSessionKind },
     // A producer is created only with an explicit proof allowlist; an empty grant would
     // be a standing credential with no lane, and widening it later is never automatic.
     ...(proofs.length ? [{ id: `${installId}-ci`, role: 'producer' as Role, proofs, sessionKind: 'ai' as DeclaredSessionKind }] : []),

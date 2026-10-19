@@ -298,7 +298,7 @@ test('unit:operator-principal-declared-human — the install plan declares its o
     const deployed = principalSchema.parse(JSON.parse(coreEnv(session).find(value => value.name === 'GRAPHYARD_PRINCIPALS')!.value));
     assert.deepEqual(deployed.map(principal => [principal.id, principal.role, principal.sessionKind]), [
       ['owner-project-operator', 'admin', 'human'], ['owner-project-master', 'coordinator', 'ai'], ['owner-project-worker-1', 'worker', 'ai'], ['owner-project-worker-2', 'worker', 'ai'],
-      ['owner-project-dashboard', 'reader', 'ai'], ['owner-project-ci', 'producer', 'ai']]);
+      ['owner-project-dashboard', 'reader', 'ai'], ['owner-project-e2e', 'admin', 'ai'], ['owner-project-ci', 'producer', 'ai']]);
 
     // `master principals` reads the proposed roster from .graphyard/credentials.json and previews it
     // against the live one: adding a worker keeps the operator human and applies.
@@ -315,7 +315,7 @@ test('unit:operator-principal-declared-human — the install plan declares its o
     const undeclared = await roster(deployed.map(({ sessionKind: _kind, ...principal }) => principal));
     assert.equal(undeclared.applicable, false);
     assert.ok(undeclared.refusals.includes('owner-project-operator would stop being a declared human session'));
-    assert.ok(undeclared.refusals.some(refusal => /no admin principal is declared "sessionKind": "human"; declare the operator's \(owner-project-operator\)/.test(refusal)));
+    assert.ok(undeclared.refusals.some(refusal => /no admin principal is declared "sessionKind": "human"; declare the operator's \(owner-project-operator, owner-project-e2e\)/.test(refusal)), undeclared.refusals.join('; '));
     // An agent principal declared human is refused too: it could answer a human-only request itself.
     const agentHuman = await roster(deployed.map(principal => principal.role === 'worker' ? { ...principal, sessionKind: 'human' } : principal));
     assert.deepEqual(agentHuman.refusals, ['owner-project-worker-1 (worker) is an agent role and may not be declared human', 'owner-project-worker-2 (worker) is an agent role and may not be declared human']);
