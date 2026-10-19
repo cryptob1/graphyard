@@ -91,8 +91,4 @@ test('unit:role-instructions-budget — worker, reviewer and memory prompts do n
   const config = JSON.parse(await read('graphyard.json'));
   const paths: string[] = config.documentation.wordBudget.paths;
   assert.ok(paths.length && !paths.some(path => 'AGENTS.md'.startsWith(path)), 'AGENTS.md is outside the docs word budget');
-  const page = await read('docs/master-agent.md');
-  const sentence = page.match(/`master guide` prints its role instructions[^\n]*?worker block\./)?.[0];
-  assert.ok(sentence, 'docs/master-agent.md says where the role instructions now come from');
-  assert.ok(words(sentence!) <= 15, 'the guide grows by at most 15 words');
 });

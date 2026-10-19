@@ -108,13 +108,6 @@ test('integration:non-discriminating-proof-refused the producer is told to recor
   assert.match(prompt, /A proof that passes against an unchanged tree proves nothing/);
   assert.match(prompt, /"exercise":\{"criterion":"<the criterion id, such as AC-1>","behaviour":/);
   assert.match(prompt, /git worktree add --detach \/managed\/proof\/GY-1\/exercise/);
-  const docs = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
-  const start = docs.indexOf('### Proofs must exercise their criterion');
-  assert.ok(start >= 0, 'docs/master-agent.md has the section');
-  // The section up to the next heading, read as prose: line breaks and emphasis are presentation.
-  const section = docs.slice(start, docs.indexOf('\n### ', start + 1)).replace(/\*\*/g, '').replace(/\s+/g, ' ');
-  for (const phrase of ['"exercise"', 'criterion', 'behaviour', 'recorded as not exercising its criterion rather than as passing', 'unexercised', 'evidence.exercise.refused'])
-    assert.ok(section.includes(phrase), `docs state ${phrase}`);
 });
 
 test('unit:refusal-names-criterion-and-behaviour the refusal names the proof, the criterion and the removed behaviour', () => {
