@@ -1608,10 +1608,12 @@ const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000
  * One attention item per review request that has waited past the bound without a launch (GY-710), naming how long and why.
  * GY-1067 follow-up 1: raises attention for any review waiting over 15 minutes, intentionally including capacity
  * and bot waits so prolonged stalls are always visible to operators rather than silently hidden.
+ * GY-2085: a normal-risk control-plane head's designed post-merge wait (GY-1525) launches no reviewer by design,
+ * so it is no session-liveness fault: launchWaits keeps reporting it and only the fault is dropped.
  * Each carries the fault kind its reason names (GY-1175), so the line never files as unclassified.
  */
 export function launchWaitAttention(waits: LaunchWait[]): AttentionItem[] {
-  return waits.filter(wait => wait.kind === 'review' && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
+  return waits.filter(wait => wait.kind === 'review' && wait.reason !== postMergeWaitReason && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
     text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.answeredAt ? `its verdict at ${wait.answeredAt}, requested ${wait.requestedAt}` : wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
     ...classified(launchWaitKind(wait.reason)),
     ...agentOwner('master', `Fix what the wait names, or launch it with graphyard master review ${wait.work}`) }));
