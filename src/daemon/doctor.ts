@@ -1,4 +1,4 @@
-// Concern: the pipeline doctor (GY-711) — the loop's ten-minute remedy worker; the deterministic remedies it would apply live beside it in ./remedies.ts.
+// Concern: the pipeline doctor (GY-711) — the loop's five-minute remedy worker; the deterministic remedies it would apply live beside it in ./remedies.ts.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -43,7 +43,9 @@ export { settleSubmittedContainment, coveredScopePaths, clearCoveredBlockers, un
 // ---------------------------------------------------------------------------
 // GY-2003 / GY-2004: the loop's resolver. All day a master session ran a ten-minute monitor by
 // hand and repeatedly applied the same sanctioned actions; here the loop does it, and the session
-// is a resolver, not a checklist reader. Every `run.doctor.intervalMinutes` (10 by default) it
+// is a resolver, not a checklist reader. Every `run.doctor.intervalMinutes` (5 by default) — and
+// at once when the loop's progress watchdog fires (GY-2005: cycle.ts marks a run due when the
+// watchdog's lines begin standing) — it
 // launches one: a headless session on the registry's doctor role, else Pi, with the master's read
 // access and the operator-agent identity's sanctioned commands only — scope, requirements,
 // unblock, decide + approver, settle-containment, close, create, release and checkout-restore
@@ -170,11 +172,12 @@ export interface DoctorInput {
 
 /** The interval one doctor run waits for, from the settings in force. */
 export const doctorIntervalMs = (settings: Pick<DoctorSettings, 'intervalMinutes'>) => settings.intervalMinutes * 60_000;
-/** Whether a doctor run is due: none is in flight, no provider-limit hold stands (GY-1705), and the last one started past the interval. */
-export function doctorDue(state: { doctor: { runs: DoctorRunRecord[] } }, clock: number, settings: Pick<DoctorSettings, 'intervalMinutes' | 'enabled'>) {
+/** Whether a doctor run is due: none is in flight, no provider-limit hold stands (GY-1705), and the last one started past the interval — or the loop's progress watchdog marked one due (GY-2005). */
+export function doctorDue(state: { doctor: { runs: DoctorRunRecord[]; watchdogDue?: boolean } }, clock: number, settings: Pick<DoctorSettings, 'intervalMinutes' | 'enabled'>) {
   if (!settings.enabled) return false;
   if (state.doctor.runs.some(entry => entry.state === 'running')) return false;
   if (doctorLimitRetryAt(state.doctor.runs, clock)) return false;
+  if (state.doctor.watchdogDue) return true;
   const last = state.doctor.runs.at(-1);
   return !last || clock - Date.parse(last.at) >= doctorIntervalMs(settings);
 }
@@ -208,7 +211,7 @@ export function doctorPrompt(config: { repository: string; cliPath: string; merg
     `- every failed action and attention line below: take the simplest action that clears it; an escalation:dirty-checkout line is yours to run (${cli} master checkout-restore with a quoted reason)`,
     `Never approve a decision you requested yourself: request it with ${cli} master decide, then ${cli} master approver GY-N DECISION launches an independent approver.`,
     `A human-only decision (goals and priorities, money or accounts, credentials for people) is never asked for in chat: mark its finding unactionable and move on.`,
-    `File an item only for a code change you judge needed, saying why (${cli} master create); everything else is an action or a finding, never an item.`,
+    `File an item only for a code change you judge needed, quoting the why after the file (${cli} master create FILE 'why' — the guard refuses a create with no reason stated, so a notice never files an item); everything else is an action or a finding, never an item.`,
     `Run each command by its bare program name with literal arguments. Put a free-text reason last, enclosed in one pair of quotes: your allowlist refuses every other mutation — never merge, dispatch, evidence or lease — and records the refusal.`,
     `Then call the ${doctorTool} tool exactly once: one finding per item you judged, one action entry per command you ran and what it changed, one filed entry per item you asked filed. Stop after the call.`,
     ``,
@@ -516,8 +519,9 @@ export async function retryDoctorFile(cycle: Cycle, effects: DoctorEffects, pend
 
 /**
  * Step 7c: the doctor. The deterministic remedies run every cycle; the doctor itself every
- * `run.doctor.intervalMinutes`. A run settles beside the loop and applies its own report (events
- * per item, the summary) when it ends, so no cycle ever waits on a model.
+ * `run.doctor.intervalMinutes`, and at once when the progress watchdog marked a run due (GY-2005).
+ * A run settles beside the loop and applies its own report (events per item, the summary) when it
+ * ends, so no cycle ever waits on a model.
  */
 export async function doctorStep(cycle: Cycle) {
   const { state, effects, now, snapshot, clock } = cycle;
@@ -545,6 +549,9 @@ export async function doctorStep(cycle: Cycle) {
   const pendingFile = state.doctor.pendingFiles.find(entry => readyToRetry(state.actions[entry.key], state.cycle));
   if (pendingFile) await retryDoctorFile(cycle, doctor, pendingFile, now);
   if (!doctorDue(state, clock, doctor.settings)) return;
+  // Launched on whichever trigger fired — the interval or the watchdog mark — so the mark never
+  // outlives the run it started.
+  state.doctor.watchdogDue = false;
   const run = doctorRunRecordSchema.parse({ at: new Date(clock).toISOString(), state: 'running', runs: [], findings: [], actions: [], filed: [], detail: '' });
   state.doctor.runs = [...state.doctor.runs, run].slice(-retainedRuns);
   // Every open item is evidence, oldest stage first: an item that has held its stage longest is the
