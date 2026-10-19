@@ -14,7 +14,7 @@ import { actionDetailMax, emptyDaemonState, findingRecheckMs, runCycle, scopeBud
 import { decisionInput, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { decideScopeRequest, documentationConsumerScopes, impliedScopes, namedPaths, pinningTestGround, redecidableScopeRefusal, scopeBlockedBudgetMs, scopeDecisionBudgetMs, scopeRefusalBlocker, type ScopeRequestState } from '../src/model/scope.js';
 import { regressionRefusals } from '../src/regression-guard.js';
-import { basePaths, findingScope, namesPath, negatesPath, readReviewFindings } from '../src/review-scope.js';
+import { basePaths, findingScope, namesPath, negatesPath } from '../src/review-scope.js';
 import type { Observation, Principal, ScopeFile, Work } from '../src/model.js';
 import { workFaults } from '../src/model/fault-classes.js';
 import { successorWidening } from '../src/model/successors.js';
@@ -593,23 +593,6 @@ test('unit:review-finding-scope — only a file on the base that a finding names
   assert.deepEqual(findingScope(['Dockerfile', '.github/CODEOWNERS'], [{ ground: 'review 14', text: 'Fix Dockerfile and .github/CODEOWNERS' }], () => true),
     { grounds: [{ path: 'Dockerfile', ground: 'review 14' }, { path: '.github/CODEOWNERS', ground: 'review 14' }] });
 
-  // The read: unresolved threads' comments by trusted authors, and the configured reviewer's latest change request on the head only.
-  const run = (_command: string, args: string[]) => {
-    // A long thread: the listing carries its first page of comments, the rest is read by the thread's id.
-    if (args[1] === 'graphql' && args.includes('id=PRRT_long')) return JSON.stringify({ data: { node: { comments: args.includes('after=c1')
-      ? { pageInfo: { hasNextPage: true, endCursor: 'c2' }, nodes: [{ body: 'noise', author: { login: 'graphyard-reviewer' } }] }
-      : { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [{ body: 'late: fix src/g.ts', author: { login: 'graphyard-reviewer' } }] } } } });
-    if (args[1] === 'graphql') return JSON.stringify({ data: { repository: { pullRequest: { reviewThreads: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [
-      { id: 'PRRT_open', isResolved: false, comments: { nodes: [{ body: 'fix src/a.ts', author: { login: 'chatgpt-codex-connector' } }, { body: 'and src/worker.ts', author: { login: 'cryptob1' } }] } },
-      { id: 'PRRT_reviewer', isResolved: false, comments: { nodes: [{ body: 'fix src/e.ts', author: { login: 'graphyard-reviewer' } }] } },
-      { id: 'PRRT_worker', isResolved: false, comments: { nodes: [{ body: 'please widen src/f.ts', author: { login: 'cryptob1' } }] } },
-      { id: 'PRRT_done', isResolved: true, comments: { nodes: [{ body: 'src/b.ts', author: { login: 'graphyard-reviewer' } }] } },
-      { id: 'PRRT_long', isResolved: false, comments: { pageInfo: { hasNextPage: true, endCursor: 'c1' }, nodes: [{ body: 'first', author: { login: 'graphyard-reviewer' } }] } }] } } } } });
-    return JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
-      { id: 2, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'o'.repeat(40), state: 'CHANGES_REQUESTED', body: 'old head src/d.ts' },
-      // A thread reply is a COMMENTED review on the head: it withdraws no verdict, so review 1 still stands.
-      { id: 3, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'COMMENTED', body: '' }]]);
-  };
   // Existence on the base: only a genuine absence is false; a missing base ref or failing git throws, so the loop retries.
   const repo = await temporaryDirectory('gy-finding-base');
   const git = (args: string[]) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -636,16 +619,6 @@ test('unit:review-finding-scope — only a file on the base that a finding names
   await assert.rejects(basePaths(checkout, 'gone', ['src/added.ts'], gitRun), 'a missing base branch is a failure, not an absent file');
   await assert.rejects(basePaths(checkout, 'main', ['src/added.ts'], () => { throw new Error('git timed out'); }), /timed out/);
   await rm(repo, { recursive: true, force: true }); await rm(checkout, { recursive: true, force: true });
-
-  const read = await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: ['chatgpt-codex-connector[bot]'] }, run);
-  assert.deepEqual(read.map(entry => entry.ground), ['review thread PRRT_open', 'review thread PRRT_reviewer', ...Array(3).fill('review thread PRRT_long'), 'review 1'], 'one finding per trusted comment');
-  assert.ok(read.some(entry => entry.ground === 'review thread PRRT_long' && namesPath(entry.text, 'src/g.ts')), 'a trusted comment past the first page of a long thread is a finding');
-  assert.equal(read[0].text, 'fix src/a.ts', 'a comment by an untrusted author in a trusted thread is not a finding');
-  // A later verdict does replace it: an approval of the head leaves no change request standing.
-  const approved = (command: string, args: string[]) => args[1] === 'graphql' ? run(command, args)
-    : JSON.stringify([[{ id: 1, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'CHANGES_REQUESTED', body: 'also src/c.ts' },
-      { id: 4, user: { login: 'graphyard-reviewer[bot]' }, commit_id: 'h'.repeat(40), state: 'APPROVED', body: 'ok' }]]);
-  assert.ok(!(await readReviewFindings({ repository: 'owner/repo', pr: 5, sha: 'h'.repeat(40), reviewer: 'graphyard-reviewer[bot]', trusted: [] }, approved)).some(entry => entry.ground.startsWith('review ') && !entry.ground.startsWith('review thread')), 'an approval after the change request withdraws it');
 });
 
 // ---- GY-199: agents approve agents — a refused scope request goes to an independent approver ------

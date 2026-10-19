@@ -8,6 +8,11 @@ import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
 import { mergerNotRequired } from './model/setup-checklist.js';
 import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
 import type { LoopCodeReading } from './repository-setup.js';
+import { executorGlob, executorInstance, executorInstancePattern, installUnitsFile, parseInstallUnits } from './install/units.js';
+import { defaultChildRun } from './child-runner.js';
+import type { UserSystemctl } from './master/loop-restart.js';
+import { herdrServerUnit } from './herdr-host.js';
+import { installIdFor } from './install/types.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -22,6 +27,7 @@ export const setupSteps = {
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
   releaseFiling: 'docs/delivery.md#release-filing-credential',
   loopCode: 'rerun graphyard up --agent from this checkout (docs/setup-from-zero.md step 10, start the master)',
+  unitOverrides: 'docs/setup-from-zero.md#troubleshooting-manual-steps (remove the drop-in)',
 } as const;
 
 export interface SetupCheck { id: string; status: 'pass' | 'fail'; detail: string; step: string }
@@ -45,6 +51,9 @@ export interface SetupFromZeroInput {
   releaseFiling?: { status: any | null; failure?: string };
   /** GY-1859: what the install's loop and executor units run against this CLI; read beside the install when unset here. */
   loopCode?: LoopCodeReading | null;
+  /** GY-2159: `systemctl --user ARGS` for the unit-overrides line; the user manager when unset here. */
+  systemctl?: UserSystemctl;
+  platform?: NodeJS.Platform;
 }
 
 const writable = async (path: string) => { try { await access(path, constants.W_OK); return true; } catch { return false; } };
@@ -191,6 +200,41 @@ async function loopCodeCheck(root: string, injected: LoopCodeReading | null | un
   return check('pass', `the loop${code.loop ? ` (${code.loop.unit} at ${code.loop.path})` : ''}${code.loopCommit ? ` at ${code.loopCommit.slice(0, 12)}` : ''} runs this checkout (${code.cli.root})`);
 }
 
+/**
+ * GY-2159: the unit-overrides line. The install renders its loop, executor and Herdr units whole and writes
+ * no drop-in, so every drop-in systemd applies to one of them — a stopgap a person left on the host —
+ * is one FAIL naming its path, the unit and the Environment it sets; none is one PASS. A checkout
+ * recording no units (or not on Linux) prints no line; a manager that cannot be asked fails.
+ */
+async function unitOverridesChecks(root: string, systemctl: UserSystemctl, platform: NodeJS.Platform): Promise<SetupCheck[]> {
+  if (platform !== 'linux') return [];
+  let units;
+  try { units = parseInstallUnits(await readFile(resolve(root, installUnitsFile), 'utf8'), installUnitsFile, () => { throw new Error('absent'); }); } catch { return []; }
+  const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'unit-overrides', status, step: setupSteps.unitOverrides, detail });
+  // The Herdr server this install runs: its own instance's unit when master.json records one, else the host's default.
+  const master = await readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(JSON.parse).catch(() => null);
+  const herdr = herdrServerUnit(master?.herdrInstance && typeof master.repository === 'string' ? installIdFor(master.repository) : null);
+  const overrides = new Map<string, string>();
+  try {
+    // A template drop-in applies to every slot and shows on each instance; with no slot known, slot 1 shows it.
+    const instances = new Set<string>();
+    for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
+      for (const match of (await systemctl(listing)).matchAll(executorInstancePattern(units))) instances.add(match[0]);
+    }
+    for (const unit of [units.master, ...(instances.size ? instances : [executorInstance(units, 1)]), herdr]) {
+      const shown = String(await systemctl(['show', '--property=LoadState', '--property=DropInPaths', unit]));
+      if (/^LoadState=not-found$/m.test(shown)) continue;
+      for (const path of /^DropInPaths=(.*)$/m.exec(shown)?.[1].trim().split(/\s+/).filter(Boolean) ?? []) if (!overrides.has(path)) overrides.set(path, unit);
+    }
+  } catch (error: any) { return [check('fail', `systemctl --user could not be asked for the drop-ins on ${units.master}, its executors and ${herdr}: ${String(error.message).split('\n')[0]}`)]; }
+  if (!overrides.size) return [check('pass', `no drop-in overrides ${units.master}, its executors or ${herdr}`)];
+  return Promise.all([...overrides].map(async ([path, unit]) => {
+    const sets = (await readFile(path, 'utf8').catch(() => '')).split(/\r?\n/).filter(line => /^\s*Environment(File)?=/.test(line)).map(line => line.trim());
+    return check('fail', `${path} overrides ${unit}, which the install did not write${sets.length ? ` (${sets.join('; ')})` : ''}: rm ${path} && systemctl --user daemon-reload && systemctl --user restart ${unit}`);
+  }));
+}
+const userManager: UserSystemctl = (args, timeoutMs = 30_000) => defaultChildRun('systemctl', ['--user', ...args], { timeoutMs });
+
 /** Every setup-from-zero line for this machine and installation, in checklist order. */
 export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<SetupCheck[]> {
   const env = input.env ?? process.env, status = input.status;
@@ -208,6 +252,7 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
   const loopCode = await loopCodeCheck(input.root, input.loopCode);
   if (loopCode) lines.push(loopCode);
+  lines.push(...await unitOverridesChecks(input.root, input.systemctl ?? userManager, input.platform ?? process.platform));
   const releaseFiling = input.releaseFiling ?? await readReleaseFiling(input.root, env);
   if (releaseFiling) lines.push(releaseFilingCheck(releaseFiling, status?.repository ?? null));
   return lines;

@@ -11,8 +11,8 @@ import type { Transport } from '../src/install/transport.js';
 import { harness, REPOSITORY } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-2009: install reads no protection; the merge writer deploy key listing is the GitHub call every apply makes.
-const DEPLOY_KEY_LIST = `gh repo deploy-key list -R ${REPOSITORY}`;
+/** The apply's deploy-key read (GY-2010), where the first apply is held while the second tries the lock. */
+const DEPLOY_KEY_READ = `gh repo deploy-key list -R ${REPOSITORY} --json id,key,title`;
 
 test('unit:install-apply-exclusive-lock — a second install --apply on one installation directory refuses on the first one\'s lock, naming its pid, and writes nothing while it is held; a lock left by a process that is gone is reclaimed', async () => {
   // Loaded when the test runs, so a checkout without the lock fails here as a test case.
@@ -20,13 +20,13 @@ test('unit:install-apply-exclusive-lock — a second install --apply on one inst
   assert.equal(typeof applyLockFile, 'function', 'src/install/index.ts exports no apply lock');
   const fixture = await harness({ provider: 'railway' });
   try {
-    // The recording transport, held at the first apply's deploy-key listing until released.
+    // The recording transport, held at the first apply's deploy-key read until released.
     let gated = false, entered!: () => void, release!: () => void;
     const reached = new Promise<void>(accept => { entered = accept; });
     const held = new Promise<void>(accept => { release = accept; });
     const recording = fixture.transport;
     const transport: Transport = { ...recording, async exec(program, args, options) {
-      if (gated && [program, ...args].join(' ').startsWith(DEPLOY_KEY_LIST)) { gated = false; entered(); await held; }
+      if (gated && [program, ...args].join(' ') === DEPLOY_KEY_READ) { gated = false; entered(); await held; }
       return recording.exec(program, args, options);
     } };
     const deps = { ...fixture.deps, transport };
@@ -168,8 +168,6 @@ test('unit:install-partial-apply-lock — install --herdr-only and --profiles-on
   assert.deepEqual(touched, [], 'a partial apply wrote on the host while another apply held the lock');
   assert.equal(await readFile(applyLockFile(directory), 'utf8'), live);
 });
-
-// GY-2009: install records no branch protection, so the protection-record race test went with recordProtectionOnce.
 
 async function snapshot(directory: string): Promise<Record<string, string>> {
   const entries: Record<string, string> = {};

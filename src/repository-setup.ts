@@ -123,7 +123,7 @@ docs/setup-from-zero.md: \`doctor\` prints one PASS or FAIL line per prerequisit
 ${launchAuthorization}
 
 A dedicated master coordinator must keep cycling: status, dispatch ready work,
-shepherd review, reconcile what GitHub merged, then deployment verification.
+shepherd review, record what the merge writer's trial landed, then deployment verification.
 Repeat until both conditions hold: (1) every in-scope item is Done or has a genuinely
 external blocker recorded in Graphyard; and (2) every merged change is deployed and
 live-verified against the exact deployed release, or a genuinely external deployment
@@ -350,14 +350,6 @@ export function repositoryScanDifference(fresh: SetupProposal, stored: SetupProp
   return repositoryPart(fresh) === repositoryPart(stored) ? [] : ['The repository scan no longer matches the stored proposal'];
 }
 
-async function readGithubApp(directory: string, repository: string) {
-  const file = resolve(directory, 'github-app.json');
-  let app: any;
-  try { app = JSON.parse(await readFile(file, 'utf8')); } catch (error: any) { if (error.code !== 'ENOENT') throw error; return null; }
-  if (app.repository !== repository) throw new Error('Saved App belongs to a different repository');
-  return app;
-}
-
 const principalsDocumentSchema = z.object({
   version: z.literal(1), server: z.string(), repository: z.string(), note: z.string(),
   principals: z.array(z.object({
@@ -368,14 +360,12 @@ const principalsDocumentSchema = z.object({
 
 export interface ApplyDependencies {
   url: string;
-  githubSetup?: (repository: string, deployment: string) => Promise<{ appId: number; slug: string }>;
   now?: () => Date;
   token?: () => string;
   /**
    * The `graphyard install` that already owns this repository's identities (GY-1413): its install
    * directory and its confirmed App. Apply then commits only the onboarding files — it never writes
-   * a second principals registry and never opens an App page of its own. A null App is an install
-   * applied with `--no-github-app` (GY-1642): the onboarding is written with no App block.
+   * a second principals registry. Its App is the one a pull-request-era install recorded, else null.
    */
   installed?: { directory: string; githubApp: { appId: number; slug: string } | null };
   /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
@@ -480,17 +470,8 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   await writeProfile('reviewer', { provider: proposal.policy.reviewProvider, note: proposal.profiles.reviewer.note });
 
   const previousState = await loadAppliedSetup(root);
-  // An install's App, or its choice of none, is the App: a saved or earlier registration is not
-  // read or revived beside it, so a stale or malformed saved App cannot abort the apply, and no
-  // App page is opened for it.
-  const savedApp = dependencies.installed ? null : await readGithubApp(directory, proposal.repository);
-  let githubApp: { appId: number; slug: string } | null = dependencies.installed ? dependencies.installed.githubApp : (savedApp ? { appId: savedApp.appId, slug: savedApp.slug } : previousState?.artifacts.githubApp ?? null);
-  if (!githubApp && !dependencies.installed && dependencies.githubSetup) {
-    const registration = await dependencies.githubSetup(proposal.repository, server);
-    if (!Number.isSafeInteger(registration?.appId) || !registration?.slug) throw new Error('The GitHub App flow returned an incomplete registration');
-    githubApp = { appId: registration.appId, slug: registration.slug };
-    applied.push(`GitHub App registration ${githubApp.slug}`);
-  }
+  // No GitHub App is registered (GY-2010): only an App an earlier, pull-request-era apply or install recorded is kept.
+  const githubApp = dependencies.installed ? dependencies.installed.githubApp : previousState?.artifacts.githubApp ?? null;
 
   const state = appliedStateSchema.parse({ version: 1, appliedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
     proposalDigest: proposalDigest(proposal), server,
@@ -506,15 +487,11 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const documentationLine = documentationAssignment(documentation.policy).line;
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null, documentation: { file: repositoryConfigFile, policy: documentation.policy, line: documentationLine },
     delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows } : null,
-    // An install that chose no App has no App step pending; only an App-backed setup waits for one.
-    githubPending: !githubApp && !dependencies.installed,
     workerPrincipals,
     principalsFile: dependencies.installed ? null : principalsPath,
     next: dependencies.installed
       ? `The principals are the ones graphyard install deployed from ${dependencies.installed.directory}; nothing needs installing as GRAPHYARD_PRINCIPALS. Commit the onboarding files`
-      : githubApp
-      ? `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`
-      : 'Run graphyard github-setup SERVER_URL to register the GitHub App, then rerun init --scan --apply to finish idempotently',
+      : `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}`,
     documentationNext: `Commit ${repositoryConfigFile} with AGENTS.md${delivery?.workflows.length ? ` and ${delivery.workflows.join(', ')}` : ''}, and set ${documentationLine} on the Graphyard deployment so every item names these documentation paths` };
 }
 

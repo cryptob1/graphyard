@@ -117,7 +117,8 @@ test('unit:review-ledger-lock-erofs-degrades — a read-only ledger lock locatio
           await updateReviewLedger(root, current => { current.reviews = ledger.reviews.map(record => ({ ...record, state: 'pending', verdict: undefined, closedAt: undefined })); }, { environment: { GRAPHYARD_DATA_HOME: dataHome } });
           const status = await reconcileLedgers(root, config, { work: [] }, { available: false });
           assert.deepEqual(status.reviewRuntime, { available: true, reason: null }, 'master status reports runtime.reviews available');
-          assert.equal(status.reviewRecords[0]!.verdict?.state, 'APPROVED', 'and the verdict reconciled');
+          // GitHub reviews are no longer read (GY-2010): the pending pull-request session settles cancelled, saved lockless.
+          assert.equal(status.reviewRecords[0]!.state, 'cancelled', 'and the pending session reconciled');
 
           // The ledger itself unwritable (the whole checkout read-only): the pass still completes, returns the
           // reconciled records and says they were left unsaved; it never reports the capability unavailable.

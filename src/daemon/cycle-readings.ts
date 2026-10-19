@@ -34,8 +34,6 @@ export const readingKey = (item: Pick<Work, 'id'>) => `reading:${item.id}`;
 export const readingEscalationKey = (item: Pick<Work, 'id'>) => `escalation:reading:${item.id}`;
 /** The idempotency key of the close a passing reading on `release` ends in: a close that failed is retried under it, never applied twice. */
 export const readingCloseKey = (item: Pick<Work, 'id'>, release: string) => `reading:close:${item.id}:${release}`;
-/** The loop's record of closing a closed item's superseded pull request that the control plane still owes GitHub (`closure.pullRequest.outcome === 'owed'`). */
-export const owedPullRequestKey = (item: Pick<Work, 'id'>) => `reading:pull:${item.id}`;
 /** The reason a passing reading's close names, from the readings it stands on: byte-identical however many times the close is retried under its key. */
 export const closeReason = (item: Pick<Work, 'key'>, release: string, readings: readonly { proof: string; detail: string }[]) =>
   `${item.key}'s reading passed on the serving release ${release.slice(0, 12)}: ${readings.map(entry => `${entry.proof}: ${entry.detail}`).join('; ')}`.slice(0, 2000);
@@ -80,8 +78,6 @@ type Taken = { proof: string; reading: PostDeployReading };
 /** What one single-flight read of an item answers: the release it was read on, so an answer for a release the plane no longer serves is discarded, and the readings or the failure. */
 type Read = { release: string } & ({ readings: Taken[] } | { error: unknown });
 const detailOf = (entry: Taken) => (entry.reading as { detail: string }).detail.slice(0, 2000);
-/** The pull request a delivered-observation closure still owes GitHub, as the close's answer or the snapshot's document carries it. */
-const owedPullRequest = (work: unknown) => { const closure = (work as Pick<Work, 'closure'> | null | undefined)?.closure; return closure?.kind === 'delivered-observation' && closure.pullRequest?.outcome === 'owed' ? closure.pullRequest.pr : null; };
 
 /** A loop-owned item the loop may read now: open, released, unclaimed and unblocked, with every dependency done — an item whose work is not released yet is no item to close. */
 const readable = (item: Work, cycle: Pick<Cycle, 'now' | 'snapshot'>) => item.ready && !item.blocker && !(item.lease && Date.parse(item.lease.expiresAt) > cycle.now())
@@ -111,10 +107,7 @@ export function readingDueNow(cycle: Cycle): boolean {
  * last cycle observed, which the plane may no longer serve. The reads run under the deployment step's
  * budget, keyed per item: one still running at the bound is left in flight and resumed next cycle,
  * and its answer names the release it read, so an answer for a release the plane has moved past is
- * discarded unrecorded and the serving release read afresh. A closed item whose superseded pull
- * request the control plane still owes GitHub (`closure.pullRequest` owed: the close on GitHub failed
- * after the closure committed) is closed again under its key until GitHub closes it. Returns how many
- * the budget deferred.
+ * discarded unrecorded and the serving release read afresh. Returns how many the budget deferred.
  */
 export async function readingsStep(cycle: Cycle, served: DaemonState['deployment'] | typeof stillVerifying, deadline: number): Promise<number> {
   const { state, effects, now, snapshot, performed, isolate, open } = cycle;
@@ -141,29 +134,13 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
       return note('failed', detail);
     }
     try {
-      const closed = await effects.closeObservation(item, release, closeReason(item, release, passes), readingCloseKey(item, release));
-      const owed = owedPullRequest(closed);
-      return note('done', `Recorded ${item.key}'s passing reading on release ${short(release)} and closed it as delivered-observation${owed ? `; its superseded pull request #${owed} is still owed on GitHub, and the loop closes it next cycle` : ''}: ${summary}`);
+      await effects.closeObservation(item, release, closeReason(item, release, passes), readingCloseKey(item, release));
+      return note('done', `Recorded ${item.key}'s passing reading on release ${short(release)} and closed it as delivered-observation: ${summary}`);
     } catch (error) {
       await pace(message(error));
       return note('failed', `Recorded ${item.key}'s passing reading on release ${short(release)}, and could not close it as delivered-observation: ${message(error)}`);
     }
   };
-  // A closed item's superseded pull request the control plane still owes GitHub: the same close under the same key
-  // closes it there and replays the closure, on the failure backoff, until GitHub has it closed.
-  for (const item of snapshot.work.filter(entry => owedPullRequest(entry) !== null)) await isolate('deployment', item, item.key, async () => {
-    if (now() >= deadline) { deferred++; return; }
-    const key = owedPullRequestKey(item), previous = state.actions[key], pr = owedPullRequest(item)!, release = item.closure!.ref!;
-    if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
-    const note = noteFor(item, key, previous, (previous?.attempts ?? 0) + 1);
-    if (!effects.closeObservation) return note('failed', `${item.key} is closed as delivered-observation and its superseded pull request #${pr} is still owed on GitHub; this loop cannot close it: it runs without the coordinator's close effect`);
-    try {
-      // The closure's own reason, under the key the close was applied with: the control plane replays the closure once the pull request is closed.
-      const closed = await effects.closeObservation(item, release, item.closure!.reason, readingCloseKey(item, release));
-      if (owedPullRequest(closed) !== null) return note('failed', `${item.key} is closed as delivered-observation and its superseded pull request #${pr} is still owed on GitHub after the close call; the loop closes it again on its backoff`);
-      return note('done', `Closed ${item.key}'s superseded pull request #${pr} on GitHub, owed since it closed as delivered-observation on release ${short(release)}`);
-    } catch (error) { return note('failed', `${item.key} is closed as delivered-observation and its superseded pull request #${pr} could not be closed on GitHub: ${message(error)}`); }
-  });
   for (const item of loopOwned) await isolate('deployment', item, item.key, async () => {
     if (now() >= deadline) { deferred++; return; }
     const observing = loopObservation(item, new Date(now()), snapshot.work);
@@ -172,7 +149,7 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     // by hand after unavailable or failed readings closes on the next pass. What paces the close is
     // its own failure cursor (GY-1794): a close the plane keeps refusing is asked once per backoff
     // step, never once per cycle and never on the reading's backoff. A done action stands: that close
-    // has landed, and only the owed pull request is retried, above, on its own key.
+    // has landed.
     if (!observing) {
       const pass = observationPass(item, new Date(now()), snapshot.work);
       if (!pass) return;

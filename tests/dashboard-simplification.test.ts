@@ -234,11 +234,13 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   assert.doesNotMatch(text(review), /Proven to work:/, 'later steps are collapsed');
   for (const raw of ['needs trusted passing evidence', 'Policy v', 'Revision ', 'assignment 1', 'GitHub observation missing']) assert.ok(!text(review).includes(raw) && !visible.includes(raw), `no ${raw} by default`);
   // Requirements sit below the summary and What is left (GY-161 AC-10, GY-171 AC-1), folded with the description under Details
-  // (GY-2011 AC-3): one line per criterion, its full text folded; each criterion appears once, with one marker per proof.
+  // (GY-2011 AC-3): one line per criterion, its full text folded; each criterion appears once in Requirements (the Tests panel
+  // names its proofs' criterion too, GY-2091), with one marker per proof.
   assert.match(view, /<details class="panel item-details-fold" aria-label="Details"><summary>Details<\/summary>[\s\S]*<section class="requirements" aria-label="Requirements">/);
-  const lines = text(view.replace('<details class="panel item-details-fold"', '<details open class="panel item-details-fold"'));
-  for (const ac of find('GY-16').criteria) assert.equal(lines.split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once`);
+  const requirements = view.slice(view.indexOf('aria-label="Requirements"'), view.indexOf('aria-label="Pull request"'));
+  for (const ac of find('GY-16').criteria) assert.equal(text(requirements).split(/\s+/).filter((word: string) => word === ac.id).length, 1, `${ac.id} once in Requirements`);
   assert.equal(view.match(/class="marker-pass"/g)?.length, 2); assert.equal(view.match(/class="marker-pending"/g)?.length, 1);
+  const lines = text(view.replace('<details class="panel item-details-fold"', '<details open class="panel item-details-fold"'));
   assert.match(lines, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
   assert.match(view, /<li class="marker-pass">✓ <abbr class="term"[^>]*>integration:login-rate-limit<\/abbr> passed<\/li>/);
   // Policy-changing actions sit in a closed, admin-only Edit menu.

@@ -7,9 +7,9 @@ Claims last 120s, renewed every ≤30s; owner mutations carry epoch (expired ref
 
 `graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss SIGTERM→SIGKILLs the process group. Launch calls, release, settlement and renewal ride 5xx/408/429, dropped connections and timeouts 90s with backoff; a renewal unanswered 15s is retried afresh, the deadline unmoved (the worker stops at the server's expiry); refusals stop at once. An agent exiting or signalled before lease end releases with cause, not `lease-loss`. Contained launches' quarantine names the scope unit. A dead supervisor fences the item (delivered too) until attested stop or `POST /api/work/UUID/autosettle` (`coordinator`/`admin`) proves authority expired 120+s ago, nothing alive; loop-ended attempts (exhaustion; submitted, unleased past grace, supervisor stopped, pane gone) settle in the ending action when the plane's own record agrees — the loop judges each settlement on that record before posting and waits out a fence the record still holds (a renewed lease, an unexpired launch authority); a POST the plane never answers is transient, retried next cycle. Unsettled: supervisors record why. Loop settlements send `origin: "loop"` (server records `lapsedAt`); [interventions](../dashboard.md) count them past grace+10min, hand ones sooner.
 
-### Push credential
+### No push credential
 
-Workers never use host `gh` logins; launchers mint into `worker-sessions/GY-N-EPOCH` (0700), set `GH_CONFIG_DIR`. `POST /api/work/UUID/push-credential` `{"epoch":N}` (`graphyard push-credential GY-N EPOCH DIR`) mints an unstored App token (`contents`, `pull_requests`, `workflows` write) expiring claim + 4h; refused for lapsed/submitted epochs or an App-bypassing base queue; `watch` re-mints near expiry, revokes at exit. GitHub credential failures block the attempt (branch kept), relaunching with backoff once `github-credential` clears; a third holds it for the approver.
+Workers never use host `gh` logins and get no GitHub credential: launches mint no App token and `watch` supervises none. A worker pushes nothing; `complete GY-N EPOCH --head` submits the commit from the shared object store and the control plane's merge writer pushes with its deploy key.
 
 ## How a lease ends
 

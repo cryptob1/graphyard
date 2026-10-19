@@ -1,35 +1,14 @@
-// Concern: base failures (GY-528) — a required check that fails on the base branch as well as on
-// the candidate. Such a failure is not the candidate's to fix: requesting rework for it spent one
+// Concern: base failures (GY-528) — a test that fails on the base branch as well as on the
+// candidate. Such a failure is not the candidate's to fix: requesting rework for it spent one
 // approver session per blocked item (2026-09-26: nine items, each refused as "a date time-bomb
 // unrelated to" the item) and nothing raised the fault against the base. This module holds the
-// pure half: reading failing test names from a CI log, comparing the candidate's with the base
-// head's, and the attention and P0 item a base failure raises. The loop's step is
-// src/daemon/cycle-base-failures.ts.
+// pure half: reading failing test names from a test-runner log, and the attention and P0 item a
+// base failure raises. The merge writer's trial proves the failure on the base tip (GY-1834); the
+// loop's step is src/daemon/cycle-base-failures.ts.
 import { createHash } from 'node:crypto';
 import type { Work } from './work.js';
-import { failedCheckResults as protectionFailedResults, requiredCheckRun, requiredChecksOf } from '../merge-queue.js';
 
-/** The conclusions a required check has failed with; the latest attempt of each check decides. */
-export const failedCheckResults: readonly string[] = ['failure', 'timed_out', 'action_required', 'cancelled'];
-type Check = NonNullable<Work['observation']>['checks'][number];
-const latestAttempt = (runs: Check[]) => runs.length ? runs.reduce((newest, check) => (check.attempt ?? 0) >= (newest.attempt ?? 0) ? check : newest) : null;
-/**
- * The required checks that failed on exactly the current head, each with its latest run. The same
- * judgement `failedCheckRework` makes: an open submitted candidate observed at its own head, not
- * merged or closed, and the latest attempt of the check failed. The policy's checks and the base
- * branch's other required checks alike (GY-430).
- */
-export function failedRequiredChecks(work: Work): { name: string; check: Check }[] {
-  const candidate = work.candidate, observation = work.observation;
-  if (!work.submission || work.reworkRequested || !candidate || !observation || work.stage === 'done') return [];
-  if (observation.candidate.sha !== candidate.sha || observation.merged || observation.prState === 'closed') return [];
-  return requiredChecksOf(work).flatMap(required => {
-    const latest = required.policy ? latestAttempt(observation.checks.filter(check => check.name === required.name)) : requiredCheckRun(required, observation.checks, null);
-    return latest && (required.policy ? failedCheckResults : protectionFailedResults).includes(latest.result) ? [{ name: required.name, check: latest }] : [];
-  }).sort((a, b) => a.name.localeCompare(b.name));
-}
-
-// A GitHub Actions log line starts with its timestamp; a terminal log may carry colour codes.
+// A CI log line may start with its timestamp; a terminal log may carry colour codes.
 const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?/;
 // eslint-disable-next-line no-control-regex
 const ansi = /\u001b\[[0-9;]*m/g;
@@ -49,42 +28,6 @@ export function parseFailedTests(log: string): string[] {
     if (name && name.length <= 500) names.add(name.trim());
   }
   return [...names].sort();
-}
-
-/**
- * The latest completed run of one check on the base branch head, as the loop read it from GitHub
- * outside any coordination transaction. `pending` while the head's run of the check has not
- * completed, `none` when the head has no run of it (or one that neither passed nor failed).
- */
-export interface BaseCheck {
-  check: string; baseSha: string; state: 'passed' | 'failed' | 'pending' | 'none';
-  jobId: number | null; url: string | null;
-  /** The failing test names of a failed run, or null when its log could not be read. */
-  tests: string[] | null;
-}
-/** How one failed required check of a candidate is judged against the base head. */
-export type CheckJudgement =
-  /** Every test failing on the candidate fails on the base head too: nothing of the candidate's to fix. */
-  | { kind: 'base'; tests: string[] }
-  /** The base head's run of the check is still going, or failed with a log not yet read: the comparison waits for it. */
-  | { kind: 'pending' }
-  /** A failure of the candidate's own, or one that cannot be compared: rework, as before GY-528. */
-  | { kind: 'own'; tests: string[] | null };
-/**
- * Compare the failing tests of a candidate's check with the base head's latest completed run of the
- * same check. A failure present on the base too is a base failure; one only the candidate has, or
- * a failure whose tests cannot be read on the candidate, is the candidate's own. A failed base run
- * whose log cannot be read is waited for, like one still running.
- */
-export function judgeFailedCheck(candidateTests: string[] | null, base: BaseCheck | null | undefined): CheckJudgement {
-  if (base?.state === 'pending') return { kind: 'pending' };
-  // A failed base run whose log could not be read (yet) decides nothing: waiting for a readable log
-  // never requests the very rework a shared failure must not get.
-  if (base?.state === 'failed' && base.tests === null && candidateTests?.length) return { kind: 'pending' };
-  if (!base || base.state !== 'failed' || !candidateTests?.length || !base.tests?.length) return { kind: 'own', tests: candidateTests };
-  const onBase = new Set(base.tests);
-  const own = candidateTests.filter(test => !onBase.has(test));
-  return own.length ? { kind: 'own', tests: own } : { kind: 'base', tests: candidateTests };
 }
 
 /** One candidate a base failure blocks: its item, the head the check failed on, and the failed job. */

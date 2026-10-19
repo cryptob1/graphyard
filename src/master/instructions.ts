@@ -81,8 +81,8 @@ Confirm-access page gets it from \`graphyard master browser capture\`, which kee
 that page's views as redacted markup (listed by \`graphyard master browser fixtures\`)
 and submits nothing; never request that recording from a human.
 
-Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub
-merged. Repeat until both conditions hold:
+Keep cycling: status, dispatch ready work, shepherd review, record what the merge
+writer's trial and push landed. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in
 Graphyard; and (2) the release health line in \`master status\` is healthy, or a
 genuinely external deployment blocker is recorded in Graphyard as a follow-up work item.

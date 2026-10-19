@@ -16,7 +16,6 @@ import { stalledItemAttention } from './cli/status-attention.js';
 import { stalledActionAttention } from './cli/stalled-actions.js';
 import { actorlessAttention } from './cli/actorless-submissions.js';
 import { overlongSessionAttention } from './cli/overlong-sessions.js';
-import { githubBudgetAttention } from './cli/github-budget-attention.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './cli/unanswered-requests.js';
 import { consentHoldItems } from './cli/consent-holds.js';
 import { untriagedAttention } from './triage.js';
@@ -213,8 +212,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   // What waits on a judgment rather than on capacity, named once and counted apart (GY-104); the
   // merge writer's own summary lets a trial refusal it holds read as its motion (GY-2015).
   const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], scopeRequests, observed.mergeWriter);
-  // The GitHub budget (GY-117): a pause as one incident, an exhaustion ahead, a silent webhook.
-  const budget = githubBudgetAttention(coordinator);
   const overlong = overlongSessionAttention(snapshot, { ...observed.runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   const stuck = stuckRequestReport({ reviews: observed.reviews, producers: observed.producers }, now).attentionItems;
   // A machine-filed item no triage has judged within a day of filing (GY-402).
@@ -230,12 +227,13 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   if (observed.standalone) {
     const cursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
     const dispatch = 'error' in cursor ? cursor : dispatchSummary(cursor, now, master.run.dispatchIntervalSeconds * 1000, [], snapshot.work, Date.parse(snapshot.now) || now);
-    host.push(...dispatchFailureAttention(dispatch), ...(await setupHealth(root, master, undefined, coordinator)).attention);
+    host.push(...dispatchFailureAttention(dispatch), ...(await setupHealth(root, master)).attention);
     // A starved reviewer or producer role (GY-107), which the report's own buildMasterStatus raises from the role profiles.
     const sessions = { producers: summarizeProducers(observed.producers), failures: 'error' in dispatch ? [] : dispatch.failures, retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] };
     host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)])
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
-  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, conflicted, stalled, owed, budget, overlong, triage, backlog,
-    items: [...host, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items] };
+  // GY-2010: no GitHub budget attention — the App request budget is gone with the API client.
+  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, conflicted, stalled, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
+    items: [...host, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...triage, ...owed.items] };
 }

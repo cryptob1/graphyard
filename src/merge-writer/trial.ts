@@ -12,6 +12,14 @@ import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretSca
 import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master-resources.js';
 
+/** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
+export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
+export type TrialMergeResult = { mergeSha: string; tree: string } | { conflict: string[] };
+
+export const trialAuthor = 'graphyard-merge-writer';
+export const trialRef = (head: string) => `refs/graphyard/trial/${head}`;
+const fullSha = /^[0-9a-f]{40}$/;
+
 // A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
 const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 /**
@@ -33,14 +41,6 @@ export function failingSummary(output: string): string | null {
   while (end < lines.length && (!plain[end]!.trim() || /^\s/.test(plain[end]!) || /^(test at |✖ )/.test(plain[end]!))) end++;
   return lines.slice(start, end).join('\n').replace(/\n+$/, '');
 }
-
-/** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
-export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
-export type TrialMergeResult = { mergeSha: string; tree: string } | { conflict: string[] };
-
-export const trialAuthor = 'graphyard-merge-writer';
-export const trialRef = (head: string) => `refs/graphyard/trial/${head}`;
-const fullSha = /^[0-9a-f]{40}$/;
 const exitOf = (error: unknown) => error as { status?: number | null; stdout?: unknown };
 
 /**
@@ -50,7 +50,7 @@ const exitOf = (error: unknown) => error as { status?: number | null; stdout?: u
  * `refs/graphyard/trial/<head>`. Nothing under `refs/heads/*`, no remote and no checkout is
  * touched. A conflicting merge gives the conflicted paths and writes no commit. Retention: one
  * ref per tried head, overwritten by that head's next trial and never pruned here, so a recorded
- * verdict's mergeSha keeps resolving; a cleanup belongs beside tip-cleanup if the refs ever matter.
+ * verdict's mergeSha keeps resolving, and nothing deletes them.
  */
 export async function trialMerge(git: TrialGit, input: { head: string; baseTip: string }): Promise<TrialMergeResult> {
   const head = input.head.toLowerCase(), baseTip = input.baseTip.toLowerCase();
@@ -402,6 +402,11 @@ export class TrialEnvironmentError extends Error {
     this.name = 'TrialEnvironmentError';
   }
 }
+/** The paths whose change runs the browser suite in a trial (GY-2092): the dashboard, its tests and tooling, and the server routes it calls. */
+export const dashboardPaths = ['web/', 'browser-tests/', 'src/server/routes/', 'src/server/routes.ts', 'src/model/board.ts', 'scripts/dashboard-fixture.mjs', 'playwright.config.ts', 'vite.config.ts'];
+export const touchesDashboard = (files: readonly string[]) => files.some(file => dashboardPaths.some(path => file === path || (path.endsWith('/') && file.startsWith(path))));
+/** The failing entry a trial records when `npm run test:browser` fails. */
+export const browserSuite = 'browser-tests/';
 export interface RunTrialInput {
   /** The coordinator checkout whose object store holds the merge commit. */
   root: string;
@@ -692,13 +697,23 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
         // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
-        let scripts: { build?: unknown } | undefined;
+        let scripts: { build?: unknown; 'test:browser'?: unknown } | undefined;
         try { scripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
         if (scripts === undefined || scripts?.build) {
           enter('build');
           const built = await child('build', 'npm', ['run', 'build']);
           if (hostEnded(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+        }
+        // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
+        // Chromium installs into the host's shared Playwright cache (a no-op once present); an install that fails is the host's, retried, never the merge's.
+        if (scripts?.['test:browser'] && touchesDashboard(input.changedFiles)) {
+          enter('tests');
+          const chromium = await child('tests', 'npx', ['playwright', 'install', 'chromium']);
+          if (!chromium.ok) throw runnerFailure('tests', chromium);
+          const browser = await child('tests', 'npm', ['run', 'test:browser']);
+          if (hostEnded(browser)) throw runnerFailure('tests', browser);
+          if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });
         }
       }
       if (!await holds('scripts/ci-tests.mjs')) return finish('pass', { passed: 0, failed: [], files: 0 });

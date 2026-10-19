@@ -7,7 +7,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ## Variables
 
-`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH` (`owner/repo`/`main`); App `GITHUB_APP_ID`/`GITHUB_INSTALLATION_ID`/`GITHUB_PRIVATE_KEY` (or `_FILE`)/`GITHUB_WEBHOOK_SECRET`; trusted `GITHUB_CI_APP_IDS`; [reviewer](github.md#identity-bound-agent-review) `GRAPHYARD_REVIEWER_APPS`; [revert approver](delivery.md#pre-merge-gate-and-release-candidate-validation) `GRAPHYARD_REVERT_APPROVER_APP_ID`/`_INSTALLATION_ID`/`_PRIVATE_KEY` (or `_FILE`); `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA` (commit; else clean-build `GRAPHYARD_BUILD_REVISION`); `RAILWAY_API_TOKEN`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/[`s3`](recovery.md#artifact-backends-capacity-and-migration)); `GRAPHYARD_SIGNIN_CLAIM` ([host](install.md#self-contained-host) sign-in hash):
+`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH` (`owner/repo`/`main`); no GitHub App variable (the merge writer pushes with the [deploy key](install.md#step-3-deploy-key)); reviewer `GRAPHYARD_REVIEWER_APPS`; `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA` (commit; else clean-build `GRAPHYARD_BUILD_REVISION`); `RAILWAY_API_TOKEN`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/[`s3`](recovery.md#artifact-backends-capacity-and-migration)); `GRAPHYARD_SIGNIN_CLAIM` ([host](install.md#self-contained-host) sign-in hash):
 
 | Variable | Purpose
 | --- | ---
@@ -19,7 +19,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ### CI producer
 
-[CI proofs](github.md#proofs-in-ci) publish via one principal (`manual:*`, `e2e:*` refused):
+CI proofs publish via one principal (`manual:*`, `e2e:*` refused); its posted run binding (repository, run, job, conclusion) is Graphyard's record of the job, never read back from GitHub (GY-2010):
 
 ```json
 {"id":"ci-proofs","role":"producer","runtime":"github-actions","proofs":["unit:*","integration:*"],"token":"…"}
@@ -29,7 +29,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy `production` shows no attention. Deployments: Railway's API, else GitHub's ([environment name](#production-environment-name)). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses observations `run.deploymentReuseMinutes` (15; `0` every cycle).
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy `production` shows no attention. The serving commit comes from Railway's API or the configured deployment endpoint (GitHub deployments are not read). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses observations `run.deploymentReuseMinutes` (15; `0` every cycle).
 
 Self-upgrades [deploy](delivery.md#release-candidates) the tip first; `.graphyard/held-cli.json` pins `bin/graphyard.mjs` and loops to a dirty checkout's snapshot.
 
@@ -43,9 +43,9 @@ Railway deploys `release/production` in ~1min. `/healthz` `commit` behind tip: `
 
 Railway reports `<project> / production`. Startup uses `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `github-pages` if workflows run `actions/deploy-pages`, else `production`; the loop publishes it.
 
-### Webhook delivery
+### Webhook
 
-Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0/404 → URL ≠ `https://YOUR-HOST/api/github/webhook`; 401 → secret ≠ `GITHUB_WEBHOOK_SECRET`. Fix, redeliver (`webhooks.settingsUrl` Advanced).
+`/api/github/webhook` is not served (404): Graphyard registers no webhook and reads no delivery.
 
 ## Backup, upgrade, rollback
 
@@ -53,10 +53,10 @@ Hosted: `failing` ([liveness](operations-reference.md#webhook-liveness)) codes 0
 
 ## Manual fallback
 
-Set the variables table; `node "$GRAPHYARD_CLI" github-setup https://YOUR-DOMAIN` and `doctor`.
+Set the variables table, register a read-write deploy key ([step 3](install.md#step-3-deploy-key)), then `doctor`.
 
 - Compose: `cp .env.example .env`, set secrets, `docker compose --profile full up -d`; TLS on 4310, Postgres private.
 - Kubernetes: `helm install graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials …`.
 - Railway: `railway init`, `railway add --database postgres`, variables, `railway up`. Production redeploy (no `init`): `railway link --project graphyard --environment production --service graphyard`, `railway up`.
 - `graphyard master setup` plans variables saved credentials derive; `--apply` sets them (Railway: `variable set --stdin`), audited in `.graphyard/setup-audit.jsonl`; no install record: `--provider railway --service graphyard --link-dir DIR`. `park` refuses host-doable asks (repository, derived variable, held credential, Confirm-access capture, coordinator checkout or unit record, agent identity); a person's sign-in, enrolment or browser profile stays human.
-- Railway revert approver: `node scripts/provision-railway.mjs` sets `GRAPHYARD_REVERT_APPROVER_*` from `.graphyard/revert-approver.json` (0600) or `--revert-approver-stdin` (`--revert-approver-only`: only those). Redeploy; `--verify` exits 0 once the live guard names it.
+- Railway principals: `node scripts/provision-railway.mjs` sets `GRAPHYARD_PRINCIPALS` and the capacity variables from `.graphyard/credentials.json`, then redeploy. No main guard or revert approver remains; leftover `GRAPHYARD_REVERT_APPROVER_*` are unread and may be deleted.
