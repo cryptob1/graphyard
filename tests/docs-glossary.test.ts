@@ -35,10 +35,10 @@ test('the primary operations page fits a three-minute skim and keeps its structu
   const words = body.replace(/`[^`]*`/g, 'x').split(/\s+/).filter(Boolean).length;
   assert.ok(words <= 650, `operations.md body is ${words} words excluding code and navigation; the budget is 650`);
   for (const heading of ['## Daily checklist', '## Incident decision tree', '## Recovery recipes', '## Safety facts that never change', '## Deeper references']) assert.ok(page.includes(heading), `operations.md keeps ${heading}`);
-  for (const link of ['operations-reference.md#lost-worker-before-submission', 'operations-reference.md#submitted-implementation-needs-rework', 'operations-reference.md#supervisor-died-leaving-a-containment-quarantine', 'operations-reference.md#master-coordination-loop', 'operations-reference.md#merge-bypass', 'operations-reference.md#bootstrap-mode-for-a-self-proving-change']) assert.ok(page.includes(link), `each recipe links its deeper reference: ${link}`);
+  for (const link of ['#lost-worker-before-submission', '#submitted-implementation-needs-rework', '#supervisor-died-leaving-a-containment-quarantine', '#master-coordination-loop', '#merge-bypass', '#bootstrap-mode-for-a-self-proving-change']) assert.ok(page.includes(link), `each recipe links its deeper reference: ${link}`);
   // The safety facts the split must not lose, on the page itself.
   for (const fact of ['Never weaken requirements', 'No AI principal can', 'never bypass', 'Never attest a stop you have not confirmed', 'no bypass, no lifecycle-state endpoint', 'append-only']) assert.ok(page.includes(fact), `operations.md states: ${fact}`);
-  const reference = read('docs/operations-reference.md');
+  const reference = read('docs/operations.md');
   for (const heading of ['## Master coordination loop', '## Proof authority grants', '## Setup proposals and drift', '## Scale limits', '## Credentials', '### Concurrent reconciliation']) assert.ok(reference.includes(heading), `operations-reference.md keeps ${heading}`);
 });
 

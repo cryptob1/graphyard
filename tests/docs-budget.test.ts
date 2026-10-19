@@ -14,9 +14,9 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const read = (path: string) => readFileSync(`${root}${path}`, 'utf8');
 // Graphyard's own documentation budget is this repository's configuration, not a product rule for
 // managed projects (GY-574): graphyard.json's documentation.wordBudget sets the total, the per-page
-// cap and the pages counted, exactly as the control plane reads any project's. It is 16,000 words,
-// per page 1,200 (GY-1453 raised the total from 12,000 so the set sits at least 5% under it). A
-// page over its cap fails here. The total was never a merge gate, so main re-saturated within
+// cap and the pages counted, exactly as the control plane reads any project's. GY-2172 halved the
+// set and lowered the total to the new word count plus 10% (8,489); per page 1,200. A page over
+// its cap fails here. The total was never a merge gate, so main re-saturated within
 // hours of every trim (GY-1515): a total within 3% of the budget now fails any change that adds a
 // word to it (docsBudgetJudgement), while a change that adds none, the base branch itself, or a
 // change whose base cannot be counted passes with the warning, and the loop's trim item restores the room.
@@ -53,7 +53,7 @@ function headings(text: string) {
 }
 
 /** Graphyard's own configured budget (GY-1453), which docs/development.md states. */
-const CONFIGURED_BUDGET = { total: 16_000, perPage: 1_200, paths: ['README.md', 'docs/'] };
+const CONFIGURED_BUDGET = { total: 8_489, perPage: 1_200, paths: ['README.md', 'docs/'] };
 /** The budget the judgement tests below exercise on fixtures, independent of the configured one. */
 const FIXTURE_BUDGET = { total: 12_000, perPage: 1_200, paths: ['README.md', 'docs/'] };
 const git = (...args: string[]) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
@@ -87,35 +87,33 @@ const REQUIRED_STATEMENTS: [string, RegExp][] = [
   ['docs/delivery.md', /\*\*The master loop deploys continuously\*\*.*`promotion\.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`/],
   // GY-1848: the repository's release failure-action keys and their defaults.
   ['docs/delivery.md', /`release\.onFailure` `hold` \(default `revert`\) names each failing case, step and would-be target or `no map matched`, reverting\/reopening nothing; `release\.revertUnmatched: false` holds an unmatched failure instead of the newest item/],
-  // GY-1555 AC-6, GY-2010: setup-from-zero's control-plane merger subsection; no GitHub App step remains.
-  ['docs/setup-from-zero.md', /### Control-plane merger\n\n`install --apply` \(and `up`\) creates an ed25519 deploy key and registers it read-write on OWNER\/REPO .*No GitHub App, webhook or branch protection is set up/],
+  // GY-1555 AC-6, GY-2010, GY-2172: setup-from-zero's control-plane merger subsection; the deploy key is the only GitHub step.
+  ['docs/setup-from-zero.md', /### Control-plane merger\n\n`install --apply` \(and `up`\) creates an ed25519 deploy key and registers it read-write on OWNER\/REPO .*Nothing else is registered on the remote, and nothing asks for it/],
   // GY-2010: install's deploy-key step replaces the App confirmation.
   ['docs/install.md', /## Step 3: deploy key\n\n`--apply` generates `INSTALL\/deploy-key` .*registers it read-write on OWNER\/REPO with `gh repo deploy-key add`/],
   // GY-1523 AC-8: the head form of submit, its CLI and the change number it allocates.
   ['docs/protocol/work-commands.md', /`\{"epoch":1,"head":SHA\}` \(`complete GY-N EPOCH --head \[SHA\]`.*allocates one change number per head into `candidate\.pr`\/`submission\.pr`/],
-  // GY-1529 AC-5: the Coordinator recovery section names its symptoms, the recover command and how promotion resumes.
-  // GY-1607 AC-4: the deployment page says CI and release-candidate runners pull Docker Hub images through the mirror.
-  ['docs/deployment.md', /CI and release-candidate runners pull Docker Hub images through the `mirror\.gcr\.io` mirror/],
-  ['docs/recovery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; deploys repin\./],
-  // GY-1778 AC-2: plan-read bounds live on the protocol read-endpoints page (docs/github.md deleted in GY-2010).
-  ['docs/protocol/read-endpoints.md', /`\/api\/work`: the fleet \(open items whole, settled deliveries summarized\), `\?pr=N` only the item whose candidate or submission names pull request N \(else `\[\]`\)/],
-  // GY-2010: no GitHub App is held, so both master-agent pages say the App browser flows refuse (GY-1686's capture remedy is gone).
-  ['docs/master-agent.md', /No GitHub App is held, so the \[browser flows\]\(master-agent-reference\.md#github-administration-through-the-browser\) refuse/],
-  ['docs/master-agent-reference.md', /`master browser app-permissions\|installation-accept\|capture` therefore refuse, naming the missing App credential/],
+  // GY-1529 AC-5, GY-2172: delivery.md's Coordinator recovery section names its symptoms and the recover command.
+  // GY-1607 AC-4: the deployment page says CI runners pull Docker Hub images through the mirror.
+  ['docs/deployment.md', /CI runners pull Docker Hub images through the `mirror\.gcr\.io` mirror/],
+  ['docs/delivery.md', /## Coordinator recovery\n\nSelf-merge stalled the loop, or main-watch froze: `graphyard master recover \[--to SHA\] --admin-token-stdin` repins, restarts; deploys repin\./],
+  // GY-1778 AC-2, GY-2172: the work reads live on the work-commands page (read-endpoints merged in).
+  ['docs/protocol/work-commands.md', /`\/api\/work`: the fleet \(open items whole, settled deliveries summarized\), `\?pr=N` only the item whose candidate or submission carries that legacy number \(else `\[\]`\)/],
+  // GY-2010, GY-2172: both master-agent pages say the browser flows refuse; the deploy key is the only remote credential.
+  ['docs/master-agent.md', /The \[browser flows\]\(master-agent-reference\.md#github-administration-through-the-browser\) refuse: the deploy key is the only remote credential/],
+  ['docs/master-agent-reference.md', /`master browser app-permissions\|installation-accept\|capture` therefore refuse, naming the missing credential/],
   // GY-1784 AC-6 and GY-1828: the operations page states the worktree-disk reading's answered condition (out of reach over the plan, the pass's own removals included), its currency bound, the hard line and the recovery band.
   ['docs/operations.md', /`disk` attention under `run\.diskThresholdGb` is answered \(reported, faultless\) while the latest worktree-reclaim pass is ≤30 min old and out of reach \(nothing disposable now, no backlog or error, its removals included; no fault standing\); ≤ half the threshold, or ENOSPC\/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers/],
   // GY-1690 AC-3 and GY-1729: the release-candidate section says the chart exercise forwards a free port it re-establishes, waits for the rollout, retries transient API failures and names the last line a failed job ends on.
   ['docs/delivery.md', /`deploy\/helm\/exercise\.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures \(empty reply, reset, stall, non-2xx, bodiless 2xx\), else ending `api METHOD \/api\/PATH failed after 15 attempts: status STATUS, body: BODY`/],
-  // GY-1844: the release-candidate section states digest promotion: a candidate's recorded build promotes by its exact digests, never a rebuild.
-  ['docs/delivery.md', /A recorded build promotes by digest, never rebuilt, once UAT names it/],
   // GY-1855 AC-2, reworded by GY-1980: an uncleared stall wakes the master session once per run and files nothing; the status listing stays.
-  ['docs/master-agent-reference.md', /an unbound \[stall\]\(operations-reference\.md#master-coordination-loop\) wakes the master session once per run at three failing cycles \(bound: remedy refused, unverified or failing at six\); `master status` lists each stall's signature, count, remedy, owner, filing nothing/],
+  ['docs/master-agent-reference.md', /an unbound \[stall\]\(operations\.md#master-coordination-loop\) wakes the master session once per run at three failing cycles \(bound: remedy refused, unverified or failing at six\); `master status` lists each stall's signature, count, remedy, owner, filing nothing/],
 ];
 
 test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and every docs page) keep every page within its per-page budget and 200 words under it, counted as wc -w counts them; a total within 3% of the budget fails a change that adds to it and warns otherwise', () => {
   assert.ok(budget, 'graphyard.json configures documentation.wordBudget');
   assert.deepEqual({ total: budget.total, perPage: budget.perPage, paths: budget.paths }, CONFIGURED_BUDGET, 'graphyard.json budgets 16,000 words, 1,200 per page, over README.md and docs/');
-  assert.match(read('docs/development.md'), /`wordBudget` \(16,000 words, 1,200 per page;/, 'docs/development.md states the configured budget');
+  assert.match(read('docs/development.md'), /`wordBudget` \(8,489 words, 1,200 per page;/, 'docs/development.md states the configured budget');
   // Verification maps (GY-1495) carry their own 250-word cap (tests/verification-maps.test.ts), never the docs budget.
   for (const map of readdirSync(`${root}verification`).filter(name => name.endsWith('.md'))) assert.ok(!budgetedPage(`verification/${map}`, budget), `verification/${map} is outside the docs budget`);
   assert.equal(words('one  two\tthree\n\nfour — `five six` [seven](eight.md)'), 8, 'words are whitespace-separated runs, as wc -w counts them');
@@ -128,11 +126,17 @@ test('unit:docs-word-budget — the pages graphyard.json budgets (README.md and 
   if (judgement.warning) console.warn(`unit:docs-word-budget: ${judgement.warning}`);
   const largest = counts.reduce((top, entry) => entry.words > top.words ? entry : top);
   console.log(`unit:docs-word-budget: ${counts.length} pages, ${counts.reduce((sum, entry) => sum + entry.words, 0)} words in total; largest ${largest.page} (${largest.words})`);
+  // GY-2172 unit:docs-halved — the set stays at most half its 2026-10-18 size, with headroom in the budget.
+  const HALVED_BASELINE = 15_492; // the budgeted set's word count on 2026-10-18 (commit 46e47bf8f8), the day's end state this item trimmed
+  const setTotal = counts.reduce((sum, entry) => sum + entry.words, 0);
+  assert.ok(setTotal * 2 <= HALVED_BASELINE, `the budgeted set totals ${setTotal} words; at most half of ${HALVED_BASELINE} (7,746) is the item's bound`);
+  assert.ok(budget.total >= setTotal, `the budget (${budget.total}) covers the set (${setTotal})`);
+  assert.ok(budget.total <= Math.ceil(setTotal * 1.1), `the budget stays at the new total plus 10% (${budget.total})`);
   // Statements a criterion requires the budgeted pages to keep (GY-1142 AC-2): the budget holds
   // with them in, and a trim that drops one fails here instead of passing silently.
   for (const [page, statement] of REQUIRED_STATEMENTS) assert.match(read(page), statement, `${page} states ${statement}`);
-  const coordinatorRecovery = read('docs/recovery.md').split(/^## Coordinator recovery$/m)[1]?.split(/\n## /)[0] ?? '';
-  assert.ok(coordinatorRecovery && words(coordinatorRecovery) <= 120, `docs/recovery.md's Coordinator recovery section is at most 120 words: ${words(coordinatorRecovery)}`);
+  const coordinatorRecovery = read('docs/delivery.md').split(/^## Coordinator recovery$/m)[1]?.split(/\n## /)[0] ?? '';
+  assert.ok(coordinatorRecovery && words(coordinatorRecovery) <= 120, `docs/delivery.md's Coordinator recovery section is at most 120 words: ${words(coordinatorRecovery)}`);
 });
 
 test('unit:docs-budget-growth-gate — a saturated total fails a change that adds to it and passes with the warning one that adds none, the base branch itself or an uncounted base; a page over its cap or past its headroom still fails', () => {
