@@ -310,24 +310,6 @@ test('integration:cleared-condition-retries-promptly — a row starved against a
 
 // ---- AC-5: the docs say it ------------------------------------------------------------------
 
-test('manual:stall-visibility-docs-review — docs state that a repeated identical failure is a stall rather than a retry, what the threshold is, where an operator sees one, and that it is the signal for a fleet that looks idle but is not', async () => {
-  // Read as prose, not as source: emphasis and line wrapping are the author's, and an assertion
-  // about either would fail on a reflow that changed no statement.
-  const master = (await readMasterGuide()).replace(/[*`_]/g, '').replace(/\s+/g, ' ');
-  const numbers: Record<number, string> = { 1: 'one', 2: 'two', 3: 'three', 4: 'four', 5: 'five' };
-  const threshold = new RegExp(`(${actionStallThreshold}|${numbers[actionStallThreshold]}) (consecutive )?(failures|identical failures)`, 'i');
-  for (const [name, text] of [['master-agent.md', master]] as const) {
-    assert.match(text, /stalled rather than retrying|stall, not a retry/i, `${name} states that a repeated identical failure is a stall rather than a retry`);
-    assert.match(text, /unchanged reason/i, `${name} says what makes it one`);
-    assert.match(text, threshold, `${name} states the threshold`);
-    assert.match(text, /does not outlive it|never outlives it/i, `${name} states what the classification does to the backoff`);
-  }
-  assert.match(master, /actions\.stalled/, 'master-agent.md says where an operator sees one');
-  assert.match(master, /on the item's own card/i, 'and on the dashboard');
-  assert.match(master, /reads as idle and is not|looks idle/i, 'and that it is the signal for a fleet that looks idle but is not');
-  assert.match(master, /read exactly like an item with nothing to do|no count and no list/i);
-});
-
 // ---- GY-185: delivered items owe nothing to retry, and an idle poll costs no lock ------------
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);

@@ -10,7 +10,7 @@ import { stallRenewalWindowMs } from '../src/engine.js';
 // so either moving alone fails here until the page and the engine agree again.
 
 test('unit:stall-window-docs — the operations reference states the engine stallRenewalWindowMs, never a further lease period', async () => {
-  const docs = await readFile(new URL('../docs/operations-reference.md', import.meta.url), 'utf8');
+  const docs = await readFile(new URL('../docs/operations.md', import.meta.url), 'utf8');
   const stated = docs.match(/(\d+)s `stallRenewalWindowMs`/);
   assert.ok(stated, 'the page states its stall window in seconds beside the engine constant stallRenewalWindowMs');
   assert.equal(Number(stated![1]) * 1000, stallRenewalWindowMs, 'the stated window equals the engine stallRenewalWindowMs');

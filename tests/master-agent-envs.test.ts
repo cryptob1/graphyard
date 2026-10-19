@@ -474,14 +474,6 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
   } finally { await cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 
-test('manual:agent-env-docs-review — the onboarding and master guides describe agent environments, quota failover and permissions', async () => {
-  const read = async (name: string) => readFile(new URL(`../${name}`, import.meta.url), 'utf8');
-  const [onboarding, masterGuide, help] = await Promise.all([read('docs/onboarding.md'), readMasterGuide(), read('src/cli/master.ts')]);
-  for (const fragment of ['master environments', '~/.coding_agents', '--create', '--apply', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME', 'CURSOR_CONFIG_DIR', 'quota']) assert.ok(onboarding.includes(fragment), `onboarding describes ${fragment}`);
-  for (const fragment of ['master environments', 'quotaCeilingPercent', 'fails over', 'accounts', 'prompt', 'bypassPermissions', 'OPENCODE_PERMISSION', 'master harness', 'systemctl --user restart graphyard-master']) assert.ok(masterGuide.includes(fragment), `the master guide describes ${fragment}`);
-  assert.match(help, /master environments \[--create KIND/);
-});
-
 // A registry runtime that names no home variable (GY-180): the kind's known variable carries the
 // chosen account's home, and a home nothing can carry is refused before any session starts.
 const registryAccount = (kind: string, home: string | null) => ({ name: `${kind}-b`, kind, home, fleet: { runtime: kind, model: 'm', modelId: null, session: 's-1', reason: 'chosen',

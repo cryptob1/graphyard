@@ -3,51 +3,100 @@
 
 ## Daily checklist
 
-- `/healthz` at expected `commit` (CLI at another release refuses: `graphyard upgrade`); `/api/status`: no job errors, `delegationLimits.attention`, `production.incidents`.
-- `master status`: `daemon.liveness` `running`, attention owned; recent verified `graphyard db backup`.
+- `/healthz` at expected `commit` (another release refuses: `graphyard upgrade`); `/api/status`: no job errors.
+- `master status`: `daemon.liveness` `running`, attention owned; recent `graphyard db backup`.
 
 ## Incident decision tree
 
-- **Item not moving**: fix refusal's cause; `master status` flags no progress 60min or merges unreleased 90min, filing nothing. Never weaken requirements.
-  - Escalation: declared human runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](delegation.md#who-may-settle-what)).
-  - Expired unsubmitted: [lost worker](operations-reference.md#lost-worker-before-submission); retry: [rework](operations-reference.md#submitted-implementation-needs-rework); fenced: [quarantine](operations-reference.md#supervisor-died-leaving-a-containment-quarantine).
-  - Late-fault waits: 30min: owed `request-rework` (`owed-decision`), unwatched decision, owed escalation/blocker, stale non-release, `actorless` head behind base; a queue-held trial or push refusal, or a head the writer parked on its own `base failure` refusal (30min), is the writer's motion ([fault classes](master-agent-reference.md#fault-classes)); 10min: containment past grace; 15min: watched decision post-launch; once: unre-asked refusal (`decision-refused`).
-  - Plane-wide failures (502–504, refused, timeout) retry faultless: outage-refused preserves, coordinates re-sent across restarts (`plane-unavailable`); slow fault/deployment reads defer (`faults:deferred`, `deployment:deferred`); `loop-cost` names the slowest.
-  - A failed producer-runnable manual proof returns to worker, never to an operator escalation; one no producer may run needs operator witness, an unexecuted one an attestation.
-- **Merge refused**: wait or repair, never bypass; the gate quotes the merge writer's ledger ([main](delivery.md#main)): not yet trialled or pushed is its motion; a failed trial returns the head to a worker; a failure the base tip shares is held, never reworked; `base moved N times` stays queued for a later trial. **Merged outside**: [bypass](operations-reference.md#merge-bypass). **Wrong evidence**: [revoke](operations-reference.md#accepted-evidence-turns-out-to-be-wrong). **Smoke failed**: [delivered](operations-reference.md#delivered-with-a-failed-smoke-proof).
-- **Main ahead of production**: [deployment incident](deployment.md#production-deployment-observation). An up-to-date release takes no coordination locks; a migrating release fails fast within health check, touching only tables whose DDL changed since its per-table digest, retrying deadlocks and expired lock waits with backoff in one 30-second lock budget, each attempt waiting ≤3 s per lock so live writes never queue longer.
-- **Diagnosis `waiting`**: [provider quota](master-agent.md#research-and-diagnosis). **Loop down**: [loop](operations-reference.md#master-coordination-loop). **Self-proving change**: [bootstrap](operations-reference.md#bootstrap-mode-for-a-self-proving-change).
+- **Item not moving**: fix the refusal's cause; `master status` flags no progress 60min. Never weaken requirements. Escalation: a declared human runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](master-agent-reference.md#recovery)). Expired unsubmitted: [lost worker](#lost-worker-before-submission); retry: [rework](#submitted-implementation-needs-rework); fenced: [quarantine](#supervisor-died-leaving-a-containment-quarantine). Late-fault waits (30min/10min/15min): a queue-held trial, push or `base failure` refusal is the writer's motion. A failed producer-runnable manual proof returns to worker, never to an operator escalation.
 
 ## Recovery recipes
 
 ```sh
 graphyard rework GY-N --previous-worker-stopped "reason"
-graphyard master settle-containment GY-N "reason"                       # settleable
-graphyard recover-containment GY-N --previous-worker-stopped "reason"   # delivered
-graphyard unblock GY-N "reason"                                         # unowned
-systemctl --user restart graphyard-master-OWNER-NAME                    # loop down
-graphyard master checkout-restore "reason"                              # dirty/drifted/diverged
+graphyard master settle-containment GY-N "reason"
+graphyard recover-containment GY-N --previous-worker-stopped "reason"
+graphyard unblock GY-N "reason"
+systemctl --user restart graphyard-master-OWNER-NAME
+graphyard master checkout-restore "reason"
 ```
 
-Never attest a stop you have not confirmed. Outside its namespace, `master status` judges by stall bound; stalled/absent: stop hand-started loops, install `examples/master/graphyard-master.service`, `systemctl --user daemon-reload && systemctl --user enable --now graphyard-master`.
-
-## Worker host keyring proxy
-
-Confined masters/approvers/producers (not workers/reviewers) read GitHub through a keyring-only D-Bus proxy: copy `deploy/systemd/graphyard-secrets-bus*`, `systemctl --user enable --now graphyard-secrets-bus.socket` (`GRAPHYARD_SECRETS_BUS`); absent, sessions push `GH_TOKEN`.
+Never attest a stop you have not confirmed.
 
 ## Safety facts that never change
 
 - Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal can hold `admin`.
-- Proof authority: live [grant](operations-reference.md#proof-authority-grants); `admin` attests only `manual:` proofs; operator agents only add requirements.
-- Only the merge writer moves main, pushing its trialled merge commit on passing gates: no bypass, no lifecycle-state endpoint.
-- History is append-only; routine rows past retention get [compacted](operations-reference.md#storage-retention).
+- Only the merge writer moves main, on passing gates: no bypass, no lifecycle-state endpoint.
+- History is append-only; rows past retention get compacted.
 
 ## Deeper references
 
-[Operations reference](operations-reference.md), [delegation](delegation.md).
+[The coordination loop](#master-coordination-loop), [merge bypass](#merge-bypass), [bootstrap mode](#bootstrap-mode-for-a-self-proving-change).
 
 ## Resources and disk
 
-`resourceRegistry` bounds resources ([remedies](operations-reference.md#control-plane-resources)); worktrees reclaimed after `run.reclaimIdleHours` (never dirty/unpushed), idle unowned [panes](master-agent-sessions.md#panes-are-closed-and-reclaimed); `disk` attention under `run.diskThresholdGb` is answered (reported, faultless) while the latest worktree-reclaim pass is ≤30 min old and out of reach (nothing disposable now, no backlog or error, its removals included; no fault standing); ≤ half the threshold, or ENOSPC/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers. Clean detached verified-release descendant self-recovers (`upgrade:recovered`); otherwise `escalation:dirty-checkout`. Dirty checkout: loop (loaded-code executors) restarts via a `.graphyard/held-cli` snapshot's launcher though commands run its `bin/graphyard.mjs` (return it to HEAD). `master checkout-restore` serves a snapshot; moved: `adopted`; diverged: `refs/graphyard/checkout-restore/diverged-*`; stale: `handoff`.
+`resourceRegistry` bounds resources ([remedies](#control-plane-resources)); `disk` attention under `run.diskThresholdGb` is answered (reported, faultless) while the latest worktree-reclaim pass is ≤30 min old and out of reach (nothing disposable now, no backlog or error, its removals included; no fault standing); ≤ half the threshold, or ENOSPC/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers. Otherwise `escalation:dirty-checkout`.
 
-`/tmp` pass (own, unheld, same-device): test temps 2h; agent checkouts/`opencode`+`claude-UID` scratch 24h; `tsx-UID`/`node-compile-cache` 6h; `.pnpm-store` 7d; low inodes keep 12 newest. Entries another account's subtree traps stay, marked `<entry>.foreign`, unfaulted.
+## Master coordination loop
+
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`; `daemon.stepStalls` names one verified remedy per signature.
+
+## Lost worker before submission
+
+Leases expire 120s after last heartbeat (plane stall: 30s `stallRenewalWindowMs`, not another lease period); higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/work-commands.md#how-a-lease-ends).
+
+## Supervisor died leaving a containment quarantine
+
+[`master settle-containment`](#recovery-recipes) verifies nothing survives; refused: confirm stop, then rework, or `recover-containment`.
+
+## Retro synthesis
+
+Minutely scan (`GET /api/interventions`) raises each crossed pattern as attention, never an item; a non-drafting operator agent approves. The merge writer reruns a trial's failing files; a pass lands, filing nothing (no job log is read, GY-2010).
+
+## Accepted evidence turns out to be wrong
+
+`graphyard revoke GY-N revoke.json` closes that head's required checks.
+
+## Submitted implementation needs rework
+
+Stop worker; [rework](#recovery-recipes) `--previous-worker-stopped`; next resubmits.
+
+## Proof authority grants
+
+Only `admin` grants/revokes, to `producer` principals.
+
+## Credentials
+
+Operator agents hold only listed capabilities.
+
+## Setup proposals and drift
+
+`graphyard init --scan` writes `.graphyard/setup-proposal.json`; rescans report drift, never repair.
+
+## Scale limits
+
+`GRAPHYARD_RECONCILE_BATCH_MS` (250) sizes batches; `GRAPHYARD_OBSERVATION_CONCURRENCY` workers (8) pace per token. Rotate [`GRAPHYARD_PRINCIPALS`](deployment.md#variables).
+
+### Concurrent reconciliation
+
+Reconcile evaluates changed and due rows, ≥ max(`GRAPHYARD_RECONCILE_FULL_MS` (300000), 3× length) running full.
+
+## Observation
+
+Graphyard observes no remote thread, check run or commit status; no request budget, webhook or observation cadence; every candidate is observed from the shared checkout.
+
+## Bootstrap mode for a self-proving change
+
+`policy:bootstrap` holders self-prove one change.
+
+## Control-plane resources
+
+Remedies: `graphyard master run --once`, `herdr pane close PANE`, raise a role's `concurrency`, grow `GRAPHYARD_DATABASE_MAX_BYTES`, code moves for `loaded-revision`.
+
+## Withdrawal, credentials, grants
+
+Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A merge outside the gates is a permanent violation: never bypass; a delivered item with a failed smoke proof stays Done.
+
+## Merge bypass
+
+Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.

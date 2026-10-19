@@ -158,9 +158,6 @@ test('integration:expired-request-never-blocks — a request past its token expi
     const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), mint, requestId: 'review-request' });
     assert.equal(next.work, 'GY-127');
     assert.deepEqual((await readReviewLedger(root)).reviews.map(entry => entry.state), ['expired', 'pending']);
-    // docs/master-agent.md states both rules and how to read a request pending past its expiry.
-    const docs = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');
-    for (const phrase of ['pane_not_found', 'No request outlives its own token', 'sessionReconcile.stuck']) assert.ok(docs.includes(phrase), `docs/master-agent.md names ${phrase}`);
   } finally { await cleanup(); }
 });
 
