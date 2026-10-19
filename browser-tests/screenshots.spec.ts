@@ -144,7 +144,7 @@ for (const width of loginWidths) test(`the sign-in page is captured in every sta
   await expect(page.getByRole('button', { name: 'Use another token' })).toHaveClass(/text-button/);
   await shot('verifying');
   await page.clock.fastForward(VERIFY_TIMEOUT_MS);
-  await expect(page.getByRole('alert')).toHaveText(`Can't reach the control plane at 127.0.0.1:${process.env.GRAPHYARD_BROWSER_PORT ?? 4319}`);
+  await expect(page.getByRole('alert')).toHaveText(/^Can't reach the control plane at 127\.0\.0\.1:4319$/);
   await expect(page.getByRole('button', { name: 'Retry' })).toBeVisible();
   await shot('unreachable');
   // A rejected token returns to the form with the notice and the input focused.
