@@ -59,15 +59,15 @@ test('unit:done-at-merge-settles — a merged item is delivered with a settled n
   }
 });
 
-test('unit:done-at-merge-board-and-goal — the board groups a merged item as shipped with no next command, its steps end at merge, flow exit is its merge, and a goal of merged items is deliverable', () => {
+test('unit:done-at-merge-board-and-goal — the board groups a merged item as shipped with no next command, it is Done at its merge, flow exit is its merge, and a goal of merged items is deliverable', () => {
   // Production observed not serving the merge yet: none of it holds the item any more.
   const watching: ReleaseView = { ...noRelease, unserved: new Set(['GY-1', 'GY-2']), failed: new Set(['GY-2']), observedAt: nowMs - 2 * day };
   for (const item of variants()) for (const view of [noRelease, watching]) {
     assert.equal(groupOf(item, nowMs, undefined, undefined, view), 'shipped', `${item.key} is shipped`);
     assert.equal(nextCommand(item, 'shipped', 'master'), null, `${item.key} has no next command`);
     const steps = prSteps(item, nowMs, view);
-    assert.equal(steps.current, null, `${item.key}'s steps end at merge`);
-    assert.equal(steps.steps.at(-1)!.id, 'merge', `${item.key} shows no Deploy step`);
+    assert.equal(steps.current, 'done', `${item.key} is Done at its merge (GY-1979)`);
+    assert.equal(steps.steps.at(-1)!.id, 'done', `${item.key} shows no Deploy step`);
     assert.ok(steps.steps.every(step => step.state === 'done'));
     assert.equal(leftFlowAt(item, view), item.delivery!.mergedAt, `${item.key} leaves the flow at its merge`);
     assert.equal(flowExitAt(item), item.delivery!.mergedAt);
