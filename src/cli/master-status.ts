@@ -102,8 +102,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // Candidate session status, conflict probe and timing failure qualification (GY-1157)
-  const { probe, status: pipelined, delivery, lead: leadTime } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
-  // Failed check a fixed base explains (GY-793); stalled review-cap replaces a relaunching review-gate row (GY-1810).
+  const { probe, status: pipelined, delivery, lead } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
+  // Failed check a fixed base explains (GY-793); a stalled review-cap replaces its review-gate row (GY-1810).
   const status = nameBaseBreaks(stalledReviewCapAttention(pipelined, snapshot.work, cursor, master.reviewRoundCap, Date.parse(snapshot.now)), snapshot.work);
   const itemSize = timeToMergeBySize(snapshot.work, Date.parse(snapshot.now)); // GY-1858
   const sudo = administration.sudo; // operator confirming their GitHub credential on device
@@ -116,7 +116,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Requests, conflicts, stalls, executors, owed judgments: derivedAttention (the loop reads it too).
   const { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
-      // GY-2015: the writer summary the cursor holds, so a trial refusal its queue holds reads as its motion here as the loop reads it.
+      // GY-2015: the writer summary the cursor holds, so a held trial refusal reads as the loop reads it.
       mergeWriter: cycling?.mergeWriter ?? null,
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
@@ -161,10 +161,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals: cycling?.approvals ?? [],
   });
   return {
-    // The one speed number (GY-1989), first in the report: median released→merged over the last 10
-    // merges, the previous 10's median beside it — the number the loop optimizes for.
-    ...leadTimeHeadline(leadTime),
-    // The merger setting (src/merger-mode.ts), beside it at the top of the report.
+    // Lead time (GY-1989), then the merger setting (src/merger-mode.ts).
+    ...leadTimeHeadline(lead),
     ...mergeWriterLine(coordinator),
     ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     unavailable: sections.unavailable,
