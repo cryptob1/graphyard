@@ -23,7 +23,7 @@ graphyard master checkout-restore "reason"
 
 Never attest a stop you have not confirmed.
 
-`master checkout-restore` serves from the verified release's snapshot under the loop's loader, never the checkout's `node_modules`; a serve that cannot start dies at its startup bound, the command refusing nonzero within its window.
+`master checkout-restore` serves the verified snapshot under the loop's loader; an unstartable serve dies at its startup bound, never hanging.
 
 ## Safety facts that never change
 
