@@ -32,7 +32,7 @@ Claims last 120s, renewed every ≤30s; owner mutations carry epoch. Register br
 
 - `submit`; later heartbeats are told to stop after `complete`.
 - `park` (human-only request naming every human step) or `blocked` releases; coordinator `capacity` (`event: "exhausted"`) frees another account.
-- Expiry classes (`lease.expired`): `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `control-plane-stall`, `no-submission-bound`; none: `lease-loss` escalation.
+- Expiry classes (`lease.expired`): `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `control-plane-stall`, `control-plane-deploy`, `no-submission-bound`; none: `lease-loss` escalation.
 
 ### Blocked work unblocks itself
 

@@ -1569,7 +1569,9 @@ export function tickWaits(waiting: DispatchWait[]) {
 /** A review request waiting longer than this without a launch raises attention (GY-710). */
 export const reviewLaunchWaitAttentionMs = 15 * 60_000;
 /** `answeredAt` is when a reviewer's verdict answered the request (GY-1429): the wait is then the verdict's settlement, aged from it. */
-export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string; answeredAt?: string }
+export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string; answeredAt?: string;
+  /** GY-2176/2177: a normal-risk control-plane head's designed post-merge wait (GY-1525), whatever its tick entry reports — the fault decision reads this mark, not the reason's wording. */
+  postMergeWait?: true }
 /**
  * Every launch still waiting (GY-710, GY-1067), as `master status` reports it: each request the control
  * plane still holds open that has no live session, how long since the request was made, and why
@@ -1596,7 +1598,8 @@ export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick
       const since = Date.parse(answeredAt ?? request.requestedAt);
       rows.push({ kind: request.kind === 'review' ? 'review' : 'producer', work: item.key, requestId: request.id, sha: request.sha, group: request.group ?? null, requestedAt: request.requestedAt,
         waitedMs: Number.isFinite(since) ? Math.max(0, now - since) : 0,
-        reason: wait?.reason ?? (failure ? `launch refused ${failure.attempts} time(s): ${failure.reason}; next attempt at ${failure.nextAt}` : 'waiting for dispatch'), ...(answeredAt ? { answeredAt } : {}) });
+        reason: wait?.reason ?? (failure ? `launch refused ${failure.attempts} time(s): ${failure.reason}; next attempt at ${failure.nextAt}` : 'waiting for dispatch'), ...(answeredAt ? { answeredAt } : {}),
+        ...(request.kind === 'review' && reviewedAfterMerge(item) ? { postMergeWait: true as const } : {}) });
     }
   }
   return rows.sort((a, b) => b.waitedMs - a.waitedMs);
@@ -1608,10 +1611,14 @@ const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000
  * and bot waits so prolonged stalls are always visible to operators rather than silently hidden.
  * GY-2085: a normal-risk control-plane head's designed post-merge wait (GY-1525) launches no reviewer by design,
  * so it is no session-liveness fault: launchWaits keeps reporting it and only the fault is dropped.
+ * GY-2176/2177: the drop reads the wait's mark, not its reason's wording — matching the exact recorded
+ * reason still faulted the same designed wait wherever the wording differed: an entry the tick lost
+ * (a restart boundary, a failed tick, the launchWaitLimit cap) falls back to 'waiting for dispatch',
+ * so the class went on recurring on GY-2164, GY-2097 and GY-2173.
  * Each carries the fault kind its reason names (GY-1175), so the line never files as unclassified.
  */
 export function launchWaitAttention(waits: LaunchWait[]): AttentionItem[] {
-  return waits.filter(wait => wait.kind === 'review' && wait.reason !== postMergeWaitReason && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
+  return waits.filter(wait => wait.kind === 'review' && !wait.postMergeWait && wait.reason !== postMergeWaitReason && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
     text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.answeredAt ? `its verdict at ${wait.answeredAt}, requested ${wait.requestedAt}` : wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
     ...classified(launchWaitKind(wait.reason)),
     ...agentOwner('master', `Fix what the wait names, or launch it with graphyard master review ${wait.work}`) }));

@@ -398,6 +398,7 @@
     "tests/fault-class-loop.test.ts": 630,
     "tests/fault-class-resources.test.ts": 3500,
     "tests/fault-class-review-convergence.test.ts": 1047,
+    "tests/fault-class-session-liveness.test.ts": 3500,
     "tests/fault-class-stalled-gate.test.ts": 1175,
     "tests/fault-class-unclassified.test.ts": 522,
     "tests/fault-classes.test.ts": 3623,
