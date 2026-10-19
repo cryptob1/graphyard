@@ -512,6 +512,13 @@ export function assertMasterBinding(config: MasterConfig, status: any) {
 
 /** The coordinator checkout the CLI launcher at `cliPath` runs from: `<root>/bin/graphyard.mjs`. */
 export const coordinatorCheckoutRoot = (cliPath: string) => dirname(dirname(cliPath));
+/**
+ * GY-2179: the checkout's own launcher for a launcher in a held snapshot under
+ * `<root>/.graphyard/held-cli/<sha>/` — `<root>/bin/graphyard.mjs` — and any other launcher as given.
+ * While the pin stands the checkout's launcher loads the snapshot's modules, so a setup run then
+ * would otherwise record a snapshot the next pin change removes.
+ */
+export const checkoutLauncherOf = (cliPath: string) => cliPath.replace(/\/\.graphyard\/held-cli\/[^/]+\/(bin\/graphyard\.mjs)$/, '/$1');
 /** The checkout areas whose files the loop and the executors load; untracked files under them are uncommitted source, not scratch. */
 export const coordinatorSourcePrefixes = ['src/', 'scripts/', 'bin/', 'tests/', 'docs/'];
 export const coordinatorSourceFiles = ['package.json', 'package-lock.json', 'tsconfig.json'];
