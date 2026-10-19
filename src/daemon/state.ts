@@ -571,7 +571,11 @@ export const daemonStateSchema = z.object({
     refusedFilings: z.array(z.object({ digest: z.string().max(80), at: z.number() }).strict()).default([]),
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
-  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {} })),
+    /** GY-2005: set when the loop's progress watchdog fires (cycle.ts, at the onset of its progressAttention lines): the next doctorStep launches a run at once, past the interval. */
+    watchdogDue: z.boolean().default(false),
+    /** GY-2005: whether the last cycle ended with the progress watchdog's lines standing — its edge, so the resolver fires once per stall, not every cycle. */
+    watchdogStanding: z.boolean().default(false),
+  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {}, watchdogDue: false, watchdogStanding: false })),
   /**
    * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
    * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).

@@ -14,7 +14,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1653. The doctor's unblocks through its command allowlist over two simulated days of the real
- * loop: a cycle every two minutes, the doctor every ten. Items go blocked on a schedule with the
+ * loop: a cycle every two minutes, the doctor every five (a run each 6-minute mark on the two-minute clock). Items go blocked on a schedule with the
  * stuck-gate reasons the 2026-10-10 run was refused on — prose holding "most recent", "last
  * attempt", semicolons, parentheses, a dollar sign and apostrophes — and the same item goes blocked
  * again later with the same reason. Each doctor run is a scripted Pi session that reads the shipped
@@ -158,7 +158,7 @@ test('unit:soak-doctor-unblock-prose — over two simulated days every stuck-gat
       assert.ok(settled.filter(episode => episode.reason === reason).length >= 8, `${keys[index]} was blocked and unblocked again and again with the same reason`);
 
     // The doctor ran once per interval, every run reported, and every applied action is what it ran.
-    assert.ok(doctorRuns >= 280 && doctorRuns <= 290, `one doctor run per ten minutes over two days: ${doctorRuns}`);
+    assert.ok(doctorRuns >= 478 && doctorRuns <= 482, `one doctor run per five minutes over two days: ${doctorRuns}`);
     assert.ok(prompts.every(prompt => prompt.includes('Put a free-text reason last, enclosed in one pair of quotes')), 'every run was told where the reason goes');
     assert.ok(!state.doctor.runs.some(run => run.state !== 'reported'), `every retained doctor run applied its report: ${state.doctor.runs.map(run => run.state).join(', ')}`);
     assert.ok(state.doctor.runs.flatMap(run => run.actions).every(action => action.outcome === 'applied'), 'no retained run recorded a refused command');
