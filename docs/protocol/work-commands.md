@@ -18,7 +18,7 @@ No endpoint sets lifecycle state.
 
 ## Reads
 
-`GET /healthz` (unauthenticated); `/api/status`: principal, integrations, jobs, `mergeWriter`, clock; `/api/github/*` answers 404. `GET /api/work/ID|KEY`: one item; `/api/work`: the fleet (open items whole, settled deliveries summarized), `?pr=N` only the item whose candidate or submission carries that legacy number (else `[]`). `GET /api/main-watch`: acknowledgements and direct-merge windows.
+`GET /healthz` (unauthenticated); `/api/status`: principal, integrations, jobs, `mergeWriter`, `leadTime`, clock; `/api/github/*` answers 404. `GET /api/work/ID|KEY`: one item; `/api/work`: the fleet (open items whole, settled deliveries summarized), `?pr=N` only the item whose candidate or submission carries that legacy number (else `[]`). `GET /api/main-watch`: acknowledgements and direct-merge windows.
 
 ## Leases, evidence, pipeline
 

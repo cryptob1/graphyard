@@ -7,7 +7,7 @@
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` makes supervised installs autonomous; refuses until a reviewer profile exists; provisions operator-agent and approver.
+`graphyard master promote --admin-token-stdin` makes installs autonomous; needs a reviewer profile; provisions operator-agent, approver.
 
 ## Conflict avoidance
 
@@ -15,7 +15,7 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 ## GitHub administration through the browser
 
-Graphyard's one remote credential is the merge writer's deploy key ([install](install.md)), and `/api/github/installation` is 404. `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing credential. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; `harness` drift is reapplied each cycle.
+Graphyard's one remote credential is the merge writer's deploy key ([install](install.md)). `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing credential. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; `harness` drift is reapplied each cycle.
 
 ## Typed actions and executors
 
@@ -39,4 +39,4 @@ The merge writer's trial, the only trial: the merge commit's build and affected 
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤30 minutes, p90 ≤60 minutes (`scripts/measure-pipeline-speed.mjs`). Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread.
+Target: submit→merge p50 ≤30min, p90 ≤60min (`scripts/measure-pipeline-speed.mjs`). `leadTime` (top bar, `master status`): median released→merged, last 10 merges. Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread.
