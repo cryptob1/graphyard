@@ -11,6 +11,8 @@ import type { LoopCodeReading } from './repository-setup.js';
 import { executorGlob, executorInstance, executorInstancePattern, installUnitsFile, parseInstallUnits } from './install/units.js';
 import { defaultChildRun } from './child-runner.js';
 import type { UserSystemctl } from './master/loop-restart.js';
+import { herdrServerUnit } from './herdr-host.js';
+import { installIdFor } from './install/types.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -199,7 +201,7 @@ async function loopCodeCheck(root: string, injected: LoopCodeReading | null | un
 }
 
 /**
- * GY-2159: the unit-overrides line. The install renders its loop and executor units whole and writes
+ * GY-2159: the unit-overrides line. The install renders its loop, executor and Herdr units whole and writes
  * no drop-in, so every drop-in systemd applies to one of them — a stopgap a person left on the host —
  * is one FAIL naming its path, the unit and the Environment it sets; none is one PASS. A checkout
  * recording no units (or not on Linux) prints no line; a manager that cannot be asked fails.
@@ -209,6 +211,9 @@ async function unitOverridesChecks(root: string, systemctl: UserSystemctl, platf
   let units;
   try { units = parseInstallUnits(await readFile(resolve(root, installUnitsFile), 'utf8'), installUnitsFile, () => { throw new Error('absent'); }); } catch { return []; }
   const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'unit-overrides', status, step: setupSteps.unitOverrides, detail });
+  // The Herdr server this install runs: its own instance's unit when master.json records one, else the host's default.
+  const master = await readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(JSON.parse).catch(() => null);
+  const herdr = herdrServerUnit(master?.herdrInstance && typeof master.repository === 'string' ? installIdFor(master.repository) : null);
   const overrides = new Map<string, string>();
   try {
     // A template drop-in applies to every slot and shows on each instance; with no slot known, slot 1 shows it.
@@ -216,13 +221,13 @@ async function unitOverridesChecks(root: string, systemctl: UserSystemctl, platf
     for (const listing of [['list-units', '--all', '--plain', '--no-legend', executorGlob(units)], ['list-unit-files', '--plain', '--no-legend', executorGlob(units)]]) {
       for (const match of (await systemctl(listing)).matchAll(executorInstancePattern(units))) instances.add(match[0]);
     }
-    for (const unit of [units.master, ...(instances.size ? instances : [executorInstance(units, 1)])]) {
+    for (const unit of [units.master, ...(instances.size ? instances : [executorInstance(units, 1)]), herdr]) {
       const shown = String(await systemctl(['show', '--property=LoadState', '--property=DropInPaths', unit]));
       if (/^LoadState=not-found$/m.test(shown)) continue;
       for (const path of /^DropInPaths=(.*)$/m.exec(shown)?.[1].trim().split(/\s+/).filter(Boolean) ?? []) if (!overrides.has(path)) overrides.set(path, unit);
     }
-  } catch (error: any) { return [check('fail', `systemctl --user could not be asked for the drop-ins on ${units.master} and its executors: ${String(error.message).split('\n')[0]}`)]; }
-  if (!overrides.size) return [check('pass', `no drop-in overrides ${units.master} or its executors`)];
+  } catch (error: any) { return [check('fail', `systemctl --user could not be asked for the drop-ins on ${units.master}, its executors and ${herdr}: ${String(error.message).split('\n')[0]}`)]; }
+  if (!overrides.size) return [check('pass', `no drop-in overrides ${units.master}, its executors or ${herdr}`)];
   return Promise.all([...overrides].map(async ([path, unit]) => {
     const sets = (await readFile(path, 'utf8').catch(() => '')).split(/\r?\n/).filter(line => /^\s*Environment(File)?=/.test(line)).map(line => line.trim());
     return check('fail', `${path} overrides ${unit}, which the install did not write${sets.length ? ` (${sets.join('; ')})` : ''}: rm ${path} && systemctl --user daemon-reload && systemctl --user restart ${unit}`);
