@@ -17,9 +17,9 @@ No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-onl
 <!-- graphyard -->
 ## Graphyard coordination
 
-This repository uses Graphyard at https://graphyard-production.up.railway.app for ownership and delivery gates.
-Repository setup stores machine-specific CLI and connection settings in ignored
-`.graphyard/connection.json`. Never put credentials in AGENTS.md or Git.
+This repository uses Graphyard for ownership and delivery gates; ignored
+`.graphyard/connection.json` names the control plane and the machine-specific
+CLI and connection settings. Never put credentials in AGENTS.md or Git.
 
 Before editing, claim an authorized work item and use its assigned worktree.
 Check dependencies, blockers, current owner, and lease epoch. Use `handoff GY-N`
