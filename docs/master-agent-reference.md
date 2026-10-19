@@ -19,7 +19,7 @@ Graphyard's one remote credential is the merge writer's deploy key ([install](in
 
 ## Typed actions and executors
 
-`nextAction`: `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`escalate`. `dispatch`/`request-review` complete if a session answers the head. Three failures, unchanged reason: stalled rather than retrying; backoff never outlives it. A declared kind the code no longer has stops no slot; `--install` drops it from `.graphyard/executors.json`.
+`nextAction`: `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`escalate`. `dispatch`/`request-review` complete if a session answers the head. Three failures, unchanged reason: stalled rather than retrying; backoff never outlives it. A declared executor kind the running code no longer has stops no slot (GY-2163): the slot serves the kinds the code still runs, and `--install` rewrites `.graphyard/executors.json` without them.
 
 ## Recovery
 
@@ -33,11 +33,9 @@ Unacted producer requests relaunch on untried profile.
 
 `faultClass` (`master status` `faults`): recurring classes file one item each; a cycle over 60s is attention, never an item; an unbound [stall](operations.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing; a queue-held trial, push or `base failure` refusal is the writer's motion, never a fault. Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`.
 
-Marked post-merge waits, release-skew refusals: no fault.
-
 ## Merge trial
 
-The merge writer's trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in a sticky tmp-reclaimed `TMPDIR`, killed after 20 minutes.
+The merge writer's trial, the only trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in a sticky tmp-reclaimed `TMPDIR`, killed after 20 minutes.
 
 ## Pipeline speed
 
