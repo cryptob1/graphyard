@@ -6,7 +6,7 @@ import type { Evidence } from './evidence.js';
 /**
  * GY-566. Docs-only conflicts are synced by the control plane, not reworked.
  *
- * Every item documents its change within a word budget, so items edit the same paragraphs of the
+ * Every item documents its change, so items edit the same paragraphs of the
  * same few pages, and every merge on the base branch left the queued items behind it conflicting
  * there. Each such conflict used to cost a rework decision, an approver, a worker session, a new
  * review, new proofs and the queue position — for a conflict in prose. Now a conflict the control
@@ -14,8 +14,8 @@ import type { Evidence } from './evidence.js';
  *
  * - confined to `docs/**\/*.md`: the loop launches one short docs-sync session on a reviewer-class
  *   account with a narrow prompt — merge the base into the item's branch, keep both sides' meaning,
- *   stay within the word budget, touch only the conflicted paragraphs, rerun the docs obligation
- *   check and the word-budget test, push. No rework decision is requested.
+ *   touch only the conflicted paragraphs, rerun the docs obligation check, push. No rework
+ *   decision is requested.
  * - anything else, or a docs-sync session that ended without moving the head: rework, as before.
  *
  * When the synced head is observed, the control plane records it as a base refresh of the reviewed

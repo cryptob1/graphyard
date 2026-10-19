@@ -31,17 +31,6 @@ export const documentationPolicySchema = z.object({
   paths: z.array(documentationPath).min(1).max(50),
   /** The changelog a user-visible change adds an entry to, when the repository keeps one. */
   changelog: documentationPath.nullable().default(null),
-  /**
-   * The project's documentation word budget (GY-574), when it keeps one: a total for the set and a
-   * per-page cap, counted as `wc -w` counts them over the Markdown pages in the documentation paths
-   * (narrowed by `paths`, globs within them, when only some of those pages are budgeted). Absent, no
-   * budget is checked: headroom is not monitored, no trim item is filed and no overflow is attributed.
-   */
-  wordBudget: z.object({
-    total: z.number().int().positive(),
-    perPage: z.number().int().positive(),
-    paths: z.array(documentationPath).min(1).max(50).optional(),
-  }).strict().optional(),
 }).strict();
 export type DocumentationPolicy = z.infer<typeof documentationPolicySchema>;
 /** The whole committed file: documentation, delivery, and the repository's own risk, review and E2E policy (model/repository-policy.ts, GY-1843). */
@@ -200,5 +189,5 @@ export function documentationReviewSection(obligation: Pick<DocumentationObligat
     + (check?.flag ? `Graphyard flags this submission: ${check.flag}. That is a BLOCKING finding unless the diff shows the behaviour is unchanged. ` : '');
 }
 
-// The documentation word budget (GY-574, GY-1515) is its own module; its exports stay reachable here.
-export * from './documentation-budget.js';
+/** Words as `wc -w` counts them: maximal runs of non-whitespace, markup and code included. */
+export const docsWords = (text: string) => text.split(/\s+/).filter(Boolean).length;

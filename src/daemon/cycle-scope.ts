@@ -39,7 +39,7 @@ export interface ScopeGround { path: string; ground: string; companion?: boolean
  *
  * GY-955: each path is judged on its own, so one ungrounded path never refuses the rest. A path the
  * engine's rule implies on its own (a criterion names it, documentation, a companion such as the
- * docs-budget gate beside a documentation path) is granted here too, and so are the companions only
+ * wall-clock gate beside a test) is granted here too, and so are the companions only
  * the base can ground: a test importing a module a planned file is or re-exports
  * (importingTestGround), a new test file the criteria's unit proofs need when no base file holds
  * them (newProofTestGround, searched by `held`), and the verification map whose Paths line covers a
@@ -142,7 +142,7 @@ async function scopeStepWithin(cycle: Cycle) {
   // What an automatic widening stood on, in the audit detail: the grounds it actually used.
   const widenedOn = (grounds: ScopeGround[], count: number): string => {
     const kinds = new Set(grounds.map(entry => entry.companion ? 'companion' : entry.ground.startsWith('successor of ') ? 'successor' : /^review /.test(entry.ground) ? 'finding' : 'criteria'));
-    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, a peer module a planned file imports or that imports it, the test its proofs live in, the verification map whose Paths cover a planned file or the docs-budget gate`;
+    if (kinds.size === 1 && kinds.has('companion')) return `the companions the change inevitably carries: what the item implies, a test importing a planned module, a peer module a planned file imports or that imports it, the test its proofs live in or the verification map whose Paths cover a planned file`;
     if (kinds.size === 1 && kinds.has('successor')) return `the base branch's split or rename of a planned file`;
     if (kinds.size === 1 && kinds.has('finding')) return `the review finding that names ${count === 1 ? 'it' : 'them'}`;
     if (kinds.size === 1) return `what the item's criteria name: a symbol a file defines or calls, or text a test pins`;

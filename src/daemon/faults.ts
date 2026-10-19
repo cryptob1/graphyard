@@ -12,9 +12,7 @@ import { type DaemonEffects, record } from './effects.js';
 import { actionableIntervalMs, loopAttention } from './liveness.js';
 import { daemonSummary } from './run.js';
 import { baseFailureAttention } from './cycle-base-failures.js';
-import { budgetedPage, docsHeadroom, docsHeadroomText, docsWords, repositoryConfigFile, repositoryDocsBudget, type DocsHeadroom, type DocsWordBudget, type DocsWordCount } from '../model/documentation.js';
 import { agentOwner } from '../master/attention.js';
-import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import type { Cycle } from './cycle.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
 import { baseRefreshConflict } from '../merge-queue.js';
@@ -29,9 +27,7 @@ import { baseConflictWaitBoundMs } from '../cli/actorless-submissions.js';
 export { baseConflictWaitBoundMs };
 
 /** The attention `master status` adds after buildMasterStatus, and its final attribution over the whole list. */
-export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[];
-  /** The documentation word budget's headroom on the base branch (GY-574), when it could be counted. */
-  docs?: { base: string; headroom: DocsHeadroom } | null }
+export interface ReportedAttention { items: AttentionItem[]; attribute?: (status: { work: any[]; attentionItems: AttentionItem[] }) => AttentionItem[] }
 /** What the cycle already read that faults are derived from, beside the items' own records. */
 export interface FaultSources {
   config?: MasterConfig; agents?: HerdrAgent[]; credentials?: Record<string, { available: boolean; reason: string | null }>;
@@ -65,8 +61,7 @@ export interface FaultSources {
  * restates a fault the item's own record shows (the same kind, or a kind in `restatements`) is that
  * fault, so it is not counted twice; a different fault of the same class on the item is its own
  * instance. Nor is the one-hour dwell line (`gate`) or containment grace window (`containment-grace`) counted,
- * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor an escalation inside the master's turn (owedEscalationInMotion), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Nor is the documentation
- * set inside its headroom band (`docs-headroom`, GY-1515): the budget test refuses every change that would grow it and the trim item restores it, so only a set over its budget is a resources fault. Failed actions are not read here:
+ * nor a lapsed fence the loop is still settling (containmentInMotion) or the owed line restating its escalation (owedContainmentLine), nor an escalation inside the master's turn (owedEscalationInMotion), nor a line whose `inMotionUntil` has not passed (GY-1315), which are the ordinary pace of work — a gate nothing moves is `stalled-item`. Failed actions are not read here:
  * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
@@ -91,7 +86,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
     }
     const listed = { work: status.work, attentionItems: [...(sources.loop ?? []), ...status.attentionItems, ...(sources.reported ?? [])] };
     for (const item of classifyAttention(sources.attribute ? sources.attribute(listed) : listed.attentionItems))
-      if (item.kind !== 'gate' && item.kind !== 'containment-grace' && item.kind !== 'docs-headroom' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
+      if (item.kind !== 'gate' && item.kind !== 'containment-grace' && !(sources.herdrUnavailable && herdrFaultKinds.has(item.kind))
         && !(containmentKinds.has(item.kind) && containmentInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'base-conflict' && baseConflictInMotion(byKey.get(item.subject), now))
         && !(item.kind === 'merge-base-dismissed' && mergeBaseDismissalInMotion(byKey.get(item.subject), now))
@@ -341,59 +336,6 @@ export function recurringFaultAttention(state: Pick<DaemonState, 'faults'>, poli
       return { subject: `fault:${recurrence.faultClass}`, text: `${recurrence.faultClass} recurred ${recurrence.count} times in the last ${policy.windowHours} hours, latest at ${latest.at}: ${latest.text}`.slice(0, 1000),
         ...agentOwner('master', 'Find and remove the cause the instances share; the loop files no item for a recurring class') };
     });
-}
-/** The budget a commit configures and its pages' words. */
-export interface DocsBudgetCount { budget: DocsWordBudget; pages: DocsWordCount }
-/** The last count per tree: the base branch moves far less often than the loop cycles. */
-const docsCounts = new Map<string, DocsBudgetCount | null>();
-/**
- * The documentation word budget the project's graphyard.json configures at `ref` in the checkout at
- * `root`, and the words per page it counts there, read from Git so the count is the base branch's
- * whatever the checkout has out. Null when the project keeps no budget there, or when unreadable.
- */
-export async function docsWordCountAt(root: string, ref: string, run: ChildRun = defaultChildRun): Promise<DocsBudgetCount | null> {
-  const git = async (...args: string[]) => await run('git', args, { cwd: root, timeoutMs: 30_000 });
-  try {
-    const tree = (await git('rev-parse', '--verify', '--quiet', `${ref}^{tree}`)).trim();
-    if (docsCounts.has(tree)) return docsCounts.get(tree)!;
-    const remember = (count: DocsBudgetCount | null) => {
-      if (docsCounts.size >= 8) docsCounts.delete(docsCounts.keys().next().value!);
-      docsCounts.set(tree, count);
-      return count;
-    };
-    // `<mode> <type> <sha> <size>\t<path>` per file; the budget comes from the committed configuration beside the pages.
-    const files = (await git('ls-tree', '-r', '-l', tree)).split('\n').map(line => line.match(/^\S+ blob \S+\s+(\d+)\t(.+)$/)).filter(match => !!match).map(match => ({ path: match![2], size: Number(match![1]) }));
-    const budget = files.some(file => file.path === repositoryConfigFile) ? repositoryDocsBudget(await git('show', `${tree}:${repositoryConfigFile}`)) : null;
-    if (!budget) return remember(null);
-    const pages = files.filter(file => budgetedPage(file.path, budget));
-    if (!pages.length) return null;
-    // Every page in one `git show`, split by those sizes.
-    const blobs = Buffer.from(await git('show', ...pages.map(page => `${tree}:${page.path}`)), 'utf8'), count: DocsWordCount = {};
-    let at = 0;
-    for (const page of pages) { count[page.path] = docsWords(blobs.subarray(at, at + page.size).toString('utf8')); at += page.size; }
-    if (at !== blobs.length) return null;
-    return remember({ budget, pages: count });
-  } catch { return null; }
-}
-/**
- * The documentation word budget's headroom on the base branch (GY-574), against the budget the
- * project's graphyard.json configures there: its origin copy when the checkout has one, else the
- * local branch. A project that configures no budget is not monitored. A set within 3% of the budget
- * is an attention line for the master (`master status` and the loop read it through
- * reportedAttention). The loop files nothing for it (GY-2186): the master trims the set by hand.
- */
-export async function docsHeadroomStatus(root: string, baseBranch: string, count: (root: string, ref: string) => Promise<DocsBudgetCount | null> | DocsBudgetCount | null = docsWordCountAt): Promise<{ docs: { base: string; headroom: DocsHeadroom } | null; attention: AttentionItem[] }> {
-  for (const ref of [`origin/${baseBranch}`, baseBranch]) {
-    const counted = await count(root, ref);
-    if (!counted) continue;
-    const headroom = docsHeadroom(counted.pages, counted.budget), text = docsHeadroomText(headroom, ref);
-    // GY-1515: inside the band the set is what the budget test holds (no change may add a word to it); that line is
-    // attention, never a fault (cycleFaults). Over the budget the band was overrun by changes merged together and the
-    // budget test fails on the base: the set is a resource at its bound.
-    const kind = headroom.remaining < 0 ? 'resource-bound' : 'docs-headroom';
-    return { docs: { base: ref, headroom }, attention: text ? [{ subject: 'docs', text, kind, faultClass: 'resources', ...agentOwner('master', 'Trim the set below its budget; the loop files no item for documentation headroom') }] : [] };
-  }
-  return { docs: null, attention: [] };
 }
 /** The recurrences `master status` reports under daemon.faults: per class, the window's count and its latest instance. */
 export function faultRecurrenceReport(state: Pick<DaemonState, 'faults'>, policy: FaultClassPolicy, now: number) {

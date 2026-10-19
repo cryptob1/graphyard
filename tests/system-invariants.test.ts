@@ -208,5 +208,4 @@ test('unit:reviewer-repeat-question — the review of a change to the loop, mast
   for (const phrase of [...systemInvariants.map(invariant => `\`${invariant}\``), '`follow-ups-per-parent` (1 open)', '`lingering-sessions` (30 min)', '`refresh-churn` (3 per own head)', '`merge-stall` (10 min)', '`cycle-p90` (30 s)', '`untriaged-backlog` (24 h)', '`deploy-lease-loss` (0)',
     'daemon.invariants.lines', '`invariants` in `.graphyard/master.json`', 'tests/soak-*.test.ts'])
     assert.ok(section.includes(phrase), `docs/master-agent.md lists: ${phrase}`);
-  assert.ok(guide.split(/\s+/).filter(Boolean).length <= 1_200, 'the page stays within its word budget (tests/docs-budget.test.ts holds the whole set)');
 });

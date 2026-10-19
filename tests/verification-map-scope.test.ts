@@ -125,7 +125,7 @@ test('unit:verification-map-companion — the map whose Paths line covers a plan
   ], 'the map is judged after the test, whatever order the ask named them in');
 
   // Review of d8e550a6: a gate the engine grants as the companion of a test in the raw ask (GY-1706's wall-clock gate,
-  // the timing baseline, the docs-budget gate) is no ground for a map. On an item planning only src/daemon/run.ts, an
+  // the timing baseline) is no ground for a map. On an item planning only src/daemon/run.ts, an
   // ask naming an unrelated test, the wall-clock gate and a map whose Paths cover tests/** grants the gate on the ask as
   // GY-1706 does, but the map is refused with the test: a refused test reaches no map through the gate it drags in.
   const gateMap = masterMap.replace(/^Paths:.*$/m, 'Paths: tests/**');
@@ -135,7 +135,7 @@ test('unit:verification-map-companion — the map whose Paths line covers a plan
   assert.deepEqual(gated.grounds?.map(entry => entry.path), ['tests/no-wall-clock-time-bombs.test.ts'], 'only the gate, on the ask, as before this item');
   assert.match(gated.refusal, /tests\/loop-self-upgrade\.test\.ts/);
   assert.match(gated.refusal, /verification\/gates\.md/);
-  for (const gate of ['tests/no-wall-clock-time-bombs.test.ts', 'tests/helpers/timing-baseline.json', 'tests/docs-budget.test.ts'])
+  for (const gate of ['tests/no-wall-clock-time-bombs.test.ts', 'tests/helpers/timing-baseline.json'])
     assert.equal(verificationMapGround('verification/gates.md', gateMap, { plannedFiles: ['src/daemon/run.ts'], criteria: [] }, [gate]), null, `${gate} grounds no map`);
   // The same ask on the item planning src/master/release-lag.ts: the test is granted on its import, the gate on the
   // test, and the map on the granted test, never on the gate.
