@@ -381,6 +381,7 @@
     "tests/fault-class-capacity.test.ts": 751,
     "tests/fault-class-configuration-fleet.test.ts": 500,
     "tests/fault-class-configuration.test.ts": 1671,
+    "tests/fault-class-configuration-executor.test.ts": 3900,
     "tests/fault-class-containment.test.ts": 986,
     "tests/fault-class-decision-docs-sync.test.ts": 1247,
     "tests/fault-class-decision-moot.test.ts": 628,

@@ -633,20 +633,30 @@ async function executorInstallUnits(root: string, unitDirectory: string): Promis
 /** An executor started for a slot the declaration does not have exits with this status; the unit does not restart it. */
 export const executorSlotUndeclaredExit = 78;
 
+/**
+ * The declaration as the file may hold it (GY-2163): the kinds list is read as names, because an
+ * earlier release may have written a kind this code no longer runs. On the self-upgrade that
+ * removes the kind, every slot the fleet restarts onto the new code died in this module's stored
+ * declaration schema before its first poll — the whole host's executors crash-looped dead for two
+ * hours on 19 October 2026 while the queue's dispatch and request-review rows went unserved and
+ * the loop filed configuration faults naming a start command that died on the same file. A name
+ * the code does not run is dropped — it says nothing about what the slot may claim — and a list
+ * that empties serves every runnable kind, the undeclared default. `--install` rewrites the file
+ * clean; every other field still validates exactly as the stored schema says.
+ */
+const executorDeclarationRead = executorDeclarationSchema.extend({ kinds: z.array(z.string().min(1)).min(1).nullable().default(null) });
+
 export async function readExecutorDeclaration(root: string): Promise<ExecutorDeclaration | null> {
-  let raw: unknown;
-  try { raw = JSON.parse(await readFile(resolve(connectionRoots(root)[0], executorDeclarationFile), 'utf8')); }
+  let file: string;
+  try { file = await readFile(resolve(connectionRoots(root)[0], executorDeclarationFile), 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
-  // A host's declaration may name a kind this checkout's code removed (GY-1981 removed
-  // verify-deployment and every slot still listing it crash-looped on the strict enum's refusal):
-  // read the kinds as plain strings, keep the ones the running code knows, log the dropped ones,
-  // and fall back to kinds: null — every kind the executor handles — when none remain.
-  const read = executorDeclarationSchema.extend({ kinds: z.array(z.string()).min(1).nullable().default(null) }).parse(raw);
-  const known = executorRunnableKinds as readonly string[];
-  const kept = read.kinds?.filter(kind => known.includes(kind));
-  const dropped = read.kinds?.filter(kind => !known.includes(kind)) ?? [];
-  if (dropped.length) console.error(`[graphyard-executor] the declaration names ${dropped.join(', ')}, which this checkout does not run; serving ${kept?.length ? kept.join(', ') : 'every kind this checkout runs'}`);
-  return executorDeclarationSchema.parse({ ...read, kinds: kept?.length ? kept : null });
+  const declared = executorDeclarationRead.parse(JSON.parse(file));
+  const runnable = executorRunnableKinds as readonly string[];
+  const kinds = (declared.kinds?.filter(kind => runnable.includes(kind)) ?? null) as NextActionKind[] | null;
+  const stale = declared.kinds?.filter(kind => !runnable.includes(kind)) ?? [];
+  if (!stale.length) return { version: declared.version, count: declared.count, kinds, intervalSeconds: declared.intervalSeconds };
+  console.error(`[graphyard] ${executorDeclarationFile} names ${stale.join(', ')}, which this code does not run: serving ${kinds?.length ? kinds.join(', ') : 'every kind an executor has a handler for'} instead (node scripts/graphyard-executor.mjs --install rewrites the declaration)`);
+  return { version: declared.version, count: declared.count, kinds: kinds?.length ? kinds : null, intervalSeconds: declared.intervalSeconds };
 }
 export async function writeExecutorDeclaration(root: string, declaration: ExecutorDeclaration) {
   const parsed = executorDeclarationSchema.parse(declaration);
