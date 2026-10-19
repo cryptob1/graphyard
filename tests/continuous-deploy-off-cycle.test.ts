@@ -6,7 +6,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { daemonEffects, emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
-import { deployInFlight, deployTipOffCycle, deployLine, promotionReading, type DeployPorts } from '../src/daemon/continuous-deploy.js';
+import { deployLine, promotionReading, type DeployPorts } from '../src/daemon/continuous-deploy.js';
+
+/** The new exports, imported in the case so a reverted source fails the case, not the file (graphyard verify's exercise). */
+const offCycle = () => import('../src/daemon/continuous-deploy.js') as Promise<Record<string, any>>;
 import { performSelfUpgrade, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -190,6 +193,7 @@ test('unit:continuous-deploy-off-cycle-rollback — a deploy whose end-to-end ru
 });
 
 test('unit:continuous-deploy-off-cycle-guard — the guard reads the deploy in flight and the promotion reading it records as the loop\'s own positions, and still refuses a foreign move', async t => {
+  const { deployInFlight, deployTipOffCycle } = await offCycle();
   const { master } = await config();
   const fake = new FakeGit(released, tip);
   let release = () => {};
