@@ -934,7 +934,7 @@ test('manual:fault-class-decision — a stored counting failure of the same clea
   assert.equal(state.faults.failing['mechanical-plan:work-1459'], undefined, 'the run the counting row opened is ended');
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:decision' && entry.subject === 'GY-1459'), [], 'and the instance it opened is dropped: the write was no fault');
   const [{ recurringClasses }, { faultClassPolicyDefaults }] = await Promise.all([import('../src/model/fault-class-recurrence.js'), import('../src/model/fault-classes.js')]);
-  assert.deepEqual(recurringClasses(state.faults.instances, [], faultClassPolicyDefaults, Date.parse(at) + hour(1)).filter(entry => entry.faultClass === 'decision'), [], 'so nothing of it stands in the decision class window');
+  assert.deepEqual(recurringClasses(state.faults.instances, faultClassPolicyDefaults, Date.parse(at) + hour(1)).filter(entry => entry.faultClass === 'decision'), [], 'so nothing of it stands in the decision class window');
 });
 
 test('manual:fault-class-decision — action:decision|GY-1775|2026-10-14T06:43:08.482Z: a write refused because the item was delivered meanwhile is settled — no report, no hold, no instance', async () => {
@@ -976,7 +976,7 @@ test('manual:fault-class-decision — a counting failure of a newly wanted plan,
   assert.equal(row.attempts, 2, 'as one more attempt of the same report');
   assert.equal(state.faults.failing[key], undefined, 'the run the counting row opened is ended');
   assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:decision' && entry.subject === 'GY-1775'), [], 'and the instance it opened is dropped: delivery settled the target');
-  assert.deepEqual(recurringClasses(state.faults.instances, [], faultClassPolicyDefaults, clock + hour(1)).filter(entry => entry.faultClass === 'decision'), [], 'so nothing of it stands in the decision class window');
+  assert.deepEqual(recurringClasses(state.faults.instances, faultClassPolicyDefaults, clock + hour(1)).filter(entry => entry.faultClass === 'decision'), [], 'so nothing of it stands in the decision class window');
   // The same refusal on a report nothing recorded writes no row: the settled target is not even named.
   const quiet = emptyDaemonState(config());
   await reportMechanicalPlans([item], [], effects, clock, planReportSink(quiet, note));

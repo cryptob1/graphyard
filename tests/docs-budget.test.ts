@@ -19,7 +19,7 @@ const read = (path: string) => readFileSync(`${root}${path}`, 'utf8');
 // its cap fails here. The total was never a merge gate, so main re-saturated within
 // hours of every trim (GY-1515): a total within 3% of the budget now fails any change that adds a
 // word to it (docsBudgetJudgement), while a change that adds none, the base branch itself, or a
-// change whose base cannot be counted passes with the warning, and the loop's trim item restores the room.
+// change whose base cannot be counted passes with the warning, and the master's trim restores the room.
 const budget = docsWordBudgetOf(parseRepositoryConfig(read('graphyard.json')).documentation)!;
 const { total: TOTAL_BUDGET, perPage: PAGE_BUDGET } = budget;
 const pages = ['README.md', 'AGENTS.md', ...readdirSync(`${root}docs`, { recursive: true, withFileTypes: true })
@@ -147,7 +147,7 @@ test('unit:docs-budget-growth-gate — a saturated total fails a change that add
   assert.equal(grown.warning, null);
   const flat = docsBudgetJudgement(set(11_700), FIXTURE_BUDGET, set(11_700));
   assert.equal(flat.failed, null, 'a change that adds none to a saturated set is not refused');
-  assert.match(flat.warning!, /^The budgeted documentation \(README\.md, docs\/\) totals 11700 words, within 3% of its 12000-word budget \(over 11640\); this change adds none, so it passes, and the loop's trim item restores the headroom: trim it to 11400 or fewer/);
+  assert.match(flat.warning!, /^The budgeted documentation \(README\.md, docs\/\) totals 11700 words, within 3% of its 12000-word budget \(over 11640\); this change adds none, so it passes, and the master trims the set: trim it to 11400 or fewer/);
   assert.match(docsBudgetJudgement(set(11_700), FIXTURE_BUDGET, set(11_750)).warning!, /this change adds -50, so it passes/, 'a trim that leaves the set saturated passes');
   assert.match(docsBudgetJudgement(set(11_700), FIXTURE_BUDGET, 'base-branch').warning!, /this is the base branch, where nothing can be refused, so it passes/, 'the base branch only warns: a tip that overran the band must not fail it');
   assert.match(docsBudgetJudgement(set(11_700), FIXTURE_BUDGET, null).warning!, /its base could not be counted, so the growth this change brings is not judged, so it passes/);

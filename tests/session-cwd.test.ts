@@ -23,9 +23,6 @@ import { dataDirectory, orphanGraceMs, worktreeRoot } from '../src/install/workt
 import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, readEscalationSessions, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { launchProducer, loopScratchCheckout, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
 import { applyResearchEvent, clearResearchRuns, type ResearchEvent } from '../src/research.js';
-import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
-import { faultClassItem, type FaultInstance } from '../src/model/fault-classes.js';
-import { diagnosticianSettings } from '../src/runner/payloads.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { docsSyncMaxMs, launchDocsSync, type DocsSyncPlan } from '../src/docs-sync.js';
 import { controlPlaneHandlers, type ControlPlaneEffects } from '../src/executor.js';
@@ -324,50 +321,6 @@ test('unit:session-cwd-own-checkout — a producer session opens its pane and st
       assert.equal(projects[realpathSync(resolve(root))], undefined, 'the coordinator checkout is never recorded as the folder the runtime starts in');
       assert.ok(obtainsCode(pane!, join(launched.checkout, 'checkout'), head, root), 'the git fetch and git worktree add its request runs from where it starts reach the repository');
     } finally { await rm(home, { recursive: true, force: true }); }
-    await cleanup();
-  } finally { await fixture.cleanup(); }
-});
-
-test('unit:session-cwd-own-checkout — the loop starts its diagnostician in the managed scratch checkout of the release it runs, never in the coordinator checkout', async () => {
-  const fixture = await installed();
-  try {
-    const { root, head, config, cleanup } = fixture;
-    const managedRoot = worktreeRoot(root, config);
-    const started: { cwd: string; holdsRelease: boolean }[] = [];
-    const runner: Runner = {
-      name: 'stub',
-      start: (_prompt, options) => {
-        started.push({ cwd: options.cwd, holdsRelease: existsSync(join(options.cwd, 'src', 'loop.ts')) });
-        return { id: 'run-1', events: [], onEvent: () => () => {}, cancel: () => {},
-          result: async () => ({ ok: false as const, failure: { reason: 'cancelled' as const, detail: 'the test stub settles at once' }, payloads: [] }) };
-      },
-    };
-    const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes: 30 } });
-    // The production wiring hands the loop's own checkout as the diagnostician's cwd; the loop must
-    // replace it with the scratch checkout before the run starts.
-    const diagnostician: DiagnosticianEffects = {
-      settings, cwd: root,
-      runner: async () => ({ runner, runtime: 'pi', model: settings.model }),
-      context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
-      file: async () => { throw new Error('the stub files nothing'); },
-      decide: async () => { throw new Error('the stub decides nothing'); },
-    };
-    const state = emptyDaemonState(config);
-    const instances: FaultInstance[] = ['GY-1', 'GY-2', 'GY-3'].map((subject, index) => ({ id: `blocker|${subject}|${iso(-index * 60_000)}`, kind: 'blocker', faultClass: 'stalled-gate',
-      subject, text: `${subject} waits on the merge of PR #77`, at: iso(-index * 60_000), lastSeenAt: iso(0), linkedTo: 'GY-101' }));
-    state.faults.instances.push(...instances);
-    const input = faultClassItem({ faultClass: 'stalled-gate', recent: instances }, { threshold: 3, windowHours: 24 }, Date.parse(iso(0)));
-    const recurring = { ...ready(), id: 'work-101', key: 'GY-101', stage: 'backlog', ready: false, title: input.title, description: input.description, origin: input.origin, type: 'bug' } as unknown as Work;
-    try {
-      await runDaemon(config, state, loopEffects([recurring], { loadedRelease: { commit: head, dirty: false }, diagnostician }), loopOptions(fixture));
-      await diagnosesSettled();
-    } finally { clearDiagnoses(); }
-    assert.equal(started.length, 1, 'one diagnostician run starts');
-    const [run] = started;
-    assert.ok(outsideCoordinator(run.cwd, root) && !run.cwd.startsWith(resolve(root)), `the diagnostician does not start in the coordinator checkout (${run.cwd})`);
-    assert.ok(run.cwd.startsWith(resolve(managedRoot)), `the diagnostician starts under the managed worktree root (${run.cwd})`);
-    assert.match(run.cwd.split(sep).at(-2)!, /^graphyard-approval-loop-scratch-/, 'the diagnostician starts in the loop scratch checkout');
-    assert.ok(run.holdsRelease, 'the scratch checkout holds the release the loop runs, so the diagnostician reads real code');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });

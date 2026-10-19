@@ -11,15 +11,12 @@ import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from
 import {
   doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimit,
 } from '../src/model/capacity.js';
-import { faultClassItem, type FaultClass, type FaultInstance } from '../src/model/fault-classes.js';
 import {
   approverRoleHealth, approverSessionName, holdRepeatedLimitAccount, masterConfigSchema, observedExhaustions, recordObservedExhaustion,
   repeatedLimitAccount, selectAccount, selectApproverAccount, type MasterConfig,
 } from '../src/master.js';
-import { clearDiagnoses, diagnosesSettled, type DiagnosticianEffects } from '../src/daemon/diagnosis.js';
 import { clearDoctorRuns, doctorDue, doctorRunsSettled, type DoctorEffects } from '../src/daemon/doctor.js';
 import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
-import { diagnosticianSettings } from '../src/runner/payloads.js';
 import type { Principal, Work } from '../src/model.js';
 import type { InvariantCheck } from '../src/model/invariants.js';
 import type { RunEvent, RunResult, Runner } from '../src/runner/types.js';
@@ -29,9 +26,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * GY-1705 soak: over a simulated hour of the real loop, a pane that ends silent (`done`, never
  * working, no notice) holds its launch account once and fails the decision over onto another
  * account; a doctor all-timeout round with one readable limit waits out the hold so no second
- * no-report spends the same account; a diagnosis with the same shape waits rather than failing as
- * overlong-session; no duplicate open approver sessions linger; and every system invariant holds
- * after every cycle. Instants are relative to a fixed soak epoch.
+ * no-report spends the same account; no duplicate open approver sessions linger; and every system
+ * invariant holds after every cycle. Instants are relative to a fixed soak epoch. (The diagnostician
+ * this soak also watched is retired by GY-2186; its limit-wait replay lives in git history.)
  */
 
 const repository = 'owner/silent-soak';
@@ -66,7 +63,7 @@ before(async () => {
   await writeFile(join(home, 'env-b/auth.json'), JSON.stringify({ tokens: { access_token: 'not-a-real-token' } }));
 });
 after(async () => {
-  clearDoctorRuns(); clearDiagnoses();
+  clearDoctorRuns();
   await new Promise<void>(resolve => http.close(() => resolve()));
   await store.close();
   await database.stop();
@@ -91,8 +88,8 @@ function successDiagnosisRunner(payload: unknown): Runner {
   };
 }
 
-test('unit:soak-invariants-hold — over a simulated hour silent ended failover holds once, doctor and diagnosis limit-waits prevent a second spend, and every invariant holds', { timeout: 300_000 }, async () => {
-  clearDoctorRuns(); clearDiagnoses();
+test('unit:soak-invariants-hold — over a simulated hour silent ended failover holds once, the doctor limit-wait prevents a second spend, and every invariant holds', { timeout: 300_000 }, async () => {
+  clearDoctorRuns();
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
   const dir = await temporaryDirectory('silent-soak-run');
   const credentialFile = join(dir, 'coordinator.token');
@@ -102,7 +99,7 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
     githubAppId: 1, hostId: 'silent-soak-host', masterAgentName: 'gy-master', autoMerge: true, mergeMethod: 'merge', workers: [],
     environments: [{ name: 'env-a', kind: 'claude', home: join(home, 'env-a') }, { name: 'env-b', kind: 'codex', home: join(home, 'env-b') }],
     reviewers: [{ name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['env-a', 'env-b'] }],
-    run: { launchStartSeconds: 60, doctor: { enabled: true, intervalMinutes: 10 }, diagnostician: { invariantBoundMinutes: 30, timeoutMinutes: 20 } },
+    run: { launchStartSeconds: 60, doctor: { enabled: true, intervalMinutes: 10 } },
   }) as MasterConfig;
 
   type Pane = { name: string; pane_id: string; agent_status: string; decision: string; launchedAt: number };
@@ -121,31 +118,15 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   const silentWork = await ok(coordinator, 'POST', `work/${filed.id}/triage`, { judgement: { outcome: 'close', reason: 'Not worth doing' } }) as Work;
 
   const at = soakStart - 3 * 3_600_000;
-  const recent: FaultInstance[] = [0, 1, 2].map(index => ({
-    id: `scope|GY-${index + 1}|${index}`, kind: 'blocker', faultClass: 'scope' as FaultClass, subject: `GY-${index + 1}`,
-    text: 'an instance', at: new Date(at - index * 60_000).toISOString(), lastSeenAt: new Date(at).toISOString(), linkedTo: 'GY-1682',
-  }));
-  const diagnosisInput = faultClassItem({ faultClass: 'scope', recent }, { threshold: 3, windowHours: 24 }, at);
-  const diagnosisWork = {
-    id: 'work-GY-1682', key: 'GY-1682', title: diagnosisInput.title, description: diagnosisInput.description, type: 'bug', priority: 1,
+  const coveringWork = {
+    id: 'work-GY-99', key: 'GY-99', title: 'Covering scope fix', description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'backlog', revision: 1, policyRevision: 1,
     createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(), stageEnteredAt: new Date(at).toISOString(),
     ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [],
-    evidence: [], observation: null, blocker: null, gates: [], violations: [], origin: diagnosisInput.origin,
+    evidence: [], observation: null, blocker: null, gates: [], violations: [],
   } as unknown as Work;
 
   const retry: RunEvent = { kind: 'retry', at: new Date(soakStart).toISOString(), attempt: 1, error: limitError };
-  let diagnosisPhase: 'limit' | 'ok' = 'limit';
-  const coveringWork = {
-    ...diagnosisWork, id: 'work-GY-99', key: 'GY-99', title: 'Covering scope fix', stage: 'ready',
-  } as unknown as Work;
-  const successPayload = {
-    subject: 'GY-1682',
-    cause: 'Scope requests recurse because the planner restates the same ask',
-    evidence: { logLines: ['scope request restated'], commands: ['graphyard status GY-1682'] },
-    faultClass: 'scope' as const,
-    covering: 'GY-99',
-  };
   const doctorSettings = doctorSettingsSchema.parse({ intervalMinutes: 10 }) as DoctorEffects['settings'];
   let doctorPhase: 'limit' | 'ok' = 'limit';
   const doctorReport = { findings: [], actions: [], filed: [] };
@@ -165,19 +146,6 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
     file: async () => { throw new Error('nothing filed'); },
     recordRun: async () => {},
   };
-  const applied = new Map<string, { id: string; state: string; action: string; approvedBy?: string }>();
-  // Elapsed timeout bounds are proved in capacity-silent-exhaustion (settlement after 2×20m);
-  // advancing soak `now` inside a cycle would inflate cycle duration past cycle-p90.
-  const diagnostician: DiagnosticianEffects = {
-    settings: diagnosticianSettings({ diagnostician: {} }), cwd: '/checkout',
-    runner: async attempt => diagnosisPhase === 'limit'
-      ? { runner: limitedTimeoutRunner([retry]), runtime: 'pi', model: attempt === 'primary' ? 'zai/glm-5.3-flash' : 'zai/glm-5.3', account: attempt === 'primary' ? 'zai-diag' : null }
-      : { runner: successDiagnosisRunner(successPayload), runtime: 'pi', model: 'zai/glm-5.3-flash', account: 'zai-diag' },
-    context: async () => ({ journal: [], serverLog: [], pullRequests: [] }),
-    file: async () => { throw new Error('no fix'); },
-    decide: async (_work, action) => { const id = randomUUID(); applied.set(id, { id, state: 'applied', action, approvedBy: 'approver' }); return { id }; },
-  };
-
   const loginsOnly = { quota: false, now: clock, cacheMs: 0 };
   const effects = {
     agents: () => [...panes.values()].map(({ name, pane_id, agent_status }) => ({ name, pane_id, agent_status })),
@@ -195,12 +163,7 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
       decisions.push(entry);
       return entry;
     },
-    decisions: async (work: Work) => ({
-      decisions: [
-        ...decisions.filter(entry => entry.work === work.key),
-        ...[...applied.values()].filter(entry => work.key === 'GY-1682' || work.key === 'GY-99'),
-      ],
-    }),
+    decisions: async (work: Work) => ({ decisions: decisions.filter(entry => entry.work === work.key) }),
     approver: async (work: Work, decision: string) => {
       const chosen = await selectApproverAccount(config, work.key, 'approver-agent', { ...loginsOnly, registry: undefined });
       const agentName = approverSessionName(work, decision), pane = `pane-${launches.length}`;
@@ -212,7 +175,7 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
     snapshot: async () => {
       const snapshot = await ok(coordinator, 'GET', 'work-snapshot');
       const live = snapshot.work as Work[];
-      const extras = [diagnosisWork, coveringWork].filter(extra => !live.some(entry => entry.key === extra.key));
+      const extras = [coveringWork].filter(extra => !live.some(entry => entry.key === extra.key));
       return { work: [...live, ...extras], now: new Date(now).toISOString() };
     },
     endRegistrySession: async () => {},
@@ -223,7 +186,7 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'none', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     requestSmoke: () => {},
-    doctor, diagnostician,
+    doctor,
   } as unknown as DaemonEffects;
 
   const state: DaemonState = emptyDaemonState(config);
@@ -242,8 +205,8 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   effects.sessionOutput = (agent: { name?: string | null }) => {
     screenReads++;
     if (agent.name === busyName) return `${busyDecision}\n⏺ Bash(npm test)\n  ⎿ running ${++busyTicks}`;
-    // Any other live pane that is not the silent-death target shows its decision so an idle
-    // post-reset diagnosis approver is not mistaken for a second silent spend.
+    // Any other live pane that is not the silent-death target shows its decision, so an idle
+    // approver pane is never mistaken for a second silent spend.
     const pane = [...panes.values()].find(entry => entry.name === agent.name);
     if (pane && pane.agent_status === 'idle') return `${pane.decision}\nworking`;
     return '';
@@ -278,28 +241,13 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
       if (entry) entry.state = 'applied';
       replacement.agent_status = 'done';
     }
-    // Diagnosis/covering approvers that land after the reset apply immediately — they are not the
-    // silent-death instance under test.
-    for (const launch of launches) {
-      if (launch.decision === busyDecision) continue;
-      const pane = [...panes.values()].find(entry => entry.decision === launch.decision);
-      if (!pane || pane.name === busyName || pane.agent_status !== 'idle') continue;
-      if (launch.at >= soakStart + 50 * minute && now - launch.at >= 2 * minute) {
-        const entry = decisions.find(entry => entry.id === launch.decision);
-        if (entry && entry.state === 'requested') { entry.state = 'applied'; pane.agent_status = 'done'; }
-        for (const [id, decision] of applied) if (decision.state === 'requested') applied.set(id, { ...decision, state: 'applied', approvedBy: 'approver' });
-      }
-    }
-    // After the assumed-hour holds, the next doctor/diagnosis rounds succeed instead of re-spending.
+    // After the assumed-hour hold, the next doctor round succeeds instead of re-spending.
     if (doctorPhase === 'limit' && state.doctor.runs.some(run => run.detail.includes(doctorLimitUntilMarker)) && !doctorLimitRetryAt(state.doctor.runs, now)) {
       doctorPhase = 'ok';
     }
-    if (diagnosisPhase === 'limit' && state.diagnoses['GY-1682']?.state === 'waiting' && state.diagnoses['GY-1682'].retryAt && Date.parse(state.diagnoses['GY-1682'].retryAt) <= now) {
-      diagnosisPhase = 'ok';
-    }
 
     await runCycle(config, state, effects, clock);
-    await doctorRunsSettled(); await diagnosesSettled();
+    await doctorRunsSettled();
     for (const check of state.invariants.report as InvariantCheck[]) if (!check.holds) violations.push(`+${(now - soakStart) / minute}m ${check.line}`);
     const names = [...panes.values()].map(entry => entry.name);
     assert.equal(new Set(names).size, names.length, `cycle ${cycle}: duplicate open approver names ${names.join(',')}`);
@@ -327,12 +275,6 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   assert.equal(doctorDue({ ...state, doctor: { ...state.doctor, runs: limitWaits } }, soakStart + 10 * minute, doctorSettings), false, 'doctorDue waits out the limit hold');
   // After the wait, the held primary is still observed spent — selection cannot hand it back mid-hold.
   assert.ok((await observedExhaustions(config, soakStart + 10 * minute))['zai-doctor'], 'doctor primary stays held through the wait');
-
-  assert.ok(state.diagnoses['GY-1682'], 'GY-1682 was diagnosed');
-  assert.notEqual(state.diagnoses['GY-1682'].state, 'waiting', state.diagnoses['GY-1682'].detail);
-  assert.ok(['closing', 'answered', 'releasing', 'diagnosed'].includes(state.diagnoses['GY-1682'].state), state.diagnoses['GY-1682'].state);
-  assert.equal(state.faults.instances.filter(entry => entry.kind === 'overlong-session').length, 0);
-  assert.ok(heldAccounts.some(entry => entry.account === 'zai-diag' && entry.role === 'diagnostician'), `diag primary held despite null-account fallback: ${JSON.stringify(heldAccounts)}`);
 
   // Multi-cycle reviewer selection: two spent sessions sharing one request id re-hold before selectAccount.
   const reviewBase = soakStart + 55 * minute;

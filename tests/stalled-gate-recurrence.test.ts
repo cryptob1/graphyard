@@ -180,7 +180,6 @@ test('integration:stalled-gate-recurrence-bound-reasons — several items stalle
   assert.ok(!opened.some(instance => instance.faultClass === 'stalled-gate' || instance.kind === 'stalled-action'), 'stalled-gate observes none from them');
 
   const policy = faultClassPolicyFromEnv({});
-  const recurrence = recurringClasses(record.instances, [], policy, Date.parse(now));
-  assert.equal(recurrence.find(entry => entry.faultClass === 'stalled-gate'), undefined, 'no stalled-gate class item is filed');
-  assert.ok(!recurrence.some(entry => entry.faultClass === 'stalled-gate' && entry.file), 'and nothing past the 3-in-24h threshold files one');
+  const recurrence = recurringClasses(record.instances, policy, Date.parse(now));
+  assert.equal(recurrence.find(entry => entry.faultClass === 'stalled-gate'), undefined, 'no stalled-gate class recurs');
 });

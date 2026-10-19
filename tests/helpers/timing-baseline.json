@@ -332,9 +332,6 @@
     "tests/deployment-observation-cost.test.ts": 12937,
     "tests/deployment-packaging.test.ts": 2845,
     "tests/deployment-verification.test.ts": 300,
-    "tests/diagnosis-fix-item-planned-files.test.ts": 500,
-    "tests/diagnosis-hold.test.ts": 943,
-    "tests/diagnostician.test.ts": 2224,
     "tests/digest-promotion.test.ts": 193,
     "tests/direct-merge-mode.test.ts": 2718,
     "tests/dismissed-review.test.ts": 1929,
@@ -691,7 +688,6 @@
     "tests/soak-control-plane-observation.test.ts": 9000,
     "tests/soak-control-plane-switches.test.ts": 3000,
     "tests/soak-cursor-forward-fields.test.ts": 15000,
-    "tests/soak-diagnosis-refusals.test.ts": 25000,
     "tests/soak-doctor-unblock-prose.test.ts": 9484,
     "tests/soak-doctor.test.ts": 20000,
     "tests/soak-exact-candidates.test.ts": 32000,
@@ -725,7 +721,6 @@
     "tests/soak-session-liveness-deaf.test.ts": 1500,
     "tests/soak-silent-exhaustion.test.ts": 2500,
     "tests/soak-stale-close.test.ts": 2259,
-    "tests/soak-throughput-self-request.test.ts": 13500,
     "tests/soak-throughput.test.ts": 521524,
     "tests/soak-tmp-zero-pass.test.ts": 3718,
     "tests/soak-verification-map-scope.test.ts": 2000,
@@ -818,6 +813,8 @@
     "tests/worktree-preserved-aside.test.ts": 1442,
     "tests/worktree-reclaim.test.ts": 3054,
     "tests/zero-touch-control-plane.test.ts": 4000,
+    "tests/loop-files-no-items.test.ts": 978,
+    "tests/recurring-fault-attention.test.ts": 691,
     "~": 0
   }
 }

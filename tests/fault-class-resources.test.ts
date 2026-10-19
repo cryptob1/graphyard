@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { classifyAttention, faultClassOf, faultClassPolicyDefaults, landedAt, predateLanding, recurringClasses, releaseOvertakenLinks, trackFaults } from '../src/model/fault-classes.js';
+import { classifyAttention, faultClassOf, faultClassPolicyDefaults, landedAt, predateLanding, recurringClasses, trackFaults } from '../src/model/fault-classes.js';
 import { finishedSessionGraceMs, hostMemoryAttention, hostMemoryFloor, judgeHostMemory, memoryRecoveryMarginBytes, nameReclaimBoundMs, readReclaimState, readResources, readTmpInodes, reclaimResources, resourceAttention, describeReclaim, settleTmpReclaim, tmpErrorPrefix, unownedPaneConfirmMs, type ResourceInputs, type ResourceReclaimReport } from '../src/master-resources.js';
 import * as masterResources from '../src/master-resources.js';
 import { diskThresholdBytes, masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -502,63 +502,35 @@ const gy1830Instances = gy1830.map(entry => ({
 /** The cycle that filed GY-1830: its detectedAt on the item. */
 const gy1830DetectedAt = Date.parse('2026-10-16T02:38:16.072Z');
 
-test('unit:fault-class-cover-from-running-fix — the GY-1828 timeline: the instances raised between the merge and the running moment link to the delivered item and file nothing, a closed duplicate\'s links are not released, and an instance after the fix is running files as before', () => {
-  const policy = faultClassPolicyDefaults;
-
-  // REPRODUCE at the base: the base counted a delivered item's cover from its GitHub merge
-  // (01:42:44Z), so none of the four predates it, the cover fell, and the class filed afresh —
-  // GY-1829 (detected 02:04:36) and GY-1830, the item whose instances these are. The fallback a
-  // record without the serving observation still takes is exactly that rule.
+test('unit:fault-class-cover-from-running-fix — the GY-1828 timeline: a landing is read from the observed serving, never the record\'s write stamp, and a recurrence past it counts afresh', () => {
+  // GY-1828 delivered the fix; the instances the old revision raised between the merge and the
+  // running moment all predate the landing once it is read from the observed serving (GY-1830).
+  // GY-2186 retired the linking and the cover: triage still closes a previously filed fault-class
+  // item whose instances all predate the delivered fix, on exactly this landing.
   assert.equal(predateLanding(gy1830Instances, Date.parse('2026-10-16T01:42:44Z')), false, 'the merge-time rule covers none of the four');
-  const atBase = recurringClasses(gy1830Instances, [gy1828(false)], policy, gy1830DetectedAt);
-  assert.deepEqual(atBase.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', true, null]], 'the merge-time rule files the class afresh over the four');
+  assert.equal(predateLanding(gy1830Instances, landedAt(gy1828(true))!), true, 'the running moment covers every instance the old revision raised');
+  assert.equal(predateLanding(gy1830Instances, landedAt(gy1828(false))!), false, 'a record without the serving observation falls back to the merge');
 
-  // CANDIDATE: the same record with the observed serving of the release carrying the merge — every
-  // instance first seen between the merge and the running moment predates the fix, the cover
-  // stands, and the cycle links instead of filing.
-  const candidate = recurringClasses(gy1830Instances, [gy1828(true)], policy, gy1830DetectedAt);
-  assert.deepEqual(candidate.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', false, 'GY-1828']], 'the running moment covers the class: nothing files');
-  assert.equal(candidate[0].unlinked.length, 4, 'every instance the old revision raised links to the delivered fix');
-
-  // …nor is a link to an item closed as its duplicate released: GY-1829 closed as GY-1828's
-  // duplicate keeps its linked instance, first seen before the fix ran. The merge-time rule
-  // released it, which is how it came to count toward filing GY-1830.
-  const closedDuplicate = {
-    id: 'id-gy-1829', key: 'GY-1829', stage: 'done',
-    origin: { faultClass: { class: 'resources', threshold: 3, windowHours: 24, count: 3, detectedAt: '2026-10-16T02:04:36.246Z', instances: [] } },
-    closure: { kind: 'duplicate', reason: 'Covered by GY-1828, delivered for the resources fault class', ref: 'GY-1828', by: 'graphyard-triage', at: '2026-10-16T02:20:00.000Z', from: 'backlog' },
-  } as unknown as Work;
-  const linked = { ...gy1830Instances[1], linkedTo: 'GY-1829' };
-  const kept = [linked];
-  releaseOvertakenLinks(kept, [gy1828(true), closedDuplicate]);
-  assert.equal(kept[0].linkedTo, 'GY-1829', 'predating the running moment, the link to the closed duplicate stands');
-  const released = [{ ...linked }];
-  releaseOvertakenLinks(released, [gy1828(false), closedDuplicate]);
-  assert.equal(released[0].linkedTo, null, 'the merge-time rule released it, and the instance counted toward filing the class afresh');
-
-  // An instance first seen after the fix is running still files as before: the old four are linked
-  // and counted by GY-1828, and three fresh ones past the running moment re-file the class, alone.
+  // The windowed count the attention reads is blind to covers and links: it counts what the record
+  // holds in the window. After the fix is running, a fresh recurrence past the threshold is the
+  // attention line again, over the fresh instances alone.
   const after = ['2026-10-16T02:20:00.000Z', '2026-10-16T02:25:00.000Z', '2026-10-16T02:30:00.000Z'].map((at, index) => ({
     ...gy1830Instances[0], id: `action:reclaim|reclaim:resources:after-${index}|${at}`, subject: `reclaim:resources:after-${index}`, at, lastSeenAt: at, linkedTo: null }));
-  const refiled = recurringClasses([...gy1830Instances.map(entry => ({ ...entry, linkedTo: 'GY-1828' })), ...after], [gy1828(true)], policy, gy1830DetectedAt);
-  assert.deepEqual(refiled.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', true, null]], 'a recurrence past the threshold after the fix is running files a new item, as before');
-  assert.deepEqual(refiled[0].recent.map(entry => entry.at), after.map(entry => entry.at), 'the new filing carries the post-running instances, never the pre-running ones');
+  const recurring = recurringClasses([...gy1830Instances, ...after], faultClassPolicyDefaults, Date.parse('2026-10-16T02:30:00.001Z'));
+  assert.deepEqual(recurring.map(recurrence => recurrence.faultClass), ['resources'], 'one class recurs');
+  assert.deepEqual(recurring[0].recent.map(entry => entry.at), [...gy1830Instances.map(entry => entry.at), ...after.map(entry => entry.at)].sort(), 'the window counts every instance it holds, pre- and post-running');
 
   // The boundary between the observation and the record's write stamp: the restarted loop passes the
   // instant it saw the release serving as observedAt (02:16:20.633) and the server stamps the
   // record's write later as `at` (02:16:21.769). An instance first seen in between postdates the
-  // landing — the fix is already known running — so it still files; a landing read from the write
-  // stamp would call the same instant predating and swallow the real recurrence.
+  // landing — the fix is already known running; a landing read from the write stamp would call the
+  // same instant predating and swallow the real recurrence in triage's close.
   const observed = gy1828(true), serving = observed.delivery!.deployment!;
   const boundary = '2026-10-16T02:16:21.000Z';
   assert.ok(Date.parse(serving.observedAt) < Date.parse(boundary) && Date.parse(boundary) < Date.parse(serving.at), 'the boundary instant sits between the observed serving and the record\'s write stamp');
   const gap = { ...gy1830Instances[0], id: `action:reclaim|reclaim:resources:boundary|${boundary}`, subject: 'reclaim:resources:boundary', at: boundary, lastSeenAt: boundary, linkedTo: null };
   assert.equal(predateLanding([gap], landedAt(observed)!), false, 'against the observed serving the boundary instance postdates the running fix');
   assert.equal(predateLanding([gap], Date.parse(serving.at)), true, 'read from the write stamp, the same instant counts as predating — the recurrence this landing keeps');
-  const boundaryInstances = [0, 1, 2].map(index => ({ ...gap, id: `action:reclaim|reclaim:resources:boundary-${index}|${boundary}`, subject: `reclaim:resources:boundary-${index}` }));
-  const refiledBoundary = recurringClasses([...gy1830Instances.map(entry => ({ ...entry, linkedTo: 'GY-1828' })), ...boundaryInstances], [observed], policy, gy1830DetectedAt);
-  assert.deepEqual(refiledBoundary.map(recurrence => [recurrence.faultClass, recurrence.file, recurrence.item?.key ?? null]), [['resources', true, null]], 'an instance first seen between the observation and the write stamp files as before');
-  assert.deepEqual(refiledBoundary[0].recent.map(entry => entry.at), boundaryInstances.map(entry => entry.at), 'the boundary filing carries the instances the write stamp would have swallowed');
 });
 
 // ---- GY-1955: the class recurred as three resource-bound agent-names faults on 17 October 2026 --
