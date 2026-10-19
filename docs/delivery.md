@@ -27,11 +27,11 @@ An environment registers `{"kind":"environment","services":[…]}`; an observer 
 {"registration":{"id":"production-builder","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildInputsDigest":"sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e","artifacts":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"}],"provenanceUrl":"https://ci.example.test/builds/812"}
 ```
 
-`POST /api/delivery/release` selects its manifest members (reverted excluded); `POST /api/delivery/approve` selects it by `approvalId` and `expectedGeneration`.
+`POST /api/delivery/release` selects its manifest members (reverted members excluded, noted); `POST /api/delivery/approve` selects it by `approvalId` and `expectedGeneration`.
 
 ## Observe and verify
 
-`POST /api/delivery/observe` carries every service's instances with host-attested digests, never a self-report. `POST /api/delivery/observe-sha` marks contained merges Deployed: every service and an exact 40-hex `sha`. Smoke-required work needs an `e2e:deploy-smoke` pass naming it. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` runs per `freshnessSeconds`. `master status` `delivery` reports `readyToMerged`/`mergedToProduction`/`stages` p50/p90. `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined`.
+`POST /api/delivery/observe` carries every service's instances with host-attested digests, never a self-report. `POST /api/delivery/observe-sha` marks contained merges Deployed: every service and an exact 40-hex `sha`. Smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` runs per `freshnessSeconds`. `master status` `delivery` reports `readyToMerged`/`mergedToProduction`/`stages` p50/p90. `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined`.
 
 ## Main watch
 
