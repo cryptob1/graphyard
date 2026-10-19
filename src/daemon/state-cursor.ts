@@ -9,7 +9,6 @@ import { boundDetail } from './decisions.js';
 import { waitReason } from '../model/action-kinds.js';
 import { classified, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
 import { unansweredStands } from '../model/fault-record.js';
-import { diagnosisSettled, retainedDiagnoses } from '../runner/payloads.js';
 import { daemonActionFaultKind, daemonActionSchema, daemonStateSchema, retainedDoctorRuns, type DaemonAction, type DaemonState, type DeploymentObservation } from './state.js';
 
 export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of a run of /tmp passes removing 0 under the standing inode bound
@@ -55,7 +54,12 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   // rollback or a held-CLI snapshot neither fails nor silently drops what the newer loop recorded.
   // Declared fields are still validated: a malformed one refuses the read as before.
   // GY-2087: the shadow gate's verdicts an older loop kept are dropped, not carried.
+  // GY-2186: the diagnostician's records and the fault instances' item links an older loop kept are
+  // dropped, not carried: the loop launches no diagnostician and links no instance any more, and the
+  // schema no longer declares the fields, so riding them forward would keep them for ever.
   const { shadow: _shadow, ...stored } = JSON.parse(raw);
+  delete (stored as Record<string, unknown>).diagnoses;
+  if (stored.faults && typeof stored.faults === 'object') delete (stored.faults as Record<string, unknown>).linked;
   const state = toleratedStateSchema().parse(stored);
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
   return state;
@@ -106,11 +110,6 @@ export function pruneDaemonState(state: DaemonState) {
       state.doctor.runs = state.doctor.runs.filter(entry => !drop.has(entry.at));
     }
   }
-  // A settled diagnosis is kept for the report; the oldest settled ones go past the bound, never one still in flight
-  // and never one waiting on its provider: that record is the hold, and dropping it would relaunch its subject early (GY-1245).
-  const settled = Object.entries(state.diagnoses).filter(([, entry]) => diagnosisSettled(entry) && entry.state !== 'waiting').sort((a, b) => Date.parse(a[1].updatedAt) - Date.parse(b[1].updatedAt));
-  const excess = Object.keys(state.diagnoses).length - retainedDiagnoses;
-  if (excess > 0) for (const [key] of settled.slice(0, excess)) delete state.diagnoses[key];
   const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));
   if (runs.length > retainedDispatchFailureRuns) for (const [id] of runs.slice(0, runs.length - retainedDispatchFailureRuns)) delete state.dispatchFailures[id];
   return state;

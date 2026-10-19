@@ -262,12 +262,8 @@ export type FaultClassOrigin = z.infer<typeof faultClassOriginSchema>;
 
 /** The class an item records that it closes, when it names one. */
 export const closesFaultClass = (work: Pick<Work, 'origin'>): FaultClass | null => work.origin?.faultClass?.class ?? null;
-/** The open item that names `faultClass` as its class, if any. */
-export function openFaultClassItem(work: readonly Work[], faultClass: FaultClass): Work | null {
-  return work.find(item => item.stage !== 'done' && !isClosed(item) && closesFaultClass(item) === faultClass) ?? null;
-}
 
-export { deliveredClassCover, deliveredFaultClassCover, doctorCoverNote, doctorFaultClassSuppressReason, faultClassIsCovered, faultClassItem, landedAt, predateLanding, recurringClasses, releaseOvertakenLinks, standingFaultClassCover, windowedUnlinked, type ClassRecurrence } from './fault-class-recurrence.js';
+export { deliveredFaultClassCover, landedAt, predateLanding, recurringClasses, type ClassRecurrence } from './fault-class-recurrence.js';
 
 /** Problems the control plane's status reports beside any item (App permissions, integration jobs, production lag and
  *  incidents, a GitHub pause): the dashboard groups them with the items' faults, as master status does. */

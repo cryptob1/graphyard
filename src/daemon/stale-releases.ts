@@ -1,7 +1,6 @@
 // Concern: cycle step 4c — request again the release of every backlog item whose release went stale (GY-1315).
 import type { Work } from '../model.js';
 import { staleRelease, staleReleaseCandidates, unappliedReleases } from '../model/stale-release.js';
-import { diagnosisSettled } from '../runner/payloads.js';
 import { mapBounded } from '../master/timings.js';
 import { maxDecisionRequests } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
@@ -34,10 +33,9 @@ export async function staleReleaseStep(cycle: Cycle, effects: DaemonEffects) {
   const { state, snapshot, now, performed, isolate } = cycle;
   const { decide, approver, decisions } = effects;
   if (!decide || !approver || !decisions) return;
-  const diagnosed = new Set(Object.values(state.diagnoses).filter(entry => !diagnosisSettled(entry) && entry.decision?.action === 'release').map(entry => entry.decision!.work));
   const note = async (key: string, item: Work, kind: 'decision' | 'escalation', outcome: 'done' | 'failed', detail: string) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-  const candidates = staleReleaseCandidates(snapshot.work, diagnosed);
+  const candidates = staleReleaseCandidates(snapshot.work);
   // An unreadable history is unknown: nothing is asked on it, and the next cycle reads it again.
   const histories = await mapBounded(candidates, decisionReadConcurrency, item => decisions(item).then(result => result.decisions, () => null));
   for (const [index, item] of candidates.entries()) {

@@ -41,22 +41,20 @@ import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
 import { probeSupervisorAbsence } from '../containment-probe.js';
-import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
+import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
-import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
-import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
+import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
 import type { ReportedAttention } from './faults.js';
-import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
 import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
@@ -74,18 +72,11 @@ import type { ResearchEvent } from '../research.js';
 import type { DecompositionEvent } from '../decomposition.js';
 import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
-import { diagnosticianEffects, diagnosticianRole, type DiagnosticianEffects } from './diagnosis.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
-import { diagnosticianSettings } from '../runner/payloads.js';
 import type { TriageJudgement } from '../model/machine-backlog.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
-
-/** GY-1574 / GY-1705. Diagnostician registry selection through heldAwareProbe — kept here so unit:role-selection-honours-held-twin sees it. */
-export async function selectDiagnosticianFleet(config: MasterConfig, work?: string | null) {
-  return selectFleetSession(config, diagnosticianRole, { name: diagnosticianRole, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: work ?? undefined }));
-}
 
 /** A reviewer or producer session a launch ledger holds as pending, as the failover step reads it. */
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null; /** A producer's proof group: with the item, the session its account was selected for (GY-1582). */ group?: string }
@@ -99,8 +90,7 @@ export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
 /** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
-export type LoopFiledItem = Omit<ReturnType<typeof faultClassItem>, 'origin'> & Partial<Pick<ReturnType<typeof faultClassItem>, 'origin'>>;
-export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffects>, ThroughputEffects, ReadingEffects {
+export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffects, ReadingEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   requestProof: (work: Work) => void | Promise<void>;
@@ -362,13 +352,10 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
-  /** Files the one backlog item a recurring fault class (GY-173) or the docs trim item (GY-574) gets, as the operator-agent, under the key; absent without that identity, they are still recorded and reported. */
-  fileFaultClass?: (input: LoopFiledItem, key: string) => Promise<Work>;
   /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
   doctor?: DoctorEffects;
   /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers. */
   unblock?: (work: Work, reason: string) => Promise<Work>;
-  diagnostician?: DiagnosticianEffects; // GY-439; absent while `run.diagnostician.enabled` is false or either master identity is missing
   acceptance?: AcceptanceEffects; // the acceptance role (GY-1417); absent while either master identity is missing
   planner?: PlannerEffects; // the planner (GY-1418); absent while either master identity is missing — each acts only through the two identities a two-party decision needs
   /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */

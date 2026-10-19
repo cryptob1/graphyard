@@ -1,7 +1,6 @@
 // Concern: cycle step 4c — a close that went stale on a revision race is requested again, and the item it closes holds still meanwhile (GY-1439).
 import type { Work } from '../model.js';
 import { closeGrounds, convergibleClose, pendingClose, revisionRace, staleAttentionAttempts, staleWaitKey } from '../model/stale-close.js';
-import { diagnosisSettled } from '../runner/payloads.js';
 import { mapBounded } from '../master/timings.js';
 import { detailChanged } from './decisions.js';
 import { decisionReadConcurrency } from './decision-reads.js';
@@ -16,15 +15,11 @@ const staleWaitPrefix = 'wait:decision-stale:';
 /** The detail a named wait carries while the loop is still requesting the close again: the item is being closed. */
 const converging = /; the loop requested it again /;
 
-/** The items a diagnosis carries the close of: its own re-request (GY-1296) asks them again, so this step does not. */
-const diagnosedCloses = (state: Cycle['state']) =>
-  new Set(Object.values(state.diagnoses).filter(entry => !diagnosisSettled(entry) && entry.state === 'closing' && entry.decision?.action === 'close').map(entry => entry.decision!.work));
-
 /**
  * GY-1439. The open items a close decision stands on, requested and not yet applied, by key, with the
  * decision that closes each — as far as the loop knows without a read: a watch of its own or of a
- * hand-launched approver, a diagnosis closing the item, a kept history whose latest close is
- * requested, approved or stale and still being asked again, or a named stale wait still converging.
+ * hand-launched approver, a kept history whose latest close is requested, approved or stale and still
+ * being asked again, or a named stale wait still converging.
  * While one stands, the loop's advancing steps take nothing on the item (the routine decisions —
  * a mechanical bot round, a rework, an attestation — the observation wake behind a rework, the
  * review-cap withdrawal that spends a fresh review, a worker dispatch): each moved the item's
@@ -35,7 +30,6 @@ const diagnosedCloses = (state: Cycle['state']) =>
 export function closingItems(cycle: Pick<Cycle, 'state' | 'open' | 'heldDecisions' | 'snapshot'>): Map<string, string> {
   const { state, open, heldDecisions, snapshot } = cycle, closing = new Map<string, string>(), keys = new Set(open.map(item => item.key));
   for (const watch of Object.values(state.approvals)) if (watch.action === 'close' && !watch.settledAt && keys.has(watch.work)) closing.set(watch.work, watch.decision);
-  for (const entry of Object.values(state.diagnoses)) if (!diagnosisSettled(entry) && entry.state === 'closing' && entry.decision && keys.has(entry.decision.work)) closing.set(entry.decision.work, entry.decision.id);
   for (const item of open) {
     const history = heldDecisions.histories.get(item.id);
     const pending = history && (pendingClose(history)?.id ?? convergingClose(item, history, snapshot.work));
@@ -98,7 +92,7 @@ export function recordingWrites(effects: DaemonEffects, written: Set<string>): D
  * item it names still held and not itself closed), and requests the same closure again against
  * that revision with the master's operator-agent identity, then launches its independent approver;
  * `closingItems` holds the item's advancing steps meanwhile, so the second request is not raced by
- * the loop's own writes. A close a diagnosis carries is left to it. The series is one named wait
+ * the loop's own writes. The series is one named wait
  * per item and action (`staleWaitKey`): the attempt count and the revision the latest request
  * expected against the one the server found, re-recorded only when that changes, retired when the
  * close applies; after `staleAttentionAttempts` stale settles in a row it is asked no more, and
@@ -113,8 +107,8 @@ export async function staleCloseStep(cycle: Cycle, effects: DaemonEffects, writt
   // The named waits of items no longer open are retired: their close applied, or they were delivered.
   const ids = new Set(open.map(item => item.id));
   for (const key of Object.keys(state.actions)) if (key.startsWith(staleWaitPrefix) && !ids.has(key.slice(staleWaitPrefix.length).split(':')[0]!)) delete state.actions[key];
-  const diagnosed = diagnosedCloses(state), known = closingItems(cycle);
-  const candidates = open.filter(item => !diagnosed.has(item.key) && !written.has(item.id) && (known.has(item.key) || !!state.actions[staleWaitKey(item, 'close')]
+  const known = closingItems(cycle);
+  const candidates = open.filter(item => !written.has(item.id) && (known.has(item.key) || !!state.actions[staleWaitKey(item, 'close')]
     || cycle.heldDecisions.histories.get(item.id)?.some(decision => decision.action === 'close')));
   // An unreadable history is unknown: nothing is asked on it, and the next cycle reads it again.
   const histories = await mapBounded(candidates, decisionReadConcurrency, item => decisions(item).then(result => result.decisions, () => null));

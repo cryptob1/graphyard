@@ -8,7 +8,7 @@ import { type Work } from '../model/work.js';
 import { pendingCaseChanges } from './master-status-case-changes.js';
 import { deployLine, leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { loopCodeRoot } from '../daemon/checkout-state.js';
-import { baseFailureAttention, daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
+import { daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
 import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
@@ -16,7 +16,7 @@ import { promotionSummaryWithLag } from '../daemon/promotion-stale.js';
 import { sealRefusalAttention } from '../validation-import.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
+import { approverLaunchAttention, loopCursorLines, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -96,7 +96,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const stallItems = stallStatusAttention(cursor, master.cliPath);
   const watchdogItems = progressAttention(snapshot.work, cursor?.promotion ?? null, Date.parse(snapshot.now) || Date.now());
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...watchdogItems, ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling), ...baseFailureAttention(cycling.baseFailures, master.baseBranch)]
+    ? [...loopAttention({ liveness: cycling.liveness, budget: cycling.budget, failures: cycling.failures, cost: cycling.cost }), ...watchdogItems, ...slowCycleAttention(cycling), ...approverLaunchAttention(cycling),
+      ...loopCursorLines(cycling, cursor, master.baseBranch)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };

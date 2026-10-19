@@ -5,7 +5,6 @@ import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
 import { runRecordSchema } from '../runner/types.js';
-import { diagnosisRecordSchema, diagnosisSettled, retainedDiagnoses } from '../runner/payloads.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
@@ -17,6 +16,7 @@ import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 import { mainWatchStateSchema } from './main-watch.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 
+// 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
@@ -547,11 +547,11 @@ export const daemonStateSchema = z.object({
   /**
    * Every fault instance the loop recorded, each with its class (GY-173), and per standing fault
    * (`kind|subject`) the instance it is, and per action key in a run of failures the instance that run
-   * is. A class that recurs files one item; later instances link to it, and `linked` keeps per item key the newest first-seen time of an instance linked
-   * to it while open, past the instance's own retention (GY-1632). `observedAt` is when (loop time) the loop last read the sources standing faults are observed from, which it reads on a slower cadence than it cycles.
+   * is. A class that recurs past its threshold is one master-status attention line (GY-2186): no item
+   * is filed and no instance is linked to one. `observedAt` is when (loop time) the loop last read the sources standing faults are observed from, which it reads on a slower cadence than it cycles.
    * The default is a factory: zod 4 hands a literal default out by reference, which would share one record between states.
    */
-  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), linked: z.record(z.string(), z.string()).optional(), observedAt: z.string().optional() }).strict()
+  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
     .default(() => ({ instances: [], open: {}, failing: {} })),
   /**
    * Per failing test and base head (`baseFailureKey`), a required check that fails on the base
@@ -578,11 +578,6 @@ export const daemonStateSchema = z.object({
     /** GY-2005: whether the last cycle ended with the progress watchdog's lines standing — its edge, so the resolver fires once per stall, not every cycle. */
     watchdogStanding: z.boolean().default(false),
   }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {}, watchdogDue: false, watchdogStanding: false })),
-  /**
-   * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
-   * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).
-   */
-  diagnoses: z.record(z.string(), diagnosisRecordSchema).default(() => ({})),
   /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base
    * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease

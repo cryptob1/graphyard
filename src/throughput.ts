@@ -1027,17 +1027,16 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   const command = throughputMeasurementCommand;
   const admitted = measurement?.report.population?.admitted ?? 0, ownerKey = ownerItem?.key ?? null;
   const owner = { item: ownerKey, admitted, needed: throughputClaim.minimumDeliveries, measuredAt: measurement?.report.measuredAt ?? null };
-  const progress = `${ownerKey ? `${ownerKey} owns the verification` : 'No open item owns the verification yet (the loop files one on its next unverified measurement of a release whose owner has not closed on an answered needs-decision, and within one cycle while a needs-decision stands)'}: ${admitted} admitted of ${throughputClaim.minimumDeliveries}${measurement ? ` in the newest recorded measurement (${measurement.report.measuredAt}, of ${measurement.report.deployed?.revision?.slice(0, 12) ?? 'an unnamed release'})` : ', nothing measured yet'}`;
+  const progress = `${ownerKey ? `${ownerKey} owns the verification` : 'No open item owns the verification (the loop files none, GY-2186)'}: ${admitted} admitted of ${throughputClaim.minimumDeliveries}${measurement ? ` in the newest recorded measurement (${measurement.report.measuredAt}, of ${measurement.report.deployed?.revision?.slice(0, 12) ?? 'an unnamed release'})` : ', nothing measured yet'}`;
   const serving = Boolean(measurement && deployed.revision && deployed.revision !== 'unknown' && measurement.report.deployed?.revision === deployed.revision);
   const decision = serving ? throughputDecision(measurement!.report, pursuit, ownerKey) : null, decideOn = ownerKey ?? 'GY-N';
   // GY-1587: an escalated miss is asked once per release; once answered, the release stays owned
   // and the line says so, rather than repeating the escalation or asking the answered decision again.
   const answered = decision?.cause === 'escalated-miss' && answeredAt !== null ? new Date(answeredAt).toISOString() : null;
-  // GY-1609: a needs-decision the loop raised on the open owner and a requirements revision since
-  // answered is applied: the loop closes the owner on its next deployment step, so the line says so
-  // and never asks `master decide` and `master approver` for the decision already applied.
+  // GY-1609: a needs-decision the loop raised on an open owner and a requirements revision since
+  // answered is applied: the line says so, and the owner stays as it is (GY-2186 closes nothing).
   const applied = decision && ownerItem?.policyRevision !== undefined && throughputOwnerAnswered({ policyRevision: ownerItem.policyRevision }, raisedAt)
-    ? `${ownerKey}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${ownerItem.policyRevision}, which is applied; the loop closes ${ownerKey} on its next deployment step` : null;
+    ? `${ownerKey}'s needs-decision (raised at its requirements revision ${raisedAt}) was answered by its requirements revision ${ownerItem.policyRevision}, which is applied; no item owns the verification until a recorded measurement of the release verifies it` : null;
   const stall = answered || applied ? null : decision;
   // GY-1458: a measurement judged under a population rule since revised and applied asks no decision —
   // that one is answered — so the line says none remains and when the loop re-measures under the applied rule.
@@ -1056,15 +1055,15 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
   const attention = (reason: string): AttentionItem => {
     if (stall) return { subject: 'throughput', kind: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
       ...(selfRequest ? agentOwner('control plane', throughputSelfAsked(decideOn), 'approver')
-        : agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION; the loop closes ${decideOn} once it is applied`, 'approver')) };
+        : agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION`, 'approver')) };
     const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}. ${progress}${superseded}`;
-    if (applied) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${applied}`, ...agentOwner('control plane', `the loop closes ${ownerKey} on its next deployment step`) };
+    if (applied) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${applied}`, ...agentOwner('master', command) };
     if (!pursuit) return { subject: 'throughput', kind: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };
     if (!pursuit.escalated) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${pursuit.text}`, inMotionUntil: pursuit.dueAt, ...agentOwner('master', command) };
     // Past the bound the line names the blocker. Only two blockers are a human's to remove (AGENTS.md):
     // a credential for the measurement, or whether deliveries may run with no master session at all.
     // An unreachable plane, an unconfirmed release or a failed or missed measurement stays the master's.
-    if (answered) return { subject: 'throughput', kind: 'throughput', text: `${text}; its needs-decision on this release was answered at ${answered}, so ${ownerKey ?? 'the owner the loop files'} carries the verification until a recorded measurement verifies it, and the next release measured unverified past the bound asks afresh`,
+    if (answered) return { subject: 'throughput', kind: 'throughput', text: `${text}; its needs-decision on this release was answered at ${answered}, so the claim stays carried until a recorded measurement verifies it, and the next release measured unverified past the bound asks afresh`,
       ...agentOwner('master', command) };
     const escalated = `${text}; escalated: ${pursuit.text}`;
     if (pursuit.blocker === 'missing-credentials') return { subject: 'throughput', kind: 'throughput', text: escalated,
