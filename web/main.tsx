@@ -10,7 +10,7 @@ import type { Dashboard } from './pages/dashboard';
 import { primaryEntry, viewFor, views } from './pages';
 import TopBar from './components/top-bar';
 import { useFeatures } from './features';
-import LoginPage, { REJECTED_NOTICE } from './pages/login';
+import LoginPage, { HUMAN_SESSION_KEY, REJECTED_NOTICE, storedToken } from './pages/login';
 import WorkDetails, { useOpenedWork } from './pages/work-details';
 import GoalPage, { goalPathKey } from './pages/goal';
 import CreateWork from './pages/create-work';
@@ -23,7 +23,7 @@ import { idempotencyKey } from './idempotency-key';
  * registry, and the page it selects — or the open work item's page. Pages live under web/pages/.
  */
 function App() {
-  const [token, setToken] = useState(sessionStorage.getItem('graphyard-token') ?? '');
+  const [token, setToken] = useState(storedToken);
   const sessionEpoch = useRef(0);
   const [draftToken, setDraftToken] = useState('');
   const [work, setWork] = useState<Work[]>([]);
@@ -46,7 +46,7 @@ function App() {
     const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey() }, body: data === undefined ? undefined : JSON.stringify(data) });
     const body = await response.json(); if (!response.ok) throw new Error(body.error + (body.issues ? `: ${body.issues.map((i: any) => i.message).join(', ')}` : '')); return body;
   }
-  function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem('graphyard-token'); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
+  function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem(HUMAN_SESSION_KEY); localStorage.removeItem(HUMAN_SESSION_KEY); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
   /** The sign-in page's first read: once the status reply accepts the token, the work snapshot, then the dashboard. */
   async function firstLoad(system: any, signal: AbortSignal) {
     const epoch = sessionEpoch.current, headers = { Authorization: `Bearer ${token}` }, response = await fetch('/api/work-snapshot', { headers, signal });

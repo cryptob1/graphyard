@@ -5,7 +5,7 @@ Sidebar: **Work**, **Workers**, **Shipped**, **Tests**, **Insights**, **Settings
 
 ## From your phone
 
-Serves `127.0.0.1:4310` or the install's free port ([install](install.md)). With Tailscale, `up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` plus tailnet URL; `--share-tailnet` runs it (never `funnel`), `reachableUrl` (`up.json`) feeds sign-in links. A green `up` ends with a single-use `signIn` link (10min).
+Serves `127.0.0.1:4310` or the install's free port ([install](install.md)). With Tailscale, `up` prints `tailscale serve --bg --http=4310 http://127.0.0.1:4310` plus tailnet URL; `--share-tailnet` runs it (never `funnel`), `reachableUrl` (`up.json`) feeds sign-in links. A green `up` ends with a single-use `signIn` link (10min). Later, `graphyard login` (no options; the sign-in screen shows it) mints one with the install's operator credential under `~/.config/graphyard/<install>/tokens/` (a self-contained host's too), on that tailnet URL; the session lasts 30 days (until a server restart).
 
 ## Work
 
@@ -13,7 +13,7 @@ Open items: **Needs you**, **Blocked**, **Moving**, **Up next**, **Backlog**. `G
 
 ## Needs you
 
-Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent detail under **Details for agents**. `graphyard login`: single-use sign-in link; **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`); human admins only.
+Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent detail under **Details for agents**. **Provide now** seals credentials for `unseal GY-N`; operator approvals offer **Approve** or terminal **Decline** (`master refuse GY-N DECISION REASON`); human admins only.
 
 ## Workers
 

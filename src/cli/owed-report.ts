@@ -9,6 +9,7 @@ import { maxDecisionRequests } from '../daemon/decisions.js';
 import { pushRefusal, trialRefusal } from '../model/gates.js';
 import { openAction } from '../model/concerns.js';
 import type { MergeWriterSummary } from '../daemon/cycle-merge-writer.js';
+import { baseFailureHoldMs, baseFailurePrefix } from '../merge-writer/executor.js';
 import { staleRelease, staleReleaseWaitBoundMs, unappliedReleases, type DecisionHistoryRow } from '../model/stale-release.js';
 
 /**
@@ -104,6 +105,13 @@ export function humanNeededAttention(snapshot: { work: Work[]; now: string }, wr
       ...agentOwner('master', row.resolve, 'approver') };
     // GY-2053: a live flight is movement on its own, so its hold is dated from this reading, never from a movement aged past the bound.
     if (held === 'moving') item.inMotionUntil = new Date((writer!.inFlight ? now : mergeWriterMovement(writer)!.at) + mergeWriterMotionBound(writer)).toISOString();
+    // GY-2174: a head the writer's own base-failure hold parks is out of the queue by the writer's
+    // design, so the hold above cannot see it; the ledger's hold of the exact head bounds the line
+    // itself, to the instant the queue re-enters the head on whatever the base tip then is.
+    else if (work) {
+      const until = baseFailureHoldUntil(work, now);
+      if (until !== null) item.inMotionUntil = new Date(until).toISOString();
+    }
     return [item];
   });
 }
@@ -163,8 +171,9 @@ export function mergeWriterMovement(writer: MergeWriterSummary | null | undefine
  * writer's own next step either way, never a judgment — and the writer's queue holds the head or has it in flight, so
  * the writer knows it and will reach it. Held and moving (a trial in flight, or any recorded movement inside the
  * bound), it is the writer's work; held with no trial in flight and no movement past the bound, the writer itself
- * cannot move and the queue's one stall stands for it. A refusal whose head the queue does not hold is a genuine
- * unanswered decision: the writer will never reach that head on its own.
+ * cannot move and the queue's one stall stands for it. A refusal whose head the queue does not hold is answered one way
+ * short of a judgment: the ledger's own base-failure hold below (GY-2174). Any other refusal whose head the queue does
+ * not hold is a genuine unanswered decision: the writer will never reach that head on its own.
  */
 export function mergeWriterHolds(work: Work, writer: MergeWriterSummary | null | undefined, now: number): 'moving' | 'stalled' | null {
   if (!writer) return null;
@@ -179,6 +188,30 @@ export function mergeWriterHolds(work: Work, writer: MergeWriterSummary | null |
   else return null;
   const movement = mergeWriterMovement(writer);
   return !writer.inFlight && (!movement || now - movement.at > mergeWriterMotionBound(writer)) ? 'stalled' : 'moving';
+}
+
+/**
+ * GY-2174: the instant the writer's own base-failure hold of this item's head ends, or null when it holds nothing now.
+ * A trial whose failures are the base tip's own leaves the ledger's `base failure` refusal of the exact head, and
+ * `mergeQueue` drops the head on that record for `baseFailureHoldMs` from the refusal's `intentAt` (GY-1834) — the head
+ * the GY-2015 hold above watches for is absent from the queue and the flight by the writer's design, so the item's
+ * trial-refusal line would stand unbounded over a wait the writer itself imposed (on 19 October 2026 one red base
+ * parked three heads and each counted an `owed-decision` at the 30–36m mark). The hold runs to
+ * `intentAt + baseFailureHoldMs`, the instant the queue re-enters the head on whatever the base tip then is: one red
+ * base parks every queued head at once, each parked head's line is the writer's motion for exactly that long — the
+ * repair item's own `base-failure` line is what the cycle counts — and past the bound the head is queued again, held
+ * as GY-2015 holds it. Grounded in the record alone, it bounds with no writer summary at all.
+ */
+export function baseFailureHoldUntil(work: Work, now: number): number | null {
+  const candidate = work.candidate, action = openAction(work), state = work.mergeLedger, head = candidate?.sha.toLowerCase();
+  if (!candidate || !action || !state || !head || action.gate !== 'test') return null;
+  // The line bounded is the writer's trial refusal of this exact candidate, as mergeWriterHolds requires; any other
+  // refusal of the item (a stale observation, a rerun) is a judgment or a step of its own, never this hold's to bound.
+  if (action.refusal !== trialRefusal(candidate.sha, candidate.baseSha)) return null;
+  // The same record mergeQueue drops the head on: a `base failure` refusal of the exact head, inside its hold.
+  if (state.state !== 'refused' || state.head !== head || !state.refusal?.reason.startsWith(baseFailurePrefix) || !state.intentAt) return null;
+  const until = Date.parse(state.intentAt) + baseFailureHoldMs;
+  return Number.isFinite(until) && now <= until ? until : null;
 }
 
 /**
