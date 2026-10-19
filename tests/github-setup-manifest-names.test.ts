@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import type { UpDependencies, UpRequest } from '../src/up.js';
@@ -80,8 +81,8 @@ test('unit:local-install-no-hook-config — a loopback reviewer manifest subscri
     assert.ok(!fixture.requests.some(request => request.url.includes('/app/hook/')), 'install read or PATCHed /app/hook/config for a local install');
     assert.ok(!fixture.requests.some(request => request.url.includes('/check-runs')), 'install attempted a delivery proof for a local install');
     assert.equal(summary.webhook.skipped, true);
-    assert.match(summary.webhook.detail, /polls GitHub/);
-    assert.ok(logs.some(line => /polls GitHub/.test(line)), 'install does not report that the control plane polls GitHub');
+    // GY-2009: install registers no App, so there is no webhook to configure or deliver.
+    assert.match(summary.webhook.detail, /no GitHub App is registered/);
   } finally { await fixture.cleanup(); }
 });
 
@@ -154,10 +155,11 @@ test('unit:installed-app-detected — a saved App without installationId is comp
     let pages = 0;
     const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, { ...fixture.deps, fetch: fetcher, githubApp: async () => { pages++; throw new Error('an App page was opened'); } });
     const plan = await buildPlan(session);
-    assert.ok(!plan.browserApps.includes('control-plane'), 'the plan still creates the control-plane App in a browser');
+    assert.deepEqual(plan.browserApps, [], 'the plan creates no App in a browser');
     await applyInstall(session, plan);
+    // GY-2009: install registers no App, so a saved one is neither reused nor copied into the install directory.
     assert.equal(pages, 0);
-    assert.equal(JSON.parse(await readFile(join(session.directory, 'github-app.json'), 'utf8')).installationId, 500, 'the detected installation is not recorded');
+    assert.equal(existsSync(join(session.directory, 'github-app.json')), false, 'install recorded an App');
   } finally { await fixture.cleanup(); }
 
   // Agent-mode up: with no browser profile, a plan whose saved App leaves nothing for a browser goes on to install.

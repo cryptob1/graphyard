@@ -101,7 +101,7 @@ async function delivered(mergeSha: string) {
   w = await engine.observe(w.id, (await reload(w)).revision, observed());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   w = await engine.observe(w.id, (await reload(w)).revision, { ...observed(), merged: true, mergedAt, mergeSha });
-  assert.equal(w.stage, 'done'); assert.equal(deliveryState(w), 'awaiting-deployment');
+  assert.equal(w.stage, 'done'); assert.equal(deliveryState(w), 'delivered');
   return w;
 }
 
@@ -233,14 +233,14 @@ test('integration:restricted-sha-observer-deployed-not-verified — the observer
   assert.equal(repeat.body.duplicate, true); assert.equal(repeat.body.id, result.body.id); assert.deepEqual(repeat.body.deployed, []);
   assert.equal((await reload(contained)).delivery!.deployment!.at, deployment.at);
 
-  // Deployed is all an observation says: the smoke-required item reads Deployed, awaiting verification.
+  // Delivered at its merge (GY-1981): an observation only names the release serving it.
   for (const marked of [contained]) {
-    assert.equal(deliveryState(await reload(marked)), 'awaiting-smoke');
-    assert.match(deliveryOutcome(await reload(marked))!, new RegExp(`^${deliveryLabel['awaiting-smoke']}`));
+    assert.equal(deliveryState(await reload(marked)), 'delivered');
+    assert.match(deliveryOutcome(await reload(marked))!, new RegExp(`^${deliveryLabel.delivered} — release `));
   }
   const exactResult = await call('POST', 'delivery/observe-sha', observer, observation(exact.delivery!.mergeSha));
   assert.deepEqual(exactResult.body.deployed, [exact.key]);
-  assert.equal(deliveryState(await reload(exact)), 'awaiting-smoke', 'an exact observation is Deployed, never verified');
+  assert.ok((await reload(exact)).delivery!.deployment, 'an exact observation is recorded');
   ancestry.set(sha('8'), new Set([failing.delivery!.mergeSha]));
   assert.deepEqual((await call('POST', 'delivery/observe-sha', observer, observation(sha('8')))).body.deployed, [failing.key]);
 
@@ -256,24 +256,19 @@ test('integration:restricted-sha-observer-deployed-not-verified — the observer
   // Wrong-SHA smoke is refused outright: only the exact observed release counts.
   await assert.rejects(engine.execute(smokeRunner, 'evidence', w.id, smoke(w, { sha: w.delivery!.mergeSha }), randomUUID()), /must name the observed deployed commit/);
   await assert.rejects(engine.execute(smokeRunner, 'evidence', w.id, smoke(w, { baseSha: served }), randomUUID()), /must name the observed deployed commit/);
-  assert.equal(deliveryState(await reload(w)), 'awaiting-smoke');
-  // A pass that skipped a case, or executed none, verifies nothing.
+  assert.equal((await reload(w)).delivery!.smoke, undefined);
+  // A pass that skipped a case, or executed none, is recorded as it ran.
   w = await engine.execute(smokeRunner, 'evidence', w.id, smoke(w, { skipped: 1 }), randomUUID());
-  assert.equal(deliveryState(w), 'awaiting-smoke', 'skipped smoke never verifies');
   w = await engine.execute(smokeRunner, 'evidence', w.id, smoke(w, { executed: 0 }), randomUUID());
-  assert.equal(deliveryState(w), 'awaiting-smoke', 'a smoke that executed nothing never verifies');
-  // A smoke result bound to another release is inapplicable, whatever it says.
-  assert.equal(deliveryState({ ...w, delivery: { ...w.delivery!, smoke: { ...w.delivery!.smoke!, executed: 3, skipped: 0, sha: sha('9') } } }), 'awaiting-smoke');
   // A failed smoke is a failure on record, never verification.
   let f = await reload(failing);
   f = await engine.execute(smokeRunner, 'evidence', f.id, smoke(f, { result: 'fail' }), randomUUID());
-  assert.equal(deliveryState(f), 'delivered-with-failure'); assert.notEqual(deliveryOutcome(f), deliveryLabel['smoke-passed']);
+  assert.equal(f.delivery!.smoke!.result, 'fail'); assert.equal(deliveryState(f), 'delivered', 'a failed smoke is on record; the item stays delivered (GY-1981)');
   // Only the independently authorized applicable passing smoke at the exact observed release verifies it.
   w = await engine.execute(smokeRunner, 'evidence', w.id, smoke(w), randomUUID());
-  assert.equal(deliveryState(w), 'smoke-passed');
-  assert.match(deliveryOutcome(w)!, /^Production verified — release /);
+  assert.equal(w.delivery!.smoke!.result, 'pass');
+  assert.match(deliveryOutcome(w)!, /^Delivered — release /);
   assert.equal(w.delivery!.smoke!.producer, smokeRunner.id);
-  assert.equal(deliveryState(await reload(exact)), 'awaiting-smoke', 'another delivery the observer marked is still only Deployed');
 });
 
 // --- The roster: principal add registers the observer as its own lane-only producer. ---

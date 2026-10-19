@@ -24,8 +24,9 @@ import { coordinationDocument, coordinationRelevance, coordinationTrimSql, detoa
 
 /**
  * When a row is next claimable: its request, backoff, settle window and live claim, the latest of
- * them (`claimable` in src/model/action-progress.ts, as a time). On a delivered item only the
- * deployment row counts, as `openActions` offers no other. The item's due time is the earliest.
+ * them (`claimable` in src/model/action-progress.ts, as a time). On a delivered item only a
+ * verify-deployment row left from before GY-1981 counts, so the reconciliation pass reaches and
+ * retires it; `openActions` offers none. The item's due time is the earliest.
  */
 const dueAt = `(SELECT MIN(COALESCE(GREATEST(
     graphyard_timestamptz(a.entry->>'requestedAt'),

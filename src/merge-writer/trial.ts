@@ -8,6 +8,8 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
+import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
+import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master-resources.js';
 
 // A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
@@ -431,6 +433,11 @@ export interface RunTrialInput {
   /** The free space a short checkout's root must have, and how it is measured: the managed worktree root's default and probe unless given. */
   minFreeBytes?: number;
   probe?: FilesystemProbe;
+  /**
+   * GY-2009: the pinned gitleaks secret scan. Production runs `runSecretScan`; the test runner
+   * skips it unless a test injects a scan (or `false` to force a skip outside the suite).
+   */
+  secretScan?: ((input: SecretScanInput) => Promise<SecretScanResult>) | false;
 }
 const tailLength = 4000;
 /**
@@ -653,6 +660,27 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         return listing.split('\n').some(line => line.trim() === path);
       };
+      // GY-2009: the merge writer's trial runs the secret scan (formerly the Actions secrets job).
+      const scan = input.secretScan === false ? null
+        : input.secretScan ?? (underTestRunner() ? null : runSecretScan);
+      if (scan) {
+        // The binary is cached under the managed root, so only the first trial on a host downloads it.
+        const scanned = await scan({ worktree, cacheDirectory: secretScanCacheDirectory(input.base), run, timeoutMs: remaining() });
+        if (!scanned.ok) {
+          log.push(`$ ${secretScanArgv(worktree).join(' ')}\n${scanned.detail}`);
+          // A binary the host could not obtain says nothing about the merge: no verdict, tried again.
+          if (scanned.unavailable) throw runnerFailure('install', { ok: false, out: scanned.detail, status: null, signal: null, cause: scanned.detail });
+          // A scan the deadline killed is the trial's timeout, and one a signal, the runner or an error exit ended is
+          // a runner failure: neither is a finding, so neither fails the merge (only gitleaks' findings status does).
+          if (scanned.execution) {
+            if (scanned.execution.timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
+            const ended = endedOf(scanned.execution, scanned.detail);
+            throw runnerFailure('install', { ...ended, cause: ended.cause ?? (ended.signal ? undefined : `gitleaks exited with status ${ended.status ?? 'unknown'}, not its findings status`) });
+          }
+          enter('build');
+          return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
+        }
+      }
       if (await holds('package.json')) {
         const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
         const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);

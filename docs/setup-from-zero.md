@@ -33,7 +33,7 @@ Once green, **Describe what you want built** records a goal.
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: from `master.json` or install); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting), `step-failed` naming argv and stderr. Default: no Apps, browser profile or `--reviewer`; missing repo: `gh repo create --source . --push`; no `--local`. Apps in signed-in Chrome profile (passed, master's, same-login install's; none without `--reuse-app`/saved Apps: exit `2`) in `.graphyard/master-actions/`. Handoffs: subscription login approval, *Confirm access* Mobile number. Beside Mobile: App page (http://127.0.0.1:4311); sudo (`up --sudo-code`); import both: `up --reuse-app SLUG --reuse-app REVIEWER_SLUG` (`--no-wait` → `3`). `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: from `master.json` or install); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting), `step-failed` naming argv and stderr. No GitHub App, branch protection, ruleset or `--reviewer`: the merge writer's deploy key is the only GitHub access, and `--reuse-app` is refused (GY-2009). Missing repo: `gh repo create --source . --push`; no `--local`. Handoff: subscription login approval. `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
 
 ## Troubleshooting: manual steps
 
@@ -43,17 +43,17 @@ Once green, **Describe what you want built** records a goal.
 
 ```sh
 node --version          # v24+
-gh auth status          # scope repo; non-compose providers also admin:repo_hook
+gh auth status          # scope repo (deploy-key registration); no provider needs admin:repo_hook
 docker compose version
 herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**Verify:** each exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as a repository admin; user namespaces for `bwrap`; a free-plan private repository goes public.
+**Verify:** each exits 0; `gh repo view OWNER/REPO --json viewerPermission -q .viewerPermission` prints `ADMIN`. **HUMAN:** `gh auth login` as a repository admin; user namespaces for `bwrap`.
 
 ## 2. Graphyard and the repository
 
-Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:** doctor readiness `repository`, `required-checks` and `test-formats` are `ready`.
+Needs a GitHub `origin`. Install writes no Actions workflows; the merge writer's trial is the gate. **Verify:** doctor readiness `repository` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
@@ -65,11 +65,11 @@ Needs a GitHub `origin` and an Actions `pull_request` test workflow. **Verify:**
 
 ## 4. Register the GitHub App
 
-Only `install --apply` without `--no-github-app`; never `up`. It serves `http://127.0.0.1:4311` and prints it; it opens no browser ([900 s, then `resume`](install.md#step-3-app-confirmation)). **HUMAN:** create the App, install it on OWNER/REPO only. **Verify:** `github-app` passes; on `missing permissions`, `gy github-setup --update-permissions --wait 600` ([permissions](github.md#app-permissions)). Reviewer and revert-approver Apps: `--reviewer claude` registers both (else `gy master reviewer setup`); **Verify:** `reviewer-app`.
+Not required for the control-plane merger: install and `up` register no App and write no branch protection ([github](github.md)). Doctor `github-app` / `reviewer-app` print `PASS ... not required`. Optional legacy observation-only binding remains via `graphyard app import` / `app bind`. Reviewer and revert-approver Apps: only when an observation-only install still uses them.
 
 ## 6. Onboard the checkout
 
-`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json .github/workflows` to the base (never `.graphyard/`). `--no-github-app` onboards App-less. Scans skip `.claude`. **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
+`gy init --scan`, then `gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json` to the base (never `.graphyard/` or `.github/workflows` — setup writes none). Scans skip `.claude`. **Verify:** `setup-proposal` is `ready` ([onboarding](onboarding.md#documentation-policy)).
 
 ## 8. Agent environments
 

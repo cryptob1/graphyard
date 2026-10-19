@@ -65,6 +65,16 @@ function unwrapFinding([, opened = '', closedLabel = '', closedFinding = '', aft
  */
 const scaffold = /^(?:#{1,6}\s|(?:[-*]\s*)?\**\[(?:AC-\d+|DOCS)\]|(?:[-*]\s*)?\**(?:Judgement|BLOCKING findings?|Open review threads|Resolved threads|Follow-up threads|Overridden threads)\**\s*:|Review of (?:pull request )?#\d+)/i;
 /**
+ * The `PATH:LINE` a finding opens with (the form BLOCKING: and Nit: lines name a finding by), or none: a
+ * bare number is a time or a count, not a path. GY-1988 reads it to judge a finding against the hunks
+ * changed since the earlier head.
+ */
+export function findingLocation(finding: string): { path: string; line: number } | null {
+  const match = /^`?([^\s`:]+):(\d+)`?\s*(?:[—–-]|$)/.exec(finding.trim());
+  const line = match ? Number(match[2]) : NaN;
+  return match && !/^\d+$/.test(match[1]!) && Number.isSafeInteger(line) ? { path: match[1]!, line } : null;
+}
+/**
  * The blocking findings a change request names, one per `BLOCKING:` line; a line naming none ("BLOCKING: none")
  * names nothing. Prose that merely mentions the word is not a finding: the reviewer is told the form at the cap.
  */

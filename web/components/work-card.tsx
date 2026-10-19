@@ -17,8 +17,8 @@ const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replac
 
 /**
  * One item as a row of its group (GY-161): key, title, one line saying why it is where it is, the
- * seven pull-request steps while it moves, who acts next as a role, and — only for moving work —
- * how long it has held the step those seven show (`stepHeld`), red past the one configured
+ * six pull-request steps while it moves, who acts next as a role, and — only for moving work —
+ * how long it has held the step those six show (`stepHeld`), red past the one configured
  * threshold. On a phone the same element lays out as a card. The pull request is linked once, on the row's second line; the open
  * control and that link are siblings, never nested, so each stays a separate keyboard stop.
  */
@@ -35,8 +35,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
   const why = group === 'needs-you' ? actor.does
     : waits?.kind === 'waiting-until' ? waits.sentence
     : stall ? `Nothing is happening: ${stall.missing} — stuck at “${phaseLabel[phaseOf(item, now)]}” for ${formatDuration((now - Date.parse(stall.heldSince)) / 60000)} with nothing to do next`
-      // Merged work held at Deploy is blocked by the release, never "Shipped": say what the release lacks.
-      : group === 'blocked' ? (steps?.current === 'deploy' ? unprefixed(`${steps.detail}.`) : unprefixed(status.blocking ?? status.sentence))
+      : group === 'blocked' ? unprefixed(status.blocking ?? status.sentence)
         : group === 'backlog' || (group === 'up-next' && actor.who === 'Nobody yet') ? actor.does : null;
   const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : null;
   // A blocked row names its blocker's class and the loop's last and next probe of it (GY-1008).

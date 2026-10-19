@@ -14,7 +14,7 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 
 /**
  * GY-1713. Create-400 refusals and standing-close adoption over a simulated day of the real loop:
- * a cycle a minute for six hours, the doctor every ten minutes. The doctor retries one pending
+ * a cycle a minute for six hours, the doctor every five minutes. The doctor retries one pending
  * filing the create route refuses with 400 Invalid input; the diagnostician files a fix the same
  * way for one recurring item, and for another asks a close that already stands with a matching
  * duplicate-of covering (GY-1710's shape). A third recurring item meets a standing obsolete close
@@ -261,6 +261,6 @@ test('unit:soak-invariants-hold — over a simulated day create-400 refusals set
   // (d) Sessions bounded: one diagnostician run per subject that needed one; doctor once per interval.
   assert.deepEqual([...new Set(launched.map(entry => entry.subject))].sort(), [mismatchedClose.key, matchingClose.key, refusedFix.key].sort());
   assert.ok(launched.every(entry => launched.filter(other => other.subject === entry.subject).length === 1), 'each subject diagnosed once');
-  assert.ok(doctorRuns >= 35 && doctorRuns <= 38, `one doctor run per ten minutes over six hours: ${doctorRuns}`);
+  assert.ok(doctorRuns >= 71 && doctorRuns <= 73, `one doctor run per five minutes over six hours: ${doctorRuns}`);
   clearDoctorRuns(); clearDiagnoses();
 });

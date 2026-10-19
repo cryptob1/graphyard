@@ -82,16 +82,11 @@ that page's views as redacted markup (listed by \`graphyard master browser fixtu
 and submits nothing; never request that recording from a human.
 
 Keep cycling: status, dispatch ready work, shepherd review, reconcile what GitHub
-merged, then deployment verification. Repeat until both conditions hold:
+merged. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in
-Graphyard; and (2) every merged change is deployed and live-verified against the exact
-deployed release, or a genuinely external deployment blocker is recorded in Graphyard.
-Verify each delivery with \`graphyard master verify-deployment GY-N\`: it refuses a
-stale or local-only observation and records only the exact deployed release it observed.
-Delivered work is immutable, so a deployment blocker is recorded as a follow-up work
-item naming the delivered item, its merge commit, and the external cause;
-\`master status\` keeps the delivery under \`pending\` until the release serves it.
-An observed merge alone does not end the loop. Ordinary review findings, rework,
+Graphyard; and (2) the release health line in \`master status\` is healthy, or a
+genuinely external deployment blocker is recorded in Graphyard as a follow-up work item.
+An item is delivered at merge; release health is one status line. Ordinary review findings, rework,
 idle workers, and proof setup are not stopping conditions. Close finished agent
 sessions as part of the cycle.
 

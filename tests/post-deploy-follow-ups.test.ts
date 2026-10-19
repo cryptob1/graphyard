@@ -295,18 +295,3 @@ test('unit:criterion-window-hours — an hour-denominated window is read like a 
     assert.equal(observationWindowFor(gy1700, { id: 'AC-2', text }, 'manual:post-deploy/x', undefined, servedAt)!.notBefore, iso(servedAt + day), `${text}: first observed serving plus 24 hours`);
   }
 });
-
-test('unit:post-deploy-no-item — verify-deployment records the observation and reports an owed post-deploy check without filing any item', async () => {
-  const { masterConfigSchema } = await import('../src/master.js');
-  const { verificationEffects, verifyDeployment } = await modules();
-  const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/private/master.token', cliPath: '/coordinator/bin/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'coordinator-host', masterAgentName: 'graphyard-master-project', run: { deploymentUrl: 'https://graphyard.example/healthz', deploymentShaField: 'commit' } });
-  const at = '2026-10-12T07:33:40.939Z', now = Date.parse(at) + 2_000, posted: string[] = [];
-  const effects = verificationEffects(master, { root: '/nonexistent', snapshot: async () => ({ work: [gy1700], now: iso(now) }), mutate: async (path: string, data: unknown) => { posted.push(path); return data; } });
-  const verified = await verifyDeployment(gy1700, { ...effects, now: () => now,
-    observe: async () => ({ source: 'endpoint' as const, sha: serving, at, reason: null, deployed: [gy1700.key], pending: [] }),
-    release: () => ({ sha: 'f'.repeat(40), clean: true, repository: 'other/repo', reason: null }),
-    emit: async () => assert.fail('nothing is emitted') });
-  assert.equal(verified.result, 'verified', verified.refusals.join('; '));
-  assert.deepEqual(verified.postDeploy.map(check => [check.criterion, check.proof, check.result]), [['AC-2', 'manual:post-deploy/webhook-deliveries-clean-24h', 'owed'], ['AC-3', 'manual:post-deploy/github-budget-attention-row-clears', 'owed']]);
-  assert.deepEqual(posted, [`work/${gy1700.id}/deployment`], 'the deployment is recorded and no work item is created');
-});

@@ -5,9 +5,9 @@ The master (`coordinator`) routes and administers GitHub unasked, never implemen
 
 ## Operate
 
-Keep cycling: `master status`; `master run` dispatches; merge gate-passing candidates; rework findings; deployment verification (`master verify-deployment GY-N`, [refusals](operations-reference.md#perpetual-master-loop)); control plane performs "Close finished agent sessions". The deployment-verification step records each loop-owned observation item's due reading on the serving release (a pass closes it `delivered-observation`; a fail escalates, naming the measured values); `master reading GY-N pass|fail DETAIL` records one by hand. Live Confirm-access fixtures: [`master browser capture`](master-agent-reference.md#github-administration-through-the-browser), never a human. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, merges verified against the exact deployed release or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production`: main ahead of production.
+Keep cycling: `master status`; `master run` dispatches; merge gate-passing candidates; rework findings; deployment verification (one release health line; an item is delivered at merge); control plane performs "Close finished agent sessions". The deployment-verification step records each loop-owned observation item's due reading on the serving release (a pass closes it `delivered-observation`; a fail escalates, naming the measured values); `master reading GY-N pass|fail DETAIL` records one by hand. Live Confirm-access fixtures: [`master browser capture`](master-agent-reference.md#github-administration-through-the-browser), never a human. Stop only when every in-scope item is Done or has a genuinely external blocker recorded in Graphyard, release health healthy or deployment-blocked. Ordinary review findings, rework, idle workers, and proof setup are not stopping conditions. `controlPlane.production`: main ahead of production.
 
-`master restart` (stalled loop) runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` (or pin) `master run`, else detached; never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). Loop sleeps `run.intervalSeconds` (≤30s if actionable).
+`master restart` (stalled loop) runs `systemctl --user restart graphyard-master.service` if the [unit](onboarding.md#the-loop-must-be-supervised)'s ExecStart is node `cliPath` (or pin) `master run`, else detached; never from [dirty/non-forward checkouts](master-agent-sessions.md#the-coordinator-checkout-is-confined-at-the-os-level). Loop sleeps `run.intervalSeconds` (≤30s actionable).
 
 ### System-driven items
 
@@ -41,7 +41,7 @@ Past the build gate (`autoDispatch`): a producer request per proof group (`unit`
 - `pane_not_found` panes close. No request outlives its own token: one expired and unreported by Herdr settles `expired` (`dispatch.sessionReconcile.stuck` counts pending). Unanswered sessions relaunch, then `dispatch.abandoned`; exhausted producers raise `escalation:proof-exhausted`, then rework.
 - **Every role fails over on spent quota** or waits as one `capacity` line.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops; a stranded post-merge request is probed hourly and launches once its cause is gone.
 
 ### Proofs must exercise their criterion
 

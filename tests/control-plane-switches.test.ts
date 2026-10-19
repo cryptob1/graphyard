@@ -12,7 +12,7 @@ import { evaluateLandability, landabilityRefusals } from '../src/model/landabili
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
 import { reworkWaitsForApprover, riskClassApprover, selfApprover } from '../src/server/lane-rework.js';
-import { advisoryActionKey, advisoryChore, advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
@@ -172,7 +172,7 @@ test('unit:advisory-tests-selection — scripts/ci-tests.mjs exports the advisor
   for (const advisory of advisoryTests) assert.ok(preMergeTestFiles().includes(advisory), `${advisory} stays in github's pre-merge selection`);
 });
 
-test('integration:advisory-failure-files-chore — after the merge writer delivers a head the loop runs the advisory tests once on its merge commit, and each failing one files one chore naming the test and the merge sha; nothing is reverted and nothing is filed twice', async () => {
+test('integration:advisory-failure-files-nothing — after the merge writer delivers a head the loop runs the advisory tests once on its merge commit, and a failing one files no work item and prints one log line; nothing is reverted', async () => {
   const work = [item('control-plane', ['src/app.ts'], { gates: ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: true, reasons: [] })), stageEnteredAt: iso(start - 60_000) })];
   const events: MergeRecordEvent[] = [], advised: string[] = [], filed: { input: any; key: string }[] = [];
   const ports: MergePorts = {
@@ -196,20 +196,20 @@ test('integration:advisory-failure-files-chore — after the merge writer delive
   work[0] = { ...work[0]!, stage: 'done', observation: { ...work[0]!.observation!, merged: true, mergeSha } } as Work;
   await advisoryIdle(state);
   assert.deepEqual(advised, [mergeSha], 'one advisory run, on the merge commit');
-  const filing = cycle();
-  await mergeWriterStep(filing);
-  assert.equal(filed.length, 1, 'the one failing test file files one chore; a selection failure names no test');
-  assert.deepEqual(filed[0]!.input, advisoryChore('tests/hotspots.test.ts', mergeSha, 'GY-1'));
-  assert.equal(filed[0]!.input.type, 'chore');
-  assert.match(filed[0]!.input.title, new RegExp(`^Advisory test tests/hotspots\\.test\\.ts fails on ${mergeSha.slice(0, 12)}$`));
-  assert.ok(filed[0]!.input.description.includes(mergeSha));
-  assert.equal(state.actions[advisoryActionKey(mergeSha, 'tests/hotspots.test.ts')]?.state, 'done');
+  const logging = cycle();
+  const errors: string[] = [];
+  const error = console.error;
+  console.error = (line: string) => errors.push(String(line));
+  try { await mergeWriterStep(logging); } finally { console.error = error; }
+  assert.deepEqual(filed, [], 'the failing advisory test files no work item (GY-2086)');
+  assert.deepEqual(errors.map(line => line.trim()).filter(line => line.includes('advisory budget tests failed')).length, 1, 'the failing advisory test prints one log line');
+  assert.match(errors.find(line => line.includes('advisory budget tests failed')) ?? '', new RegExp(`failed on ${mergeSha}`));
   assert.ok(!events.some(event => (event as { kind: string }).kind === 'revert'), 'nothing is reverted');
   for (let again = 0; again < 2; again++) await mergeWriterStep(cycle());
-  assert.deepEqual([filed.length, advised.length], [1, 1], 'neither the run nor the chore repeats');
+  assert.deepEqual([filed.length, advised.length], [0, 1], 'neither the run nor a filing repeats');
 });
 
-test('integration:advisory-failure-files-chore — the advisory obligation is read from the merge ledger and kept in the persisted state: a restart mid-run runs it again, a delivery an open intent\'s reconciliation made is owed a run though no flight supplied it, and nothing delivered before the ledger was first read is owed', async () => {
+test('integration:advisory-failure-files-nothing — the advisory obligation is read from the merge ledger and kept in the persisted state: a restart mid-run runs it again, a delivery an open intent\'s reconciliation made is owed a run though no flight supplied it, and nothing delivered before the ledger was first read is owed', async () => {
   let clock = start;
   const delivered = (key: string, mergeSha: string, at: number) => ({ ...item('control-plane', ['src/app.ts']), key, id: key, stage: 'done',
     mergeLedger: { key, state: 'reconciled', head: sha(`head:${key}`), baseTip: base, mergeSha, risk: 'normal', intentAt: iso(at), pushedAt: iso(at + 1), observedTip: mergeSha, refusal: null, events: 3 } }) as unknown as Work;
@@ -239,12 +239,12 @@ test('integration:advisory-failure-files-chore — the advisory obligation is re
   assert.deepEqual(advised, [reconciled, reconciled], 'the restarted loop runs the interrupted obligation again');
   await advisoryIdle(state);
   await step();
-  assert.deepEqual(filed, [`Advisory test tests/module-budgets.test.ts fails on ${reconciled.slice(0, 12)}`]);
+  assert.deepEqual(filed, [], 'the failing advisory test files nothing across the restart either');
   assert.deepEqual([state.mergeWriter.advisory?.due, state.mergeWriter.advisory?.ran.map(entry => entry.mergeSha)], [[], [reconciled]]);
-  // Another restart: nothing runs or files twice.
+  // Another restart: nothing runs twice.
   state = JSON.parse(JSON.stringify(state));
   for (let again = 0; again < 3; again++) { await step(); await advisoryIdle(state); }
-  assert.deepEqual([advised.length, filed.length], [2, 1]);
+  assert.deepEqual([advised.length, filed.length], [2, 0]);
 });
 
 test('unit:rework-approver-by-risk — a control-plane rework waits for an approver only for a sensitive change, applied otherwise by graphyard-risk-class; github keeps reworkNeedsApprover by lane', () => {
