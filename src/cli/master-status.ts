@@ -170,7 +170,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // GY-1511: the Herdr server holding this install's agents, and the command that opens them.
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,
-    // The release reading (GY-1302): last deployed SHA, production lag; `deploy`, the one line on a failed continuous deploy (GY-1982).
+    // GY-1982: + a failed deploy's line.
     promotion: { ...promotion, deploy: deployLine(cursor?.promotion?.deployFailed) },
     launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
     itemSize,
