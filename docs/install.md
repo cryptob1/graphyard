@@ -42,7 +42,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 
 ## Step 3: deploy key
 
-`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` unless listed. The merge writer trial-merges each submitted head and pushes the base with it alone; the loop re-registers a missing key each setup run. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
+`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` unless listed. The merge writer trial-merges each submitted head and pushes the base with it alone; setup re-registers a missing key. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
 
 ## Step 4: summary
 
@@ -58,7 +58,7 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-change); the merge write
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs a clean checkout with `DATABASE_URL` and `GRAPHYARD_URL`; backs up, redeploys a build stamped from the target (`install --source-root DIR`), restarts the loop, waits for a healthy `/healthz`; refuses older schemas; failures name step and rollback (migrated: roll-forward).
+`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs a clean checkout with `DATABASE_URL` and `GRAPHYARD_URL`; backs up, redeploys a build stamped from the target (`install --source-root DIR`), restarts the loop, waits for healthy `/healthz`; refuses older schemas; failures name step and rollback (migrated: roll-forward).
 
 ## Failure handling
 
