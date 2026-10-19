@@ -3,7 +3,7 @@
 
 Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
 
-**The master loop deploys continuously** (compose/local installs): each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case as the install's `<installId>-e2e` identity, closing pass or fail, obsolete, naming the run, whatever its cases created; passing, the loop restarts onto it. The redeploy stamps from the deployed commit's tree, so `/healthz` names it while the loop runs a held snapshot. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`); two tries until main moves, unless the tip migrated the database. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline.
+**The master loop deploys continuously** (compose/local installs): each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case as the install's `<installId>-e2e` identity, closing pass or fail, obsolete, naming the run, whatever its cases created; passing, the loop restarts onto it. The redeploy stamps from the deployed commit's tree, so `/healthz` names it while the loop runs a held snapshot. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`); two tries until main moves, unless the tip migrated the database. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline. Main moves only by the merge writer's push; the report-only main watch explains every commit. Base failures file P0.
 
 ### Release filing credential
 
@@ -11,9 +11,9 @@ Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `obs
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
-### Main and delivery
+### One delivery path
 
-Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)). Main moves only by the merge writer's push; the report-only main watch explains every commit. Base failures file P0.
+Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)).
 
 ## Managed repositories
 
