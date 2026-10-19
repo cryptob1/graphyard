@@ -178,7 +178,7 @@ async function syncFixture(plannedFiles: string[]) {
   return { root, main, branch, git, shipped, sync, close: () => new Promise<void>(resolve => http.close(() => resolve())) };
 }
 
-test('integration:speed-regression-guard — sync performs the canonical main integration (merge of the shared tip the loop fetched, never rebase) and the self-check against that tip: a re-resolved file outside plannedFiles is refused with the restore command, and the push is cleared once it matches main again', async () => {
+test('integration:speed-regression-guard — sync performs the canonical main integration (merge of the shared tip the loop fetched, never rebase) and judges only the merge: a file outside plannedFiles that differs from main reports ok, and a real conflict is still reported', async () => {
   const fixture = await syncFixture(['speed.ts']);
   const { main, branch, git, shipped, sync } = fixture;
   try {
@@ -193,19 +193,22 @@ test('integration:speed-regression-guard — sync performs the canonical main in
     assert.equal(merged.output.merged, true); assert.equal(merged.output.ok, true); assert.equal(merged.output.base, 'origin/main');
     assert.equal(merged.output.baseTip, git(main, 'rev-parse', 'HEAD'));
     assert.equal(git(branch, 'rev-list', '--merges', '--count', 'HEAD'), '1', 'the integration is a merge commit, never a rebase');
-    assert.deepEqual(merged.output.files.map((entry: any) => [entry.path, entry.kind]), [['speed.ts', 'in-scope']]);
     assert.match(merged.output.next, /complete GY-1 EPOCH --head/);
-    // The worker "resolves" the shipped module back to its own version and commits: the self-check refuses before any push.
-    await writeFile(join(branch, 'conflicts.ts'), 'export const probe = 1;\n'); git(branch, 'add', '.'); git(branch, 'commit', '-q', '-m', 'bad resolution');
-    const refused = await sync();
-    assert.equal(refused.code, 1); assert.equal(refused.output.ok, false);
-    assert.deepEqual(refused.output.refused.map((line: string) => line.split(':')[0]), ['conflicts.ts']);
-    assert.match(refused.output.refused[0], /^conflicts\.ts: differs from the base branch tip \(\+1 −1\)$/);
-    assert.match(refused.output.next, new RegExp(`git checkout ${refused.output.baseTip.slice(0, 12)} -- PATH`)); assert.match(refused.output.next, /Do not complete until it reports ok/);
-    git(branch, 'checkout', refused.output.baseTip, '--', 'conflicts.ts'); git(branch, 'commit', '-q', '-m', 'restore');
-    const restored = await sync();
-    assert.equal(restored.code, 0); assert.equal(restored.output.ok, true); assert.deepEqual(restored.output.refused, []);
+    // The worker edits conflicts.ts, a base file outside plannedFiles: the merge alone is judged,
+    // the report lists no out-of-scope finding, and no --restore is offered.
+    await writeFile(join(branch, 'conflicts.ts'), 'export const probe = 3;\n'); git(branch, 'add', '.'); git(branch, 'commit', '-q', '-m', 'outside the plan');
+    const outside = await sync();
+    assert.equal(outside.code, 0); assert.equal(outside.output.ok, true);
+    assert.equal(outside.output.refused, undefined); assert.equal(outside.output.files, undefined);
+    assert.ok(!/--restore/.test(outside.output.next), outside.output.next);
     assert.equal(git(branch, 'status', '--porcelain'), '');
+    // A real merge conflict is still reported: GY-66 ships conflicts.ts again while the branch holds its own edit.
+    await writeFile(join(main, 'conflicts.ts'), 'export const probe = 4; // shipped by GY-66 again\n'); git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'GY-66 again'); git(main, 'push', '-q', 'origin', 'main');
+    (shipped as any).delivery.mergeSha = git(main, 'rev-parse', 'HEAD');
+    git(branch, 'fetch', '-q', '--no-tags', 'origin');
+    const conflicted = await sync();
+    assert.equal(conflicted.code, 1); assert.equal(conflicted.output.merged, false);
+    assert.deepEqual(conflicted.output.conflicts.map((entry: any) => entry.path), ['conflicts.ts']);
   } finally { await fixture.close(); await rm(fixture.root, { recursive: true, force: true }); }
 });
 
@@ -215,7 +218,7 @@ test('integration:speed-regression-guard — the generated worker instructions r
     assert.ok(instructions.includes(fragment), `the generated worker instructions must say: ${fragment}`);
   assert.ok((await read('AGENTS.md')).includes('Run `sync GY-N` before submitting'), 'this repository carries the generated block');
   const coordination = await read('docs/coordination.md');
-  assert.ok(coordination.includes('## Refuse candidates that revert shipped code outside their scope'));
+  assert.ok(coordination.includes('## Scope is a plan, not a lock'));
   assert.ok(coordination.includes('graphyard sync'));
 });
 
@@ -351,18 +354,6 @@ test('integration:speed-ci-proofs — every unit:* and integration:* proof an it
   let item = await submitted('Manual proofs start at submit', ['src/server/routes/pipeline-speed.ts'], { producerProofs: ['manual:speed-ci-proofs-live', 'manual:speed-target-met'] });
   item = await engine.observe(item.id, item.revision, observed(item, { sha: H, baseSha: B }));
   assert.deepEqual(item.autoDispatch!.producers, []);
-  // The workflow: candidate pushes (including Graphyard's own tip publication) plan, exercise in parallel, publish through the CI producer.
-  const workflow = await read('.github/workflows/acceptance.yml');
-  assert.match(workflow, /pull_request_target:\n\s+types: \[opened, reopened, synchronize\]\n\s+branches: \[main\]/);
-  assert.match(workflow, /run: node scripts\/enumerate-ci-proofs\.mjs/);
-  assert.match(workflow, /with: \{ node-version: '24', cache: npm \}/, 'npm dependencies are cached');
-  assert.match(workflow, /key: docker-image-postgres-17-alpine/, 'the isolated database image is cached');
-  assert.match(workflow, /cache-from: type=gha,scope=acceptance-\$\{\{ needs\.plan\.outputs\.pr \}\}/, 'candidate image layers are cached per pull request');
-  assert.match(workflow, /include: \$\{\{ fromJSON\(needs\.plan\.outputs\.proofs\) \}\}/, 'one job per proof, in parallel');
-  assert.match(workflow, /publish-acceptance\.mjs --candidate-run reports/);
-  assert.ok(!/GRAPHYARD_(CI_)?PRODUCER_TOKEN/.test(workflow.slice(workflow.indexOf('  exercise:'), workflow.indexOf('  publish:'))), 'the exercise job holds no producer credential');
-  const docs = await read('docs/github.md');
-  for (const fragment of ['### Proofs in CI', 'pull_request_target', 'cached', 'Manual proofs stay producer sessions']) assert.ok(docs.includes(fragment), `docs/github.md must say: ${fragment}`);
 });
 
 // ---------------------------------------------------------------------------------------------

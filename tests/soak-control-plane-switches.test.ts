@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { advisoryActionKey, advisoryChore, advisoryFilingAttempts, advisoryIdle, advisoryKeptDue, advisoryKeptRuns, advisoryKeptUnfiled, mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { advisoryIdle, advisoryKeptDue, advisoryKeptRuns, mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { workerHarnessPlan } from '../src/master/harness.js';
 import type { MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { systemInvariants } from '../src/model/invariants.js';
@@ -16,13 +16,12 @@ import type { Work } from '../src/model.js';
  * GY-1528: the control-plane switches over a simulated day of the real loop's cycles, in the real
  * step order. Items are submitted every quarter hour, each with a standing scope request, and the
  * merge writer delivers them one at a time. After each merge the advisory budget tests run once on
- * its merge commit: some fail (each failing test files one chore), some cannot run at all, one run
- * hangs until the loop restarts, the loop restarts at other points too (its state read back from
- * JSON, every in-memory run lost), the chore route refuses some first attempts, and the merger read
- * fails for stretches. The loop must run every delivered merge's advisory tests, file each failing
- * (merge, test) chore exactly once and never revert, never decide, widen or re-plan a scope request,
- * install no scope-guard hook, keep its state bounded, and hold every system invariant
- * docs/master-agent.md#system-invariants names.
+ * its merge commit: some fail (filing nothing since GY-2086, one log line each), some cannot run at
+ * all, one run hangs until the loop restarts, the loop restarts at other points too (its state read
+ * back from JSON, every in-memory run lost), and the merger read fails for stretches. The loop must
+ * run every delivered merge's advisory tests, file nothing for a failing one and never revert,
+ * never decide, widen or re-plan a scope request, install no scope-guard hook, keep its state
+ * bounded, and hold every system invariant docs/master-agent.md#system-invariants names.
  */
 const minute = 60_000;
 const start = Date.parse('2030-05-01T00:00:00Z');
@@ -38,7 +37,6 @@ const items = 80, submitEveryMs = 15 * minute, cycleMs = 2 * minute, cycles = (2
 const advisoryFails = (n: number) => n % 7 === 0;
 const advisoryCannotRun = (n: number) => n % 13 === 0 && !advisoryFails(n);
 const advisoryHangs = (n: number) => n === 30;
-const choreRouteRefusesFirst = (n: number) => n % 14 === 0;
 const mergerUnreadable = (cycle: number) => cycle > 0 && cycle % 50 < 2;
 const restartAt = (cycle: number) => cycle === 300 || cycle === 501;
 const failing = ['tests/hotspots.test.ts', 'tests/module-budgets.test.ts'];
@@ -50,11 +48,9 @@ class World {
   submitted = new Map<number, number>();
   merges = new Map<string, number>();
   advisoryRuns = new Map<string, number>();
-  chores = new Map<string, string>();
-  choreAttempts = new Map<string, number>();
   scopeCalls: string[] = [];
   hanging = false; hung = false; cycle = 0;
-  /** The second day's outage: the work route refuses every filing while `routeDown`, and a failing merge fails `failing` tests. */
+  /** The second day's outage: a failing merge fails `failing` tests. */
   constructor(readonly now: () => number, readonly outage: { failing: (n: number) => string[]; routeDown: () => boolean } | null = null) {}
   head(n: number) { return sha(`head${n}`); }
   snapshot(): Work[] {
@@ -102,20 +98,9 @@ class World {
       },
     };
   }
-  /** The work route: idempotent per key, as the coordinator's is; some first attempts refused. */
-  fileChore = async (input: { title: string; type: string }, key: string) => {
-    const attempts = (this.choreAttempts.get(key) ?? 0) + 1;
-    this.choreAttempts.set(key, attempts);
-    const n = this.merges.get(key.split(':')[1]!)!;
-    if (this.outage?.routeDown()) throw new Error('work: route down (HTTP 503)');
-    if (!this.outage && choreRouteRefusesFirst(n) && attempts === 1) throw new Error('work: route down (HTTP 503)');
-    assert.equal(input.type, 'chore');
-    if (!this.chores.has(key)) this.chores.set(key, `GY-${1000 + this.chores.size}`);
-    return { key: this.chores.get(key)! } as Work;
-  };
 }
 
-test('unit:scope-switches-control-plane — a simulated day on the real loop under the control-plane merger: every delivered merge gets its advisory run, each failing (merge, test) files exactly one chore through restarts, hung runs, refused filings and unreadable merger stretches, nothing is reverted, no scope request is decided, widened or re-planned, no scope-guard hook is installed, state stays bounded, and every system invariant docs/master-agent.md names holds', { timeout: 300_000 }, async () => {
+test('unit:scope-switches-control-plane — a simulated day on the real loop under the control-plane merger: every delivered merge gets its advisory run, a failing one files no work item through restarts, hung runs and unreadable merger stretches, nothing is reverted, no scope request is decided, widened or re-planned, no scope-guard hook is installed, state stays bounded, and every system invariant docs/master-agent.md names holds', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submitted.set(n, start + n * submitEveryMs);
@@ -125,7 +110,7 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
     closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), fileFaultClass: world.fileChore,
+    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(),
     decide: scopeSpy('decide'), decideScope: scopeSpy('decideScope'), widenScope: scopeSpy('widenScope'), replan: scopeSpy('replan'), baseSuccessions: scopeSpy('baseSuccessions') } as unknown as DaemonEffects;
   let state: DaemonState = emptyDaemonState(config);
   const invariantNames = new Set<string>();
@@ -138,7 +123,7 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
     await mergeWriterIdle(state);
     if (!world.hanging) await advisoryIdle(state);
     const advisory = state.mergeWriter.advisory;
-    assert.ok(!advisory || (advisory.due.length <= advisoryKeptDue && advisory.ran.length <= advisoryKeptRuns && advisory.unfiled.length <= advisoryKeptUnfiled), `cycle ${cycle}: the advisory state is bounded`);
+    assert.ok(!advisory || (advisory.due.length <= advisoryKeptDue && advisory.ran.length <= advisoryKeptRuns), `cycle ${cycle}: the advisory state is bounded`);
     for (const check of state.invariants.report) { invariantNames.add(check.invariant); assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`); }
     if (cycle % 60 === 0) for (const item of world.snapshot()) assert.equal(workerHarnessPlan({ cliPath: '/bin/graphyard', branch: `graphyard/${item.key.toLowerCase()}-1`, baseBranch: 'main', credentialHome: '/creds', key: item.key, epoch: 1, mergeWriter: 'control-plane' }).hooks, undefined, `${item.key}: no scope-guard hook`);
   }
@@ -157,61 +142,14 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
     assert.ok(runs <= 2, `GY-${n}: ran ${runs} times; only a restart reruns one`);
     if (advisoryHangs(n)) assert.equal(runs, 2, 'the hung run ran again after the restart');
   }
-  // Exactly one chore per failing (merge, test), whatever the restarts and refused filings; none for a run that could not run.
-  const expected = world.pushes.filter(mergeSha => advisoryFails(world.merges.get(mergeSha)!)).flatMap(mergeSha => failing.map(test => `advisory-test:${mergeSha}:${test}`)).sort();
-  assert.ok(expected.length > 0);
-  assert.deepEqual([...world.chores.keys()].sort(), expected, 'each failing (merge, test) filed one chore');
-  for (const key of expected) {
-    const [, mergeSha, test] = key.split(':');
-    assert.equal(state.actions[advisoryActionKey(mergeSha!, test!)]?.state, 'done', `${key} recorded filed`);
-    assert.equal(advisoryChore(test!, mergeSha!, `GY-${world.merges.get(mergeSha!)}`).type, 'chore');
-  }
-  assert.ok(expected.some(key => (world.choreAttempts.get(key) ?? 0) > 1), 'a refused filing was retried');
+  // Nothing is filed for a failing advisory test (GY-2086); a run that could not run is recorded, never filed or reverted.
+  assert.ok(world.pushes.some(mergeSha => advisoryFails(world.merges.get(mergeSha)!)), 'the day includes failing advisory runs');
   assert.ok(world.pushes.some(mergeSha => advisoryCannotRun(world.merges.get(mergeSha)!) && state.actions[`merge-writer-advisory:${mergeSha}`]?.state === 'failed'), 'a run that could not run is recorded, never filed or reverted');
   assert.ok(![...world.recorded.values()].flat().some(event => (event as { kind: string }).kind === 'revert'), 'nothing is reverted');
   assert.deepEqual(state.mergeWriter.advisory?.due, [], 'nothing is still owed');
-  assert.deepEqual(state.mergeWriter.advisory?.unfiled, [], 'nothing is left unfiled');
   // The state round-trips, and every invariant the guide names was judged.
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).mergeWriter, state.mergeWriter);
   const guide = readFileSync(docs, 'utf8');
   const section = guide.slice(guide.indexOf('### System invariants'), guide.indexOf('## Research and diagnosis'));
   for (const invariant of systemInvariants) { assert.ok(section.includes(`\`${invariant}\``), `docs/master-agent.md#system-invariants names ${invariant}`); assert.ok(invariantNames.has(invariant), `${invariant} was judged over the day`); }
-});
-
-test('unit:scope-switches-control-plane — a filing outage across a simulated day: advisory failures past the unfiled bound and filings refused far past the escalation threshold are held and retried, never dropped, so after the outage every failing (merge, test) has exactly one chore', { timeout: 300_000 }, async () => {
-  let now = start;
-  // Every merge fails 30 advisory tests, so four failing merges already overflow the unfiled bound; the route is down for the first sixteen hours.
-  const outageEnds = start + 16 * 60 * minute;
-  const world = new World(() => now, { failing: n => Array.from({ length: 30 }, (_, index) => `tests/budget-${index}.test.ts`).concat(n % 2 ? [] : ['scripts/ci-tests.mjs advisory']), routeDown: () => now < outageEnds });
-  for (let n = 1; n <= 40; n++) world.submitted.set(n, start + n * submitEveryMs);
-  const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), fileFaultClass: world.fileChore } as unknown as DaemonEffects;
-  let state: DaemonState = emptyDaemonState(config);
-  let held = false, escalated = false;
-  for (let cycle = 0; cycle < cycles; cycle++) {
-    now = start + cycle * cycleMs; world.cycle = cycle;
-    // Restarts during the outage, one of them while a full unfiled list holds a run back.
-    if (cycle === 240 || cycle === 400) state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state)));
-    await runCycle(config, state, effects, () => now);
-    await mergeWriterIdle(state); await advisoryIdle(state);
-    const advisory = state.mergeWriter.advisory;
-    assert.ok(!advisory || (advisory.due.length <= advisoryKeptDue && advisory.ran.length <= advisoryKeptRuns && advisory.unfiled.length <= advisoryKeptUnfiled), `cycle ${cycle}: the advisory state is bounded`);
-    if (advisory?.unfiled.length === advisoryKeptUnfiled && advisory.due.length) held = true;
-    if (advisory?.unfiled.some(entry => entry.attempts > advisoryFilingAttempts && state.actions[advisoryActionKey(entry.mergeSha, entry.test)]?.detail.startsWith('Escalated after'))) escalated = true;
-    for (const check of state.invariants.report) assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`);
-  }
-  assert.ok(held, 'a full unfiled list held a run back rather than dropping its failures');
-  assert.ok(escalated, 'filings were retried past the escalation threshold, each escalation recorded');
-  // Settle what the outage left owed; the backoff is at most an hour.
-  for (let extra = 0; extra < 200 && (state.mergeWriter.advisory?.unfiled.length || state.mergeWriter.advisory?.due.length); extra++) { now += cycleMs; world.cycle = cycles + extra; await runCycle(config, state, effects, () => now); await mergeWriterIdle(state); await advisoryIdle(state); }
-  assert.deepEqual(world.snapshot().filter(item => item.stage !== 'done').map(item => item.key), [], 'every item is delivered');
-  const expected = world.pushes.flatMap(mergeSha => Array.from({ length: 30 }, (_, index) => `advisory-test:${mergeSha}:tests/budget-${index}.test.ts`)).sort();
-  assert.equal(expected.length, 40 * 30);
-  assert.deepEqual([...world.chores.keys()].sort(), expected, 'each failing (merge, test) filed exactly one chore, none dropped');
-  assert.deepEqual([state.mergeWriter.advisory?.due, state.mergeWriter.advisory?.unfiled], [[], []], 'nothing is still owed or unfiled');
-  assert.ok(![...world.recorded.values()].flat().some(event => (event as { kind: string }).kind === 'revert'), 'nothing is reverted');
 });

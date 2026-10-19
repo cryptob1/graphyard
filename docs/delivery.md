@@ -34,11 +34,11 @@ Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard
 
 ### Main guard
 
-Every 30s the guard reverts merges failing parent-passed checks; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon. Reverts failing the merge's named tests close `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun (merge, base): [flakes](validation.md#flake-ledger) land; base failures file P0.
+Every 30s the guard reverts merges failing parent-passed checks; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon. Reverts failing the merge's named tests close `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun (merge, base): a pass on the rerun lands, filing nothing; base failures file P0.
 
 ## Managed repositories
 
-`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` renders `graphyard-release-candidate.yml` (`candidateSchedule`/`--candidate-cron CRON|off`), `graphyard-promotion.yml`. `deploy.adapter`: `railway`|`command` (`deploy.uat`/`deploy.production`, given `GRAPHYARD_CANDIDATE_SHA`). `--delivery local|per-pr` overrides; `install --plan` lists.
+`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` writes the policy to `graphyard.json` (`candidateSchedule`/`--candidate-cron CRON|off`), writes no `.github/workflows` file and removes generated `graphyard-release-candidate.yml`/`graphyard-promotion.yml` copies. `deploy.adapter`: `railway`|`command` (`deploy.uat`/`deploy.production`, given `GRAPHYARD_CANDIDATE_SHA`). `--delivery local|per-pr` overrides; `install --plan` lists.
 
 `mode: local` (`control-plane` default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, generated workflows removed; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application; invalid refuse `init`/`install`/`/api/status` (`project.error`); **Delivery** shows it.
 

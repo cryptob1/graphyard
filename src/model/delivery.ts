@@ -31,66 +31,12 @@ export interface Delivery { mergedAt: string; mergeSha: string; authorizationRev
 export const deploySmokeRequired = (policy: Work['policy']) => !!policy.deploySmoke;
 
 /**
- * GY-1824: how many settled deliveries still owing their record one full reconciliation pass
- * raises a verify-deployment row for (newest item first). Deliveries done before the unattended
- * path shipped hold no row and are re-evaluated by nothing else, so the pass backfills them a few
- * at a time — the first passes after this ships never sweep the whole delivery history into the
- * queue at once — and every one of them is reached in turn, however old its merge.
+ * Done = merged (GY-1981): a done item with a delivery is delivered, whatever its smoke policy and
+ * whether or not a release observation was ever recorded on it. Production health is one
+ * release-level reading, not a per-item state; `deployment` and `smoke` on older deliveries are
+ * history that still loads and decides nothing.
  */
-export const deploymentBackfillPerPass = 5;
-
-/**
- * A done, unclosed delivery the unattended verify-deployment path still owes its record: no release
- * observation is bound to it yet. The smoke policy decides what follows a record (the
- * post-deployment smoke proof), never whether the record is owed, so this holds for non-smoke
- * policies too — the gap GY-1824 closes — and for a merge of any age.
- */
-export const deploymentUnrecorded = (work: Work) => work.stage === 'done' && !work.closure && !!work.delivery && !work.delivery.deployment;
-
-/**
- * Post-delivery state, derived from the delivery snapshot alone. `delivered` is the terminal state
- * for work whose policy asks for no smoke proof; the others describe the second confidence layer.
- */
-export type DeliveryState = 'delivered' | 'awaiting-deployment' | 'awaiting-smoke' | 'smoke-passed' | 'delivered-with-failure';
+export type DeliveryState = 'delivered';
 export function deliveryState(work: Work): DeliveryState | null {
-  if (work.stage !== 'done' || !work.delivery) return null;
-  if (!deploySmokeRequired(work.policy)) return 'delivered';
-  const { deployment, smoke } = work.delivery;
-  if (!deployment) return 'awaiting-deployment';
-  // A smoke result only counts for the deployed commit Graphyard recorded for this delivery.
-  if (!smoke || smoke.sha !== deployment.sha || smoke.mergeSha !== work.delivery.mergeSha) return 'awaiting-smoke';
-  if (smoke.result === 'fail') return 'delivered-with-failure';
-  // GY-1912: skips never verify — a pass that executed nothing or skipped a case leaves the release unverified.
-  return smoke.executed > 0 && smoke.skipped === 0 ? 'smoke-passed' : 'awaiting-smoke';
-}
-
-/**
- * What an operator does about a failed smoke proof. Graphyard v0.1 does not roll anything back
- * itself: the guidance names the exact commits involved so the person or agent acting on it
- * cannot confuse the failing release with the one to restore.
- */
-export function rollbackGuidance(work: Work, baseBranch = 'main'): string | null {
-  if (deliveryState(work) !== 'delivered-with-failure') return null;
-  const { mergeSha, deployment, smoke } = work.delivery!;
-  const serving = deployment!.covers === 'exact' ? `merge commit ${mergeSha}` : `${deployment!.sha}, which contains merge commit ${mergeSha}`;
-  return `${work.key} is delivered with a failed post-deployment smoke proof: the live deployment served ${serving} when ${smoke!.producer} reported ${smoke!.executed} executed, ${smoke!.skipped} skipped at ${smoke!.at}. `
-    + `Roll the deployment back to the last release whose smoke proof passed, or revert ${mergeSha} on ${baseBranch} through a new work item so the revert is reviewed and merged under the same gates. `
-    + `Do not backfill passing evidence for this delivery; the failure stays on record, and the fix or revert is a follow-up item with its own proof.`;
-}
-
-/** Time from merge to the smoke verdict, or to `now` while the verdict is still outstanding. */
-export function postDeployMs(work: Work, now: number): number | null {
-  const state = deliveryState(work);
-  if (!state || state === 'delivered') return null;
-  const end = state === 'smoke-passed' || state === 'delivered-with-failure' ? Date.parse(work.delivery!.smoke!.at) : now;
-  const value = end - Date.parse(work.delivery!.mergedAt);
-  return Number.isFinite(value) && value >= 0 ? value : null;
-}
-
-/** Time from the item's creation to the observed deployment covering its merge: PR-to-production latency. */
-export function productionLatencyMs(work: Work): number | null {
-  const observedAt = work.delivery?.deployment?.observedAt;
-  if (work.stage !== 'done' || !observedAt) return null;
-  const value = Date.parse(observedAt) - Date.parse(work.createdAt);
-  return Number.isFinite(value) && value >= 0 ? value : null;
+  return work.stage === 'done' && work.delivery ? 'delivered' : null;
 }

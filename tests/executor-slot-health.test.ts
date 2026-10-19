@@ -149,7 +149,7 @@ function dispatcher(start: string, snapshots: (now: number) => Work) {
       if (workerStartFence({ ...item, containmentQuarantine: fence } as Work, clock)) throw new Error(refusal);
       return { launched: item.key };
     },
-    launchReview: async () => ({}), launchProducer: async () => ({}), observeDeployment: async () => ({}) as any,
+    launchReview: async () => ({}), launchProducer: async () => ({}),
     now: () => clock, sleep: async ms => { slept.push(ms); clock += ms; },
   };
   return { handlers: controlPlaneHandlers(() => config, effects), slept, launches, clock: () => clock };

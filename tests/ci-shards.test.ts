@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { baselineSentinel, dependencyMap, listTestFiles, mergeDurations, readDurations, selectAffected, selectForRun, shardFiles, shardImbalance } from '../scripts/ci-tests.mjs';
 import { nestedFirst, nestedPortGap, nodeTestArgs, runTests } from './helpers/run-tests.js';
-import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-499: the required `test` check ran the whole suite on one runner in about fifteen minutes, on
@@ -20,23 +20,8 @@ const workflowJob = (text: string, id: string) => {
   return end < 0 ? rest : rest.slice(0, end + 1);
 };
 
-test('unit:ci-sharded — the required test check aggregates a matrix of eight duration-balanced shards that finish within 20% of each other, and passes only when every shard passes', async () => {
-  const ci = await readFile(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
-  // Branch protection is unchanged: the check it names is still the job `test`, now an aggregate.
-  const jobs = readWorkflow(ci).jobs.map(job => job.id);
-  for (const id of ['test', 'test-shard', 'test-browser']) assert.ok(jobs.includes(id), `ci.yml defines ${id}`);
-  const shard = workflowJob(ci, 'test-shard'), aggregate = workflowJob(ci, 'test');
-  assert.match(shard, /matrix:\n\s+shard: \[1, 2, 3, 4, 5, 6, 7, 8\]/, 'eight shards by default');
-  assert.match(shard, /fail-fast: false/, 'one failing shard does not hide the others');
-  assert.match(shard, /SHARD: \$\{\{ matrix\.shard \}\}\/\$\{\{ strategy\.job-total \}\}/, 'each shard knows its index and the matrix size');
-  assert.match(shard, /node scripts\/ci-tests\.mjs select --out "\$RUNNER_TEMP\/selected-tests\.txt"/);
-  assert.match(shard, /npm test -- --shard "\$SHARD" --files-from "\$RUNNER_TEMP\/selected-tests\.txt" --durations /);
-  assert.match(aggregate, /needs: \[test-shard, test-browser\]/);
-  assert.match(aggregate, /if: \$\{\{ !cancelled\(\) \}\}/, 'the aggregate reports a failed shard rather than being skipped with it');
-  assert.match(aggregate, /SHARDS: \$\{\{ needs\.test-shard\.result \}\}/);
-  assert.match(aggregate, /test "\$SHARDS" = success && test "\$BROWSER" = success/, 'passes only when every shard and the browser suite passed');
-  assert.match(aggregate, /timing-report\.ts "\$RUNNER_TEMP\/graphyard-timing\.jsonl" "\$RUNNER_TEMP"\/timing\/test-\*\.log/, 'timing annotations still land on the required check');
-
+test('unit:ci-sharded — duration-balanced shards finish within 20% of each other (GY-2009: Actions ci.yml gate removed; merge writer trial shards tests)', async () => {
+  assert.ok(!existsSync(new URL('../.github/workflows/ci.yml', import.meta.url)), 'ci.yml is gone');
   // The recorded durations cover the suite, and the seven shards they give finish within 20%.
   const tests = listTestFiles(), durations = readDurations();
   const recorded = tests.filter(file => Number.isFinite(durations[file]));

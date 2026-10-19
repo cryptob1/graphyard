@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, deploymentBackfillPerPass, deploymentUnrecorded, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { readInterventionReport } from './interventions/report.js';
 import { interventionPolicyFromEnv } from './model/interventions.js';
@@ -180,9 +180,6 @@ const commands = {
     ciRun: ciRunBindingSchema.optional(),
     // GY-135: the same proof run against a tree with its criterion's behaviour removed.
     exercise: proofExerciseSchema.optional() }).strict(),
-  // The coordinator's observation of the running release covering a delivered merge. It names the
-  // serving commit and where it was read; whether it is exact is derived, never asserted.
-  deployment: z.object({ sha, mergeSha: sha, source: z.enum(['endpoint', 'github-deployment']), observedAt: z.iso.datetime() }).strict(),
   // GY-1779: the loop's own reading of a loop-owned observation item's proof on the serving release,
   // recorded through the coordinator by its deployment-verification step: `sha` is the release the
   // control plane observed serving the parent delivery's merge `baseSha`; `detail` names the measured values.
@@ -1502,9 +1499,9 @@ export class Engine {
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
-      // The only commands a delivered item still accepts: containment cleanup, and the two
-      // post-deployment facts that extend the delivery snapshot without reopening the merge.
-      const postDeployment = command === 'deployment' || command === 'evidence' && data.proof === deploySmokeProof;
+      // The only commands a delivered item still accepts: containment cleanup, and the
+      // post-deployment smoke fact that extends the delivery snapshot without reopening the merge.
+      const postDeployment = command === 'evidence' && data.proof === deploySmokeProof;
       const containmentCleanup = ['settle', 'recover', 'autosettle'];
       const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
       // Ending a session handle an item still carries is the third thing a delivered item accepts,
@@ -2120,17 +2117,6 @@ export class Engine {
         const evidence: Evidence = { id: randomUUID(), proof: data.proof, sha: data.sha, baseSha: data.baseSha, policyRevision: data.policyRevision, producer: actor.id, trusted: true, result: data.result, executed: 1, skipped: 0, at: now.toISOString(), reading: { detail: data.detail } };
         work.evidence.push(evidence);
       }
-      if (command === 'deployment') {
-        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        demand(work.stage === 'done' && !!work.delivery, 'A deployment observation is recorded only for delivered work');
-        demand(data.mergeSha === work.delivery!.mergeSha, 'Deployment observation names another merge commit');
-        // One observation per delivery: the smoke proof binds to exactly this serving commit, so a
-        // later rollout cannot quietly move the target the proof was made against.
-        demand(!work.delivery!.deployment, 'Delivery already has a recorded deployment observation');
-        demand(Date.parse(data.observedAt) <= now.getTime() + 60_000 && Date.parse(data.observedAt) >= Date.parse(work.delivery!.mergedAt) - 60_000, 'Deployment observation time must fall between the merge and now');
-        work.delivery!.deployment = { sha: data.sha, mergeSha: data.mergeSha, source: data.source, observedAt: data.observedAt,
-          covers: data.sha === data.mergeSha ? 'exact' : 'descendant', at: now.toISOString(), observer: actor.id };
-      }
       if (command === 'evidence') {
         demand(actor.role === 'producer' || actor.role === 'worker' || actor.role === 'admin', 'Evidence submission is not permitted', 403);
         // Workers may still record their own untrusted assertions; every identity
@@ -2216,8 +2202,7 @@ export class Engine {
       // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
       // append its audit/revision metadata, but stale inputs must not re-evaluate it.
       if (!deliveredContainmentCleanup && !postDeployment && !deliveredSessionClosure) this.evaluate(work, all, now);
-      // A delivered item's gates are an immutable snapshot, but what it still owes — a deployment
-      // carrying the merge — is not; its queue is reconciled without re-evaluating the delivery.
+      // A delivered item's gates are an immutable snapshot; its queue is settled without re-evaluating the delivery.
       else settleDelivered(work, all, now);
       await this.recordDispatch(db, work, now);
       await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
@@ -3009,8 +2994,6 @@ export class Engine {
    * planned, so the count bounds how much one surprise at write time sends back for evaluation.
    */
   reconcileBatchWrites = 8;
-  /** GY-1824: settled deliveries owing their deployment record that one full pass raises a row for. */
-  reconcileDeploymentBackfill = deploymentBackfillPerPass;
   /**
    * How long a batch with writes waits in line for the coordination lock (GY-1115, GY-1290), never
    * more than half the server's `deadlock_timeout` (`coordinationLockWithin`); it holds no row while
@@ -3365,12 +3348,7 @@ export class Engine {
             // How many items the moved faces made evaluated (GY-1898), for the slow-tick warning.
             if (!full) tick.readers = live.filter(id => due.has(id) && (moved.some(move => move.id === id) || faceReaches.some(reach => readsFace(fleet.get(id)!, reach)))).length;
             if (full) this.reconcileConfig = config;
-            // GY-1824: a full pass also takes in a few settled deliveries still owing their deployment
-            // record, newest item first: nothing else re-evaluates one, and a bounded share per pass
-            // backfills the delivery history without sweeping it into the queue at once.
-            const backfill = full ? [...fleet].filter(([, entry]) => entry.settled && deploymentUnrecorded(entry.work))
-              .sort(([, a], [, b]) => b.number - a.number).slice(0, this.reconcileDeploymentBackfill).map(([id]) => id) : [];
-            candidates = [...live.filter(id => due.has(id)), ...backfill]; tick.candidates = candidates.length;
+            candidates = live.filter(id => due.has(id)); tick.candidates = candidates.length;
             this.reconcileOwed.clear();
             for (const id of candidates) this.reconcileOwed.add(id);
             decided = true;
@@ -3524,14 +3502,11 @@ export class Engine {
   private async reconcileItem(db: PoolClient, work: Work, all: Work[], now: Date, { dryRun = false }: { dryRun?: boolean } = {}): Promise<{ wrote: boolean; due: number | null }> {
     // A delivered item is not re-evaluated, but one still holding rows, a merge-queue entry (stored
     // before GY-1236) or an action from before its delivery — every item delivered before GY-185 —
-    // is settled here once, and the check that finds nothing to settle costs no evaluation.
-    // GY-1824: a delivery still owing its deployment record (`deploymentUnrecorded`) — one done
-    // before the unattended verify-deployment path shipped, which the full pass's backfill brings
-    // here — is settled too, and `settleDelivered` raises the row the executor records, exactly as
-    // the delivery transaction raises a fresh delivery's.
+    // is settled here once, and the check that finds nothing to settle costs no evaluation. A
+    // verify-deployment row or action left from before done-at-merge (GY-1981) is such a leftover.
     if (work.stage === 'done') {
-      const leftover = !!(work as Work & { queue?: unknown }).queue || (work.actionQueue?.actions ?? []).some(row => row.kind !== 'verify-deployment') || (!!work.nextAction && work.nextAction.kind !== 'verify-deployment');
-      if ((!leftover && !deploymentUnrecorded(work)) || !settleDelivered(work, all, now)) return { wrote: false, due: null };
+      const leftover = !!(work as Work & { queue?: unknown }).queue || !!work.actionQueue?.actions.length || !!work.nextAction;
+      if (!leftover || !settleDelivered(work, all, now)) return { wrote: false, due: null };
       this.reconcileWrites.set(work, { delivered: true });
       if (!dryRun) await this.writeReconciled(db, work, all, now);
       return { wrote: true, due: null };

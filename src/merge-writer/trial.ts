@@ -2,12 +2,14 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
-import { availableParallelism, constants, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
+import { dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
-import { tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
+import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
+import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
+import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master-resources.js';
 
 // A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
@@ -121,19 +123,65 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
 export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots()) =>
   roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
 /**
- * The folder a trial's short checkout is made in (GY-1565): the first of `roots` that passes the
- * managed worktree root's own guard (`verifyWorktreeRoot`: durable storage, not a tmpfs, with
- * `minFreeBytes` free), so a checkout and its `npm ci` tree never fill a memory-backed /tmp, and
- * that no stray node_modules, .git or package.json sits in or above (`lookupPoisoned`), so a module
- * the checkout's own install lacks never resolves upward into a durable host /tmp's stray tree; null
- * when none does, and the checkout stays in the managed session directory.
+ * Where a trial's short checkout may go (GY-2020): a short folder on disk in the coordinator's home,
+ * made on demand. Never /tmp, /var/tmp or the tmpdir: the suite treats a checkout under any of them
+ * as a test fixture (seven self-upgrade tests failed every trial on a host whose /tmp is a tmpfs and
+ * whose loop unit's TMPDIR is /var/tmp), and no service override is needed to keep it out.
  */
-export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe): Promise<string | null> {
+export const trialCheckoutRoots = (home = homedir()): string[] => [join(home, '.gy', 'trials')];
+/** The folders a trial's checkout never goes under (GY-2020): /tmp, /var/tmp and the process tmpdir. */
+export const trialExcludedRoots = (own = tmpdir()): string[] => [...new Set(['/tmp', '/var/tmp', own])];
+const within = (path: string, root: string) => { const to = relative(root, path); return to === '' || !to.startsWith('..') && !isAbsolute(to); };
+/**
+ * The folder a trial's short checkout is made in (GY-1565, GY-2020): the first of `roots` under none
+ * of `excluded` that passes the managed worktree root's own guard (`verifyWorktreeRoot`: durable
+ * storage, not a tmpfs, with `minFreeBytes` free), so a checkout and its `npm ci` tree never fill a
+ * memory-backed volume, is made if missing, and that no stray node_modules, .git or package.json sits
+ * in or above (`lookupPoisoned`), so a module the checkout's own install lacks never resolves upward
+ * into a stray tree; null when none does, and the checkout stays in the managed session directory.
+ * Each root's leftovers are taken back (`reclaimTrialCheckouts`) before its free space is measured,
+ * so a crashed checkout that left the volume short never keeps its own space from being reclaimed.
+ */
+export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe, excluded: readonly string[] = trialExcludedRoots()): Promise<string | null> {
   for (const root of roots) {
-    if (!existsSync(root) || lookupPoisoned(root)) continue;
-    try { await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) }); return root; } catch { /* the next root */ }
+    if (excluded.some(temporary => within(root, temporary))) continue;
+    try {
+      await reclaimTrialCheckouts(root);
+      await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) });
+      await mkdir(root, { recursive: true });
+      if (!lookupPoisoned(root)) return root;
+    } catch { /* the next root */ }
   }
   return null;
+}
+/** This process's trial checkouts whose removal failed (GY-2020): kept marked as its own, and taken back by the next reclaim pass though it lives. */
+const abandonedTrialCheckouts = new Set<string>();
+/**
+ * Takes back the short checkouts a crashed trial left in `root` (GY-2020): the tmp reclaim scans only
+ * the temporary roots, so a `gy-c` directory here whose owner marker names a process that is gone, or
+ * one this process failed to remove (`clearTrialCheckout`), is removed, with its marker, before the
+ * next trial makes its own. Best effort: nothing here fails a trial.
+ */
+export async function reclaimTrialCheckouts(root: string): Promise<string[]> {
+  const removed: string[] = [];
+  const names = await readdir(root).catch(() => [] as string[]);
+  for (const name of names) {
+    if (!name.startsWith(trialCheckoutPrefix) || name.endsWith('.owner')) continue;
+    const directory = join(root, name), owner = await readTempOwner(directory).catch(() => null);
+    if (!owner || !(abandonedTrialCheckouts.has(directory) || tempOwnerGone(owner))) continue;
+    try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); abandonedTrialCheckouts.delete(directory); removed.push(directory); } catch { /* the next */ }
+  }
+  return removed;
+}
+/**
+ * Removes a trial's short checkout directory (GY-2020). Its owner marker goes only once the directory
+ * has: the trials folder has no tmp reclaim to take an ownerless leftover, so a removal that fails
+ * keeps the marker and is remembered as abandoned, and the next trial's reclaim pass (or any pass once
+ * this process is gone) takes it back. The failure is rethrown.
+ */
+export async function clearTrialCheckout(directory: string, remove: (path: string) => Promise<void> = path => rm(path, { recursive: true, force: true })): Promise<void> {
+  try { await remove(directory); } catch (error) { abandonedTrialCheckouts.add(directory); throw error; }
+  await rm(tempOwnerMarker(directory), { force: true }).catch(() => {});
 }
 /**
  * The name prefix of a trial's temporary directory. It stays this short, as CI's /tmp is
@@ -383,11 +431,18 @@ export interface RunTrialInput {
   retries?: number;
   /** Called as each attempt starts, before it runs anything (GY-1832): a caller keeping attempt-scoped evidence starts it afresh. */
   onAttempt?: (attempt: number) => void;
-  /** Where the trial's temporary directory and short checkout may go; `trialTemporaryRoots()` unless a test names others. */
+  /** Where the trial's temporary directory may go; `trialTemporaryRoots()` unless a test names others. */
   temporaryRoots?: readonly string[];
+  /** Where the trial's short checkout may go; `trialCheckoutRoots()`, kept out of `trialExcludedRoots()`, unless a test names others, taken as named. */
+  checkoutRoots?: readonly string[];
   /** The free space a short checkout's root must have, and how it is measured: the managed worktree root's default and probe unless given. */
   minFreeBytes?: number;
   probe?: FilesystemProbe;
+  /**
+   * GY-2009: the pinned gitleaks secret scan. Production runs `runSecretScan`; the test runner
+   * skips it unless a test injects a scan (or `false` to force a skip outside the suite).
+   */
+  secretScan?: ((input: SecretScanInput) => Promise<SecretScanResult>) | false;
 }
 const tailLength = 4000;
 /**
@@ -508,19 +563,20 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const enter = (next: TrialPhase = phase) => { const at = now(); phases[phase] += Math.max(0, at - phaseAt); phase = next; phaseAt = at; return { ...phases }; };
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
   // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
-  // with room (else the session directory's checkout), each removed with the session and marked as this process's so a
+  // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's so a
   // crash before the cleanup leaves it to the tmp reclaim.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
   const clear = async (directory: string) => {
-    // A directory that would not go loses its owner marker, so the tmp reclaim takes it once it ages rather than keeping it for this live process.
+    if (directory === place) return clearTrialCheckout(directory);
+    // A temporary directory that would not go loses its owner marker, so the tmp reclaim takes it once it ages rather than keeping it for this live process.
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
   };
   try {
     const root = trialTemporaryRoot(checkout.directory, roots);
     if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
-    const near = await trialCheckoutRoot(roots, input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe);
+    const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
   }
   catch (error) {
@@ -609,6 +665,27 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         return listing.split('\n').some(line => line.trim() === path);
       };
+      // GY-2009: the merge writer's trial runs the secret scan (formerly the Actions secrets job).
+      const scan = input.secretScan === false ? null
+        : input.secretScan ?? (underTestRunner() ? null : runSecretScan);
+      if (scan) {
+        // The binary is cached under the managed root, so only the first trial on a host downloads it.
+        const scanned = await scan({ worktree, cacheDirectory: secretScanCacheDirectory(input.base), run, timeoutMs: remaining() });
+        if (!scanned.ok) {
+          log.push(`$ ${secretScanArgv(worktree).join(' ')}\n${scanned.detail}`);
+          // A binary the host could not obtain says nothing about the merge: no verdict, tried again.
+          if (scanned.unavailable) throw runnerFailure('install', { ok: false, out: scanned.detail, status: null, signal: null, cause: scanned.detail });
+          // A scan the deadline killed is the trial's timeout, and one a signal, the runner or an error exit ended is
+          // a runner failure: neither is a finding, so neither fails the merge (only gitleaks' findings status does).
+          if (scanned.execution) {
+            if (scanned.execution.timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
+            const ended = endedOf(scanned.execution, scanned.detail);
+            throw runnerFailure('install', { ...ended, cause: ended.cause ?? (ended.signal ? undefined : `gitleaks exited with status ${ended.status ?? 'unknown'}, not its findings status`) });
+          }
+          enter('build');
+          return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
+        }
+      }
       if (await holds('package.json')) {
         const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
         const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);

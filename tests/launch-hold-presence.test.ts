@@ -17,7 +17,7 @@ import { matchRoute, type RouteContext } from '../src/server/routes.js';
  */
 const host = 'vishrog', slot = (n: number) => `graphyard-master@${host}/${n}`;
 const actor = { id: 'graphyard-master', role: 'coordinator' } as Principal;
-const served: NextActionKind[] = ['request-review', 'approve-scope', 'reclaim', 'verify-deployment', 'resync', 'dispatch'];
+const served: NextActionKind[] = ['request-review', 'approve-scope', 'reclaim', 'resync', 'dispatch'];
 const row = (key: string, kind: NextActionKind): ActionRow => ({ id: key.replace(/\D/g, '').padStart(32, 'd'), kind, work: `work-${key}`, key, inputs: { kind } as ActionRow['inputs'], gate: 'build', refusal: null,
   reason: `${key} needs ${kind}`, binding: 'b', requestedBy: 'graphyard', requestedAt: new Date(Date.now() - 120_000).toISOString(), state: 'pending', claim: null, attempts: 0, history: [] });
 const item = (key: string, kind: NextActionKind) => ({ id: `work-${key}`, key, stage: 'build', actionQueue: { actions: [row(key, kind)], history: [] } }) as unknown as Work;
