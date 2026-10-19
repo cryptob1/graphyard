@@ -9,7 +9,7 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 A dispatch plan (paths, `/`-ending prefixes) keeps parallel work apart and never locks: `sync` and the merge writer's trial integrate overlaps (`master status`: `overlap.concurrent`, `merge-tree` failures). Root-level directories (`highConflict`) need `--allow-broad-scope`; only `exclusiveResources` hold dispatch. Docs and `verification/AREA.md` maps whose `Paths:` cover planned files stay widen-time.
 
-**3** single-cause dispatch failures, fleet-idle excluded, as is a deploy's release-skew window (`CLI … and server … differ`): `dispatchblock` until `graphyard unblock GY-N REASON`.
+**3** single-cause dispatch failures, fleet-idle and release-skew (`CLI … and server … differ`) excluded: `dispatchblock` until `graphyard unblock GY-N REASON`.
 
 ## Review gate: verdicts, not threads
 
