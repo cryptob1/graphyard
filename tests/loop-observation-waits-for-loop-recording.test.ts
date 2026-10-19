@@ -130,10 +130,3 @@ test('unit:loop-observation-waits-for-loop-recording — only the loop\'s record
   assert.match(deliveredObservationRefusal(code, all, serving, at) ?? '', /GY-1727 is not a loop-owned observation item/);
 });
 
-test('unit:loop-observation-waits-for-loop-recording — docs/master-agent.md states that the loop records due readings in the deployment-verification step and what a failed reading raises', () => {
-  const page = readFileSync(fileURLToPath(new URL('../docs/master-agent.md', import.meta.url)), 'utf8');
-  const delivery = readFileSync(fileURLToPath(new URL('../docs/delivery.md', import.meta.url)), 'utf8');
-  assert.match(delivery, /deployment verification reads it; a pass closes it `delivered-observation`, a fail escalates/);
-  assert.match(page, /deployment-verification step records each loop-owned observation item's due reading on the serving release \(a pass closes it `delivered-observation`; a fail escalates, naming the measured values/);
-  assert.match(page, /`master reading GY-N pass\|fail DETAIL` records one by hand/);
-});

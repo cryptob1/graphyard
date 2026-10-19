@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | loop -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening accounts, issuing credentials to people.
+The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
 
 ## Operate
 
@@ -17,12 +17,16 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 Sweeps run every automatic-dispatch tick; a handle closes at the second consecutive miss. Closures: **Vanished**, **Ended** (terminal; `idle`/`done`/`blocked` are not terminal), **Superseded**, **Duplicate** — a closure decides no gate. Past its role's maximum a session is flagged, not closed.
 
-`blocked` frees its slot; [classes](protocol/work-commands.md#blocked-work-unblocks-itself) self-clear (`github-credential`, `sandbox-path`, `runtime-denial`, `dispatch-failure`, `host-supervisor`, …); `master-role` a master-role identity runs and unblocks; `needs-decision` approver. `genuine`/`human-only` escalate.
+`blocked` frees its slot; [classes](protocol/work-commands.md#blocked-work-unblocks-itself) self-clear (`github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `host-supervisor`, `runtime-denial`, `runtime-exhaustion`, `github-outage`, `planned-file-scope`); `master-role` a master-role identity runs and unblocks; `needs-decision` approver. `genuine`/`human-only` escalate.
 
 `Recurring <class>` and `invariant:` faults past `invariantBoundMinutes` get diagnostician; fix the plan as `master create`; `stale`/`withdrawn` decisions re-request ≤3×, then `decision-stale`; refused `create` 409/400 is `fix-item`. Review follow-ups: Pi (`run.research`) triages.
 
 ## Automatic dispatch at submit
 
-Past the build gate: a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then a review once passed. **The loop launches each request within 30 seconds**, starting the reviewer (`run.reviewerProfile`, producer profiles, 4 sessions each) and one producer session per proof group. Reviewer launches await head's bot reviews ≤`awaitReviewersMinutes` (8, 0 disables), skipping a bot under a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`, `dispatch.botReviewers`).
+Past the build gate: a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then a review once passed. **The loop launches each request within 30 seconds** (`run.reviewerProfile`, producer profiles, 4 sessions each). Reviewer launches await head's bot reviews ≤`awaitReviewersMinutes` (8, 0 disables), skipping a bot under a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`, `dispatch.botReviewers`).
 
-**Concurrency is per role** (1–20, default 1). Unanswered sessions relaunch, then `dispatch.abandoned`; exhausted producers raise `escalation:proof-exhausted`, then rework. **Every role fails over on spent quota** or waits as one `capacity` line. The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]`.
+**Concurrency is per role** (1–20, default 1). Unanswered sessions relaunch, then `dispatch.abandoned`; exhausted producers raise `escalation:proof-exhausted`, then rework. **Every role fails over on spent quota** or waits as one `capacity` line.
+
+### System invariants
+
+Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h), `deploy-lease-loss` (0); `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts`.

@@ -19,9 +19,9 @@ Exact-head approval lands; remote threads and reviews are never read or resolved
 
 ## Scope is a plan, not a lock
 
-The plan keeps parallel work apart at dispatch and hints at the change; nothing refuses a file outside it. `graphyard sync GY-N` merges `origin/BASE`, regenerates the generated files and reports only merge conflicts; `scope-request GY-N EPOCH PATH -- REASON` prints that the plan is not a lock and files nothing.
+The plan keeps parallel work apart at dispatch and hints at the change; nothing refuses a file outside it. `graphyard sync GY-N` merges `origin/BASE`, regenerates the generated files and reports only merge conflicts;
 
-Workers build, run the request-named fast gates and `graphyard verify GY-N` (own proofs; CI: all), submit on pass, naming out-of-scope sandbox failures. `leftToCi` (exit 0, `passing`): all passed, abnormal end; failed/skipped/unexecuted block.
+Workers build, run the request-named fast gates (tests/module-budgets.test.ts, tests/docs-budget.test.ts, tests/docs-growth-gate.test.ts, tests/docs-glossary.test.ts, tests/no-wall-clock-time-bombs.test.ts, tests/ci-shards.test.ts, scripts/check-docs.mjs) and `graphyard verify GY-N` (own proofs; CI: all), submit on pass, naming out-of-scope sandbox failures. `leftToCi` (exit 0, `passing`): all passed, abnormal end; failed/skipped/unexecuted block.
 
 ### Generated files and speed
 
