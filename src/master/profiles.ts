@@ -70,7 +70,12 @@ function tolerateSchema(schema: unknown, seen: Map<unknown, unknown>): any {
     case 'pipe': rebuilt = (schema as any).clone({ ...def, in: tolerateSchema(def.in, seen) }); break;
     case 'lazy':
       // Registered before its getter can run, so a recursive schema reaches itself through the map.
-      rebuilt = (schema as any).clone({ ...def, getter: () => tolerateSchema(def.getter(), seen) });
+      // zod memoizes the getter's result on the def itself (`_cachedInner`), and resolving any lazy
+      // property while rebuilding earlier nodes can fill that memo on the original before this clone
+      // is made; the spread would then carry the stale original inner into the clone, whose parse
+      // would refuse keys the schema retired (GY-2160). Clear it so the clone resolves afresh
+      // through the tolerant getter.
+      rebuilt = (schema as any).clone({ ...def, getter: () => tolerateSchema(def.getter(), seen), _cachedInner: undefined });
       seen.set(schema, rebuilt);
       return rebuilt;
     default: return schema; // leaves (strings, numbers, literals) have nothing to keep

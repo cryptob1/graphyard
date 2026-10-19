@@ -310,6 +310,7 @@
     "tests/coordination.test.ts": 299,
     "tests/coordinator-checkout-guard.test.ts": 633,
     "tests/coordinator-os-confinement.test.ts": 1273,
+    "tests/cursor-tolerates-nested-undeclared-keys.test.ts": 1000,
     "tests/cycle-failure.test.ts": 3296,
     "tests/cycle-latency.test.ts": 19567,
     "tests/daemon-state-unknown-keys.test.ts": 1355,
