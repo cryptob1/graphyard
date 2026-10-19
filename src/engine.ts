@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, type PlaneDeploy, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { readInterventionReport } from './interventions/report.js';
 import { interventionPolicyFromEnv } from './model/interventions.js';
@@ -30,6 +30,7 @@ import { retroCheckRefusals } from './model/retro-synthesis.js';
 import { readAppliedRetroChecks } from './retro-synthesis.js';
 import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { nonRepositoryRead } from './model/scope-repository.js';
+import { buildIdentity } from './protocol-version.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, unplannedPaths, type ScopeDecision, type ScopeRequestState } from './model/scope.js';
 import { askIdentity, mergedScopeRequest, plannedFilesCovered, widenedPlannedFiles } from './model/scope-collapse.js';
 import { handScopeWideningRefusal, routedScopeAsk } from './model/scope-provenance.js';
@@ -293,6 +294,19 @@ export async function readAttestations(db: { query: (text: string, values: unkno
 export async function readPlaneStalls(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, fromMs: number, untilMs: number): Promise<PlaneStall[]> {
   const rows = (await db.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.stall' AND created_at >= to_timestamp($1 / 1000.0) AND created_at <= to_timestamp($2 / 1000.0) ORDER BY created_at`, [fromMs, untilMs])).rows;
   return rows.map(row => { const details = row.details ?? {}; return { from: String(details.from), to: String(details.to) }; }).filter(stall => Number.isFinite(Date.parse(stall.from)) && Number.isFinite(Date.parse(stall.to)));
+}
+/**
+ * The deploys recorded around `fromMs`..`untilMs` (wall-clock ms): the release changes the plane's
+ * own liveness tick observed (recordPlaneLiveness), each once in the ledger with no work of its own.
+ * They are read beside the stalls wherever a lapse is classed, so a lease that ran out inside a
+ * deploy's release-skew window — the worker's release refuses every renewal client-side once the
+ * newer release answers — is explained by the plane's record rather than counted as a lost worker
+ * (GY-2177). The `created_at` index serves the read; the window is bounded by the caller.
+ */
+export async function readPlaneDeploys(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, fromMs: number, untilMs: number): Promise<PlaneDeploy[]> {
+  const rows = (await db.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.deploy' AND created_at >= to_timestamp($1 / 1000.0) AND created_at <= to_timestamp($2 / 1000.0) ORDER BY created_at`, [fromMs, untilMs])).rows;
+  return rows.map(row => { const details = row.details ?? {}; return { commit: String(details.commit), from: String(details.from), to: String(details.to) }; })
+    .filter(deploy => /^[0-9a-f]{40}$/.test(deploy.commit) && Number.isFinite(Date.parse(deploy.from)) && Number.isFinite(Date.parse(deploy.to)));
 }
 /**
  * Apply this repository's scope rule to an open request and record what it decided (GY-85).
@@ -1107,6 +1121,8 @@ export class Engine {
   }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
   constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
+  /** The commit this process first recorded itself serving (recordPlaneLiveness); undefined until its first tick named one (GY-2177). */
+  private servedCommit: string | null | undefined;
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
     if (data.head !== undefined) return this.observeSubmittedHead(actor, id, { epoch: data.epoch, head: data.head }, key);
     if (this.submissionObserver === undefined) this.submissionObserver = null;
@@ -1662,7 +1678,8 @@ export class Engine {
         // history, a silently vanished worker is an escalation the overwrite cannot erase.
         if (work.lease) {
           const lapsedStalls = await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime());
-          const explained = leaseLapseCause(work, work.lease, await readAttestations(db, work.id), lapsedStalls);
+          const lapsedDeploys = await readPlaneDeploys(db, now.getTime() - 24 * 3_600_000, now.getTime());
+          const explained = leaseLapseCause(work, work.lease, await readAttestations(db, work.id), lapsedStalls, lapsedDeploys);
           if (explained) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
             JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
           else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
@@ -3179,6 +3196,22 @@ export class Engine {
         if (at.getTime() - previous.getTime() > planeStallMs)
           await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
             ['graphyard', 'plane.stall', JSON.stringify({ details: { from: previous.toISOString(), to: at.toISOString() } })]);
+        // GY-2177: the first tick that moves also records what this process serves, against what the
+        // tick named before it: a change is a deploy, recorded once with the window it names — from
+        // the replaced release's last tick, when its renewals started landing nowhere, to this
+        // process's first answer, from which the release before it refuses every renewal client-side
+        // with the version skew until the loop realigns. That row is what lets the plane explain the
+        // lapses its own deploy causes (leaseLapseCause), the way a stall row explains its outage.
+        // The read is one indexed query per process, and the commit comparison makes a retried tick
+        // (a failed transaction leaves the field unset) idempotent.
+        if (this.servedCommit === undefined) {
+          const commit = buildIdentity().commit;
+          const last = await db.query(`SELECT payload->>'commit' AS commit FROM events WHERE kind = 'plane.deploy' ORDER BY created_at DESC LIMIT 1`);
+          if (commit && last.rows[0]?.commit !== commit)
+            await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
+              ['graphyard', 'plane.deploy', JSON.stringify({ details: { commit, from: previous.toISOString(), to: at.toISOString() } })]);
+          this.servedCommit = commit;
+        }
         await db.query('UPDATE plane_liveness SET tick_at = $1 WHERE id = true', [at]);
       }
       await db.query('COMMIT');
@@ -3508,6 +3541,7 @@ export class Engine {
     // indexed, and it serves both the lapse being classed here and the standing losses a recorded
     // stall explains (GY-1791).
     const stalls = leaseLost || standingLoss ? await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime()) : [];
+    const deploys = leaseLost || standingLoss ? await readPlaneDeploys(db, now.getTime() - 24 * 3_600_000, now.getTime()) : [];
     const lost = leaseLost ? work.lease! : null;
     if (lost) {
       work.lease = null;
@@ -3518,7 +3552,7 @@ export class Engine {
       // the plane's own recorded stalls is explained by the plane's record the same way. Only an
       // epoch with no submission, no blocked report, no attestation and no stall covering its
       // expiry — a worker that silently vanished while the plane was up — still escalates.
-      const explained = leaseLapseCause(work, lost, attestations, stalls);
+      const explained = leaseLapseCause(work, lost, attestations, stalls, deploys);
       if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
       else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
       endLapsedAttempt(work, lost, now);

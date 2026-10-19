@@ -44,7 +44,7 @@ export function launchFailedBeforeStart(session: { state?: string; pane?: string
 // raises the concern. An epoch whose lease ran to the worker no-submission renewal refusal unsubmitted
 // was ended by the control plane's own refusal to renew it (GY-1462), which explains it too.
 export type LeaseLapse = 'expired' | 'lost';
-export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity' | 'control-plane-stall' | 'no-submission-bound';
+export type LeaseLapseCause = 'submitted' | 'blocked-awaiting-operator' | 'stopped-by-attestation' | 'exhausted-capacity' | 'control-plane-stall' | 'control-plane-deploy' | 'no-submission-bound';
 export const attestationKinds = ['blocked', 'stopped-worker'] as const;
 export type AttestationKind = typeof attestationKinds[number];
 /**
@@ -103,6 +103,25 @@ export function stallCovering(stalls: readonly PlaneStall[], at: number): PlaneS
   return stalls.find(stall => at >= Date.parse(stall.from) && at <= Date.parse(stall.to)) ?? null;
 }
 /**
+ * One deploy of the control plane (GY-2177), read from the ledger the way a plane stall is: the
+ * process that began answering at `to` serves a commit different from the one before it, and `from`
+ * is the last reconciliation tick of the release it replaced — the moment renewals started landing
+ * nowhere. From `to` on, every call the release before it runs refuses client-side with the
+ * version skew (src/cli/context.ts `releaseSkew`) until the loop realigns to the served commit.
+ */
+export interface PlaneDeploy { commit: string; from: string; to: string }
+/**
+ * How long after a recorded deploy a lease that ran out is still the deploy's own end: the worker's
+ * release could renew no more once the newer release answered, and the loop realigns to it within
+ * this window. It is the deploy-lease-loss invariant's own `deployWindowMinutes` default
+ * (src/model/invariants.ts), named once here so both read the same bound.
+ */
+export const deployLeaseWindowMs = 10 * 60_000;
+/** The deploy whose skew window covers `at`, when one does. */
+export function deployCovering(deploys: readonly PlaneDeploy[], at: number): PlaneDeploy | null {
+  return deploys.find(deploy => at >= Date.parse(deploy.from) && at <= Date.parse(deploy.to) + deployLeaseWindowMs) ?? null;
+}
+/**
  * When the lease of `epoch` ran out, read from the attempt record the lapse closed (pipeline-speed.ts
  * `endLapsedAttempt` ends the attempt at the lease's own deadline, in the transaction that classed the
  * lapse), or null when no expired attempt of that epoch is on the record. A standing lease-loss is
@@ -113,8 +132,8 @@ export function stallCovering(stalls: readonly PlaneStall[], at: number): PlaneS
 export function lapsedLeaseExpiry(work: { pipeline?: { attempts?: readonly { epoch: number; end: string | null; endedAt: string | null }[] } | null }, epoch: number): string | null {
   return (work.pipeline?.attempts ?? []).find(attempt => attempt.epoch === epoch && attempt.end === 'expired' && attempt.endedAt)?.endedAt ?? null;
 }
-/** Why a lapse of `lease` is expected lifecycle, or null when the worker silently vanished. */
-export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Partial<Work>, lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt' | 'owner'>>, attestations: Attestation[] = [], stalls: readonly PlaneStall[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; stall?: PlaneStall } | null {
+
+export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Partial<Work>, lease: Pick<Lease, 'epoch'> & Partial<Pick<Lease, 'expiresAt' | 'owner'>>, attestations: Attestation[] = [], stalls: readonly PlaneStall[] = [], deploys: readonly PlaneDeploy[] = []): { cause: LeaseLapseCause; attestation: Attestation | null; exhaustion?: ExhaustionRecord; stall?: PlaneStall; deploy?: PlaneDeploy } | null {
   if (submittedEpoch(work, lease.epoch)) return { cause: 'submitted', attestation: null };
   const blocked = attestationFor(attestations, lease.epoch, 'blocked');
   if (blocked) return { cause: 'blocked-awaiting-operator', attestation: blocked };
@@ -128,10 +147,17 @@ export function leaseLapseCause(work: Pick<Work, 'submission' | 'capacity'> & Pa
   // lease loss.
   const stall = lease.expiresAt ? stallCovering(stalls, Date.parse(lease.expiresAt)) : null;
   if (stall) return { cause: 'control-plane-stall', attestation: null, stall };
+  // So is the plane's own deploy (GY-2177): from the moment the newer release answers, the
+  // worker's release refuses every renewal client-side with the version skew, and no retry of its
+  // own can land one — the supervisor spends its margin and stops, the lease runs out inside the
+  // window the deploy names, and the deploy that ended it is on the plane's record. A worker that
+  // truly vanished just after a deploy is still ended by its session report and the reclaim paths.
+  const deploy = lease.expiresAt ? deployCovering(deploys, Date.parse(lease.expiresAt)) : null;
+  if (deploy) return { cause: 'control-plane-deploy', attestation: null, deploy };
   if (lapsedAtNoSubmissionBound(work, lease)) return { cause: 'no-submission-bound', attestation: null };
   return null;
 }
-export function classifyLeaseLapse(work: Parameters<typeof leaseLapseCause>[0], lease: Parameters<typeof leaseLapseCause>[1], attestations: Attestation[] = []): LeaseLapse { return leaseLapseCause(work, lease, attestations) ? 'expired' : 'lost'; }
+export function classifyLeaseLapse(work: Parameters<typeof leaseLapseCause>[0], lease: Parameters<typeof leaseLapseCause>[1], attestations: Attestation[] = [], stalls: readonly PlaneStall[] = [], deploys: readonly PlaneDeploy[] = []): LeaseLapse { return leaseLapseCause(work, lease, attestations, stalls, deploys) ? 'expired' : 'lost'; }
 // A standing lease-loss raised for an epoch that already had its candidate bound was
 // recorded before post-submission expiry stopped being treated as an incident, and one
 // raised by the control plane (actor `graphyard`) for an epoch whose lapse a blocked report, a
@@ -140,9 +166,10 @@ export function classifyLeaseLapse(work: Parameters<typeof leaseLapseCause>[0], 
 // rather than by a human: an escalation reaches a person only when nothing on the record says
 // why the attempt ended.
 export const leaseLossAutoSettlement = 'auto-settled: submitted before expiry';
-export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Attestation | null, exhaustion: ExhaustionRecord | null = null, stall: PlaneStall | null = null) {
+export function leaseLossSettlementNote(cause: LeaseLapseCause, attestation: Attestation | null, exhaustion: ExhaustionRecord | null = null, stall: PlaneStall | null = null, deploy: PlaneDeploy | null = null) {
   if (cause === 'submitted') return leaseLossAutoSettlement;
   if (cause === 'control-plane-stall') return `auto-settled: the control plane was not answering between ${stall?.from ?? 'its recorded start'} and ${stall?.to ?? 'its recorded end'} (recorded by its own reconciliation), so renewals could not land and the attempt ended`;
+  if (cause === 'control-plane-deploy') return `auto-settled: the control plane deployed ${deploy?.commit?.slice(0, 12) ?? 'a newer release'} between ${deploy?.from ?? 'its recorded start'} and ${deploy?.to ?? 'its recorded end'} (recorded by its own reconciliation), so the release before it could renew no more and the attempt ended`;
   if (cause === 'no-submission-bound') return `auto-settled: the server refused renewal ${workerNoSubmissionRefusalMs / 60_000} minutes unsubmitted, past the worker no-submission bound, which is why the attempt ended`;
   if (cause === 'exhausted-capacity') return `auto-settled: the ${exhaustion?.profile ?? 'worker'} account ${exhaustion?.account ?? 'it ran on'} reported no quota left for epoch ${exhaustion?.epoch} (recorded by ${exhaustion?.recordedBy ?? 'the loop'} at ${exhaustion?.at}; ${exhaustion?.resetsAt ? `resets ${exhaustion.resetsAt}` : 'no reset time given'}), which is why the attempt ended`;
   const source = attestation ? ` (${attestation.source} by ${attestation.actor} at ${attestation.at})` : '';
