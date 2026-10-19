@@ -6,7 +6,7 @@ import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { containmentFailureNote, controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../supervisor.js';
-import { attributeConflicts, hasConflictMarkers, managedServerUrl, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
+import { attributeConflicts, hasConflictMarkers, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
 import { resolveTimingBaseline, timedTestFile, timingBaselinePath } from '../model/timing-companion.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
@@ -21,7 +21,7 @@ export { installUnderLease };
 
 const quietBranch = () => spawnSync('git', ['symbolic-ref', '--short', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).stdout.trim();
 
-export async function syncWork({ api, print, base: serverUrl }: CliContext, work: any) {
+export async function syncWork({ api, print }: CliContext, work: any) {
   // The canonical way to take the base branch: a merge keeps the worker's history and makes every
   // resolution visible. Files the repository declares generated are rendered afresh from the
   // merged sources rather than merged by hand; every other conflict is the worker's, reported with
@@ -67,9 +67,8 @@ export async function syncWork({ api, print, base: serverUrl }: CliContext, work
   }
   if (conflicts.includes('AGENTS.md') && !conflicts.some(path => agentsTemplateSources.includes(path))) {
     const conflicted = await readFile(resolve(cwd, 'AGENTS.md'), 'utf8');
-    const url = managedServerUrl(quietly('show', `${baseTip}:AGENTS.md`).stdout) ?? managedServerUrl(conflicted) ?? serverUrl;
     const renderers = await agentsRenderers(cwd);
-    const rendered = regenerateManagedBlocks(conflicted, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text), url));
+    const rendered = regenerateManagedBlocks(conflicted, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text)));
     if (rendered !== null) { await writeFile(resolve(cwd, 'AGENTS.md'), rendered); git('add', '--', 'AGENTS.md'); regenerated.push(`AGENTS.md (managed blocks rendered from the ${renderers.source} templates)`); }
   }
   // The timing baseline conflicts by construction (GY-1875): every new test file adds one line to
