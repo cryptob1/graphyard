@@ -19,7 +19,7 @@ import { actionDetailMax, approvalWatchSchema, type ApprovalWatch, message } fro
 // existing import keeps working.
 import { adoptedOnRefusal, botThreadReworkRounds, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, maxRefusalAnswers, namePaths, refusalNamedIn, reworkDecisionReason, reworkGroundsMin, reworkThreads, setAsideFollowUpThreads, standingNamedIn, threadReworkSummary } from './decision-text.js';
 export { adoptedOnRefusal, botThreadReworkRounds, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, maxRefusalAnswers, namePaths, refusalNamedIn, reworkDecisionReason, reworkGroundsMin, reworkThreads, setAsideFollowUpThreads, standingNamedIn, threadReworkSummary } from './decision-text.js';
-import { blockingFindings, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
+import { blockingFindings, controlPlaneWithdrawal, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
 import type { ScreenMotion } from '../master/approver-stall.js';
 
@@ -100,7 +100,8 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
   const body = review ? review.body : observation.agentReview?.reason;
   const reviewId = review ? review.id ?? null : observation.agentReview?.verdictId ?? null;
   const blocking = review?.blocking?.length ? review.blocking : blockingFindings(body), round = reviewRound(work);
-  const own = !!review && !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
+  // A control-plane verdict is Graphyard's own however its reviewer is named, App or agent (GY-2078).
+  const own = !!review && (controlPlaneWithdrawal(work, reviewId) || !!config.reviewer && review.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase());
   const findings = followUpFindingsOf(body);
   const base = { round, cap, reviewer: verdict.reviewer, reviewId, sha: candidate.sha, blocking, findings: findings.length ? findings : [verdict.reason], ...(review?.submittedAt ? { submittedAt: review.submittedAt } : {}) };
   const past = `${work.key} is in review round ${round}, past its cap of ${cap}`;

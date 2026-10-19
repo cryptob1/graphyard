@@ -42,8 +42,12 @@ const identifier = z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0
 const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
 export const reviewLaunchBodySchema = z.object({ reviewer: identifier, head: sha, baseTip: sha, tokenHash: hex64, expiresAt: instant, postMerge: z.boolean().default(false) }).strict();
 export const reviewVerdictBodySchema = z.object({ event: z.enum(reviewEvents), body: z.string().trim().min(1).max(65_536), sha, token: hex64 }).strict();
+/** GY-2078: the loop's withdrawal of one control-plane review verdict — which review, and the request the re-review is asked by. */
+export const reviewWithdrawBodySchema = z.object({ reviewId: z.number().int().safe().positive(), reason: z.string().trim().min(1).max(8000) }).strict();
 /** The events each route appends with its own payload; the document save beside each is `<event>.recorded`. */
 export const reviewLaunchEvent = 'review.launch', reviewVerdictEvent = 'review.verdict', independenceRefusedEvent = 'review.independence-refused';
+/** The event a control-plane review's withdrawal is appended with (GY-2078). */
+export const reviewWithdrawnEvent = 'review.withdrawn';
 /** How long a registered launch's token stays valid at most, whatever expiry the launcher asks. */
 export const launchTokenBoundMs = 4 * 3_600_000;
 
@@ -190,4 +194,42 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
   applyRegistryChange(services, change, Date.now());
   if ('refusal' in judged) demand(false, judged.refusal.reason, judged.refusal.status);
   return (judged as { result: unknown }).result;
+}
+
+/**
+ * GY-2078. The loop's withdrawal of a control-plane review verdict — a capped change request an
+ * independent approver refused as non-blocking — recorded in the control plane's own review record,
+ * where the verdict stands: the review is marked DISMISSED and its id joins `dismissedReviewIds`,
+ * exactly as GitHub marks a dismissal, so `standingVerdict`, `exactApproval` and the review gate
+ * read the withdrawal unchanged and the item is re-evaluated in the same transaction. No GitHub
+ * request is made: a control-plane head has no pull request to dismiss a review on. The
+ * coordinator identity alone withdraws; a retried key replays, and a review already withdrawn
+ * answers withdrawn again, so a lost answer never turns its retry into a second refusal.
+ */
+export async function withdrawReviewVerdict(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  demand(actor.role === 'coordinator', "Only the loop's coordinator identity withdraws a control-plane review", 403);
+  const data = reviewWithdrawBodySchema.parse(body);
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
+  return services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
+    const all = await lockedWork(db, [id]);
+    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    const observation = work!.observation;
+    demand(observation?.source === 'control-plane', `${work!.key} was observed by GitHub, not the control plane; its reviews are dismissed on GitHub, not here`, 409);
+    const review = (observation!.reviews ?? []).find(entry => entry.id === data.reviewId);
+    demand(review, `${work!.key} holds no review ${data.reviewId}`, 404);
+    if (review!.state !== 'DISMISSED') {
+      demand(review!.source === 'control-plane', `${work!.key}'s review ${data.reviewId} stands on GitHub; it is dismissed there, not withdrawn here`, 409);
+      demand(review!.state === 'CHANGES_REQUESTED', `${work!.key}'s review ${data.reviewId} is ${review!.state}; only a change request is withdrawn`, 409);
+      review!.state = 'DISMISSED';
+      observation!.dismissedReviewIds = [...(observation!.dismissedReviewIds ?? []), data.reviewId];
+      await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, reviewWithdrawnEvent, JSON.stringify({ key: work!.key, reviewId: data.reviewId, sha: review!.sha, reviewer: review!.reviewer, reason: data.reason })]);
+      if (work!.stage !== 'done') {
+        services.engine.evaluate(work!, all, now);
+        await (services.engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+      }
+      await save(db, work!, actor.id, `${reviewWithdrawnEvent}.recorded`, now, { reviewId: data.reviewId, sha: review!.sha, reviewer: review!.reviewer });
+    }
+    return { withdrawn: true, key: work!.key, reviewId: data.reviewId, sha: review!.sha, state: review!.state };
+  }));
 }

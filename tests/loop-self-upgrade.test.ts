@@ -853,20 +853,31 @@ test('unit:self-upgrade-waits-for-served-release — a supervised executor compa
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('unit:docs-only-alignment-unaffected — a move touching no loaded code completes while production still serves the earlier release: nothing restarts, nothing is held, no stall is named', async () => {
+test('unit:docs-only-alignment-unaffected — a docs-only move restarts nothing, and while production serves an earlier release the checkout holds that release until the server reports the tip (GY-2169: an unserved checkout commit refuses every claim)', async () => {
   const { master, dispose } = await fixture();
   try {
     const { loaded, tip, fake, state } = releaseLagged(hex('a'));
     fake.diffPaths = ['docs/deployment.md'];
     const { deps, calls } = recording(fake, '/srv/graphyard');
-    const upgraded = await performSelfUpgrade(master, state, deps());
-    assert.deepEqual(upgraded, { outcome: 'upgraded', from: loaded, to: tip, code: false, executors: null, self: false });
-    assert.equal(fake.checkoutTo, tip);
+    // Production still serves the loaded release: the checkout never moves onto the unserved tip,
+    // however little the tip loads — every command the checkout's launcher starts would name a
+    // commit the server refuses. Nothing restarts, no stall is named.
+    const heldBack = await performSelfUpgrade(master, state, deps());
+    assert.deepEqual(heldBack, { outcome: 'up-to-date', commit: loaded });
+    assert.equal(fake.checkoutTo, null);
     assert.deepEqual([calls.executors, calls.self], [[], 0]);
     assert.equal(state.upgrade.pending, null);
     assert.equal(state.upgrade.stalled, undefined);
     assert.equal(state.upgrade.alignedRelease, loaded);
-    assert.equal(fake.ancestryReads, 0, 'a docs-only move never asks whether production serves it');
+    // The server reports the tip: the move completes, and a docs-only tip still restarts nothing.
+    state.deployment = verified(tip);
+    const moved = await performSelfUpgrade(master, state, deps());
+    assert.deepEqual(moved, { outcome: 'upgraded', from: loaded, to: tip, code: false, executors: null, self: false });
+    assert.equal(fake.checkoutTo, tip);
+    assert.deepEqual([calls.executors, calls.self], [[], 0]);
+    assert.equal(state.upgrade.pending, null);
+    assert.equal(state.upgrade.stalled, undefined);
+    assert.equal(state.upgrade.alignedRelease, tip);
   } finally { await dispose(); }
 });
 
