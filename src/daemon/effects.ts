@@ -111,6 +111,8 @@ export interface DaemonEffects extends BaseFailureEffects, Partial<DocsSyncEffec
   requestProof: (work: Work) => void | Promise<void>;
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
+  /** An item as the control plane holds it now, read outside any transaction (GY-2151): a containment settlement is judged on this record before it is posted, because the plane lowers the fence against its own record, not the cycle's snapshot. */
+  readWork?: (work: Work) => Promise<Work>;
   /** Asks the control plane to decide the item's open scope request and returns the decided document. */
   decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation

@@ -65,10 +65,11 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
  * (one plain sentence), who acts next (a role, never a code name), where it is in the seven
  * pull-request steps, and its pull request, linked once in the header. A decision only the human
  * may make is answered right here. Below it (GY-171): What is left, then Details (the full
- * description and criteria, folded), Pull request, Test cases and Activity. Everything technical — gate
- * internals, sessions and their attach commands, review provider, next action and executors, agent
- * requests, evidence — is in one collapsed "Technical details" section, and policy changes are in
- * the admin Edit menu.
+ * description and criteria, folded), Pull request, Tests (every test proof the criteria name with
+ * its result on the head — `unit:`/`integration:` from the merge trial, `e2e:` from the evidence,
+ * GY-162/GY-2091) and Activity. Everything technical — gate internals, sessions and their attach
+ * commands, review provider, next action and executors, agent requests, evidence — is in one
+ * collapsed "Technical details" section, and policy changes are in the admin Edit menu.
  */
 export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
