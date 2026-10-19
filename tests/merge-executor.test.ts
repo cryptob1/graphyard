@@ -364,7 +364,10 @@ test('integration:executor-trial-failure-rework-no-approver — a rework request
   const failing = fakePorts({ failTrial: mergeSha => mergeSha === sha(`merge:${sha('head1')}:${tip}`) });
   let refuse = 2;
   const decided: { key: string; binding: string }[] = [];
-  const decide: DaemonEffects['decide'] = async (target, _action, _reason, input) => { if (refuse-- > 0) throw new Error('route down (HTTP 503)'); decided.push({ key: target.key, binding: (input as { binding: string }).binding }); return { id: randomUUID() }; };
+  const decide: DaemonEffects['decide'] = async (target, _action, _reason, input) => { if (refuse-- > 0) throw new Error('route down (HTTP 503)'); decided.push({ key: target.key, binding: (input as { binding: string }).binding });
+    // The server applies a trial-failure rework with the writer as its approver (GY-1524), so the confirmed request shows on the snapshot the next cycle reads: the item is returned to a worker.
+    const applied = work.find(entry => entry.key === target.key); if (applied) (applied as { reworkRequested?: boolean }).reworkRequested = true;
+    return { id: randomUUID() }; };
   const state = emptyDaemonState(config);
   const effects = effectsFor({ work: () => failing.world(work), now, mergeWriter: fakeReads(failing.ports, async () => 'control-plane'), decide });
   await runCycle(config, state, effects, now); await mergeWriterIdle(state);
@@ -395,10 +398,11 @@ test('integration:executor-trial-failure-rework-no-approver — a rework request
   const settled = await runCycle(config, lost, effectsFor({ work: () => applied, now, mergeWriter: fakeReads(fakePorts().ports, async () => 'control-plane'), decide }), now);
   assert.deepEqual([lost.mergeWriter.reworks, decided.length], [[], 1], 'both are settled without a request');
   assert.ok(settled.actions.some(action => /grounds is applied: the snapshot shows the item returned to a worker/.test(action.detail)) && settled.actions.some(action => /the snapshot shows the item on a new head/.test(action.detail)), JSON.stringify(settled.actions.map(action => action.detail)));
-  // Without the decision effects the record waits, naming the command the operator runs.
+  // Without the decision effects the record waits, naming the command the operator runs. A fresh
+  // snapshot: the item above was returned to a worker when its request was confirmed.
   const waiting = emptyDaemonState(config);
   waiting.mergeWriter.reworks = [{ key: 'GY-1', id: 'w1', head: sha('head1'), reason: `${trialFailurePrefix}: tests tests/item.test.ts`, refusedAt: iso(start), attempts: 0, lastError: null }];
-  const waited = await runCycle(config, waiting, effectsFor({ work: () => work, now, mergeWriter: fakeReads(fakePorts().ports, async () => 'control-plane') }), now);
+  const waited = await runCycle(config, waiting, effectsFor({ work: () => [submitted(1, 30)], now, mergeWriter: fakeReads(fakePorts().ports, async () => 'control-plane') }), now);
   assert.equal(waiting.mergeWriter.reworks[0]?.lastError, 'this loop runs without the decision effects');
   assert.ok(waited.actions.some(action => action.state === 'failed' && new RegExp(`graphyard master decide GY-1 rework '\\{"previousWorkerStopped":true,"binding":"${sha('head1')}:${mergeWriterTrialGround}"\\}' REASON`).test(action.detail)), JSON.stringify(waited.actions.map(action => action.detail)));
 });

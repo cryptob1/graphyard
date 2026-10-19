@@ -42,6 +42,8 @@ const item = (paths: string[], proofs: string[] = ['unit:core-flow', 'manual:saf
   workspaces: [{ host: 'test', path: '/tmp/fixture', branch: 'graphyard/gy-1-1', epoch: 1, owner: 'worker' }],
   submission: { pr: 7, epoch: 1 }, candidate: { sha: head, baseSha: base, pr: 7, branch: 'graphyard/gy-1-1', author: 'worker' },
   reworkRequested: false, scenarioRequirements: [], evidence: [], observation: observed(paths), blocker: null, gates: [], violations: [],
+  // The merge writer's passing trial of exactly this head on this base (GY-2010: the test gate reads the merge ledger).
+  mergeLedger: { key: 'GY-1', state: 'intent', head, baseTip: base, mergeSha: null, risk: null, intentAt: new Date().toISOString(), pushedAt: null, observedTip: null, refusal: null, events: 2 },
   createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(),
 } as unknown as Work);
 
@@ -139,17 +141,17 @@ test('unit:lane-sets-required-gates — the shipped required set of each lane', 
   }
 });
 
-test('unit:lane-sets-required-gates — a low-lane item is landable on its required CI checks and one approving review', () => {
+test('unit:lane-sets-required-gates — a low-lane item is landable on its merge-writer trial and one approving review', () => {
   const work = item(['src/model/policy.ts']);
   const result = verdict(work);
   assert.equal(result.lane, 'low');
   assert.deepEqual(requiredProofs(work, [work]), [], 'no producer-run proof or manual attestation is required of a low item');
   assert.equal(acceptance(work).passed, true, acceptance(work).reasons.join('; '));
   for (const gate of ['review', 'test']) assert.equal(result.gates.find(entry => entry.name === gate)!.passed, true, `${gate} passes: ${result.gates.find(entry => entry.name === gate)!.reasons.join('; ')}`);
-  // The CI checks and the one approving review still gate it.
+  // The writer's trial and the one approving review still gate it.
   const red = item(['src/model/policy.ts']);
-  red.observation = { ...observed(['src/model/policy.ts']), checks: [{ name: 'test', result: 'failure', appId: 15368 }] } as Observation;
-  assert.equal(verdict(red).gates.find(gate => gate.name === 'test')!.passed, false, 'a red required check refuses a low item');
+  red.mergeLedger = { ...red.mergeLedger!, state: 'refused', refusal: { kind: 'merge', reason: 'trial failed: tests/policy.test.ts' } };
+  assert.equal(verdict(red).gates.find(gate => gate.name === 'test')!.passed, false, 'a refused trial refuses a low item');
   const unreviewed = item(['src/model/policy.ts']);
   unreviewed.observation = { ...observed(['src/model/policy.ts']), reviews: [] };
   assert.equal(verdict(unreviewed).gates.find(gate => gate.name === 'review')!.passed, false, 'a low item still needs one approving review');

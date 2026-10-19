@@ -153,7 +153,7 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
   assert.deepEqual(interventionExemptions.map(entry => entry.name), [
     'approved-autoscope', 'successor-replan', 'audited-scope-widening', 'routed-scope-widening', 'unstarted-replan', 'criteria-implied-widening',
     'routine-rework-ground', 'lane-rework-ground', 'failed-check-round', 'loop-rework-round',
-    'direct-merge-window', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'approver-holds-scope-request', 'scope-refusal-within-bound', 'lease-loss-resolve', 'approved-decision-weakening',
+    'direct-merge-window', 'merge-writer-reconcile', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'approver-holds-scope-request', 'scope-refusal-within-bound', 'lease-loss-resolve', 'approved-decision-weakening',
   ]);
   assert.ok(interventionExemptions.every(entry => typeof entry.exempts === 'function'), 'one predicate per rule');
   const fold = source('src/interventions.ts');
@@ -188,8 +188,11 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
     [{ at: 'rework', decision: { ...decision, binding: 'x:base', approvedBy: laneApprover }, asked: false, grounds: null, candidate }, 'loop-rework-round'],
     [{ at: 'rework', decision: { ...decision, binding: 'x:base' }, asked: false, grounds: null, candidate }, null],
     [{ at: 'open-rework', decision: { ...decision, binding: 'x:base' }, asked: false, grounds: null, candidate }, 'loop-rework-round'],
-    [{ at: 'merge', details: { directMerge: true } }, 'direct-merge-window'],
-    [{ at: 'merge', details: {} }, null],
+    [{ at: 'merge', kind: 'merge.reconciled', details: { directMerge: true } }, 'direct-merge-window'],
+    [{ at: 'merge', kind: 'merge.operator-authorized', details: {} }, null],
+    [{ at: 'merge', kind: 'merge.reconciled', details: { requestedBy: 'vish', approvedBy: 'an-approver' } }, null],
+    [{ at: 'merge', kind: 'merge.reconciled', details: { mergeSha: 'a'.repeat(40), observedTip: 'b'.repeat(40) } }, 'merge-writer-reconcile'],
+    [{ at: 'merge', kind: 'merge.reconciled', details: {} }, 'merge-writer-reconcile'],
     [{ at: 'settlement', kind: 'autosettle', details: { origin: 'loop', lapsedAt: at(0) }, when: at(5) }, 'loop-autosettle-in-bound'],
     [{ at: 'settlement', kind: 'recover', details: { origin: 'loop', lapsedAt: at(0) }, when: at(5) }, null],
     [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'blocked-report', blocked: 'x', paths: [], sources: [] }, item: { ...item, blocker: null } as Work, now: at(60) }, 'answered-off-ledger'],

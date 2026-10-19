@@ -9,7 +9,7 @@ Serves `127.0.0.1:4310` or the install's free port ([install](install.md)). With
 
 ## Work
 
-Open items: **Needs you**, **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `outcome`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30min); master-owed: `master status` `board.owed`. Blocked rows name their clearer (`blocker.summary`; a wait's UTC `until`).
+Open items: **Needs you**, **Blocked**, **Moving**, **Up next**, **Backlog**. `GET /api/board` items carry `group`, `stage`, `owner`, `actor`, `command`, `since`, `overdue` (Moving/Blocked past `overdueAfterMs`, 30min); master-owed: `master status` `board.owed`. Blocked rows name their clearer (`blocker.summary`; a wait's UTC `until`).
 
 ## Needs you
 
@@ -27,8 +27,8 @@ Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent
 
 ## The status sentence
 
-**Build, Validate, Test, Review, Prove, Merge**; done items are *Delivered* at merge; *Live* once served. Item page leads with `summary`, state, **What is left**, folded **Details** (description, criteria), **Pull request** (**Merge danger**), **Tests** (each criterion proof's result: merge trial, evidence, *not run yet*), **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker). `/goals/KEY`: summary, outcomes, Todo/Doing/Checking/Done flowchart, **Play**.
+**Todo**/**Doing**/**Checking**/**Done** (GY-1979; Done = merged, off the board). Release line: commit · health · lag, or *Release: not watched*. Shipped items are *Delivered* at merge; *Live* once served. Item page leads with `summary`, state, **What is left**, folded **Details** (description, criteria), **Pull request** (**Merge danger**), **Tests** (each criterion proof's result: merge trial, evidence, *not run yet*), **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker). `/goals/KEY`: summary, outcomes, Todo/Doing/Checking/Done flowchart, **Play**.
 
 ## Insights
 
-**Flow**; **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are attention, never items; pattern: owners, causes, rounds, [under-threshold days](protocol/read-endpoints.md)), **Validation**, **Releases**.
+**Flow**; **Show details**: shipping pulse, PR-to-production (`POST /api/production-observations`), analytics, conflict hotspots. **Shipped**: **Interventions** ([retro](operations-reference.md#retro-synthesis); repeats are attention, never items; the merge writer's own reconcile delivers and is no bypass; pattern: owners, causes, rounds, [under-threshold days](protocol/read-endpoints.md)), **Validation**, **Releases**.

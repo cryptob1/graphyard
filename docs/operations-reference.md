@@ -33,54 +33,17 @@ Stop worker; [rework](operations.md) `--previous-worker-stopped`; next resubmits
 
 Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATTERNS=0` disables) raises each crossed pattern as attention, never an item, drafting `retro.drafted` changes per recurring cause; a non-drafting operator agent [approves](protocol/work-commands.md) (`decision:approve`)/refuses; approved: [`retroStanding`](protocol/read-endpoints.md).
 
-## Flaky CI check
+## Flaky test
 
-[Reruns once](github.md#failed-checks) (`mergeQueue.rerunFailedChecks`, 0 disables); main merges wait for reruns. Cancelled/timed-out jobs rerun ≤3 times, then one `escalation:main-guard:SHA` infrastructure fault names run+step, reverting nothing. A real failure reruns once: a pass joins `mainGuardFlakes` (last 20); a second failure/refusal/unconcluded hour reverts.
+The merge writer reruns a trial's failing files on the same merge commit; a pass on the rerun lands, filing nothing. No CI check or job log is read (GY-2010).
 
 ## Accepted evidence turns out to be wrong
 
 `graphyard revoke GY-N revoke.json` ([body](protocol/evidence.md#revocation)) closes gate; that head's required checks stop passing.
 
-## GitHub request budget
+## Observation
 
-### The live budget
-
-`x-ratelimit-remaining`/`-limit`/`-reset` project `projectedExhaustionAt`.
-
-### Observation cadence by state
-
-| Band | Cadence
-| --- | ---
-| `merge` | gates pass: 20s
-| `active` | awaiting check/review/refresh/rework: 1min
-| `steady` | unchanged: 5min, fleet-stretched; reviews ≤10min
-| `idle` | awaiting dispatch/escalation: 5min, stretched
-
-Unchanged non-merge candidates spend **at most 40%** (`steadyStateShare`).
-
-### The merge-path reserve
-
-Below **500 requests** by default, `GRAPHYARD_GITHUB_RESERVE`, non-merge observations await reset (`githubBudget.deferrals`); token projected below it at reset raises `github`.
-
-### What an observation costs
-
-~10 requests uncached; unchanged, none.
-
-### What a pause means for gates
-
-`403`/`429` pauses stop requests; gates read the last observation until it lifts; GitHub merges on branch protection ([prioritized wakes](protocol/github-webhook.md#prioritized-wakes)).
-
-### Reading the budget
-
-`graphyard status` (or `GET /api/status`) → `githubBudget`; `billable` (also `master status`): REST-only `perHour` across replicas (`instances`), `limit`/`share`/`target` 0.6/`byEndpoint`; `lastHour`: hourly requests by kind. Immutable, per-cycle, webhook-driven reads [aren't repeated](protocol/github-webhook.md#reads-that-are-not-repeated).
-
-### Reading under control-plane
-
-Every candidate is observed from the checkout, polling GitHub for no pull request/reviews/checks. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
-
-### Webhook liveness
-
-`webhooks` checks receipts against GitHub's delivery log: `lastAttemptAt`/`windowSince`/`coveredFrom`/`attemptsInWindow`/`failedAttempts`/`failedStatusCodes`. `state`: `delivering` (<1h), `failing` (non-2xx; proved-foreign 403 excused), `quiet`, `answered` (2xx), `unverified` (read failed/`coveredFrom` after `windowSince`). Open PRs cite `https://github.com/settings/apps/APP-SLUG`.
+Graphyard observes no pull request, check run or commit status through GitHub's API (directly or through `gh api`), so there is no request budget, rate-limit pause, webhook or observation cadence to read. Every candidate is observed from the shared checkout; the merge writer's ledger decides the test and merge gates. Diagnostician/doctor read `graphyard status GY-N`, not `gh pr view`.
 
 ## Control-plane resources
 
@@ -106,7 +69,7 @@ Ungated merges are permanent violations: repair access, file follow-up. Admin di
 
 ## Merge-intent withdrawal
 
-`graphyard master withdraw [--repo OWNER/NAME] [--apply] [--json] --admin-token-stdin` (admin, loop stopped, managed repository only) dequeues or disarms each unmerged pull request; reruns write nothing; failures exit 1; without `--apply`, plans.
+No pull request is queued or armed, so there is nothing to withdraw: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself; with automatic merging off each merge is a [two-party decision](glossary.md#who-decides), and `master withdraw GY-N DECISION REASON` takes one back.
 
 ## Credentials
 

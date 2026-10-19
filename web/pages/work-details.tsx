@@ -106,11 +106,12 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     document.addEventListener('keydown', keydown);
     return () => document.removeEventListener('keydown', keydown);
   }, [setSelected]);
-  // The Work page's own classification of this item, so its badge is the tile that led here.
+  // The Work page's own classification of this item, so its badge is the tile that led here. A
+  // merged item is off the board (Done, GY-1979) and its page still renders, badge Shipped.
   const group = groupWithin(item, work, now, status?.humanOnly, release);
   const steps = prSteps(item, now, release);
   const actor = nextActor(item, group, now, release, work);
-  // Work closed without merging has no step: no bar, nothing left, nobody acting (`prSteps`).
+  // Work closed without merging has no state: no bar, nothing left, nobody acting (`prSteps`).
   const closed = isClosed(item);
   const showSteps = !closed && (group === 'moving' || group === 'blocked' || group === 'shipped' || (!!item.submission && group !== 'backlog'));
   // The why, in plain words and without the pull request, which the header links once.
@@ -125,7 +126,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const [currentLeft, ...laterLeft] = left;
   const leftCount = left.reduce((sum, group) => sum + group.lines.length, 0);
   const overlap = overlapLine(item, work);
-  const leftGroup = (group: LeftGroup) => <section key={group.step} className="left-step" aria-label={`${group.label} step`}>
+  const leftGroup = (group: LeftGroup) => <section key={group.state} className="left-step" aria-label={`${group.label} state`}>
     <h3>{group.label} <small>· cleared by {group.who}</small></h3>
     <ul className="left-list">{group.lines.map(text => <li key={text}><Explained sentence={text}/></li>)}</ul></section>;
   // Each required check as the test gate reads it, the same states the Test step counts.

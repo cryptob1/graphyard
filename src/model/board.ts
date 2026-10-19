@@ -4,7 +4,7 @@ import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-requ
 import { humanAsk } from './human-ask.js';
 import { scopeRefusalBlocker } from './scope.js';
 import { scopeAskCommand, type RoutedScopeDecision } from './scope-provenance.js';
-import { deliveryOutcome, shortShas } from './format.js';
+import { shortShas } from './format.js';
 import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { blockerSummary, phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
 import { prSteps, stepSince } from './pr-steps.js';
@@ -19,11 +19,10 @@ import { blockerCounts, blockerView, routineBlocker, type BlockerView } from './
  * classification: the server serves it at `GET /api/board`, the Work page renders what that
  * returns, and `master status` lists from it what the master owes, so the operator's view and an
  * agent's cannot disagree. Pure over the work, the clock, the human-only rows and the release
- * view — no I/O and nothing the browser bundle cannot load. Merged work is `shipped` (GY-1981:
- * done = merged; production health is one release-level reading, never a per-item state). Within
- * Shipped, an item is live only once the release is observed serving it (`servedAt`, under the
- * configured production environment); until then it reads "Merged" and is not counted as shipped
- * this week. Closed work is in none.
+ * view — no I/O and nothing the browser bundle cannot load. Only the four states Todo, Doing and
+ * Checking are on the board (GY-1979): a merged item is Done and leaves it — the top bar's one
+ * release line names the commit production serves, its health and the merged changes it does not
+ * carry yet (src/model/release.ts) — and closed work is in none.
  *
  * - `needs-you`: waits on a decision only the human operator may make (a parked item, or an
  *   approval no agent identity can give). Listed here and nowhere else — never also as Blocked.
@@ -74,9 +73,12 @@ export function mergedAt(work: Work): number {
 const windowHeld = (work: Work, now: number) => phaseOf(work, now) === 'needs-worker' && !work.violations.length && !!observationWindowHold(work, new Date(now));
 
 /** The group of one item. `humanOnly` is the set from `humanOnlyIds`; `stalled` the ids nothing is moving. */
-export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set(), _release?: ReleaseView): Group | null {
+export function groupOf(work: Work, now: number, humanOnly: ReadonlySet<string> = new Set(), stalled: ReadonlySet<string> = new Set(), _release: ReleaseView = noRelease): Group | null {
   if (isClosed(work)) return null;
-  // Done = merged (GY-1981): a merged item is shipped; production health is one release-level reading.
+  // Merged work is Done (GY-1979): it has left the board, whichever delivery state it is in — the
+  // top bar's release line carries the commit production serves, its health and what it does not
+  // carry yet. It still counts as shipped this week only once the release is observed serving it
+  // (`shippedThisWeek`), and `leftFlowAt` stays the delivery record's own rule.
   if (work.stage === 'done') return 'shipped';
   if (humanOnly.has(work.id) || parkedOnHuman(work)) return 'needs-you';
   const phase = phaseOf(work, now);
@@ -212,7 +214,6 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
   if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker)) return scopeAskCommand(work, now, scopeDecisions);
   if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
-  if (work.stage === 'done') return null;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
   return null;
 }
@@ -231,8 +232,6 @@ export interface BoardItem {
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
   overdue: boolean;
-  /** GY-1845: a done row's outcome — the production state `deliveryOutcome` headlines ('Merged, awaiting deployment', 'Deployed, awaiting verification', 'Production verified' or 'Deployed with a failure', with the serving release when known), never the word Done, never Merged alone; absent on open rows, which have no outcome yet. */
-  outcome?: string;
   /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008); `summary` is the one plain sentence a Work page row shows for it (GY-1739), and `until` the instant a wait names. */ blocker?: BlockerView & { summary: string; until?: string };
 }
 export interface Board {
@@ -258,9 +257,8 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
     const view = blockerView(entry), wait = view && blockerSummary(entry.blocker!, now, entry, 'UTC'), blocker = view && wait && { ...view, summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
-    const outcome = entry.stage === 'done' && !isClosed(entry) ? deliveryOutcome(entry) : null; // GY-1845: a done row headlines its production state, never a bare merge.
     return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(outcome ? { outcome } : {}), ...(blocker ? { blocker } : {}) };
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,

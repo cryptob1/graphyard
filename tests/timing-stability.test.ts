@@ -2,9 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, readdir, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { buildMasterStatus } from '../src/master.js';
-import type { Work } from '../src/model.js';
-import { parseTimingAnnotations, qualifyTimingFailures, timingFailureReason } from '../src/cli/timing-failures.js';
+import { parseTimingAnnotations, timingFailureReason } from '../src/cli/timing-failures.js';
 import { TimingAssertionError, assertTiming, measureTiming, minimumSamples, observationsAbove, parseTimingRecord, percentile, percentileRank, steadyState, timingFailureMarker, timingSlack, withinSlack } from './helpers/timing.js';
 import { annotationCommand, failedTestCount, readBaseline, timingFailures, timingSpread, timingSummary } from './helpers/timing-report.js';
 import { baselineRecordingVariable, requiredCheckEnvironment, requiredRuns, stabilityRecord, testFilePorts, testPortBase, type StabilityRecord } from './helpers/timing-stability.js';
@@ -49,19 +47,10 @@ test('unit:percentile-and-warmup — the percentile helper returns the order sta
   assert.doesNotMatch(latency, /Math\.ceil\(samples\.length \* 0\.95\)/, 'no second percentile lives beside the helper');
 });
 
-const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
-function heldOnTest(overrides: Partial<Work> = {}) {
-  const now = new Date().toISOString();
-  return { id: 'work-id', key: 'GY-42', title: 'Held on a red test check', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:master'] }],
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: [], stage: 'test', revision: 9, policyRevision: 2, createdAt: now, updatedAt: now, stageEnteredAt: now, ready: true, epoch: 1, lease: null, workspaces: [],
-    candidate, submission: { epoch: 1, pr: 42 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], mergeAuthorization: null,
-    observation: { at: now, candidate, checks: [{ name: 'test', result: 'failure', appId: 15368, id: 7001, attempt: 1 }, { name: 'typecheck', result: 'success', appId: 15368, id: 7002 }], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null, files: [], scopeFiles: [] },
-    gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] }, { name: 'test', passed: false, reasons: ['Required CI check test has not passed on the current candidate'] }], ...overrides } as unknown as Work;
-}
 // What GitHub's annotations API returns for a workflow-command annotation: the message, unescaped.
 const published = (command: string) => ({ annotation_level: 'failure', title: 'Timing-dependent assertion over budget', message: command.slice(command.indexOf('::', 2) + 2).replace(/%0A/g, '\n').replace(/%0D/g, '\r').replace(/%25/g, '%') });
 
-test('unit:timing-failure-reported — a failed timing-dependent assertion is recorded with what it measured, and master status reports it with the measured value against the budget instead of an unqualified red check', async () => {
+test('unit:timing-failure-reported — a failed timing-dependent assertion is recorded with what it measured, and the run\'s annotation states the measured value against the budget', async () => {
   const directory = await temporaryDirectory('timing-record');
   try {
     // The run records every timing-dependent assertion, passed or failed, with what it measured.
@@ -78,7 +67,7 @@ test('unit:timing-failure-reported — a failed timing-dependent assertion is re
     assert.equal(record[1].observationsAbove, 5); assert.equal(record[1].warmupDiscarded, 5); assert.deepEqual(record[1].distribution, { minMs: 900, medianMs: 949, maxMs: 2092 });
 
     // The CI job publishes one annotation per over-budget assertion on its own check run, saying
-    // whether anything else failed beside it; `master status` reads the same record back.
+    // whether anything else failed beside it.
     assert.equal(failedTestCount('ℹ tests 851\nℹ pass 850\nℹ fail 1\n'), 1); assert.equal(failedTestCount('# pass 3\n# fail 0\n'), 0); assert.equal(failedTestCount('no summary'), null);
     const onlyTiming = timingFailures(record, 1), withRegression = timingFailures(record, 3), unknown = timingFailures(record, null);
     assert.equal(onlyTiming.length, 1); assert.equal(onlyTiming[0].otherFailures, 0); assert.equal(withRegression[0].otherFailures, 2); assert.equal(unknown[0].otherFailures, null);
@@ -90,39 +79,11 @@ test('unit:timing-failure-reported — a failed timing-dependent assertion is re
     assert.match(timingSummary(record, onlyTiming, null), /\| work-snapshot-latency\.p95 \|.*\| p95 2092ms \| < 2000ms \| 100 \(5 warmup discarded\) \| not recorded \| \*\*over budget\*\* \|/);
     assert.match(timingSummary(record, onlyTiming, null), /Every failed test in this run failed on a timing-dependent assertion/);
 
-    // Master status: the unqualified refusal becomes the measurement against its budget, and the
-    // item raises attention at once with the rerun, instead of sitting silently behind a red check.
-    const work = heldOnTest(), snapshot = { work: [work], now: new Date().toISOString() };
-    const plain = buildMasterStatus(snapshot, [], []);
-    assert.equal(plain.work[0].refusal?.reason, 'Required CI check test has not passed on the current candidate'); assert.equal(plain.work[0].attention, null);
-    const asked: number[] = [];
-    const annotations = (failures: typeof onlyTiming) => async (id: number) => { asked.push(id); return [{ message: 'Process completed with exit code 1.' }, ...failures.map(failure => published(annotationCommand(failure)))]; };
-    const qualified = await qualifyTimingFailures(plain, snapshot.work, 'owner/project', annotations(onlyTiming));
-    assert.deepEqual(asked, [7001], 'only the failed required check of the current candidate is looked up');
+    // The reason the record reads as, for whoever reads the run; Graphyard reads no check run back (GY-2010).
     const reason = 'Required CI check test failed on a timing-dependent assertion, not on behaviour: work-snapshot-latency.p95 (integration:work-snapshot-latency) measured p95 2092ms against its budget of < 2000ms over 100 samples after 5 discarded warmup reads; every other test in the run passed';
     assert.equal(timingFailureReason('test', onlyTiming), reason);
-    assert.deepEqual(qualified.work[0].refusal, { gate: 'test', reason }); assert.equal(qualified.work[0].attention, reason);
-    assert.equal(qualified.counts.attention, plain.counts.attention + 1);
-    const item = qualified.attentionItems.find(entry => entry.subject === 'GY-42')!;
-    assert.equal(item.text, reason); assert.equal(item.role, 'master'); assert.equal(item.human, false);
-    assert.match(item.next, /^gh api --method POST repos\/owner\/project\/actions\/jobs\/7001\/rerun reruns the test job once; a second measurement over budget is a latency regression/);
-    assert.ok(!JSON.stringify(qualified).includes('has not passed on the current candidate'), 'nothing in the report still calls it an unqualified failure');
-
-    // A regression beside the timing failure is said to be one, and is not offered a rerun.
-    const mixed = await qualifyTimingFailures(plain, snapshot.work, 'owner/project', annotations(withRegression));
-    assert.match(mixed.work[0].attention!, /failed on a timing-dependent assertion: .*2092ms against its budget of < 2000ms.*; 2 other tests failed in the same run, so it is not only a timing failure$/);
-    assert.doesNotMatch(mixed.attentionItems.find(entry => entry.subject === 'GY-42')!.next, /rerun/);
-    assert.match((await qualifyTimingFailures(plain, snapshot.work, 'owner/project', annotations(unknown))).work[0].attention!, /the run did not report whether other tests failed$/);
-
-    // A red check with no timing annotation, an unreadable run, a passing check, an observation of
-    // another head and a delivered item are all left exactly as they were.
-    assert.deepEqual(await qualifyTimingFailures(plain, snapshot.work, 'owner/project', annotations([])), plain);
-    assert.deepEqual(await qualifyTimingFailures(plain, snapshot.work, 'owner/project', async () => { throw new Error('gh: HTTP 502'); }), plain);
-    asked.length = 0;
-    const passing = heldOnTest({ observation: { ...work.observation!, checks: [{ name: 'test', result: 'failure', appId: 15368, id: 7001, attempt: 1 }, { name: 'test', result: 'success', appId: 15368, id: 7003, attempt: 2 }] } });
-    const moved = heldOnTest({ observation: { ...work.observation!, candidate: { ...candidate, sha: 'c'.repeat(40) } } });
-    for (const other of [passing, moved, heldOnTest({ stage: 'done' })]) await qualifyTimingFailures(buildMasterStatus({ work: [other], now: snapshot.now }, [], []), [other], 'owner/project', annotations(onlyTiming));
-    assert.deepEqual(asked, []);
+    assert.match(timingFailureReason('test', withRegression), /; 2 other tests failed in the same run, so it is not only a timing failure$/);
+    assert.match(timingFailureReason('test', unknown), /the run did not report whether other tests failed$/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

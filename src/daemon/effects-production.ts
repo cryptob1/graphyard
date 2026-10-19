@@ -20,8 +20,8 @@ import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
-import { dismissApproval, followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, type SuccessionRead, readReviewFindings, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
+import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
+import { type ReviewFinding, type SuccessionRead, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
@@ -41,7 +41,6 @@ import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
 import { baseTree } from '../cli/planned-files-intent.js'; import { currentBaseTree } from '../executor.js';
-import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
@@ -129,7 +128,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
-  const annotations = onceAnnotations(async checkRunId => JSON.parse(await run('gh', ['api', '--paginate', `repos/${current().repository}/check-runs/${checkRunId}/annotations`])));
   const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
     const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
     try { return await post(work); }
@@ -199,8 +197,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     alignExecutorUnits: script => alignExecutorUnitScript(root, script, { codeRoot: loopCodeRoot(current().cliPath, root) }),
     persist: persistLoop,
     // GY-1982: continuous deploy, through the install's own adapter; imported when first used, as the CLI's upgrade module loads the installer.
-    deploy: async () => (await import('../cli/upgrade.js')).deployPorts({ cliRoot: loopCodeRoot(current().cliPath, root), repoRoot: root, repository: current().repository, url: current().url,
-      token: () => readCredentialFile(current().credentialFile), run, keepAlive }),
+    // GY-2167: the deploy's e2e cases authenticate as the install's own e2e identity, read from its
+    // roster token file inside deployPorts — never with this loop's coordinator credential, whose
+    // principal may create no item and whose use failed every create-step case with 403.
+    deploy: async () => (await import('../cli/upgrade.js')).deployPorts({ cliRoot: loopCodeRoot(current().cliPath, root), repoRoot: root, repository: current().repository, url: current().url, run, keepAlive }),
   });
   return Object.defineProperties({
     agents: () => listHerdrAgents(run).catch(() => []),
@@ -308,10 +308,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await currentBaseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
-    // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
-    // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
-    reviewFindings: async work => work.candidate?.pr ? readReviewFindings({ repository: current().repository, pr: work.candidate.pr, sha: work.candidate.sha, reviewer: current().reviewer ? `${current().reviewer!.slug}[bot]` : null,
-      trusted: current().run.awaitReviewers ?? defaultAwaitReviewers.logins }, run) : [],
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
     baseText: path => baseText(root, current().baseBranch, path, run),
     baseMentions: identifier => baseMentions(root, current().baseBranch, identifier, run),
@@ -322,10 +318,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get replan() {
       return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
         asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
-    },
-    get withdrawReview() {
-      const reviewer = current().reviewer;
-      return reviewer ? (work: Work, reviewId: number, message: string) => dismissApproval(root, reviewer, current().repository, work.candidate!.pr, reviewId, message) : undefined;
     },
     get widenScope() {
       return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
@@ -418,8 +410,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         // The intervention report takes the server close to a minute (GY-377): the cycle uses the
         // cached copy and refreshes it detached from itself, which is also the copy master status reads.
         reports: 'background', reportBoundMs: deps.reportReadBoundMs });
-      // A required check red on the clock is named as master status names it, after buildMasterStatus.
-      return { ...reported, items: [...reported.items, ...await timingFaultAttention(work, current().repository, annotations)] };
+      // No check-run annotation is read back (GY-2010): stored checks are pull-request-era history.
+      return reported;
     },
     get diagnostician() { const config = current(); return config.operatorAgent && config.approver && diagnosticianSettings(config.run).enabled ? diagnosticianEffects(config, root, asOperatorAgent, run) : undefined; },
     // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
@@ -459,5 +451,5 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
     masterSession: masterSessionEffects(root, current, run),
     persist: persistLoop,
-  }, Object.getOwnPropertyDescriptors(baseFailureEffects(run, current, asOperatorAgent)));
+  }, Object.getOwnPropertyDescriptors(baseFailureEffects(current, asOperatorAgent)));
 }
