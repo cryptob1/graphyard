@@ -35,7 +35,7 @@ Container writes; attestor, collector read; never add the runner account. Collec
 
 `e2e/cases/ID.json`, code-reviewed: `id`/`title`, optional `description`/`tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`: `http` (`method`, `path`, `status`, `expect` on dotted paths, `save`, GET `waitSeconds`); `browser` (Playwright Chromium: `open`, `fill`, `click`/`expectText`); `command`: `run` in the checkout with `TARGET_URL`, exit 0 passes, last 50 lines kept: `{"kind":"command","run":"npx playwright test"}`; `agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS|FAIL - reason`, screenshot kept: `{"kind":"agent","goal":"Win tic-tac-toe","success":["Board says You win"],"path":"/games"}`.
 
-`timeoutSeconds` (600). `secrets: ["NAME"]` from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600, uncommitted) as variables and `{{secret:NAME}}`, redacted. `e2e run CASE|--tag T|--all --url URL` prints failing steps, exits non-zero. An install serving neither deliveries (no wired repository, no UAT) nor previews pends the cases exercising them.
+`timeoutSeconds` (600). `secrets: ["NAME"]` from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600, uncommitted) as variables and `{{secret:NAME}}`, redacted. `e2e run CASE|--tag T|--all --url URL` prints failing steps, exits non-zero. Without a wired repository the delivery cases pend; without previews the preview cases do.
 
 **Required `uat` cases run on every deploy** (`GRAPHYARD_UAT_URL`, `GRAPHYARD_SUITE_DETAIL`; static sites loop back `GRAPHYARD_UAT_STATIC`); `e2e record REPORT` records attempts ([`e2e:record` agent](delivery.md#release-filing-credential)).
 
