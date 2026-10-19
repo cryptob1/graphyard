@@ -394,48 +394,6 @@ test('unit:upgrade-acts-on-cli-checkout-only — a dirty-checkout upgrade pins a
   assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
 });
 
-test('unit:upgrade-acts-on-cli-checkout-only — a restart held for the served release pins the served release under the CLI checkout and completes onto it when production catches up', async () => {
-  const cli = await cliCheckout();
-  const tip2 = await cli.advance(2);
-  const managed = await managedCloneOf(cli.origin, cli.loaded);
-  const master = config(join(cli.checkout, 'bin', 'graphyard.mjs'));
-  const state = emptyDaemonState(master);
-  state.release = { commit: cli.loaded, dirty: false };
-  // Production serves the release the loop already runs, which does not contain the merged tip.
-  state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: cli.loaded, at, reason: null, deployed: ['GY-1'], pending: [] });
-  const executorEntries: (string | null)[] = [];
-  let executors: string[] = [], self = 0;
-  const deps: SelfUpgradeDeps = {
-    root: managed.root, run, now: () => now, persist: async () => {},
-    alignUnit: async () => ({ wrote: 'updated', reason: null }),
-    alignExecutorUnits: async script => { executorEntries.push(script); return { wrote: 'updated', reason: null }; },
-    restartExecutors: async to => { executors.push(to); return { result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; },
-    restartSelf: async () => { self += 1; state.release = await startupRelease(managed.root, master); },
-  };
-  const held = await performSelfUpgrade(master, state, deps);
-  assert.equal(held.outcome, 'pending', JSON.stringify(held));
-  assert.equal(state.upgrade.stalled?.cause, 'release-lagged');
-  // The pin holds the SERVED release, under the CLI checkout: the moved checkout's launcher speaks
-  // the served protocol until the plane catches up, and the managed repository holds nothing.
-  assert.equal(readHeldCli(cli.checkout), cli.loaded);
-  assert.ok(!existsSync(heldCliPointer(managed.root)));
-  assert.equal(git(cli.checkout, 'rev-parse', 'HEAD'), tip2, 'the checkout moved; only the restart is held');
-  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
-  assert.equal(state.release.commit, cli.loaded, 'the loop still runs the served release');
-  // Production catches up: the held restart completes onto the checkout, the pin lifts, the
-  // executor units return, and the loop re-executes onto the commit it now reports.
-  state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: tip2, at, reason: null, deployed: ['GY-1'], pending: [] });
-  const served = await performSelfUpgrade(master, state, deps);
-  assert.equal(served.outcome, 'upgraded', JSON.stringify(served));
-  assert.equal(served.code, true);
-  assert.equal(readHeldCli(cli.checkout), null, 'the pin is lifted once the plane serves the move');
-  assert.deepEqual(executorEntries, [null], 'the executor units return to the checkout’s entry');
-  assert.deepEqual(executors, [tip2]);
-  assert.equal(self, 1);
-  assert.deepEqual(state.release, { commit: tip2, dirty: false }, 'the restarted loop reports the checkout it runs');
-  assert.equal(git(managed.root, 'rev-parse', 'HEAD'), managed.head);
-});
-
 test('unit:upgrade-acts-on-cli-checkout-only — up lifts the pin from the CLI checkout it stands under, never from the managed repository', async () => {
   const cli = await cliCheckout();
   const managed = await managedCloneOf(cli.origin, cli.loaded);

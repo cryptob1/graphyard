@@ -7,7 +7,7 @@ import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
 import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics } from './metrics.js';
 import { profileHealth } from './sessions.js';
-import { boundedPersist } from './liveness.js';
+import { boundedPersist, progressAttention } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
 import { masterSessionStep } from './cycle-master.js';
@@ -301,6 +301,12 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
   // not a recomputation beside it, so what reclasses a subject is what the step decided.
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
+  // The loop's progress watchdog (GY-2005): its lines (progressAttention, GY-1980) began standing
+  // this cycle. The onset — not every cycle the stall stands — is the resolver's cue: a run is
+  // marked due and the next cycle's doctorStep launches it at once instead of waiting the interval.
+  const watchdogStanding = progressAttention(snapshot.work, state.promotion, clock).length > 0;
+  if (watchdogStanding && !state.doctor.watchdogStanding) state.doctor.watchdogDue = true;
+  state.doctor.watchdogStanding = watchdogStanding;
   const { stages, lead } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
