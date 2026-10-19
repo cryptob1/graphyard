@@ -512,7 +512,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     // or not (GY-1464), unless a completed pass already processed it without loaded code; a tip deployed now (GY-1982) always is.
     // GY-2344: a tip the install serves — the off-cycle deploy recorded it — is loaded code whatever
     // the diff says: the CLI tracks the release production runs (GY-2169), so the restart onto it
-    // re-executes the loop and the executors even when the diff touches none of what they load.
+    // re-executes the loop even when the diff touches none of what it loads.
     const servedTip = deploying && sameCommit(state.promotion?.promotedSha, to);
     if ((servedTip && !sameCommit(loaded, to)) || (loaded && loaded !== to && !processed(to))) {
       if (checkout.dirty === null) return unaligned(`the restart onto ${shortCommit(to)} is owed, but whether the coordinator checkout at ${shortCommit(checkout.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
