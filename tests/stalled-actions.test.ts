@@ -16,12 +16,12 @@ import { assertDispatchable } from '../src/master.js';
 import { actionReport, stalledActionAttention } from '../src/cli/master-status.js';
 import { plainStatus, stalledStep } from '../src/model/plain-status.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
-import { credential401Remedy, recordStallRemedy } from '../src/stall-remedies.js';
+import { credential401Remedy } from '../src/stall-remedies.js';
 import WorkCard from '../web/components/work-card.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
-// Time-bomb allowance (GY-1694): the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merge are past inside an open-ended window; the 2026-10-18 GY-2014 fixtures pass their own fixed ISO clocks into stalledActionAttention and recordStallRemedy; Date.now()/new Date() only stamp live DB rows in the integration cases.
+// Time-bomb allowance (GY-1694): the 2026-09-21 clock is passed explicitly to claim/settle/reconcile; the 2026-01-01 window and 2026-02-01 merge are past inside an open-ended window; the 2026-10-18 GY-2014 fixtures pass their own fixed ISO clocks into stalledActionAttention; Date.now()/new Date() only stamp live DB rows in the integration cases.
 
 /**
  * GY-110: an action that keeps failing for the same reason is a stall, not a retry.
@@ -261,57 +261,6 @@ test('integration:stall-raises-attention — a stalled row is raised as an atten
   assert.ok(openMs < actionIdleMs, 'raised well inside the bound applied to a row nobody is acting on');
   assert.deepEqual(actionReport(snapshot).idle.filter(entry => entry.key === item.key), [], 'which the idle report alone would never have said: it can only see claimable rows');
   assert.ok(actionStallLatencyMs < actionIdleMs);
-});
-
-test('unit:stall-remedy-recorded-once — the control plane records the loop\'s remedy on the stalled row once per unchanged run, refuses a second record and a non-coordinator, and master status names what the remedy did (GY-949)', async () => {
-  const item = await release(await created());
-  const hold = `${item.key}: no observation newer than the claim was saved; its observation job is held: App graphyard-owner-project lacks Actions: write, which failed CI reruns needs to rerun failed workflow jobs on the unchanged candidate; accept the pending permission request at https://github.com/settings/installations/91011; the claim woke it and leaves the row waiting for the observation`;
-  let last: ActionRow | undefined;
-  for (let failure = 0; failure < actionStallThreshold; failure++) {
-    last = await attempt(item, async () => hold);
-    if (failure < actionStallThreshold - 1) await elapse(item, actionRetryMaxMs);
-  }
-  const body = { remedy: 'installation-accept', reason: hold, outcome: 'refused', detail: 'Confirm access was not approved within 300s; approve the GitHub Mobile prompt (code 42)', flows: ['installation-accept'] };
-  await assert.rejects(engine.recordActionRemedy(worker, last!.id, body), /Coordinator permission required/);
-  const recorded = await engine.recordActionRemedy(coordinator, last!.id, body);
-  assert.equal(recorded.action.remedy?.outcome, 'refused');
-  assert.equal(recorded.action.remedy?.by, coordinator.id);
-  // The record is evaluated with the item: the refusal's escalation is queued at once and retires
-  // the stalled row, so a second record finds no open row to write to — one record, the first.
-  const escalated = await reload(item);
-  assert.equal(escalated.nextAction?.kind, 'escalate', 'the refused remedy is escalated in the same transaction');
-  assert.match(escalated.nextAction!.binding, new RegExp(`^stalled:${last!.id}:remedy:`));
-  await assert.rejects(engine.recordActionRemedy(coordinator, last!.id, { ...body, outcome: 'applied' }), /Action is not open on (any|this) work item/);
-  const stored = [...escalated.actionQueue!.actions, ...escalated.actionQueue!.history].find(row => row.id === last!.id)!;
-  assert.equal(stored.remedy?.outcome, 'refused', 'one record, the first');
-  // The escalation now owns the stall and names what the remedy did; no generic stalled line is left.
-  assert.match(escalated.nextAction!.reason, /installation-accept remedy \(installation-accept\) was refused at .*Confirm access was not approved/);
-  assert.deepEqual(stalledActionAttention(await snapshotOf()).filter(entry => entry.subject === item.key), []);
-});
-
-test('unit:stall-remedy-recorded-once — a granted remedy is recorded once on a held row its executor completed and the item\'s reconciliation retired to history before the record landed (GY-1586)', async () => {
-  const item = await release(await created());
-  const hold = `${item.key}: no observation newer than the claim was saved; its observation job is held: App graphyard-owner-project lacks Actions: write, which failed CI reruns needs to rerun failed workflow jobs on the unchanged candidate; accept the pending permission request at https://github.com/settings/installations/91011; the claim woke it and leaves the row waiting for the observation`;
-  for (let failure = 0; failure < actionStallThreshold; failure++) {
-    await attempt(item, async () => hold);
-    await elapse(item, actionStallMaxMs);
-  }
-  // The remedy cleared the hold: the held job resumed and the executor completed the row, and the
-  // reconciliation that settlement wakes retired the completed row to history, all before the loop's record.
-  const claimed = await engine.claimNextAction(executor, { host: identity.host, kinds: ['dispatch'], work: item.key }, randomUUID());
-  const done = (await engine.settleClaimedAction(executor, claimed.action!.id, { result: 'done', reason: 'the held job resumed' }, randomUUID())).action as ActionRow;
-  const current = await reload(item);
-  const retired = { ...current.actionQueue!.actions.find(row => row.id === done.id)!, resolution: `${item.key} no longer needs this action` };
-  const queue = { actions: current.actionQueue!.actions.filter(row => row.id !== done.id), history: [...current.actionQueue!.history, retired] };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{actionQueue}',$2::jsonb) WHERE id=$1", [item.id, JSON.stringify(queue)]);
-
-  const body = { remedy: 'installation-accept', reason: hold, outcome: 'applied', detail: 'granted', flows: ['installation-accept'] };
-  const recorded = await engine.recordActionRemedy(coordinator, done.id, body);
-  assert.equal(recorded.action.remedy?.outcome, 'applied', 'the record finds the retired row instead of answering 404');
-  // A second record is refused: by the retired run's record, or, once the item opens the row afresh, by the new run not being stalled.
-  await assert.rejects(engine.recordActionRemedy(coordinator, done.id, body), /already recorded for this unchanged run|no longer stalled on the reason/, 'and lands once');
-  const stored = (await reload(item)).actionQueue!.history.filter(row => row.id === done.id);
-  assert.deepEqual(stored.map(row => row.remedy?.outcome), ['applied'], 'on the retired row itself');
 });
 
 // ---- AC-4: backoff does not outlive the condition it was earned against ----------------------
@@ -572,7 +521,7 @@ function fixtureStall(key: string, kind: ActionRow['kind'], reason: string, at =
 
 test('unit:stalled-actions-claim-credential-attention — a dispatch row on the refused claim credential names the credential-401 remedy, not the generic instruction', () => {
   const reason = 'Command failed: node bin/graphyard.mjs claim GY-1994\n{"error":"A valid Graphyard bearer token is required"}';
-  const { work, row, at } = fixtureStall('GY-1994', 'dispatch', reason);
+  const { work, at } = fixtureStall('GY-1994', 'dispatch', reason);
   const raised = stalledActionAttention({ work: [work], now: at });
   assert.equal(raised.length, 1);
   assert.equal(raised[0].kind, 'setup');
@@ -580,10 +529,7 @@ test('unit:stalled-actions-claim-credential-attention — a dispatch row on the 
   assert.match(raised[0].next, /credential-401/);
   assert.match(raised[0].next, new RegExp(credential401Remedy.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 40)));
   assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
-  recordStallRemedy(work, row.id, { remedy: 'credential-401', reason, outcome: 'applied', detail: 'the fresh credential authenticates', flows: [] }, 'graphyard-master', new Date(at));
-  const after = stalledActionAttention({ work: [work], now: at })[0];
-  assert.match(after.next, /the loop applied the credential-401 remedy/);
-  assert.equal(classifyAttention([after])[0].faultClass, 'configuration');
+  assert.equal(classifyAttention([raised[0]])[0].faultClass, 'configuration');
 });
 
 test('unit:stalled-actions-reviewer-launch-attention — a request-review row on the refused reviewer launch raises the reviewer-identity setup line, not a stalled-action instance', () => {

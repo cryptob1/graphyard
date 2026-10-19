@@ -1,7 +1,7 @@
-import { executorLiveMs } from './executor-presence.js';
+import type { PaneServer } from './setup-checklist.js';
 
-// The master loop as the control plane sees it (GY-916): which loop merges on this installation, and
-// who reviews and merges there (GY-1501). Split from `executor-presence.ts`, which re-exports it.
+// The master loop as the control plane sees it (GY-916): which loop merges on this installation,
+// who reviews and merges there (GY-1501), and the pane server holding its sessions (GY-1511).
 
 /**
  * How long a loop's merge request keeps it the installation's merger on the control plane's view
@@ -27,13 +27,13 @@ export const loopSupervisionHeader = 'X-Graphyard-Loop-Supervision';
 export type LoopSupervision = 'supervised' | 'autonomous';
 export interface LoopPresence { principal: string; intervalSeconds: number; seenAt: string; supervision?: LoopSupervision }
 /**
- * How long one read keeps the loop live: three of its cycles, never under an executor's window —
+ * How long one read keeps the loop live: three of its cycles, never under two minutes —
  * the rule `daemonSummary` applies to the loop's own cursor. The dispatcher beside the cycle reads
  * every few seconds, so a long cycle does not lapse it.
  */
-export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * intervalSeconds * 1000, executorLiveMs);
+export const loopPresenceLiveMs = (intervalSeconds: number) => Math.max(3 * intervalSeconds * 1000, 120_000);
 
-/** The loop as the control plane last saw it read, in memory beside the engine like executor presence. */
+/** The loop as the control plane last saw it read, in memory beside the engine. */
 export class LoopRegistry {
   private latest: LoopPresence | null = null;
   observe(poll: { principal: string; intervalSeconds: number; supervision?: LoopSupervision | null }, now: Date) {
@@ -78,11 +78,42 @@ export async function reportedLoopMerger(registry: LoopRegistry, query: (text: s
 
 /**
  * The control plane's own reading of the loop (GY-916): the newest merge request its ledger holds
- * from a `daemon-` merge instance — the instance only the durable loop mints (`daemonExecutor`);
- * an executor's is `executor-…` — inside the window. A range read on the `(kind, created_at)` index.
+ * from a `daemon-` merge instance — the instance only the durable loop mints (`daemonExecutor`),
+ * inside the window. A range read on the `(kind, created_at)` index.
  */
 export async function ledgerLoopMerger(query: (text: string, values: unknown[]) => Promise<{ rows: any[] }>, now: Date, liveMs = loopMergerLiveMs): Promise<ReportedLoopMerger | null> {
   const [latest] = (await query("SELECT payload->'details'->>'requestedBy' AS by, created_at FROM events WHERE kind='merge.enqueue.requested' AND created_at > $1 AND payload->'details'->>'requestedBy' LIKE '%#daemon-%' ORDER BY created_at DESC LIMIT 1",
     [new Date(now.getTime() - liveMs)])).rows;
   return latest ? { live: true, name: `the master loop (${String(latest.by).split('#')[0]}, last merge request ${new Date(latest.created_at).toISOString()})` } : null;
+}
+
+/**
+ * The header on the loop's coordination reads naming the pane server that holds the install's agent
+ * sessions (GY-1511), as the loop knows it — its own instance's config home and session (null for the
+ * host's default), the host the loop runs on, and whether the loop last reached that server —
+ * URI-encoded JSON. The control plane keeps the latest beside the loop's presence for /api/status.
+ */
+export const loopPanesHeader = 'X-Graphyard-Loop-Panes';
+export const encodeLoopPanes = (panes: PaneServer) => encodeURIComponent(JSON.stringify(panes));
+/** The pane server a loop read names, or null when it names none or one that does not parse. */
+export function loopPanes(header: string | string[] | undefined): PaneServer | null {
+  const value = Array.isArray(header) ? header[0] : header;
+  if (!value || value.length > 2_000) return null;
+  try {
+    const parsed = JSON.parse(decodeURIComponent(value));
+    const text = (field: unknown) => typeof field === 'string' && field.trim() && field.length <= 500 ? field.trim() : null;
+    const configHome = text(parsed?.configHome), session = text(parsed?.session);
+    return { configHome: configHome && session ? configHome : null, session: configHome && session ? session : null, host: text(parsed?.host), running: typeof parsed?.running === 'boolean' ? parsed.running : null };
+  } catch { return null; }
+}
+/** The pane server the loop last named, kept per engine like the loop's presence; a read naming none keeps the last. */
+export class LoopPanesRegistry {
+  latest: PaneServer | null = null;
+  observe(panes: PaneServer | null) { if (panes) this.latest = panes; }
+}
+const loopPanesRegistries = new WeakMap<object, LoopPanesRegistry>();
+export function loopPanesRegistry(owner: object): LoopPanesRegistry {
+  let registry = loopPanesRegistries.get(owner);
+  if (!registry) { registry = new LoopPanesRegistry(); loopPanesRegistries.set(owner, registry); }
+  return registry;
 }

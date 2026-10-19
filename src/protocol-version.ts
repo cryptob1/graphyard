@@ -37,8 +37,21 @@ export function buildIdentity(env: Record<string, string | undefined> = process.
   return { commit: null, protocol: MERGE_PROTOCOL, source: null };
 }
 
+type SyncRun = (command: string, args: string[]) => string;
+const syncRun: SyncRun = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
 /** The commit the CLI itself runs from: the checkout that holds this source file. */
-export function cliCommit(root: string, run: (command: string, args: string[]) => string = (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 })): string | null {
+export function cliCommit(root: string, run: SyncRun = syncRun): string | null {
   try { const value = run('git', ['-C', root, 'rev-parse', 'HEAD']).trim(); return commitPattern.test(value) ? value.toLowerCase() : null; }
   catch { return null; }
+}
+/**
+ * The release a process loads from `root`, read once at its startup: the commit, and whether tracked
+ * files differ from it (a dirty checkout runs code no commit names).
+ */
+export function readRelease(root: string, run: SyncRun = syncRun): { commit: string | null; dirty: boolean | null } {
+  const commit = cliCommit(root, run);
+  if (!commit) return { commit: null, dirty: null };
+  let dirty: boolean | null;
+  try { dirty = run('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no']).trim().length > 0; } catch { dirty = null; }
+  return { commit, dirty };
 }

@@ -148,7 +148,7 @@ test('unit:item-page-technical-collapsed — gate internals, sessions with attac
   assert.doesNotMatch(inside.slice(0, inside.indexOf('>') + 1), /\sopen/, 'collapsed');
   // Everything technical is inside it, and none of it is above it.
   const technicalParts = ['<h3>Gate decisions</h3>', '<h3>Sessions (1)</h3>', 'herdr pane attach w1V:p32M --workspace w1V', '<h3>Code review</h3>', 'Provider: Formal GitHub approval',
-    '<h3>Next action and executors</h3>', '<code>request-review</code>', '<h3>Agent requests (1)</h3>', 'graphyard master scope GY-171', 'graphyard-cursor-1'];
+    '<h3>Next action</h3>', '<code>request-review</code>', '<h3>Agent requests (1)</h3>', 'graphyard master scope GY-171', 'graphyard-cursor-1'];
   for (const part of technicalParts) {
     assert.ok(inside.includes(part), `inside Technical details: ${part}`);
     assert.ok(!above.includes(part), `not above Technical details: ${part}`);

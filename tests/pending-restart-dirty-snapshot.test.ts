@@ -11,8 +11,6 @@ import * as upgrade from '../src/daemon/upgrade.js';
 import type { SelfUpgradeDeps, SelfUpgradeOutcome } from '../src/daemon/upgrade.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { alignLoopUnit, installLoopSupervisor, loopUnitOf, loopUnitText, type LoopUnitInput } from '../src/supervisor.js';
-import { installExecutorSupervision, renderExecutorUnit } from '../src/repository-setup.js';
-import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import type { CoordinatorCheckout } from '../src/master/profiles.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -24,17 +22,14 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // every path the upgrade records or classifies is read unquoted; a launcher the checkout holds
 // dirty never decides what loads — the units start the launcher held in the snapshot, with the
 // checkout handed to it, and a hostile checkout launcher is never the code that boots. Real
-// repositories and the shipped git and launcher throughout; the fleet, the supervisor and the
-// unit alignments are recorded fakes, except where the real unit renderer is the thing proved. Each
+// repositories and the shipped git and launcher throughout; the supervisor and the unit
+// alignment are recorded fakes, except where the real unit renderer is the thing proved. Each
 // test is named for the proof it produces: unit:pending-restart-dirty-checkout-snapshots,
 // unit:dirty-path-porcelain-unquoted, unit:snapshot-upgrade-survives-head-drift,
 // unit:pending-restart-unknown-dirty-keeps-pin, unit:dirty-launcher-restarts-from-snapshot-launcher;
 // and, from the review of PR #1201: unit:moved-dirty-checkout-hold-keeps-served-pin (a dirtied
 // checkout moved onto an unserved commit is pinned to the served release for the hold),
-// unit:executor-unit-render-idempotent (re-rendering a unit the pin already rendered changes
-// nothing, and the lift leaves no handed-checkout line), unit:snapshot-lift-returns-the-units (a
-// clean restart from a snapshot loop returns the executor units, and a lift keeps its record until
-// the loop unit is rewritten).
+// unit:snapshot-lift-returns-the-units (a lift keeps its record until the loop unit is rewritten).
 
 const clock = Date.parse('2030-01-01T12:00:00.000Z');
 const iso = (offsetMs = 0) => new Date(clock + offsetMs).toISOString();
@@ -42,7 +37,6 @@ const short = (commit: string) => commit.slice(0, 12);
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const run = async (command: string, args: string[]) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 const verified = (sha: string): DaemonState['deployment'] => deploymentObservationSchema.parse({ source: 'endpoint', sha, at: iso(), reason: null, deployed: ['GY-1'], pending: [] });
-const restarted = (to: string) => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
 const status = (root: string) => execFileSync('git', ['-C', root, 'status', '--porcelain', '--untracked-files=no'], { encoding: 'utf8' }).trimEnd();
 
 /**
@@ -84,11 +78,10 @@ async function world(label: string, options: { seed?: (origin: string) => Promis
   return { origin, root, directory, loaded, tip, master, launch, cli };
 }
 
-/** The upgrade's dependencies: the real checkout and git, a recorded fleet restart and self re-execution, the fixed clock. */
+/** The upgrade's dependencies: the real checkout and git, a recorded self re-execution, the fixed clock. */
 function recording(root: string) {
-  const calls = { executors: [] as string[], self: 0 };
+  const calls = { self: 0 };
   const deps = (extra: Partial<SelfUpgradeDeps> = {}): SelfUpgradeDeps => ({ root, run,
-    restartExecutors: async to => { calls.executors.push(to); return restarted(to); },
     restartSelf: async () => { calls.self += 1; }, persist: async () => {}, now: () => clock, ...extra });
   return { calls, deps };
 }
@@ -115,8 +108,8 @@ const performSelfUpgrade = upgrade.performSelfUpgrade;
 const readHeldCli = upgrade.readHeldCli;
 
 test('unit:pending-restart-dirty-checkout-snapshots — a restart onto B pending after a refused or failed attempt, with the checkout then dirtied at B and nothing newer merged, retried loads a held-cli snapshot of B with the launcher pinned to it, the checkout left behind with its dirty paths; a clean checkout at B restarts from the checkout as before', async () => {
-  // Refused: the alignment moved the checkout onto B, the executors held their claims, and the
-  // operator dirtied the checkout while HEAD stayed at B. The retry never runs the dirty tree.
+  // Refused (a cursor an older loop left, its executors holding their claims): the alignment moved
+  // the checkout onto B, and the operator dirtied the checkout while HEAD stayed at B. The retry never runs the dirty tree.
   const r = await world('pending-refused');
   git(r.root, 'fetch', '-q', 'origin');
   git(r.root, 'checkout', '-q', '--detach', r.tip);
@@ -129,10 +122,10 @@ test('unit:pending-restart-dirty-checkout-snapshots — a restart onto B pending
   state.upgrade.stalled = { cause: 'executors-refused', reason: 'the executors were not restarted: a claim was held', since: iso(), at: iso() };
   const refused = recording(r.root);
   const done = await performSelfUpgrade(r.master, state, refused.deps());
-  assert.deepEqual(done, { outcome: 'upgraded', from: r.loaded, to: r.tip, code: true, executors: restarted(r.tip), self: true, left: { checkout: r.tip, dirty: ['README.md'] } });
+  assert.deepEqual(done, { outcome: 'upgraded', from: r.loaded, to: r.tip, code: true, self: true, left: { checkout: r.tip, dirty: ['README.md'] } });
   assert.equal(readHeldCli(r.root), r.tip, 'the launcher is pinned to the snapshot of B');
   assert.equal(r.launch('watch', 'GY-1', '1').release, 'B', 'the restarted launcher loads the snapshot');
-  assert.deepEqual(refused.calls, { executors: [r.tip], self: 1 });
+  assert.deepEqual(refused.calls, { self: 1 });
   assert.deepEqual([git(r.root, 'rev-parse', 'HEAD'), status(r.root)], [r.tip, before], 'the checkout is untouched: HEAD where it stood, the edit intact');
   assert.deepEqual(state.upgrade.snapshot, { at: iso(), commit: r.tip, checkout: r.tip, dirty: ['README.md'] }, 'the cursor records the checkout left behind with its dirty paths');
   assert.equal(state.upgrade.pending ?? null, null, 'nothing stays owed');
@@ -157,7 +150,7 @@ test('unit:pending-restart-dirty-checkout-snapshots — a restart onto B pending
   assert.deepEqual('left' in retriedDone && retriedDone.left, { checkout: f.tip, dirty: ['README.md'] }, 'the dirty checkout is left behind, never what restarts');
   assert.equal(readHeldCli(f.root), f.tip);
   assert.equal(f.launch('watch', 'GY-1', '1').release, 'B');
-  assert.deepEqual(retried.calls, { executors: [f.tip], self: 1 });
+  assert.deepEqual(retried.calls, { self: 1 });
   assert.deepEqual([git(f.root, 'rev-parse', 'HEAD'), status(f.root)], [f.tip, failedBefore], 'the checkout is untouched');
 
   // Clean: a checkout at B with no edit restarts from the checkout as before — no pin, no record.
@@ -170,7 +163,7 @@ test('unit:pending-restart-dirty-checkout-snapshots — a restart onto B pending
   clean.upgrade.pending = { from: c.loaded, to: c.tip, code: true };
   const fromCheckout = recording(c.root);
   const cleanDone = await performSelfUpgrade(c.master, clean, fromCheckout.deps());
-  assert.deepEqual(cleanDone, { outcome: 'upgraded', from: c.loaded, to: c.tip, code: true, executors: restarted(c.tip), self: true });
+  assert.deepEqual(cleanDone, { outcome: 'upgraded', from: c.loaded, to: c.tip, code: true, self: true });
   assert.equal(readHeldCli(c.root), null, 'no pin stands for a clean checkout');
   assert.equal(clean.upgrade.snapshot, undefined);
   assert.deepEqual([git(c.root, 'rev-parse', 'HEAD'), status(c.root)], [c.tip, '']);
@@ -203,8 +196,9 @@ test('unit:dirty-path-porcelain-unquoted — a modified or staged path whose nam
   const done = await performSelfUpgrade(w.master, state, deps());
   assert.equal(done.outcome, 'upgraded', JSON.stringify(done));
   // The diff from A to B names the quoted path too; classified by its real path it is loaded code,
-  // so the executors restart — left quoted, the name would read as docs-only and nothing would.
-  assert.deepEqual(calls.executors, [w.tip], 'the quoted loaded path is classified by its real path');
+  // so the move is loaded code — left quoted, the name would read as docs-only.
+  assert.equal('code' in done && done.code, true, 'the quoted loaded path is classified by its real path');
+  assert.equal(calls.self, 1);
   assert.deepEqual(done.left?.dirty, [renamedFrom, renamedTo, arrowed, quoted], 'the cursor records every quoted path by its real name, a rename as both its paths');
   assert.deepEqual(state.upgrade.snapshot?.dirty, [renamedFrom, renamedTo, arrowed, quoted]);
   assert.equal(readHeldCli(root), w.tip, 'the launcher is pinned to the snapshot');
@@ -233,7 +227,7 @@ test('unit:snapshot-upgrade-survives-head-drift — a loop running a held-cli sn
   assert.deepEqual('left' in upgraded && upgraded.left, { checkout: movedTo, dirty: ['README.md'] }, 'the moved dirty checkout is left behind');
   assert.deepEqual(state.upgrade.snapshot, { at: iso(), commit: next, checkout: movedTo, dirty: ['README.md'] }, 'the snapshot upgrade lands on the newer merged commit');
   assert.equal(readHeldCli(w.root), next);
-  assert.deepEqual(second.calls, { executors: [next], self: 1 });
+  assert.deepEqual(second.calls, { self: 1 });
   assert.deepEqual([git(w.root, 'rev-parse', 'HEAD'), status(w.root)], [movedTo, before], 'the moved checkout is untouched');
 
   // The loop's checkout guard (src/daemon/run.ts): a snapshot loop is not refused by the dirty
@@ -278,7 +272,7 @@ test('unit:pending-restart-unknown-dirty-keeps-pin — a pending restart whose c
   assert.equal(state.actions['upgrade:align']?.state, 'failed', 'the failed read is recorded');
   assert.equal(state.upgrade.stalled?.cause, 'checkout-failed');
   assert.deepEqual(state.upgrade.pending, { from: u.loaded, to: u.tip, code: true }, 'the restart stays owed');
-  assert.deepEqual(owed.calls, { executors: [], self: 0 }, 'nothing restarts from the checkout');
+  assert.deepEqual(owed.calls, { self: 0 }, 'nothing restarts from the checkout');
   assert.equal(git(u.root, 'rev-parse', 'HEAD'), u.tip, 'the checkout is untouched');
   assert.equal(readHeldCli(u.root), null);
   // With the pin standing the same failed read must not clear it: the loop on the snapshot keeps it.
@@ -291,7 +285,7 @@ test('unit:pending-restart-unknown-dirty-keeps-pin — a pending restart whose c
   const pinDone = await performSelfUpgrade(p.master, pinned.state, kept.deps({ loadedFrom: join(pinned.snapshot, 'src', 'daemon', 'upgrade.ts'), run: unreadable }));
   assert.equal(pinDone.outcome, 'failed', JSON.stringify(pinDone));
   assert.equal(readHeldCli(p.root), p.tip, 'the pin is not cleared');
-  assert.deepEqual(kept.calls, { executors: [], self: 0 }, 'the loop and the executors are not restarted from the checkout');
+  assert.deepEqual(kept.calls, { self: 0 }, 'the loop is not restarted from the checkout');
   assert.deepEqual(pinned.state.upgrade.pending, { from: p.loaded, to: p.tip, code: true });
 
   // A clean detached checkout moved by hand to another commit while the pin stands: the pin keeps,
@@ -311,7 +305,7 @@ test('unit:pending-restart-unknown-dirty-keeps-pin — a pending restart whose c
   const skipped = await performSelfUpgrade(m.master, moved.state, pass.deps({ loadedFrom: join(moved.snapshot, 'src', 'daemon', 'upgrade.ts') }));
   assert.equal(skipped.outcome, 'skipped', JSON.stringify(skipped));
   assert.equal(readHeldCli(m.root), m.tip, 'the pin keeps standing');
-  assert.deepEqual(pass.calls, { executors: [], self: 0 }, 'nothing restarts');
+  assert.deepEqual(pass.calls, { self: 0 }, 'nothing restarts');
   assert.deepEqual(moved.state.upgrade.snapshot, { at: iso(), commit: m.tip, checkout: byHand, dirty: [] }, 'the checkout is reported as left behind where it now stands');
   const named = upgrade.leftBehindCheckoutAttention(moved.state.upgrade.snapshot, m.tip, m.root);
   assert.equal(named.length, 1);
@@ -325,7 +319,7 @@ test('unit:pending-restart-unknown-dirty-keeps-pin — a pending restart whose c
   assert.equal(skippedAgain.outcome, 'skipped', JSON.stringify(skippedAgain));
   assert.match('reason' in skippedAgain ? skippedAgain.reason : '', /moved there by hand while the loop runs its held snapshot/);
   assert.equal(readHeldCli(m.root), m.tip, 'the pin keeps standing on the next pass too');
-  assert.deepEqual(again.calls, { executors: [], self: 0 });
+  assert.deepEqual(again.calls, { self: 0 });
   assert.deepEqual(moved.state.upgrade.snapshot, { at: iso(), commit: m.tip, checkout: byHand, dirty: [] }, 'the record is unchanged');
   assert.equal(git(m.root, 'rev-parse', 'HEAD'), byHand, 'the moved checkout is not touched');
 });
@@ -363,11 +357,9 @@ test('unit:dirty-launcher-restarts-from-snapshot-launcher — a checkout whose o
   state.release = { commit: w.loaded, dirty: true };
   state.deployment = verified(w.tip);
   const { calls, deps } = recording(w.root);
-  // The unit alignments are recorded fakes, wired the way the loop wires them: the loop unit's
-  // ExecStart follows the pin through alignRunningLoopUnit, and the executor units' entry is
-  // pointed at the snapshot's own script before the fleet restarts.
+  // The unit alignment is a recorded fake, wired the way the loop wires it: the loop unit's
+  // ExecStart follows the pin through alignRunningLoopUnit.
   const captured: { unit: LoopUnitInput | null } = { unit: null };
-  const executorScripts: (string | null)[] = [];
   const done = await performSelfUpgrade(w.master, state, deps({
     alignUnit: async () => {
       const unitDirectory = join(w.directory, 'units');
@@ -379,14 +371,12 @@ test('unit:dirty-launcher-restarts-from-snapshot-launcher — a checkout whose o
         return { wrote: aligned.wrote, reason: aligned.reason };
       } finally { if (previous === undefined) delete process.env.XDG_CONFIG_HOME; else process.env.XDG_CONFIG_HOME = previous; }
     },
-    alignExecutorUnits: async script => { executorScripts.push(script); return { wrote: 'updated', reason: null }; },
   }));
   const snapshot = upgrade.heldCliSnapshotAt(w.root, w.tip);
   assert.equal(done.outcome, 'upgraded', JSON.stringify(done));
   assert.deepEqual('left' in done && done.left, { checkout: w.loaded, dirty: ['bin/graphyard.mjs', 'bin/held-release-hooks.mjs'] }, 'the restart is not held as snapshot-failed; the checkout is named left behind with its dirty launcher paths');
   assert.equal(readHeldCli(w.root), w.tip, 'the launcher is pinned to the snapshot');
-  assert.deepEqual(executorScripts, [join(snapshot, 'scripts', 'graphyard-executor.mjs')], 'the executor units are pointed at the snapshot\'s entry before the fleet restarts');
-  assert.deepEqual(calls, { executors: [w.tip], self: 1 }, 'the executors and the loop restart onto the snapshot');
+  assert.deepEqual(calls, { self: 1 }, 'the loop restarts onto the snapshot');
   assert.deepEqual([git(w.root, 'rev-parse', 'HEAD'), status(w.root)], [w.loaded, before], 'the checkout and its launcher are untouched');
   // The loop unit's ExecStart follows the pin: it names the launcher held in the snapshot and hands
   // it the checkout in the environment, never the checkout's own launcher while the pin stands.
@@ -438,70 +428,26 @@ test('unit:dirty-launcher-restarts-from-snapshot-launcher — a checkout whose o
   // With bin/graphyard.mjs itself dirty, master status says what is true of it: the supervised
   // starts never run it, a command started through it still does, so it is to be returned.
   const bothNamed = upgrade.leftBehindCheckoutAttention(state.upgrade.snapshot, w.tip, w.root);
-  assert.match(bothNamed[0].text, /the loop and the executors start the launcher held in the snapshot, so their starts never run those edits; every command started through the checkout's launcher still runs its edited bin\/graphyard\.mjs before the pin redirects any module, so return it to the commit first\.$/);
+  assert.match(bothNamed[0].text, /the loop starts the launcher held in the snapshot, so its starts never run those edits; every command started through the checkout's launcher still runs its edited bin\/graphyard\.mjs before the pin redirects any module, so return it to the commit first\.$/);
 });
 
-test('unit:executor-unit-render-idempotent — rendering an executor unit the pin already rendered is byte-identical, the alignment then writes nothing and reloads nothing, and the lift removes the handed-checkout line it added', async () => {
-  // Imported here, not at the top: neither export exists on the base this file is exercised against,
-  // and the exercise must see these cases fail as test cases, never the file fail to load.
-  const { alignExecutorUnitScript, checkoutRootVariable } = await import('../src/repository-setup.js');
-  const w = await world('unit-render');
-  const template = await readFile(fileURLToPath(new URL('../examples/master/graphyard-executor@.service', import.meta.url)), 'utf8');
-  const snapshotScript = join(upgrade.heldCliSnapshotAt(w.root, w.tip), 'scripts', 'graphyard-executor.mjs');
-  const installed = renderExecutorUnit(template, { root: w.root, node: process.execPath });
-  const pinned = renderExecutorUnit(installed, { root: w.root, node: process.execPath, script: snapshotScript, checkoutRoot: w.root });
-  const environment = new RegExp(`^Environment="${checkoutRootVariable}=`, 'm');
-  assert.equal(pinned.split('\n').filter(line => environment.test(line)).length, 1, 'one handed-checkout line');
-  assert.match(pinned, new RegExp(`^Environment="${checkoutRootVariable}=${w.root}"\nExecStart=${process.execPath} ${snapshotScript} --slot %i$`, 'm'));
-  assert.equal(renderExecutorUnit(pinned, { root: w.root, node: process.execPath, script: snapshotScript, checkoutRoot: w.root }), pinned, 'rendering the rendered unit again changes nothing');
-  assert.equal(renderExecutorUnit(pinned, { root: w.root, node: process.execPath }), installed, 'the lift renders the checkout\'s unit, the handed-checkout line gone');
-  assert.equal(renderExecutorUnit(installed, { root: w.root, node: process.execPath }), installed);
-
-  // The alignment the finish and the lift run, against a unit directory of this test's own, with
-  // the install's units recorded so no user unit directory is consulted. Every retry of a refused
-  // restart re-runs it before the fleet restarts: the second call must be a no-op.
-  const units = perInstallUnits('owner/project');
-  await mkdir(join(w.root, '.graphyard'), { recursive: true });
-  await writeFile(join(w.root, installUnitsFile), `${JSON.stringify(units)}\n`);
-  const unitDirectory = join(w.directory, 'systemd-user');
-  await mkdir(unitDirectory, { recursive: true });
-  const unitFile = join(unitDirectory, units.executorTemplate);
-  await writeFile(unitFile, installed);
-  const reloads: string[][] = [];
-  const run = (args: string[]) => { reloads.push(args); return ''; };
-  assert.deepEqual(await alignExecutorUnitScript(w.root, snapshotScript, { run, unitDirectory }), { wrote: 'updated', reason: null });
-  assert.equal(await readFile(unitFile, 'utf8'), pinned);
-  assert.deepEqual(reloads, [['daemon-reload']]);
-  assert.deepEqual(await alignExecutorUnitScript(w.root, snapshotScript, { run, unitDirectory }), { wrote: 'unchanged', reason: null }, 'the retry writes nothing');
-  assert.deepEqual(await alignExecutorUnitScript(w.root, snapshotScript, { run, unitDirectory }), { wrote: 'unchanged', reason: null });
-  assert.equal(await readFile(unitFile, 'utf8'), pinned, 'the unit holds one handed-checkout line however often it is aligned');
-  assert.deepEqual(reloads, [['daemon-reload']], 'the manager is reloaded once');
-  assert.deepEqual(await alignExecutorUnitScript(w.root, null, { run, unitDirectory }), { wrote: 'updated', reason: null });
-  assert.equal(await readFile(unitFile, 'utf8'), installed, 'the lift returns the unit to the checkout\'s entry, byte for byte');
-  assert.deepEqual(await alignExecutorUnitScript(w.root, null, { run, unitDirectory }), { wrote: 'unchanged', reason: null });
-  assert.deepEqual(reloads, [['daemon-reload'], ['daemon-reload']]);
-});
-
-test('unit:snapshot-lift-returns-the-units — a loop running a held snapshot whose checkout is cleaned where it was left restarts from the checkout with the executor units returned to its entry before the fleet restarts, and a lift onto the snapshot commit keeps its record and retries while the loop unit cannot be rewritten', async () => {
-  // Cleaned where it was left: the ordinary alignment moves the clean checkout onto B and restarts
-  // the loop and the executors from it. The pin lifts, and the executor units — pointed into the
-  // snapshot by the earlier restart — are pointed back at the checkout's entry first.
+test('unit:snapshot-lift-returns-the-units — a loop running a held snapshot whose checkout is cleaned where it was left is aligned from the checkout with the pin lifted, and a lift onto the snapshot commit keeps its record and retries while the loop unit cannot be rewritten', async () => {
+  // Cleaned where it was left: the ordinary alignment moves the clean checkout onto B. The pin lifts,
+  // and the loop, already running B, is not restarted.
   const c = await world('cleaned-left-behind');
   const cleaned = await snapshotUpgrade(c);
   cleaned.state.release = { commit: c.tip, dirty: false };
   git(c.root, 'checkout', '-q', '--', 'README.md');
   assert.equal(status(c.root), '');
-  const executorScripts: (string | null)[] = [];
   const aligned = recording(c.root);
-  const done = await performSelfUpgrade(c.master, cleaned.state, aligned.deps({ loadedFrom: join(cleaned.snapshot, 'src', 'daemon', 'upgrade.ts'), alignExecutorUnits: async script => { executorScripts.push(script); return { wrote: 'updated', reason: null }; } }));
-  assert.deepEqual(done, { outcome: 'upgraded', from: c.loaded, to: c.tip, code: true, executors: restarted(c.tip), self: false }, 'the loop already runs B, so only the executors restart, from the checkout');
-  assert.deepEqual([...executorScripts], [null], 'the executor units are returned to the checkout\'s entry before the fleet restarts');
+  const done = await performSelfUpgrade(c.master, cleaned.state, aligned.deps({ loadedFrom: join(cleaned.snapshot, 'src', 'daemon', 'upgrade.ts') }));
+  assert.deepEqual(done, { outcome: 'upgraded', from: c.loaded, to: c.tip, code: true, self: false }, 'the loop already runs B, so nothing restarts');
   assert.equal(readHeldCli(c.root), null, 'the pin is lifted');
   assert.equal(cleaned.state.upgrade.snapshot, undefined, 'the record is cleared');
   assert.deepEqual([git(c.root, 'rev-parse', 'HEAD'), status(c.root)], [c.tip, ''], 'the clean checkout is moved onto B');
-  assert.deepEqual(aligned.calls, { executors: [c.tip], self: 0 });
+  assert.deepEqual(aligned.calls, { self: 0 });
 
-  // Moved onto B and clean there: the lift. The pin lifts and the executor units return, but while
+  // Moved onto B and clean there: the lift. The pin lifts, but while
   // the loop's own unit cannot be rewritten its ExecStart still names the snapshot's launcher, so
   // the record stays and the next pass retries the rewrite before the snapshot is forgotten.
   const l = await world('lift-unit-refused');
@@ -513,7 +459,7 @@ test('unit:snapshot-lift-returns-the-units — a loop running a held snapshot wh
   const unitWrites: string[] = [];
   const refusing = recording(l.root);
   let unit: { wrote: string; reason: string | null } = { wrote: 'refused', reason: 'EACCES: the unit file is read-only' };
-  const liftDeps = () => refusing.deps({ loadedFrom: join(lifted.snapshot, 'src', 'daemon', 'upgrade.ts'), alignUnit: async () => { unitWrites.push(unit.wrote); return unit; }, alignExecutorUnits: async script => { executorScripts.push(script); return { wrote: 'updated', reason: null }; } });
+  const liftDeps = () => refusing.deps({ loadedFrom: join(lifted.snapshot, 'src', 'daemon', 'upgrade.ts'), alignUnit: async () => { unitWrites.push(unit.wrote); return unit; } });
   const kept = await performSelfUpgrade(l.master, lifted.state, liftDeps());
   assert.equal(kept.outcome, 'skipped', JSON.stringify(kept));
   assert.match('reason' in kept ? kept.reason : '', /the loop's supervisor unit could not be returned to the checkout's launcher \(upgrade:unit names why\); retried next cycle$/);
@@ -521,13 +467,12 @@ test('unit:snapshot-lift-returns-the-units — a loop running a held snapshot wh
   assert.match(lifted.state.actions['upgrade:unit']?.detail ?? '', /EACCES: the unit file is read-only/);
   assert.deepEqual(lifted.state.upgrade.snapshot, { at: iso(), commit: l.tip, checkout: l.loaded, dirty: ['README.md'] }, 'the record stays until the loop unit is restored');
   assert.equal(readHeldCli(l.root), null, 'the pin itself is lifted');
-  assert.deepEqual(refusing.calls, { executors: [], self: 0 }, 'nothing restarts: the code is the same');
+  assert.deepEqual(refusing.calls, { self: 0 }, 'nothing restarts: the code is the same');
   unit = { wrote: 'updated', reason: null };
   const restored = await performSelfUpgrade(l.master, lifted.state, liftDeps());
   assert.deepEqual(restored, { outcome: 'up-to-date', commit: l.tip });
   assert.equal(lifted.state.upgrade.snapshot, undefined, 'the record is cleared once the unit is rewritten');
   assert.deepEqual(unitWrites, ['refused', 'updated']);
-  assert.deepEqual(executorScripts.slice(1), [null, null], 'the executor units are returned on each pass, a no-op once they are');
   assert.equal(lifted.state.actions['upgrade:unit']?.state, 'done');
 });
 
@@ -571,16 +516,14 @@ test('unit:refused-loop-unit-rewrite-withholds-the-restart — a dirty-launcher 
   const { calls, deps } = recording(w.root);
   const snapshot = upgrade.heldCliSnapshotAt(w.root, w.tip), heldLauncher = join(snapshot, 'bin', 'graphyard.mjs');
   const pass = () => underHome(home, () => performSelfUpgrade(w.master, state, deps({
-    restartExecutors: async to => { order.push('executors'); calls.executors.push(to); return restarted(to); },
     restartSelf: async () => { order.push('self'); calls.self += 1; },
     alignUnit: async () => { order.push('unit'); return upgrade.alignRunningLoopUnit(w.root, w.master, unitName, unitInput => alignLoopUnit(unitInput, host)); },
-    alignExecutorUnits: async script => { order.push(`executor-units:${script === null ? 'checkout' : 'snapshot'}`); return { wrote: 'updated', reason: null }; },
   })));
   const withheld = await pass();
   assert.equal(withheld.outcome, 'failed', JSON.stringify(withheld));
   assert.match('reason' in withheld ? withheld.reason : '', new RegExp(`^the held snapshot of ${short(w.tip)} stands and the launcher is pinned to it, but the loop's supervisor unit could not be pointed at the snapshot's launcher \\(upgrade:unit names why\\); the restart stays owed and is retried next cycle$`));
-  assert.deepEqual(order, ['executor-units:snapshot', 'unit'], 'the executor units are pointed, the loop unit is refused, and nothing restarts');
-  assert.deepEqual(calls, { executors: [], self: 0 }, 'the loop does not re-execute through a unit still naming the edited launcher, and the fleet is not restarted for nothing');
+  assert.deepEqual(order, ['unit'], 'the loop unit is refused, and nothing restarts');
+  assert.deepEqual(calls, { self: 0 }, 'the loop does not re-execute through a unit still naming the edited launcher');
   assert.deepEqual(state.upgrade.pending, { from: w.loaded, to: w.tip, code: true }, 'the restart stays owed');
   assert.equal(state.upgrade.stalled?.cause, 'snapshot-failed');
   assert.equal(state.upgrade.snapshot, undefined, 'the cursor does not yet name the checkout as left behind: the loop still runs it');
@@ -589,16 +532,15 @@ test('unit:refused-loop-unit-rewrite-withholds-the-restart — a dirty-launcher 
   assert.match(state.actions['upgrade:unit']?.detail ?? '', /not the configured coordinator checkout/);
   assert.equal(await readFile(unitPath, 'utf8'), checkoutUnit, 'the unit is untouched by the refusal');
   assert.equal(existsSync(launcherMarker), false, 'the edited launcher never ran');
-  // The next pass, once the checkout is the configured coordinator: the units are pointed again
-  // (a no-op for the executor units already there), the loop unit is rewritten to the snapshot's
-  // launcher, and only then do the executors and the loop restart onto the snapshot.
+  // The next pass, once the checkout is the configured coordinator: the loop unit is rewritten to
+  // the snapshot's launcher, and only then does the loop restart onto the snapshot.
   await mkdir(join(w.root, '.graphyard'), { recursive: true });
   await writeFile(join(w.root, '.graphyard', 'master.json'), '{}\n');
   order.length = 0;
   const retried = await pass();
   assert.equal(retried.outcome, 'upgraded', JSON.stringify(retried));
-  assert.deepEqual(order, ['executor-units:snapshot', 'unit', 'executors', 'self'], 'the unit is pointed at the snapshot\'s launcher before the fleet restarts and before the loop re-executes through it');
-  assert.deepEqual(calls, { executors: [w.tip], self: 1 });
+  assert.deepEqual(order, ['unit', 'self'], 'the unit is pointed at the snapshot\'s launcher before the loop re-executes through it');
+  assert.deepEqual(calls, { self: 1 });
   const rewritten = await readFile(unitPath, 'utf8');
   assert.equal(rewritten, loopUnitText({ ...input, heldLauncher }), 'the unit now starts the launcher held in the snapshot');
   assert.ok(rewritten.includes(`ExecStart=${process.execPath} ${heldLauncher} master run`) && rewritten.includes(`Environment=GRAPHYARD_CHECKOUT_ROOT=${w.root}`));
@@ -618,13 +560,12 @@ test('unit:refused-loop-unit-rewrite-withholds-the-restart — a dirty-launcher 
   const drift = recording(d.root);
   const drifted = await performSelfUpgrade(d.master, driftState, drift.deps({ alignUnit: async () => ({ wrote: 'refused', reason: 'EACCES: the unit file is read-only', launcherStale: false }) }));
   assert.equal(drifted.outcome, 'upgraded', JSON.stringify(drifted));
-  assert.deepEqual(drift.calls, { executors: [d.tip], self: 1 }, 'a refusal that leaves the launcher as it must be withholds no restart');
+  assert.deepEqual(drift.calls, { self: 1 }, 'a refusal that leaves the launcher as it must be withholds no restart');
   assert.equal(driftState.actions['upgrade:unit']?.state, 'failed', 'and is still recorded');
 
   // The way back: the checkout cleaned where it was left, the loop running the snapshot. The
-  // ordinary alignment moves the checkout onto B and restarts from it: the pin lifts, the executor
-  // units return and the fleet restarts from the checkout (the unit is re-applied after the fleet
-  // restarts, as GY-916 had it), but while the loop unit cannot be returned to the checkout's
+  // ordinary alignment moves the checkout onto B and restarts from it: the pin lifts, but while the
+  // loop unit cannot be returned to the checkout's
   // launcher its ExecStart still names the snapshot's, so the loop's own re-execution is withheld
   // and the record stays; the next pass retries the rewrite and completes.
   const c = await world('cleaned-unit-refused');
@@ -632,53 +573,33 @@ test('unit:refused-loop-unit-rewrite-withholds-the-restart — a dirty-launcher 
   cleaned.state.release = { commit: c.tip, dirty: false };
   git(c.root, 'checkout', '-q', '--', 'README.md');
   assert.equal(status(c.root), '');
-  const scripts: (string | null)[] = [];
   const back = recording(c.root);
   let unit: { wrote: string; reason: string | null; launcherStale?: boolean } = { wrote: 'refused', reason: 'EACCES: the unit file is read-only', launcherStale: true };
-  const backDeps = () => back.deps({ loadedFrom: join(cleaned.snapshot, 'src', 'daemon', 'upgrade.ts'), alignUnit: async () => unit, alignExecutorUnits: async script => { scripts.push(script); return { wrote: 'updated', reason: null }; } });
+  const backDeps = () => back.deps({ loadedFrom: join(cleaned.snapshot, 'src', 'daemon', 'upgrade.ts'), alignUnit: async () => unit });
   const held = await performSelfUpgrade(c.master, cleaned.state, backDeps());
   assert.equal(held.outcome, 'failed', JSON.stringify(held));
   assert.match('reason' in held ? held.reason : '', new RegExp(`^the held snapshot pin is lifted for the restart onto ${short(c.tip)}, but the loop's supervisor unit still names the snapshot's launcher and could not be returned to the checkout's \\(upgrade:unit names why\\); the restart stays owed and is retried next cycle$`));
-  assert.deepEqual(back.calls, { executors: [c.tip], self: 0 }, 'the fleet restarts from the checkout; the loop does not re-execute through a unit naming a launcher the lift would leave behind');
-  assert.deepEqual(scripts, [null], 'the executor units are returned to the checkout\'s entry');
+  assert.deepEqual(back.calls, { self: 0 }, 'the loop does not re-execute through a unit naming a launcher the lift would leave behind');
   assert.equal(readHeldCli(c.root), null, 'the pin itself is lifted');
   assert.ok(cleaned.state.upgrade.snapshot, 'the record stays until the loop unit is returned');
   assert.deepEqual(cleaned.state.upgrade.pending, { from: c.loaded, to: c.tip, code: true }, 'the restart stays owed');
   assert.deepEqual([git(c.root, 'rev-parse', 'HEAD'), status(c.root)], [c.tip, ''], 'the clean checkout was moved onto B');
   unit = { wrote: 'updated', reason: null };
   const went = await performSelfUpgrade(c.master, cleaned.state, backDeps());
-  assert.deepEqual(went, { outcome: 'upgraded', from: c.loaded, to: c.tip, code: true, executors: restarted(c.tip), self: false }, 'the loop already runs B, so only the executors restart, from the checkout');
+  assert.deepEqual(went, { outcome: 'upgraded', from: c.loaded, to: c.tip, code: true, self: false }, 'the loop already runs B, so nothing restarts');
   assert.equal(cleaned.state.upgrade.snapshot, undefined, 'the record is cleared once the unit is returned');
-  assert.deepEqual(scripts, [null, null]);
-  assert.deepEqual(back.calls, { executors: [c.tip, c.tip], self: 0 }, 'the retried pass restarts the fleet again before the unit is confirmed, and the loop, already on B, not at all');
+  assert.deepEqual(back.calls, { self: 0 }, 'the loop, already on B, is not restarted at all');
   assert.equal(cleaned.state.upgrade.pending, null);
 });
 
-test('unit:reinstall-under-pin-keeps-the-snapshot-launcher — graphyard init and master init re-run on a coordinator host while a snapshot restart\'s pin stands render the executor units\' entry and the loop unit\'s ExecStart into the held snapshot with the checkout handed over, as the restart did, so a reinstall never points a supervised start back at a launcher the checkout may hold dirty; once the pin lifts, a re-run returns both to the checkout', async () => {
+test('unit:reinstall-under-pin-keeps-the-snapshot-launcher — graphyard init and master init re-run on a coordinator host while a snapshot restart\'s pin stands render the loop unit\'s ExecStart into the held snapshot with the checkout handed over, as the restart did, so a reinstall never points a supervised start back at a launcher the checkout may hold dirty; once the pin lifts, a re-run returns it to the checkout', async () => {
   const w = await world('reinstall-under-pin');
   const up = await snapshotUpgrade(w);
-  const heldEntry = join(up.snapshot, 'scripts', 'graphyard-executor.mjs'), heldLauncher = join(up.snapshot, 'bin', 'graphyard.mjs');
-  assert.equal(upgrade.heldExecutorEntryOf(w.root), heldEntry);
+  const heldLauncher = join(up.snapshot, 'bin', 'graphyard.mjs');
   // The checkout is the configured coordinator (the loop installer refuses any other), and its
-  // install names its units for the repository (GY-1441), so both installers write the same files.
+  // install names its units for the repository (GY-1441).
   await mkdir(join(w.root, '.graphyard'), { recursive: true });
   await writeFile(join(w.root, '.graphyard', 'master.json'), '{ "repository": "owner/project" }\n');
-  // graphyard init re-run: executor supervision installed without the caller knowing the pin.
-  const unitDirectory = join(w.directory, 'systemd-user');
-  await mkdir(unitDirectory, { recursive: true });
-  const systemctl: string[][] = [];
-  const runSystemctl = (args: string[]) => { systemctl.push(args); return args[0] === 'is-active' ? 'active' : ''; };
-  const executors = await installExecutorSupervision(w.root, { count: 1, run: runSystemctl, unitDirectory, node: process.execPath, loop: null });
-  assert.equal(executors.installed, true, JSON.stringify(executors));
-  const executorUnit = await readFile(executors.unitFile!, 'utf8');
-  assert.ok(executorUnit.includes(`Environment="GRAPHYARD_CHECKOUT_ROOT=${w.root}"`), 'the slot is handed the checkout');
-  assert.ok(executorUnit.includes(`ExecStart=${process.execPath} ${heldEntry} --slot %i`), `the slot starts the entry held in the snapshot:\n${executorUnit}`);
-  assert.ok(!executorUnit.includes(join(w.root, 'scripts', 'graphyard-executor.mjs')), 'never the checkout\'s entry while the pin stands');
-  const restarts = () => systemctl.filter(args => args[0] === 'restart').length;
-  const firstRestarts = restarts();
-  await installExecutorSupervision(w.root, { count: 1, run: runSystemctl, unitDirectory, node: process.execPath, loop: null });
-  assert.equal(await readFile(executors.unitFile!, 'utf8'), executorUnit, 'a second re-run renders the same unit');
-  assert.equal(restarts(), firstRestarts, 'and restarts no slot');
   // master init re-run: the loop unit installed without the caller knowing the pin.
   const home = await temporaryDirectory('reinstall-home');
   const { host, commands } = unitHost(home);
@@ -690,7 +611,7 @@ test('unit:reinstall-under-pin-keeps-the-snapshot-launcher — graphyard init an
   assert.ok(loopUnit.includes(`ExecStart=${process.execPath} ${heldLauncher} master run`) && loopUnit.includes(`Environment=GRAPHYARD_CHECKOUT_ROOT=${w.root}`));
   assert.equal((await installLoopSupervisor(input, host)).wrote, 'unchanged', 'a second re-run leaves it');
   assert.equal(commands.filter(call => call[2] === 'restart').length, 0, 'and restarts nothing');
-  // The pin lifted: a re-run of either returns the units to the checkout's launcher and entry.
+  // The pin lifted: a re-run returns the unit to the checkout's launcher.
   await upgrade.holdCliAt(w.root, run, null);
   assert.equal(readHeldCli(w.root), null);
   const returned = await installLoopSupervisor(input, host);
@@ -698,8 +619,4 @@ test('unit:reinstall-under-pin-keeps-the-snapshot-launcher — graphyard init an
   const returnedUnit = await readFile(loop.unitPath!, 'utf8');
   assert.equal(returnedUnit, loopUnitText({ ...input, heldLauncher: null }));
   assert.ok(returnedUnit.includes(`ExecStart=${process.execPath} ${w.master.cliPath} master run`) && !returnedUnit.includes('GRAPHYARD_CHECKOUT_ROOT'));
-  await installExecutorSupervision(w.root, { count: 1, run: runSystemctl, unitDirectory, node: process.execPath, loop: null });
-  const returnedExecutor = await readFile(executors.unitFile!, 'utf8');
-  assert.ok(!returnedExecutor.includes('GRAPHYARD_CHECKOUT_ROOT') && !returnedExecutor.includes(heldEntry), 'the slots start the checkout\'s entry again');
-  assert.equal(returnedExecutor, renderExecutorUnit(executorUnit, { root: w.root, node: process.execPath }));
 });

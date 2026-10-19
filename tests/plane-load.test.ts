@@ -16,7 +16,7 @@ import { invalidateFlowReports, pooledFlowDrilldown, projectFlow } from '../src/
 import { daemonEffects, emptyDaemonState, runCycle, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
-import { loopPresenceHeader } from '../src/model/executor-presence.js';
+import { loopPresenceHeader } from '../src/model/loop-presence.js';
 import type { Principal, Work } from '../src/model.js';
 import { readStepRows } from '../web/step-moves.js';
 import { mergeTime } from '../web/flow-analytics.js';

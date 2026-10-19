@@ -20,13 +20,8 @@ import { retryStopAttention } from '../src/retry-stop.js';
 import { stoppedFollowUpAttention, type ReviewRecord } from '../src/reviewer.js';
 import type { ResourceReading } from '../src/master-resources.js';
 import { describeHumanRequest } from '../src/model/human-request.js';
-import { ExecutorRegistry, describeUnserved, executorLiveMs, executorReport } from '../src/model/executor-presence.js';
-import type { ActionRow } from '../src/model/actions.js';
-import { executorRunnableKinds, type NextActionKind } from '../src/model/action-kinds.js';
 import { detailChanged } from '../src/daemon/decisions.js';
 import { performSelfUpgrade } from '../src/daemon/upgrade.js';
-import { executorFleet } from '../src/cli/executor-report.js';
-import { loopMergerExecutorKinds, writeExecutorDeclaration, type SystemctlRunner } from '../src/repository-setup.js';
 import { loopSupervision, loopSupervisionAttention } from '../src/supervisor.js';
 import { fleetStatus } from '../src/master/attention.js';
 import type { FleetView } from '../src/model/registry.js';
@@ -224,16 +219,16 @@ test('unit:fault-classes — master status and the dashboard group open problems
   assert.equal(single.flatMap(entry => workFaults(entry, NOW)).length, 1, 'the fixture keeps exactly one open problem');
   assert.doesNotMatch(render(single), /Problems by class/);
   // Problems the control plane's status reports beside no item are grouped too: with no item-level
-  // problem at all, two App permission lines and an unserved executor still draw the grouping.
+  // problem at all, two App permission lines still draw the grouping.
   const quiet = fixture.filter(entry => !workFaults(entry, NOW).length);
-  const troubled = { ...boardStatus('admin'), appPermissions: { attention: ['The App lacks Checks: write', 'The App lacks Contents: write'] }, executors: { live: 1, attention: [{ kind: 'merge', text: 'No executor serves merge' }] } };
-  assert.deepEqual(groupFaults(statusFaults(troubled)).map(group => [group.faultClass, group.count]), [['configuration', 3]]);
+  const troubled = { ...boardStatus('admin'), appPermissions: { attention: ['The App lacks Checks: write', 'The App lacks Contents: write'] } };
+  assert.deepEqual(groupFaults(statusFaults(troubled)).map(group => [group.faultClass, group.count]), [['configuration', 2]]);
   // Production lag and deployment incidents master status raises are grouped under deployment, as master status groups them.
   const lagging = { ...troubled, production: { attention: ['main is 3 commits ahead of production (serving abc123): build failed', '1 delivered item has an open deployment incident: GY-7 (failed)'] } };
-  assert.deepEqual(groupFaults(statusFaults(lagging)).map(group => [group.faultClass, group.count]).sort(), [['configuration', 3], ['deployment', 2]]);
+  assert.deepEqual(groupFaults(statusFaults(lagging)).map(group => [group.faultClass, group.count]).sort(), [['configuration', 2], ['deployment', 2]]);
   assert.deepEqual(statusFaults(lagging).filter(fault => fault.kind === 'production').map(fault => fault.text), lagging.production.attention);
-  assert.match(render(quiet, troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'the status-level problems are counted under their class');
-  assert.match(render([], troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>3<\/strong>/, 'with no work at all the status-level problems are still grouped');
+  assert.match(render(quiet, troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>2<\/strong>/, 'the status-level problems are counted under their class');
+  assert.match(render([], troubled), /data-fault-class="configuration"[^>]*>(?:(?!<\/li>)[\s\S])*<strong>2<\/strong>/, 'with no work at all the status-level problems are still grouped');
 });
 
 test('unit:fault-catalogue-action-kinds — a failed fault or diagnosis action is unclassified, never a loop instance, and loop keeps every other kind it lists on main', async () => {
@@ -612,20 +607,6 @@ test('unit:recurring-class-item — a failed control-plane read ends no standing
   assert.equal(trackFaults(record, [held], iso(240_000)).length, 1, 'a full read that cleared it ends it');
 });
 
-test('unit:fault-classes — unserved executor attention is classified once, as the executor configuration fault', () => {
-  const unserved = describeUnserved({ live: [], unserved: [{ kind: 'merge', key: 'GY-1', requestedAt: iso(-hour), waitedMs: hour, start: 'graphyard executor start' }] } as any);
-  const reported = unserved.map(entry => ({ subject: entry.keys[0], text: entry.text })) as AttentionItem[];
-  const down = { subject: 'GY-2', text: `Every declared executor slot on this host is down (graphyard-executor@1.service inactive) while 1 action(s) are pending, the oldest merge for GY-2 since ${iso(-hour)}; GET /api/actions failed` };
-  assert.deepEqual(classifyAttention([...reported, down]).map(entry => [entry.subject, entry.kind, entry.faultClass]), [['GY-1', 'executor', 'configuration'], ['GY-2', 'executor', 'configuration']]);
-  // The status carries the same unserved lines: with the reported attention read, they are not a second fault.
-  const status = { github: true, executors: { live: 0, attention: unserved } } as any;
-  const state = emptyDaemonState(config());
-  const faults = cycleFaults(state, [], clock, { config: config(), status, reported }).filter(fault => fault.faultClass === 'configuration' || fault.faultClass === 'unclassified');
-  assert.deepEqual(faults.map(fault => [fault.subject, fault.kind]), [['GY-1', 'executor']]);
-  // Without the reported attention (the dashboard's read), the status's copy is the one fault.
-  assert.deepEqual(cycleFaults(state, [], clock, { config: config(), status }).filter(fault => fault.kind === 'executor').map(fault => fault.subject), ['executors']);
-});
-
 test('unit:recurring-class-item — distinct faults of one kind on one subject are as many instances as the dashboard counts', async () => {
   const lines = ['App lacks Contents: write', 'App lacks Checks: read', 'App lacks Pull requests: write'];
   const status = { github: true, appPermissions: { attention: lines } };
@@ -882,7 +863,9 @@ test('unit:recurring-class-item — daemonSummary reports faults under the polic
 //     refused afresh as a new instance — six for one operator hold on the coordinator checkout.
 //
 // Each instance is replayed against the shipped code. Against the base each test fails on its first
-// assertion, the instance recurring; against the candidate it does not.
+// assertion, the instance recurring; against the candidate it does not. The executor instances
+// (merge, presence, and the executor-slot halves of stopping) went with the executor fleet itself
+// (GY-1984): their causes no longer exist to replay, and the list keeps them as the record.
 
 const instances = {
   merge: ['executor|GY-1063|2026-10-01T13:27:57.751Z', 'executor|GY-980|2026-10-01T13:36:37.333Z', 'executor|GY-1063|2026-10-01T14:32:06.820Z', 'executor|GY-566|2026-10-01T22:16:21.164Z'],
@@ -901,91 +884,21 @@ test('manual:fault-class-configuration — the item lists 18 instances, and ever
   for (const id of all) assert.equal(faultClassOf(id.split('|')[0]), 'configuration', id);
 });
 
-const pendingRow = (key: string, kind: NextActionKind, requestedAt: string): Work => ({
-  id: `work-${key}`, key, stage: 'build',
-  actionQueue: { history: [], actions: [{ id: `${kind}-${key}`, kind, work: `work-${key}`, key, inputs: { kind } as ActionRow['inputs'], gate: null, refusal: null, reason: `${key} needs ${kind}`,
-    binding: `${kind}:1`, requestedBy: 'graphyard', requestedAt, state: 'pending', claim: null, attempts: 0, history: [] } as ActionRow] },
-} as unknown as Work);
-
-/** A coordinator host that declared two slots without merge, as `--install` writes them beside a merging loop. */
-async function declaredHost(slot: string) {
-  const root = await temporaryDirectory('config-faults');
-  execFileSync('git', ['init', '-q', root]);
-  await mkdir(join(root, '.graphyard'), { recursive: true, mode: 0o700 });
-  await writeExecutorDeclaration(root, { version: 1, count: 2, kinds: [...loopMergerExecutorKinds], intervalSeconds: 5 });
-  const run: SystemctlRunner = args => {
-    if (args[0] === 'is-active') { if (slot === 'active') return 'active'; throw Object.assign(new Error(slot), { stdout: `${slot}\n` }); }
-    return '';
-  };
-  return { root, run };
-}
-
-for (const id of instances.merge) {
-  const [, key, at] = id.split('|');
-  test(`manual:fault-class-configuration — ${id}: a merge row is the merging loop's, never an executor the fleet lacks`, async () => {
-    const now = new Date(Date.parse(at));
-    const registry = new ExecutorRegistry(new Date(now.getTime() - 3_600_000));
-    for (const slot of [1, 2]) registry.observe({ executor: `graphyard-master@vishrog/${slot}`, host: 'vishrog', principal: 'graphyard-master', kinds: [...loopMergerExecutorKinds] }, now);
-    const work = [pendingRow(key, 'merge', new Date(now.getTime() - 7 * 60_000).toISOString())];
-    const report = executorReport(work, registry, now);
-    const { root, run } = await declaredHost('active');
+for (const id of instances.stopping.filter(entry => entry.startsWith('setup|'))) {
+  test(`manual:fault-class-configuration — ${id}: a unit systemd is stopping is a restart in passage, not a supervisor that is down`, async () => {
+    const home = await temporaryDirectory('config-faults-home');
     try {
-      const loop = async () => ({ name: 'the master loop (graphyard-master.service, automatic merging on)' });
-      const fleet = await executorFleet(root, async () => ({ executors: report }), { work, now: now.toISOString() }, run, loop);
-      assert.deepEqual(fleet.attention.map(item => item.text).filter(text => /^Nothing can run merge/.test(text)), [], 'no executor is asked for merge beside a merging loop');
-      // Without a merging loop the same row is a real gap, named as before.
-      const alone = await executorFleet(root, async () => ({ executors: report }), { work, now: now.toISOString() }, run, async () => null);
-      assert.match(alone.attention[0].text, new RegExp(`^Nothing can run merge: ${key} has waited 7m`));
-      assert.equal(attentionKind({ subject: key, text: alone.attention[0].text }), 'executor');
-    } finally { await rm(root, { recursive: true, force: true }); }
-  });
-}
-
-test(`manual:fault-class-configuration — ${instances.presence[0]}: a control plane that has heard from nobody yet does not report the fleet dead`, () => {
-  const now = new Date('2026-10-01T17:23:33.080Z');
-  const work = [pendingRow('GY-859', 'resync', '2026-10-01T17:06:00.000Z'), pendingRow('GY-860', 'resync', '2026-10-01T17:10:00.000Z')];
-  const listening = executorReport(work, new ExecutorRegistry(new Date(now.getTime() - 10_000)), now);
-  assert.deepEqual(listening.unserved, [], 'ten seconds after a restart, no executor has had its turn to poll');
-  // A full liveness window later, an empty registry is a dead fleet, and says so.
-  const silent = executorReport(work, new ExecutorRegistry(new Date(now.getTime() - executorLiveMs - 1)), now);
-  assert.deepEqual(silent.unserved.map(entry => entry.key), ['GY-859', 'GY-860']);
-  // One executor heard inside the first window is judged at once: the warm-up never hides a kind nobody serves.
-  const early = new ExecutorRegistry(new Date(now.getTime() - 10_000));
-  early.observe({ executor: 'e/1', host: 'h', principal: 'p', kinds: executorRunnableKinds.filter(kind => kind !== 'resync') }, now);
-  assert.deepEqual(executorReport(work, early, now).unserved.map(entry => entry.kind), ['resync', 'resync']);
-});
-
-for (const id of instances.stopping) {
-  const [kind] = id.split('|');
-  test(`manual:fault-class-configuration — ${id}: a unit systemd is stopping is a restart in passage, not a supervisor or slot that is down`, async () => {
-    if (kind === 'setup') {
-      const home = await temporaryDirectory('config-faults-home');
-      try {
-        const host = (active: string) => ({ platform: 'linux' as const, home, temporaryDirectories: [], run: (command: string, args: string[]) => {
-          if (command === 'loginctl') return 'yes';
-          if (args.includes('is-active')) { if (active === 'active') return 'active'; throw Object.assign(new Error(active), { stdout: `${active}\n` }); }
-          if (args.includes('is-enabled')) return 'enabled';
-          return '';
-        } });
-        const stopping = loopSupervisionAttention(await loopSupervision({ root: home, cliPath: launcher }, host('deactivating'))).map(item => item.text);
-        assert.deepEqual(stopping.filter(text => /installed but not running/.test(text)), [], 'the loop reading its own unit mid-restart');
-        const stopped = loopSupervisionAttention(await loopSupervision({ root: home, cliPath: launcher }, host('inactive'))).map(item => item.text);
-        assert.ok(stopped.some(text => /installed but not running/.test(text)), 'a unit that stays stopped is still named');
-      } finally { await rm(home, { recursive: true, force: true }); }
-      return;
-    }
-    const now = new Date('2026-10-01T22:14:48.524Z');
-    const registry = new ExecutorRegistry(new Date(now.getTime() - 3_600_000));
-    registry.observe({ executor: 'graphyard-master@vishrog/1', host: 'vishrog', principal: 'graphyard-master', kinds: [...loopMergerExecutorKinds] }, now);
-    const report = executorReport([], registry, now);
-    for (const [state, named] of [['deactivating', false], ['failed', true]] as const) {
-      const { root, run } = await declaredHost(state);
-      try {
-        const fleet = await executorFleet(root, async () => ({ executors: report }), { work: [], now: now.toISOString() }, run, async () => null);
-        const lines = fleet.attention.map(item => item.text).filter(text => /^Executor slot \d is /.test(text));
-        assert.equal(lines.length, named ? 2 : 0, `slots ${state}: ${lines.join(' | ')}`);
-      } finally { await rm(root, { recursive: true, force: true }); }
-    }
+      const host = (active: string) => ({ platform: 'linux' as const, home, temporaryDirectories: [], run: (command: string, args: string[]) => {
+        if (command === 'loginctl') return 'yes';
+        if (args.includes('is-active')) { if (active === 'active') return 'active'; throw Object.assign(new Error(active), { stdout: `${active}\n` }); }
+        if (args.includes('is-enabled')) return 'enabled';
+        return '';
+      } });
+      const stopping = loopSupervisionAttention(await loopSupervision({ root: home, cliPath: launcher }, host('deactivating'))).map(item => item.text);
+      assert.deepEqual(stopping.filter(text => /installed but not running/.test(text)), [], 'the loop reading its own unit mid-restart');
+      const stopped = loopSupervisionAttention(await loopSupervision({ root: home, cliPath: launcher }, host('inactive'))).map(item => item.text);
+      assert.ok(stopped.some(text => /installed but not running/.test(text)), 'a unit that stays stopped is still named');
+    } finally { await rm(home, { recursive: true, force: true }); }
   });
 }
 

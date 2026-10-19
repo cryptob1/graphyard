@@ -6,7 +6,7 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
-const modules = async () => ({ ...await import('../src/executor.js'), ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/approval.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/planned-files-intent.js'), ...await import('../src/model/goal-plan.js') });
+const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/approval.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/planned-files-intent.js'), ...await import('../src/model/goal-plan.js') });
 
 // unit:post-deploy-criteria (GY-1660) — a criterion only the live install can satisfy after merge
 // and deploy deadlocked reviewer and worker (GY-1652 AC-3, GY-1657 AC-1..4). It is refused at

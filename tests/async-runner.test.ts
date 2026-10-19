@@ -11,8 +11,6 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../s
 import { cycleBudget } from '../src/cli/master-status.js';
 import { listHerdrAgents, masterConfigSchema, startAgentSession, type HerdrAgent, type MasterConfig, type MasterRun, type ProducerProfile, type WorkerProfile } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// @ts-expect-error The standalone executor is a dependency-free entry point script.
-import { controlPlaneEffects } from '../scripts/graphyard-executor.mjs';
 import type { DispatchRequest } from '../src/model/dispatch.js';
 import type { Work } from '../src/model.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 clock is handed to runCycle, loopLiveness and daemonSummary as their explicit now over fixtures derived from it; Date.now() only measures elapsed time and child deadlines.
@@ -100,9 +98,6 @@ test('unit:no-sync-child-processes — the loop, the dispatcher, the merge broke
   const split = async (directory: string) => (await readdir(join(repository, directory))).filter(name => name.endsWith('.ts')).sort().map(name => `${directory}/${name}`);
   const loop = ['src/master.ts', ...await split('src/master'), 'src/master-daemon.ts', ...await split('src/daemon'), 'src/auto-dispatch.ts', 'src/producer.ts', 'src/reviewer.ts'];
   const reached = ['src/containment-probe.ts', 'src/harness.ts', 'src/install/worktree-root.ts', 'src/cli/master.ts', ...await split('src/cli/master'), 'src/cli/master-status.ts'];
-  // The dispatcher that runs outside the daemon: the stateless executor claims dispatch rows and
-  // launches sessions from its own process, and must renew its claim while a launch is in flight.
-  const standalone = ['scripts/graphyard-executor.mjs'];
   // The single allow-listed CLI-startup path: `cliCommit` reads the CLI checkout's own commit for
   // the version-skew guard once, when a `master` command starts, before the loop runs a cycle.
   const allowed = new Map([['src/protocol-version.ts', 'cliCommit reads the CLI checkout commit once at command startup']]);
@@ -111,7 +106,7 @@ test('unit:no-sync-child-processes — the loop, the dispatcher, the merge broke
   // Comments are not calls: a doc comment may name execFileSync to say what replaced it.
   const uncommented = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, match => match.replace(/[^\n]/g, ' ')).replace(/\/\/.*$/gm, '');
   const offenders: string[] = [];
-  for (const file of [...loop, ...reached, ...standalone, ...allowed.keys()]) {
+  for (const file of [...loop, ...reached, ...allowed.keys()]) {
     const source = uncommented(await readFile(join(repository, file), 'utf8'));
     const lines = source.split('\n').map((line, index) => ({ line, number: index + 1 })).filter(entry => synchronous.test(entry.line));
     if (allowed.has(file)) { assert.ok(lines.length > 0, `${file} is allow-listed for ${allowed.get(file)}; an allow-list entry nothing uses is removed`); continue; }
@@ -142,23 +137,6 @@ test('unit:no-sync-child-processes — the loop, the dispatcher, the merge broke
   assert.ok(Date.now() - started < 5_000, 'a timed-out child is killed at its bound, not waited out');
   await assert.rejects(runChild('graphyard-no-such-command-125', []), (error: unknown) => error instanceof ChildProcessError && /could not be started/.test(error.message));
 
-  // A runner that answers is not enough: a caller that forgets to await one is worse than a
-  // synchronous one, because it reads a field off a promise and gets a silent undefined. The
-  // standalone executor's effects are held here against stub modules: its Herdr inventory read
-  // must resolve to the agents, and to null only when Herdr itself could not be read — a
-  // dispatch row it claims is failed outright when the inventory comes back null.
-  const inventory: HerdrAgent[] = [{ name: 'producer-a', pane_id: 'pane-1', agent_status: 'idle' } as HerdrAgent];
-  const runners: unknown[] = [];
-  const stub = (observe: (run: unknown) => Promise<{ agents: HerdrAgent[]; available: boolean; reason: string | null }>) => ({
-    master: { observeHerdrAgents: (run: unknown) => { runners.push(run); return observe(run); } }, daemon: {}, reviewer: {}, producer: {},
-  });
-  const bound = childRunner();
-  const context = { root: repository, current: () => config(launcher), run: bound, snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => ({}), mergeExecutor: { principal: 'coordinator', instance: 'executor-1' } };
-  const available = controlPlaneEffects(stub(async () => ({ agents: inventory, available: true, reason: null })), context);
-  assert.deepEqual(await available.agents(), inventory, 'the executor reads the Herdr inventory through the asynchronous runner and awaits it');
-  assert.deepEqual(runners, [bound], 'and hands that runner to the read rather than running a child of its own');
-  const unreadable = controlPlaneEffects(stub(async () => ({ agents: [], available: false, reason: 'Herdr is unavailable' })), context);
-  assert.equal(await unreadable.agents(), null, 'an unreadable inventory is null, which fails the row rather than launching against an empty roster');
 });
 
 test('integration:snapshot-read-unblocked-by-launch — while the dispatcher waits thirty seconds on a Herdr session start, a cycle beside it reads its snapshot in under two seconds and completes without a failure', async () => {

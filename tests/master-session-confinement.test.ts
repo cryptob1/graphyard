@@ -6,10 +6,10 @@ import { join } from 'node:path';
 import { masterConfinementVariable, masterSessionConfinement, startAgentSession } from '../src/master/launch.js';
 import { dirtyCheckoutPaths, hostProcessLaunchTargets, readCoordinatorCheckout, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { checkoutRestoreDriftRemedy, checkoutRestoreRemedy, coordinatorCheckoutGuard, serveLoopRequests } from '../src/daemon/run.js';
+import { checkoutRestoreDriftRemedy, checkoutRestoreRemedy, coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { checkoutProcessScan } from '../src/cli/checkout-writers.js';
-import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopExecutorsRequestPath, loopRestartRequestPath, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore, statusPaths } from '../src/cli/master-checkout-restore.js';
+import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopRestartRequestPath, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore, statusPaths } from '../src/cli/master-checkout-restore.js';
 import { doctorCommandVerdict, doctorSanctionedCommands as piSanctioned } from '../integrations/pi/index.js';
 import { doctorPrompt, doctorSanctionedCommands } from '../src/daemon/doctor.js';
 import { confinedMaster } from '../src/cli/master/operations.js';
@@ -85,13 +85,12 @@ test('integration:master-session-checkout-readonly — the master session cannot
   assert.equal(git('rev-parse', '--abbrev-ref', 'HEAD'), 'main', 'the coordinator checkout did not move');
   assert.notEqual(inside(`kill -0 ${process.pid}`).status, 0, 'no host process is visible to signal');
   assert.equal(inside(`printenv ${masterConfinementVariable}`).stdout.trim(), 'master', 'the session knows it is confined');
-  assert.ok(confinedMaster({ [masterConfinementVariable]: 'master' }) && !confinedMaster({}), 'and routes its master restart and master executors to loop requests');
-  // Its admin commands that act on the host — the executors' restart through systemd, their host-pid
-  // liveness — are routed to the loop, never run against the masked manager or its own PID namespace.
+  assert.ok(confinedMaster({ [masterConfinementVariable]: 'master' }) && !confinedMaster({}), 'and routes its master restart to a loop request');
+  // Its restart acts on the host through systemd, so it is routed to the loop, never run against the masked manager.
   const cliSource = readFileSync(join(import.meta.dirname, '..', 'src', 'cli', 'master.ts'), 'utf8');
-  assert.match(cliSource, /\(id === 'restart' \|\| id === 'executors'\) && confinedMaster\(\) \? \[operationsCommand\]/, 'a confined master restart or executors goes only to the loop request');
-  // Its `master restart` and `master executors` file requests beside the cursor, which the loop serves on the host.
-  for (const path of [loopRestartRequestPath({ credentialFile: join(outside, 'coordinator.token') }), loopExecutorsRequestPath({ credentialFile: join(outside, 'coordinator.token') })]) {
+  assert.match(cliSource, /id === 'restart' && confinedMaster\(\) \? \[operationsCommand\]/, 'a confined master restart goes only to the loop request');
+  // Its `master restart` files a request beside the cursor, which the loop serves on the host.
+  for (const path of [loopRestartRequestPath({ credentialFile: join(outside, 'coordinator.token') })]) {
     const filed = inside(`echo '{}' > ${path}`);
     assert.equal(filed.status, 0, filed.stderr);
   }
@@ -336,32 +335,6 @@ test('unit:checkout-restore-freeze-fails-closed — a writer that cannot be stop
   assert.equal(git('show', `${restored!.ref}:src/loop.ts/bar`), 'bar');
   assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 1;\n');
   assert.deepEqual(statusPaths(`R  new.ts\0old.ts\0?? scratch/\0 M src/a.ts\0`).sort(), ['new.ts', 'old.ts', 'scratch/', 'src/a.ts'], 'every status entry and rename origin is a restored path');
-});
-
-test('unit:confined-master-executors-through-loop — a confined master\'s master executors is a request the loop runs on the host, once, recording what it printed', async () => {
-  const base = await temporaryDirectory('confined-executors');
-  const { root } = coordinator(base);
-  const settings = config(base);
-  const ran: string[][] = [];
-  const executors = async (args: string[]) => { ran.push(args); return args[0] === 'restart' ? { host: 'machine-a', result: 'refused', reason: 'an executor holds a claim' } : { host: 'machine-a', executors: [], lines: [] }; };
-  const pending = checkoutRestoreCommand(settings, ['restart', '--timeout', '60'], 'graphyard-master', { act: 'executors', waitMs: 2_000, pollMs: 5 });
-  const file = loopExecutorsRequestPath(settings);
-  for (let tries = 0; !(await readCheckoutRestoreRequest(file)) && tries < 200; tries++) await new Promise(done => setTimeout(done, 5));
-  assert.deepEqual((await readCheckoutRestoreRequest(file))?.args, ['restart', '--timeout', '60']);
-  const restarts: number[] = [];
-  const served = await serveLoopRequests(settings, root, { restart: async () => { restarts.push(1); }, pid: 41, executors });
-  assert.equal(served.length, 1);
-  assert.equal(served[0].state, 'executors');
-  const answer = await pending;
-  assert.deepEqual((answer as { result?: unknown }).result, { host: 'machine-a', result: 'refused', reason: 'an executor holds a claim' }, 'the command prints what the loop ran');
-  assert.equal(process.exitCode, 1, 'a refused executor restart exits non-zero for the confined master too');
-  process.exitCode = 0;
-  assert.deepEqual(await serveLoopRequests(settings, root, { restart: async () => { restarts.push(1); }, pid: 42, executors }), [], 'served once, by no later loop either');
-  assert.deepEqual(ran, [['restart', '--timeout', '60']]);
-  assert.deepEqual(restarts, [], 'an executors request owes the loop no restart of its own');
-  // A loop without the host command answers it failed rather than leaving it standing.
-  await fileCheckoutRestoreRequest(file, 'master executors from the confined master session', 'graphyard-master', new Date(), 'executors', []);
-  assert.equal((await serveLoopRequests(settings, root, { restart: async () => {}, pid: 43 }))[0]?.state, 'failed');
 });
 
 // GY-1692 (GY-1666): the coordinator checkout stood detached on fifteen unpushed operator commits, so the

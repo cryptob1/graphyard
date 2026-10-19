@@ -10,7 +10,6 @@ import { harnessDecision } from '../src/harness.js';
 import * as herdrModule from '../src/master/herdr.js';
 import { closeHerdrPane, listHerdrAgents, listHerdrPanes, observeHerdrAgents, stopCreatedHerdrTab } from '../src/master/herdr.js';
 import { liveMasterConfig, loadMasterConfig, masterConfigSchema, masterHarness, setupMaster, type MasterConfig } from '../src/master.js';
-import { executorUnitTemplate, installExecutorSupervision, type SystemctlRunner } from '../src/repository-setup.js';
 import * as supervisorModule from '../src/supervisor.js';
 import { installLoopSupervisor, loopUnitText } from '../src/supervisor.js';
 import type { Work } from '../src/model.js';
@@ -31,7 +30,6 @@ const loopUnitOf = (root: string, unitDirectory?: string, home?: string) => (sup
 const scope = herdrModule as unknown as { scopeHerdr: (workspace: string | null) => void; herdrScope: () => string | null };
 const legacyLoopUnit = 'graphyard-master.service';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const template = await readFile(fileURLToPath(new URL(`../examples/master/${executorUnitTemplate}`, import.meta.url)), 'utf8');
 
 /** A coordinator checkout of REPOSITORY: a git repository holding the master configuration both installers read. */
 async function checkout(label: string, repository: string) {
@@ -45,7 +43,7 @@ async function checkout(label: string, repository: string) {
 function userManager() {
   const calls: string[][] = [];
   const enabled = new Set<string>();
-  const run: SystemctlRunner = args => {
+  const run = (args: string[]) => {
     calls.push(args);
     if (args[0] === 'enable') for (const unit of args.slice(2)) enabled.add(unit);
     if (args[0] === 'disable') for (const unit of args.slice(2)) enabled.delete(unit);
@@ -63,7 +61,7 @@ const naming = (calls: string[][], unit: string) => calls.filter(args => args.so
 const mutating = (calls: string[][]) => calls.filter(args => ['enable', 'disable', 'restart', 'start', 'stop'].includes(args[0]));
 
 test('unit:per-install-units — two installs on one host write, enable and restart only their own per-install units; a unit another checkout runs is refused by name; a legacy host keeps its names through a recorded alias', async () => {
-  const { ForeignUnitRefusal, installUnitsFile, perInstallUnits, readInstallUnits, resolveInstallUnits } = await units();
+  const { installUnitsFile, perInstallUnits, readInstallUnits, resolveInstallUnits } = await units();
   const home = await temporaryDirectory('multi-install-home');
   const unitDirectory = join(home, '.config/systemd/user');
   const host = userManager();
@@ -73,45 +71,33 @@ test('unit:per-install-units — two installs on one host write, enable and rest
   assert.equal(alphaUnits.master, 'graphyard-master-cryptob1-graphyard.service');
   assert.equal(betaUnits.executorTemplate, 'graphyard-executor-cryptob1-graphyard-game-pilot@.service');
 
-  // The first install: its loop and two executor slots, under its own names, recorded beside its configuration.
+  // The first install: its loop, under its own names, recorded beside its configuration.
   const alphaLoop = await installLoopSupervisor({ root: alpha, cliPath: launcher, repository: 'cryptob1/graphyard', intervalSeconds: 20 }, host.loopHost(home));
   assert.equal(alphaLoop.unit, alphaUnits.master);
   assert.equal(alphaLoop.unitPath, join(unitDirectory, alphaUnits.master));
   assert.deepEqual(readInstallUnits(alpha), alphaUnits, 'the names are recorded in .graphyard/units.json');
   assert.equal(loopUnitOf(alpha), alphaUnits.master, 'every reader of the loop unit names the recorded one');
-  const alphaExecutors = await installExecutorSupervision(alpha, { count: 2, run: host.run, unitDirectory, template, node: process.execPath, loop: null });
-  assert.equal(alphaExecutors.unitFile, join(unitDirectory, alphaUnits.executorTemplate));
-  assert.deepEqual(alphaExecutors.units.map(slot => slot.unit), ['graphyard-executor-cryptob1-graphyard@1.service', 'graphyard-executor-cryptob1-graphyard@2.service']);
-  const alphaFiles = { loop: await readFile(alphaLoop.unitPath!, 'utf8'), executor: await readFile(alphaExecutors.unitFile!, 'utf8') };
+  const alphaFiles = { loop: await readFile(alphaLoop.unitPath!, 'utf8') };
 
-  // The second install's whole setup pass, with one slot: it writes and starts its own units, and
+  // The second install's whole setup pass: it writes and starts its own units, and
   // neither rewrites, restarts, disables nor otherwise names the first install's.
   const before = host.calls.length;
   const betaLoop = await installLoopSupervisor({ root: beta, cliPath: launcher, repository: 'cryptob1/graphyard-game-pilot', intervalSeconds: 20 }, host.loopHost(home));
-  const betaExecutors = await installExecutorSupervision(beta, { count: 1, run: host.run, unitDirectory, template, node: process.execPath, loop: null });
   const betaCalls = host.calls.slice(before);
   assert.equal(betaLoop.unit, betaUnits.master);
   assert.equal(betaLoop.wrote, 'created');
-  assert.deepEqual(betaExecutors.units.map(slot => slot.unit), ['graphyard-executor-cryptob1-graphyard-game-pilot@1.service']);
-  assert.deepEqual(betaExecutors.disabled, [], 'the first install\'s slot 2 is not the second install\'s to disable');
   assert.deepEqual(naming(betaCalls, alphaUnits.master), [], 'the second install never names the first install\'s loop');
-  assert.deepEqual(betaCalls.filter(args => args.some(arg => arg.startsWith('graphyard-executor-cryptob1-graphyard@'))), [], 'nor its executors');
-  assert.ok(host.enabled.has('graphyard-executor-cryptob1-graphyard@2.service'), 'the first install\'s slot 2 stays enabled');
   assert.equal(await readFile(alphaLoop.unitPath!, 'utf8'), alphaFiles.loop, 'the first install\'s loop unit is untouched');
-  assert.equal(await readFile(alphaExecutors.unitFile!, 'utf8'), alphaFiles.executor, 'and its executor template too');
 
-  // A re-run of the first install's setup at a lower count disables its own surplus slot and nothing of the second's.
+  // A re-run of the first install's setup never touches the second's units.
   const rerun = host.calls.length;
-  const shrunk = await installExecutorSupervision(alpha, { count: 1, run: host.run, unitDirectory, template, node: process.execPath, loop: null });
-  assert.deepEqual(shrunk.disabled, ['graphyard-executor-cryptob1-graphyard@2.service']);
+  await installLoopSupervisor({ root: alpha, cliPath: launcher, repository: 'cryptob1/graphyard', intervalSeconds: 20 }, host.loopHost(home));
   assert.deepEqual(mutating(host.calls.slice(rerun)).flat().filter(arg => arg.includes('game-pilot')), [], 'the first install never touches the second\'s units');
 
   // A checkout whose units collide with another checkout's (the same repository cloned again) is
   // refused by name: nothing is rewritten, enabled or restarted.
   const clone = await checkout('install-clone', 'cryptob1/graphyard');
   const cloneCalls = host.calls.length;
-  await assert.rejects(installExecutorSupervision(clone, { count: 1, run: host.run, unitDirectory, template, node: process.execPath, loop: null }),
-    (error: unknown) => error instanceof ForeignUnitRefusal && error.message.includes(alpha) && error.message.includes(alphaUnits.executorTemplate));
   const cloneLoop = await installLoopSupervisor({ root: clone, cliPath: launcher, repository: 'cryptob1/graphyard', intervalSeconds: 20 }, host.loopHost(home));
   assert.equal(cloneLoop.wrote, 'refused');
   assert.match(cloneLoop.refused!, new RegExp(`already runs a different loop \\(WorkingDirectory=${alpha}`));
@@ -130,14 +116,11 @@ test('unit:per-install-units — two installs on one host write, enable and rest
   assert.equal(kept.unit, legacyLoopUnit);
   assert.equal(kept.wrote, 'unchanged');
   assert.deepEqual(JSON.parse(await readFile(join(production, installUnitsFile), 'utf8')), { version: 1, slug: null, master: legacyLoopUnit, executorTemplate: 'graphyard-executor@.service', alias: true });
-  const keptExecutors = await installExecutorSupervision(production, { count: 1, run: legacy.run, unitDirectory: legacyDirectory, template, node: process.execPath, loop: null });
-  assert.deepEqual(keptExecutors.units.map(slot => slot.unit), ['graphyard-executor@1.service'], 'the aliased install keeps its legacy executor names');
   // The pilot on that host: the legacy unit is production's, so the pilot takes its own names.
   const pilot = await checkout('install-pilot', 'cryptob1/graphyard-game-pilot');
   assert.deepEqual(await resolveInstallUnits(pilot, 'cryptob1/graphyard-game-pilot', legacyDirectory, legacyHome), betaUnits);
   const pilotCalls = legacy.calls.length;
   await installLoopSupervisor({ root: pilot, cliPath: launcher, repository: 'cryptob1/graphyard-game-pilot', intervalSeconds: 20 }, legacy.loopHost(legacyHome));
-  await installExecutorSupervision(pilot, { count: 1, run: legacy.run, unitDirectory: legacyDirectory, template, node: process.execPath, loop: null });
   assert.deepEqual(legacy.calls.slice(pilotCalls).filter(args => args.some(arg => arg === legacyLoopUnit || arg.startsWith('graphyard-executor@'))), [], 'the pilot never names production\'s legacy units');
   // An install written before GY-1441 has no record at all: its readers keep the legacy names it runs.
   const unrecorded = await checkout('install-unrecorded', 'owner/project');
@@ -298,7 +281,6 @@ test('unit:harness-own-units-only — the generated master harness allows restar
   await installLoopSupervisor({ root: pilot, cliPath: launcher, repository: 'cryptob1/graphyard-game-pilot', intervalSeconds: 20 }, host.loopHost(home));
   const third = await checkout('harness-third', 'cryptob1/graphyard-game');
   await installLoopSupervisor({ root: third, cliPath: launcher, repository: 'cryptob1/graphyard-game', intervalSeconds: 20 }, host.loopHost(home));
-  await installExecutorSupervision(third, { count: 1, run: host.run, unitDirectory, template, node: process.execPath, loop: null });
 
   const config = (repository: string) => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(home, 'credentials/master/coordinator.token'), cliPath: launcher,
     repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master', autoMerge: true, mergeMethod: 'merge', workers: [] });
@@ -309,14 +291,13 @@ test('unit:harness-own-units-only — the generated master harness allows restar
   for (const verb of ['restart', 'start', 'stop', 'status', 'enable --now']) assert.equal(decide(pilotPlan, `systemctl --user ${verb} graphyard-master-cryptob1-graphyard-game-pilot.service`), 'allow', verb);
   for (const command of [
     'systemctl --user restart graphyard-master.service', 'systemctl --user restart graphyard-master', 'systemctl --user stop graphyard-master.service',
-    'systemctl --user restart graphyard-executor@1.service', 'systemctl --user disable --now graphyard-executor@2.service',
-    'systemctl --user restart graphyard-master-cryptob1-graphyard-game.service', 'systemctl --user restart graphyard-executor-cryptob1-graphyard-game@1.service',
+    'systemctl --user restart graphyard-master-cryptob1-graphyard-game.service',
   ]) assert.equal(decide(pilotPlan, command), 'deny', command);
 
   // Production's master (the legacy alias): its own legacy unit, never the per-install units beside it.
   const productionPlan = masterHarness(production, config('cryptob1/graphyard'), 'claude', { unitDirectory });
   assert.equal(decide(productionPlan, 'systemctl --user restart graphyard-master.service'), 'allow');
-  for (const command of ['systemctl --user restart graphyard-master-cryptob1-graphyard-game-pilot.service', 'systemctl --user stop graphyard-executor-cryptob1-graphyard-game@1.service'])
+  for (const command of ['systemctl --user restart graphyard-master-cryptob1-graphyard-game-pilot.service', 'systemctl --user stop graphyard-master-cryptob1-graphyard-game.service'])
     assert.equal(decide(productionPlan, command), 'deny', command);
 
   // A name that extends another install's (graphyard-game vs graphyard-game-pilot) never denies the longer one's own unit.
@@ -341,7 +322,8 @@ test('unit:per-install-units — re-applying the self-contained host installer t
     assert.ok(lines.some(line => line.includes(`systemctl --user enable --now ${legacyLoopUnit}`)), 'the recorded alias is the unit enabled');
     assert.ok(!lines.some(line => line.includes('graphyard-master-owner-project.service')), 'a per-install unit that was never written is never named');
     const reported = summary.host!.units.map(unit => unit.name);
-    assert.ok(reported.includes(legacyLoopUnit) && reported.includes('graphyard-executor@1.service'), reported.join(', '));
+    assert.ok(reported.includes(legacyLoopUnit), reported.join(', '));
+    assert.ok(!reported.some(name => name.startsWith('graphyard-executor')), 'no executor unit is installed or reported');
     assert.match(summary.profiles!.master.detail, new RegExp(`runs as ${legacyLoopUnit.replace('.', '\\.')}`));
     assert.deepEqual(JSON.parse(legacyHost.hostFiles.get(`/home/graphyard/code/owner-project/.graphyard/units.json`)!.content), legacyInstallUnits);
   } finally { await legacyHost.cleanup(); }
@@ -394,7 +376,6 @@ test('unit:per-install-units — install --migrate stops the units the managed c
     await assert.rejects(applyInstall(session, await buildPlan(session)), /stopped here, after the freeze/);
     const local = fixture.commandLines();
     assert.ok(local.includes(`systemctl --user disable --now ${recorded.master}`), local.join('\n'));
-    assert.ok(local.includes('systemctl --user stop graphyard-executor-owner-project@*.service'), local.join('\n'));
     assert.ok(!local.some(line => line.includes(legacyLoopUnit) || line.includes('graphyard-executor@')), 'another install\'s legacy units are never stopped');
   } finally { await fixture.cleanup(); }
 });

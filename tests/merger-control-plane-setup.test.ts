@@ -77,7 +77,7 @@ test('unit:agents-block-control-plane — master init (with no GitHub App), work
 
   const worker = await repository('merger-worker-init');
   const fetcher = (async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, repository: 'owner/project', mergeWriter: { merger: 'github' } }))) as typeof fetch;
-  await setupRepository(worker, { url: 'https://graphyard.example', cliPath: launcher, hostId: 'host-a', token: 'worker-token-'.padEnd(40, 'x') }, { fetcher, executors: false });
+  await setupRepository(worker, { url: 'https://graphyard.example', cliPath: launcher, hostId: 'host-a', token: 'worker-token-'.padEnd(40, 'x') }, { fetcher });
   assert.equal(await readFile(join(worker, 'AGENTS.md'), 'utf8'), expected, 'worker init writes the --head block');
 
   const applied = await repository('merger-apply');

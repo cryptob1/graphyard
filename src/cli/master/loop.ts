@@ -4,12 +4,12 @@ import { liveMasterConfig } from '../../master.js';
 import { daemonEffects, readDaemonState, retriedSnapshot, runDaemon } from '../../master-daemon.js';
 import { dispatchEffects, dispatchReadTimeoutMs, readDispatchCursor, runAutoDispatch } from '../../auto-dispatch.js';
 import { coordinationViewHeader } from '../../server/work-view.js';
-import { encodeLoopPanes, loopPanesHeader, loopPresenceHeader, loopSupervisionHeader } from '../../model/executor-presence.js';
+import { encodeLoopPanes, loopPanesHeader, loopPresenceHeader, loopSupervisionHeader } from '../../model/loop-presence.js';
 import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { LoopWake, loopWakeSubjects } from '../../daemon/loop-wake.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
-import { executorsAct } from '../master-executors.js';
+import { processConnectAccounts } from '../../master/environments.js';
 
 /** The durable coordination loop and the dispatcher beside it, until stopped. */
 /** The Herdr server the loop names on each read (GY-1511): the instance its herdr calls target, its host, and whether it last answered. */
@@ -46,13 +46,20 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const exit = exitWhenStopped();
     const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;
     // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
-    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake,
-      // GY-1658: a confined master's `master executors [restart]`, run here with the host's systemd and pids in view.
-      executors: (executorArgs, keepAlive) => executorsAct(current(), executorArgs, { actions: () => masterApi('actions'), coordinatorCommit: cli.commit, onWait: keepAlive }) }))
+    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake }))
       .finally(() => stopping.abort());
     const dispatching = { ...dispatchEffects(root, current, { snapshot: (timeoutMs = dispatchReadTimeoutMs) => coordinationSnapshot(timeoutMs) }),
       observeLoopSubjects: (work: Parameters<typeof loopWakeSubjects>[0], agents: Parameters<typeof loopWakeSubjects>[3], clock: number) => { wake.observe(loopWakeSubjects(work, current(), clock, agents)); } };
     const dispatchRun = runAutoDispatch(master, dispatchCursor, dispatching, { once: values.once, intervalMs: () => current().run.dispatchIntervalSeconds * 1000, signal: stopping.signal, reload });
+    // GY-409: the loop turns a connect made in Settings › Agents into a registered account on this host, one pass at a time.
+    let connecting = false;
+    const connects = values.once ? undefined : setInterval(() => {
+      if (connecting || !current().url || !current().hostId) return;
+      connecting = true;
+      processConnectAccounts(current()).catch(error => console.error(`[graphyard-master] connect-account worker: ${error instanceof Error ? error.message : String(error)}`)).finally(() => { connecting = false; });
+    }, 15_000);
+    connects?.unref?.();
+    stopping.signal.addEventListener('abort', () => clearInterval(connects));
     const [result, dispatched] = await Promise.all([daemonRun, dispatchRun]);
     // A cycle that threw was recorded and retried in-process (GY-119); it is reported here, never as an exit.
     if (result.stopped) exit.stopped();

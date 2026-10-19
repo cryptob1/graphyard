@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
-const modules = async () => ({ ...await import('../src/model.js'), ...await import('../src/master-verification.js'), ...await import('../src/executor.js'),
+const modules = async () => ({ ...await import('../src/model.js'), ...await import('../src/master-verification.js'), 
   ...await import('../src/model/next-action.js'), ...await import('../src/model/action-account.js'), ...await import('../src/model/liveness.js'),
   ...await import('../src/model/actions.js'), ...await import('../src/model/actionless.js'), ...await import('../src/model/plain-status.js'), ...await import('../src/master/status.js'),
   ...await import('../src/master/dispatch.js'), ...await import('../src/coordination.js') });

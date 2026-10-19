@@ -1,8 +1,8 @@
 // Concern: an item whose dispatch keeps failing for one unchanged cause (GY-1078).
 import type { Work } from '../model.js';
 import type { DaemonState, DispatchFailureRun } from './state.js';
-import { fleetIdleCause, planeWideFailure } from '../model/blocker-class.js';
-export { fleetIdleCause, planeWideFailure };
+import { deploySkewFailure, fleetIdleCause, planeWideFailure } from '../model/blocker-class.js';
+export { deploySkewFailure, fleetIdleCause, planeWideFailure };
 
 /**
  * How many consecutive dispatch failures of one item with the same cause, each spending an epoch,
@@ -55,6 +55,10 @@ export function noteDispatchFailure(state: DaemonState, item: Pick<Work, 'id' | 
   if (fleetIdleCause(cause)) { delete state.dispatchFailures[item.id]; return { key: item.key, cause, count: 0, epoch: item.epoch, firstAt: at, lastAt: at }; }
   // A plane-wide cause says nothing about the item: it neither counts nor ends the item's own run.
   if (planeWideFailure(cause)) return { key: item.key, cause, count: 0, epoch: item.epoch, firstAt: at, lastAt: at };
+  // Nor does a deploy's release-skew window (GY-2177): until the loop realigns the held CLI to the
+  // served release, every claim refuses with the skew named, whatever the item is. It neither counts
+  // nor ends the item's own run, and the next cycle's claim lands once the held CLI is aligned.
+  if (deploySkewFailure(cause)) return { key: item.key, cause, count: 0, epoch: item.epoch, firstAt: at, lastAt: at };
   const run = previous && previous.cause === cause
     ? { ...previous, count: item.epoch > previous.epoch ? previous.count + 1 : previous.count, epoch: item.epoch, lastAt: at }
     : { key: item.key, cause, count: 1, epoch: item.epoch, firstAt: at, lastAt: at };

@@ -9,9 +9,6 @@ import { server } from '../src/server.js';
 import { leaseLossReason, standingEscalations, type Escalation, type Principal, type Work } from '../src/model.js';
 import { actionIdleMs, idleActionable, queueSnapshot, reconcileActions } from '../src/model/actions.js';
 import { actionJudgment, carriedAction, executorRunnableKinds, humanNeeded, humanNeededActions, nextAction, openAction } from '../src/model/next-action.js';
-import { runExecutorTick, type ExecutorEffects } from '../src/auto-dispatch.js';
-import { controlPlaneHandlers } from '../src/executor.js';
-import { masterConfigSchema } from '../src/master.js';
 import { humanNeededAttention, needsHumanActions, scopeRequestAttention } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2000-01-01 lease expiry forces a lapse that stays lapsed, 2026-09-22 resetsAt is a past record the note quotes, and 2026-09-21 `at` is the fixed now handed to nextAction.
@@ -27,21 +24,21 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * integration:explained-escalations-settle-unattended,
  * integration:scope-request-answered-by-executor and unit:human-needed-actions-visible.
  *
- * No test here runs a master session. Where an action has to be carried out, it is carried out by
- * the shipped executor handlers (`src/executor.ts`) over stubbed launchers, exactly as a host
- * running `graphyard executor` would.
+ * No test here runs a master session. Where an action has to be carried out, it is carried out the
+ * way the loop's own steps carry it out: a launched worker claims under its own identity, and the
+ * scope step asks the control plane's widening rule (`autoscope`) as the coordinator.
  */
 
 const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const master: Principal = { id: 'master-admin', role: 'admin', sessionKind: 'ai' };
 const worker: Principal = { id: 'engineer-a', role: 'worker', runtime: 'claude', sessionKind: 'ai' };
 const other: Principal = { id: 'engineer-b', role: 'worker', runtime: 'cursor', sessionKind: 'ai' };
-const executor: Principal = { id: 'executor-a', role: 'coordinator' };
+const coordinator: Principal = { id: 'loop-a', role: 'coordinator' };
 const PROOF = 'unit:priority';
 
 let database: EmbeddedPostgres, store: Store, engine: Engine, expiring: Engine;
 let http: ReturnType<typeof server>, url: string;
-const executorToken = 'x'.repeat(32);
+const coordinatorToken = 'x'.repeat(32);
 
 const id = () => randomUUID();
 const reload = async (work: Work | string) => (await store.list()).find(item => item.id === (typeof work === 'string' ? work : work.id))!;
@@ -58,10 +55,10 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, [15368], 120, 'owner/project');
-  engine.principals = [human, master, worker, other, executor];
+  engine.principals = [human, master, worker, other, coordinator];
   // Leases granted by this engine have already lapsed by the time reconciliation reads them.
   expiring = new Engine(store, [15368], 0, 'owner/project'); expiring.principals = engine.principals;
-  http = server(engine, [{ ...executor, token: executorToken }]);
+  http = server(engine, [{ ...coordinator, token: coordinatorToken }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
@@ -97,50 +94,17 @@ async function standingLoss(work: Work, epoch: number, owner = worker.id) {
   });
 }
 
-const config = masterConfigSchema.parse({
-  version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: '/outside/graphyard.mjs',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 15368, hostId: 'host-1', masterAgentName: 'm',
-  workers: [{ name: 'claude-worker', principal: other.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }],
-});
-
-/**
- * One stateless executor running the handlers Graphyard ships. What is stubbed is the outside
- * world each handler reaches — here, the worker launcher — and the stub does what that session
- * really does to the control plane: it claims under its own identity and registers its workspace.
- */
-function fleetExecutor(launched: string[], only?: string): ExecutorEffects {
-  const handlers = controlPlaneHandlers(() => config, {
-    snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
-    mutate: async (path, body) => {
-      const [, item, command] = path.split('/');
-      return engine.execute(executor, command as any, item, body, id());
-    },
-    agents: () => [],
-    workerCredentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    producerCredentials: async () => ({}),
-    dispatchWorker: async item => {
-      let claimed = await engine.execute(other, 'claim', item.id, {}, id());
-      claimed = await engine.execute(other, 'workspace', claimed.id, { epoch: claimed.epoch, host: 'host-1', path: `/tmp/priority/${claimed.id}-${claimed.epoch}`, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` }, id());
-      launched.push(claimed.key);
-      return { pane: 'pane-w' };
-    },
-    launchReview: async () => { throw new Error('no review is launched here'); },
-    launchProducer: async () => { throw new Error('no producer is launched here'); },
-    repositoryFiles: async () => new Set(['src/priority-palette/index.ts']),
-  });
-  return {
-    // Scoped to the item under test, the way a real executor is scoped to its repository: the
-    // control plane still decides what the row is and still settles the race between executors.
-    claim: request => engine.claimNextAction(executor, { ...request, ...(only ? { work: only } : {}) }, id()) as ReturnType<ExecutorEffects['claim']>,
-    settle: (row, result, reason) => engine.settleClaimedAction(executor, row.id, { result, reason, ...(row.claim?.executor ? { executor: row.claim.executor } : {}) }, id()),
-    handlers,
-  };
+/** What a launched worker does to the control plane: it claims under its own identity and registers its workspace. */
+async function launchWorker(item: Work) {
+  const claimed = await engine.execute(other, 'claim', item.id, {}, id());
+  return engine.execute(other, 'workspace', claimed.id, { epoch: claimed.epoch, host: 'host-1', path: `/tmp/priority/${claimed.id}-${claimed.epoch}`, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` }, id());
 }
-const runExecutor = (effects: ExecutorEffects) => runExecutorTick({ id: executor.id, host: 'host-1' }, effects);
+/** The loop's scope step: the control plane's widening rule decides the request for its epoch, on a base tree the loop read. */
+const autoscope = (item: Work, epoch: number) => engine.execute(coordinator, 'autoscope', item.id, { epoch, treeRead: true }, id());
 
 // ---- AC-1: an escalation stops only the work it blocks -----------------------------------------
 
-test('integration:escalation-does-not-freeze-workable-item — a ready item carrying a standing lease-loss escalation is named dispatch, an executor assigns a worker to it, and the escalation stands unresolved beside the work', async () => {
+test('integration:escalation-does-not-freeze-workable-item — a ready item carrying a standing lease-loss escalation is named dispatch, a launched worker takes it, and the escalation stands unresolved beside the work', async () => {
   // A worker claims and vanishes: reconciliation clears the lapse and raises the concern nobody
   // has explained, exactly as it does in production.
   let item = await ready();
@@ -161,19 +125,15 @@ test('integration:escalation-does-not-freeze-workable-item — a ready item carr
     [['escalation', 'lease-loss', `Worker ${worker.id} lost lease epoch ${epoch}`]]);
   assert.match(action(item).carried[0].resolve, new RegExp(`graphyard master escalation ${item.key} lease-loss`));
   assert.equal(action(item).needsHuman, undefined, 'a dispatch is not itself a judgment anybody owes');
-  assert.deepEqual(rows(item).map(row => row.kind), ['dispatch'], 'and the durable row an executor claims is the dispatch');
+  assert.deepEqual(rows(item).map(row => row.kind), ['dispatch'], 'and the durable row is the dispatch');
 
   // The concern is not lost behind the work: it is listed as owed by somebody, with the command.
   const owed = humanNeededActions([item], new Date());
   assert.deepEqual(owed.map(entry => [entry.key, entry.source, entry.trigger]), [[item.key, 'carried', 'lease-loss']]);
   assert.match(humanNeededAttention({ work: [item], now: new Date().toISOString() })[0].text, /standing lease-loss escalation while it is worked/);
 
-  // An executor claims the row and the shipped dispatch handler launches a worker, which claims
-  // the item under its own identity. Nobody resolved anything first.
-  const launched: string[] = [];
-  const step = await runExecutor(fleetExecutor(launched, item.id));
-  assert.equal(step.result, 'done', step.reason);
-  assert.deepEqual(launched, [item.key]);
+  // A worker is launched and claims the item under its own identity. Nobody resolved anything first.
+  await launchWorker(item);
   item = await reload(item);
   assert.equal(item.lease!.owner, other.id, 'a worker holds the item');
   assert.equal(item.lease!.epoch, epoch + 1, 'under a fresh attempt');
@@ -183,7 +143,7 @@ test('integration:escalation-does-not-freeze-workable-item — a ready item carr
 
   // The half the escalation does block is unchanged: nothing may be delivered under one, and an
   // item that cannot take an assignment anyway is still named for the concern rather than for a
-  // dispatch no executor could complete.
+  // dispatch no worker could take.
   const blocked = await ready({ exclusiveResources: ['escalation-staging'] });
   const holder = await engine.execute(worker, 'claim', (await ready({ exclusiveResources: ['escalation-staging'] })).id, {}, id());
   const stood = await standingLoss(blocked, 1);
@@ -236,7 +196,7 @@ test('integration:explained-escalations-settle-unattended — a lease-loss the l
   spent = await reload(spent);
   assert.deepEqual(standingEscalations(spent).map(entry => entry.trigger), ['lease-loss']);
   const reported = await fetch(`${url}/api/work/${spent.id}/capacity`, {
-    method: 'POST', headers: { Authorization: `Bearer ${executorToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() },
+    method: 'POST', headers: { Authorization: `Bearer ${coordinatorToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() },
     body: JSON.stringify({ event: 'exhausted', role: 'worker', epoch: spentEpoch, profile: 'claude-worker', account: 'claude-two', runtime: 'claude', reason: 'Claude AI usage limit reached', resetsAt: '2026-09-22T04:00:00.000Z', partialWork: { state: 'clean' } }),
   });
   assert.equal(reported.status, 200, JSON.stringify(await reported.clone().json()));
@@ -274,9 +234,9 @@ test('integration:explained-escalations-settle-unattended — a lease-loss the l
     /requires a declared human session/);
 });
 
-// ---- AC-3: a scope request the criteria imply is answered by an executor ------------------------
+// ---- AC-3: a scope request the criteria imply is answered by the loop's scope step ------------------------
 
-test('integration:scope-request-answered-by-executor — a request for a file an acceptance criterion names is granted by the approve-scope action an executor completes, with no master session, and only a widening the criteria do not support reaches a person', async () => {
+test('integration:scope-request-answered-by-executor — a request for a file an acceptance criterion names is granted by the loop\'s approve-scope step, with no master session, and only a widening the criteria do not support reaches a person', async () => {
   const target = 'src/priority-palette/tokens.ts';
   let item = await release(await created({ criteria: [
     { id: 'AC-1', text: 'The widget renders its palette', proofs: [PROOF] },
@@ -293,13 +253,12 @@ test('integration:scope-request-answered-by-executor — a request for a file an
   assert.deepEqual(action(item).inputs, { kind: 'approve-scope', epoch, paths: [target], requestedBy: worker.id, detail: 'AC-2 puts the tokens there' });
   assert.equal(action(item).llmRole, null, 'applying the item\'s own scope is mechanical');
   assert.equal(action(item).needsHuman, undefined);
-  assert.ok(executorRunnableKinds.includes('approve-scope'), 'and it is a kind an executor may claim');
+  assert.ok(executorRunnableKinds.includes('approve-scope'), 'and it is a mechanical kind, not a judgment');
   // Nobody is asked to decide it: the attention list is for widenings the item does not carry.
   assert.deepEqual(scopeRequestAttention({ work: [item], now: new Date().toISOString() }), []);
 
-  const step = await runExecutor(fleetExecutor([], item.id));
-  assert.equal(step.result, 'done', step.reason);
-  assert.match(step.reason!, /the widening rule decided .*approved/);
+  const decided = await autoscope(item, epoch);
+  assert.equal(decided.scopeDecision?.state, 'approved', JSON.stringify(decided.scopeDecision));
   item = await reload(item);
   assert.deepEqual(item.plannedFiles, [...planned, target], 'the widening is applied');
   assert.equal(item.scopeRequest, null, 'the request is answered and cleared');
@@ -312,10 +271,9 @@ test('integration:scope-request-answered-by-executor — a request for a file an
   // the item is blocked on the refusal, and it is named for a person with the command.
   const outside = 'src/priority-unclaimed/other.ts';
   item = await engine.execute(worker, 'scope', item.id, { epoch, paths: [outside], reason: 'It looked related' }, id());
-  const refused = await runExecutor(fleetExecutor([], item.id));
-  assert.equal(refused.result, 'done', refused.reason);
-  assert.match(refused.reason!, /refused/);
+  await autoscope(item, epoch);
   item = await reload(item);
+  assert.equal(item.scopeRequest?.decision?.state, 'refused');
   assert.deepEqual(item.plannedFiles, [...planned, target], 'nothing was widened');
   assert.match(item.blocker!, /^Scope request refused/);
   // Inside the bound the loop routes it to the approver and the engine refuses `master scope`

@@ -14,7 +14,7 @@ cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/R
 
 Hetzner waits (exit 3) for price approval.
 
-`up` runs: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts, harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity; neither: exit 2). The loop merges onboarding's change; goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until loop and executors run this CLI's commit.
+`up` runs: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts, harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity; neither: exit 2). The loop merges onboarding's change; goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until the loop runs this CLI's commit.
 
 ## The Setup page
 

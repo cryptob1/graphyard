@@ -157,6 +157,17 @@ const dispatchFailureBlocker = /^Dispatch failed \d+ consecutive times with the 
 export const fleetIdleCause = (failure: string) =>
   /\bno worker profile can take\b|\bagent name \S+ is already visible in \w+\b|\b\w+ agent \S+ is (?:idle|done)\b|\bis reserved by another dispatch\b/i.test(failure);
 
+/**
+ * Whether a failure is the deploy's own release-skew window (GY-2177): the fixed refusal a CLI behind
+ * the served release throws before any request is sent (src/cli/context.ts `versionSkewMessage` builds
+ * it, so neither drifts) — between a control-plane deploy and the loop's realignment to the served
+ * commit (upgrade.ts GY-2169), every claim the stale held CLI runs refuses with it, whatever the item.
+ * Like a plane-wide failure it names the window, not the item or the profile that met it: the loop
+ * rides it out and the next cycle's claim lands once the held CLI is aligned.
+ */
+export const deploySkewFailure = (failure: string | null | undefined) =>
+  !!failure && /\bCLI [^\n]* and server [^\n]* differ: run graphyard upgrade/.test(failure);
+
 /** The first path the text says could not be written: an explicit environment blocker's path, a quoted path, or the first path-shaped token. */
 function refusedPath(text: string): string | null {
   const recorded = /cannot write (\S+), so required command/.exec(text)?.[1];

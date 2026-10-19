@@ -67,7 +67,6 @@ test('unit:server-heap-bounded-under-repeated-requests — repeated status, cont
     await Promise.all([
       call(coordinator, 'GET', 'status'), call(operator, 'GET', 'status'),
       call(coordinator, 'GET', `work/${work.key}/context`),
-      call(coordinator, 'POST', 'actions/claim', { executor: 'heap-executor', host: 'heap-host', kinds: ['dispatch'] }),
       call(implementer, 'POST', 'assignments/claim', {}),
       call(coordinator, 'GET', 'agent-registry'),
     ]);
