@@ -462,6 +462,7 @@
     "tests/lease-lifecycle.test.ts": 3342,
     "tests/lease-loss-resolve.test.ts": 614,
     "tests/lease-pool.test.ts": 16257,
+    "tests/lead-time.test.ts": 901,
     "tests/ledger-compaction.test.ts": 3321,
     "tests/live-scope-widening.test.ts": 1883,
     "tests/live-throughput.test.ts": 11540,

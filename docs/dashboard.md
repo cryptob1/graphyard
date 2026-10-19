@@ -27,7 +27,7 @@ Cards: ask, **Recommended** choice, one-line why, numbered steps, choices; agent
 
 ## The status sentence
 
-**Todo**/**Doing**/**Checking**/**Done** (GY-1979; Done = merged, off the board). Release line: commit · health · lag, or *Release: not watched*. Shipped items are *Delivered* at merge; *Live* once served. Item page leads with `summary`, state, **What is left**, folded **Details** (description, criteria), **Pull request** (**Merge danger**), **Tests** (each criterion proof's result: merge trial, evidence, *not run yet*), **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker). `/goals/KEY`: summary, outcomes, Todo/Doing/Checking/Done flowchart, **Play**.
+**Todo**/**Doing**/**Checking**/**Done** (GY-1979; Done = merged, off the board). Top bar leads with the speed number: *Lead time 42 min · last 10 merges · was 58 min* — the median released→merged time over the last 10 merges, the previous 10's beside it; until a merge carries a recorded release there is no line, never a zero. Release line: commit · health · lag, or *Release: not watched*. Shipped items are *Delivered* at merge; *Live* once served. Item page leads with `summary`, state, **What is left**, folded **Details** (description, criteria), **Pull request** (**Merge danger**), **Tests** (each criterion proof's result: merge trial, evidence, *not run yet*), **Activity**, **Technical details** (gates, sessions, evidence, overlaps, verbatim blocker). `/goals/KEY`: summary, outcomes, Todo/Doing/Checking/Done flowchart, **Play**.
 
 ## Insights
 

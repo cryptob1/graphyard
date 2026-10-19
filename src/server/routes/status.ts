@@ -16,7 +16,7 @@ import { autoMergeStatus, mergeHolds, mergeWriterStatus } from '../../merger-mod
 import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
-import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../flow-analytics.js';
+import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment, leadTimeReport } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
 import { routedScopeDecisions } from '../scope-holds.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
@@ -52,8 +52,13 @@ export const statusRoutes = defineRoutes('status', [
       // A pending merge row waits on a loop that merges, never on an executor (GY-916).
       // Presence recorded durably by any process counts, so a restart or deploy reads the fleet live (GY-1289).
       const executors = executorReport(visibleWork, executorRegistry(engine), observedAt, undefined, await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt), await durablePresence(presenceQuery(engine)));
+      // The one speed number (GY-1989), read from the items' own release records; a failed read is
+      // absent, never an error: the status every client polls keeps answering. It names work items
+      // across the repository, so a scoped operator agent does not read it, exactly as production.
+      const eventsReader = (path: string) => readEventHistory(services.engine.store.pool, parseEventHistoryQuery(new URLSearchParams(path.startsWith('events?') ? path.slice('events?'.length) : path)));
+      const leadTime = actor.role === 'operator-agent' ? null : await leadTimeReport(visibleWork, eventsReader).catch(() => null);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs,
+        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs, leadTime,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work

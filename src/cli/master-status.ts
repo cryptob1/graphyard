@@ -17,7 +17,7 @@ import { promotionSummaryWithLag } from '../daemon/promotion-stale.js';
 import { sealRefusalAttention } from '../validation-import.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
-import { approverLaunchAttention, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
+import { approverLaunchAttention, leadTimeHeadline, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
 import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
@@ -102,7 +102,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // Candidate session status, conflict probe and timing failure qualification (GY-1157)
-  const { probe, status: pipelined, delivery } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
+  const { probe, status: pipelined, delivery, lead: leadTime } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
   // Failed check a fixed base explains (GY-793); stalled review-cap replaces a relaunching review-gate row (GY-1810).
   const status = nameBaseBreaks(stalledReviewCapAttention(pipelined, snapshot.work, cursor, master.reviewRoundCap, Date.parse(snapshot.now)), snapshot.work);
   const itemSize = timeToMergeBySize(snapshot.work, Date.parse(snapshot.now)); // GY-1858
@@ -161,7 +161,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals: cycling?.approvals ?? [],
   });
   return {
-    // The merger setting (src/merger-mode.ts): first in the report.
+    // The one speed number (GY-1989), first in the report: median released→merged over the last 10
+    // merges, the previous 10's median beside it — the number the loop optimizes for.
+    ...leadTimeHeadline(leadTime),
+    // The merger setting (src/merger-mode.ts), beside it at the top of the report.
     ...mergeWriterLine(coordinator),
     ...status, ...attributed, ...faulted(attributeAttention(attributed.attentionItems, resources.readings)), resources: resources.report,
     unavailable: sections.unavailable,

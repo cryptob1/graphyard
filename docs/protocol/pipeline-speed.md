@@ -10,4 +10,6 @@ Lifecycle commands append to each item's `pipeline`, never moving a gate.
 
 `end`: `submitted`, `released`, `expired`, `reworked`; `submittedAt` (first) survives rework; old items backfill (`pipeline.backfilled`). `master status` row `speed` ([target](../master-agent-reference.md#pipeline-speed)); `coverage`: `measured`, `awaiting-backfill`, `events-pruned`, `no-submission`.
 
+The one speed number: `master status` leads with `leadTime` and the dashboard's top bar shows the same line — the median released→merged time over the last 10 merges, the previous 10's median beside it (*Lead time 42 min · last 10 merges · was 58 min*). Released is the item's first `ready` event; a merge with no release on record, and a window short of ten, says so instead of padding the count.
+
 `lastAssignment.startedAt` is the epoch's first lease renewal, sent by the supervisor just before the agent starts; it is set once, never by another epoch. The loop's `daemon.budget` splits ready→first push into `launchOverhead` (claim→start) and `working` (start→first push) percentiles, and a ready→first push breach names both p90s.

@@ -4,6 +4,7 @@ import { advisoryLocks } from './store/locks.js';
 import { stages, type Stage, type Work } from './model.js';
 import { conflictHotspots, conflictHotspotWindowMs, ledgerConflicts, type ConflictOccurrence } from './model/conflict-hotspots.js';
 import { eventHistoryLimits } from './events-history.js';
+import { leadTime as leadTimeFigure, leadTimeSince, type LeadTimeReport } from './pipeline-speed.js';
 
 // Delivery-flow analytics.
 //
@@ -2147,7 +2148,9 @@ export async function readReadyInstants(readEvents: (path: string) => Promise<an
   const readyAt = new Map<string, string>();
   let cursor: string | null = null, complete = false, pages = 0;
   while (pages < pageBound) {
-    const params = new URLSearchParams({ kind: 'ready', order: 'asc', payload: 'none', view: 'history', since, limit: String(eventHistoryLimits.page) });
+    // The `page` view: this read consumes only the rows and the paging cursor, so it never pays
+    // for the routine-rows summary the `history` view aggregates beside them.
+    const params = new URLSearchParams({ kind: 'ready', order: 'asc', payload: 'none', view: 'page', since, limit: String(eventHistoryLimits.page) });
     if (cursor) params.set('cursor', cursor);
     const history = await readEvents(`events?${params}`);
     for (const event of history.events ?? []) {
@@ -2160,6 +2163,18 @@ export async function readReadyInstants(readEvents: (path: string) => Promise<an
     if (!cursor) break;
   }
   return { readyAt, complete };
+}
+/**
+ * The one speed number (GY-1989) over the ledger's own release records: the median released→merged
+ * time over the last 10 merges and the previous 10's beside it (`leadTime` in src/pipeline-speed.ts),
+ * with each item's release instant read from its first `ready` event, reaching back only as far as
+ * the window's own history goes (`leadTimeSince`). An item whose release event the bounded read did
+ * not reach has no recorded release time and is skipped, never guessed.
+ */
+export async function leadTimeReport(work: Work[], readEvents: (path: string) => Promise<any>): Promise<LeadTimeReport> {
+  const since = leadTimeSince(work);
+  const ready = since ? await readReadyInstants(readEvents, since) : { readyAt: new Map<string, string>() };
+  return leadTimeFigure(work, ready.readyAt);
 }
 /**
  * Where delivery time goes (GY-1382): each item merged into main in a window, split into the seven
