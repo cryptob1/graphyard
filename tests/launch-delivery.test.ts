@@ -15,6 +15,7 @@ import { bounded, dispatchFailureReasonLimit, emptyDispatchCursor, runDispatchTi
 import { readMasterGuide } from './helpers/master-guide.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { typedRuntime } from './helpers/launch-shell.js';
 import { launchProgram, outputAfterCommand } from '../src/master/launch.js';
 import { accountLaunch, registryLaunchArgs } from '../src/master/environments.js';
 import { knownRuntimes } from '../src/install/runtimes.js';
@@ -27,7 +28,7 @@ import { proposedRuntimes } from '../src/model/registry-proposal.js';
 // a runtime that is starting from one that never started; a refused start is recorded with the
 // pane's last line. One case per proof: unit:launch-command-bounded,
 // unit:start-bound-reads-the-pane, integration:launch-refusal-names-the-screen,
-// manual:launch-delivery-docs-review.
+// manual:launch-delivery-docs-review, unit:typed-runtime-reads-a-sourced-launch.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
@@ -217,6 +218,23 @@ test('unit:launch-command-bounded — the typed launch command line is short and
       assert.equal(positionalOf(expandTypedCommand(live.typed!).words.slice(1)), await readFile(file, 'utf8'));
       assert.equal((await readProducerLedger(root)).producers[0].delivery, 'request');
     } finally { await cleanup(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+// GY-2145: under a long temporary directory a worker's launch line exceeds the bound and sources
+// STEM.launch, so tests that judge the runtime line read it through typedRuntime, not the typed line.
+test('unit:typed-runtime-reads-a-sourced-launch — a worker launch under a long checkout path sources its runtime words from STEM.launch, and typedRuntime reads the same runtime line a short path types', async () => {
+  const directory = await temporaryDirectory('launch-long');
+  try {
+    const args = ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', join(directory, '.graphyard/harness/worker-claude-worker.json')];
+    const shape = / -- claude --permission-mode bypassPermissions --setting-sources user --settings \S+ --append-system-prompt-file "\$GY\.role" "\$\(cat "\$GY\.request"\)"$/;
+    const line = (checkout: string) => launchCommand('claude', args, writeLaunchFiles(checkout, 'engineering-claude-1', { role: 'r', request: 'Implement GY-69' }), ['node', launcher, 'watch', 'GY-69', '4', '--']);
+    const short = line(join(directory, 'assigned'));
+    assert.match(short, shape); assert.equal(typedRuntime(short), short.replace(/^GY=\S+; /, ''));
+    const long = line(join(directory, 'x'.repeat(200), 'assigned'));
+    assert.match(long, /; \. "\$GY\.launch"$/, 'the long line sources its runtime words');
+    assert.doesNotMatch(long, shape);
+    assert.match(typedRuntime(long), shape, 'the sourced runtime line has the same shape the short line types');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
