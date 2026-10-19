@@ -69,19 +69,19 @@ const words = (...values: string[]) => values.map(value => ({ value, dynamic: fa
 const liveAgent = (name: string) => ({ name, agent_status: 'working', pane_id: 'p1' } as any);
 const summary = (at_: string, runState: 'reported' | 'running' = 'reported'): DoctorRunRecord => ({ at: at_, state: runState, runs: [], findings: [], actions: [], filed: [], detail: '' });
 
-test('unit:doctor-scheduled-and-scoped — the doctor runs every ten minutes by default on a configurable interval, its session holds only the sanctioned commands with a refusal recorded rather than run, and the shipped template is the resolver\'s short act-don\'t-ask charter', async () => {
+test('unit:doctor-scheduled-and-scoped — the doctor runs every five minutes by default on a configurable interval, its session holds only the sanctioned commands with a refusal recorded rather than run, and the shipped template is the resolver\'s short act-don\'t-ask charter', async () => {
   const settings = doctorSettingsSchema.parse({});
   assert.equal(settings.enabled, true, 'the doctor is on by default');
-  assert.equal(settings.intervalMinutes, 10, 'the doctor runs every ten minutes by default');
+  assert.equal(settings.intervalMinutes, 5, 'the doctor runs every five minutes by default');
   assert.notEqual(settings.fallbackModel, settings.model, 'the fallback model is stronger than the default model');
   const master = config();
   const state = emptyDaemonState(master);
-  // The schedule: never run, it is due; nine minutes after a run it is not; at ten it is.
+  // The schedule: never run, it is due; four minutes after a run it is not; at five it is.
   state.doctor.runs = [summary(at(0))];
-  assert.equal(doctorDue(state, Date.parse(at(9 * 60_000)), settings), false, 'nine minutes after the last run the doctor is not due');
-  assert.equal(doctorDue(state, Date.parse(at(10 * 60_000)), settings), true, 'ten minutes after the last run the doctor is due');
+  assert.equal(doctorDue(state, Date.parse(at(4 * 60_000)), settings), false, 'four minutes after the last run the doctor is not due');
+  assert.equal(doctorDue(state, Date.parse(at(5 * 60_000)), settings), true, 'five minutes after the last run the doctor is due');
   // A run still in flight is never overlapped, whatever the interval.
-  state.doctor.runs.push(summary(at(10 * 60_000), 'running'));
+  state.doctor.runs.push(summary(at(5 * 60_000), 'running'));
   assert.equal(doctorDue(state, Date.parse(at(30 * 60_000)), settings), false, 'a run in flight is not overlapped');
   // The interval is the operator's: run.doctor.intervalMinutes=30 moves the bound.
   const slower = doctorSettingsSchema.parse({ intervalMinutes: 30 });

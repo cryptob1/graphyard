@@ -15,7 +15,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 /**
  * GY-1662. The loop's checkout validation before it applies the Claude harness contract, over a
  * simulated working day of the real loop: a cycle a minute for eight hours over the loop's own
- * checkout (its CLI's), the doctor every ten minutes. The unit serving the loop is broken three
+ * checkout (its CLI's), the doctor every five minutes. The unit serving the loop is broken three
  * times — it runs another checkout, then it cannot be read, then it runs another checkout while the
  * host widens the plan — and each is repaired. The checkout's units record is then removed twice:
  * once while the unit serving the loop runs it, which the loop repairs itself by recording its own

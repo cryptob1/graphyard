@@ -264,7 +264,7 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   const roleFiles = (() => { try { return readdirSync(join(docsSyncRoot, '.graphyard', 'harness')); } catch { return []; } })();
   assert.ok(docsSyncRuns.length > 0 && docsSyncRuns.every(run => run.roleFile?.startsWith(join(docsSyncRoot, '.graphyard', 'harness', 'docs-sync-'))), 'each docs-sync launch wrote its role file');
   assert.ok(roleFiles.every(file => !file.startsWith('docs-sync-')), `no docs-sync role file outlives its settled session: ${roleFiles.join(', ')}`);
-  // GY-711: the doctor fired from the real cycle on its ten-minute interval across the day — the
+  // GY-711: the doctor fired from the real cycle on its interval across the day — the
   // cursor holds its recent runs (all reported), the ledger holds every summary the loop posted,
   // and the scripted finding reached the run record it belongs to.
   const postedDoctorRuns = Number((await store.pool.query(`SELECT count(*) AS n FROM events WHERE kind = $1 AND created_at >= $2`, [doctorRunEvent, new Date(dayStart).toISOString()])).rows[0].n);

@@ -7,12 +7,19 @@ import { readFileSync } from 'node:fs';
 
 export interface TypedLaunch { stem: string | null; words: string[]; kind: string; args: string[] }
 
-/** What the shell hands the runtime: bare and single-quoted words, the role reference as its path, the request reference as the file's text. */
-export function expandTypedCommand(command: string): TypedLaunch {
+const bindingOf = (command: string) => {
   const bound = /^GY=(\S+); (.*)$/s.exec(command);
   const stem = bound ? bound[1].replace(/^'(.*)'$/s, '$1').replaceAll("'\\''", "'") : null;
   // A line over the bound sources the runtime's words from `STEM.launch` (master.ts launchCommand).
-  const body = bound && bound[2] === '. "$GY.launch"' ? readFileSync(`${stem}.launch`, 'utf8').trim() : bound ? bound[2] : command;
+  return { stem, body: bound && bound[2] === '. "$GY.launch"' ? readFileSync(`${stem}.launch`, 'utf8').trim() : bound ? bound[2] : command };
+};
+
+/** The runtime line the shell runs after the stem binding, unexpanded: the typed line's own, or the `STEM.launch` it sources when the typed line would exceed the bound (as under a long temporary directory). */
+export const typedRuntime = (command: string) => bindingOf(command).body;
+
+/** What the shell hands the runtime: bare and single-quoted words, the role reference as its path, the request reference as the file's text. */
+export function expandTypedCommand(command: string): TypedLaunch {
+  const { stem, body } = bindingOf(command);
   const words: string[] = [];
   for (const match of body.matchAll(/'((?:[^']|'\\'')*)'|("\$GY\.role")|("\$\(cat "\$GY\.request"\)")|(\S+)/g)) {
     if (match[1] !== undefined) words.push(match[1].replaceAll("'\\''", "'"));
