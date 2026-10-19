@@ -62,7 +62,7 @@ export const claimCandidatesSql = `SELECT w.id FROM work_index i JOIN work_items
       CASE WHEN pg_input_is_valid(entry->>'requestedAt', 'timestamptz') THEN (entry->>'requestedAt')::timestamptz END AS requested,
       (entry->>'id') COLLATE "C" AS row_id
     FROM jsonb_array_elements(CASE WHEN jsonb_typeof(w.document->'actionQueue'->'actions') = 'array' THEN w.document->'actionQueue'->'actions' ELSE '[]'::jsonb END) AS a(entry)
-      WHERE (w.document->>'stage' IS DISTINCT FROM 'done' OR entry->>'kind' = 'verify-deployment')
+      WHERE w.document->>'stage' IS DISTINCT FROM 'done'
         AND ($2::text[] IS NULL OR entry->>'kind' = ANY($2::text[]))
         AND (entry->>'retryAt' IS NULL OR (entry->>'retryAt')::timestamptz <= clock_timestamp())
         AND NOT (entry->>'state' = 'done' AND entry->>'resolvedAt' IS NOT NULL AND (entry->>'resolvedAt')::timestamptz > clock_timestamp() - make_interval(secs => $3::double precision / 1000))

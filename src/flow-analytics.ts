@@ -1416,8 +1416,8 @@ export function gateFactStep(details: Record<string, any>): FlowStep | null {
 /**
  * When the control plane last observed the live release serving a merged item: the first verified
  * release of the production environment that included it (`releaseDeliveries`, written by the
- * production watch — a staging or preview environment never counts), or the deployment
- * `master verify-deployment` recorded for it. Null when no production observation covers it.
+ * production watch — a staging or preview environment never counts), or a deployment recorded
+ * on the delivery. Null when no production observation covers it.
  */
 export function releaseObservedAt(work: Work, productionEnvironment = defaultProductionEnvironment): string | null {
   if (work.stage !== 'done' || work.closure || !work.delivery) return null;
@@ -1426,32 +1426,13 @@ export function releaseObservedAt(work: Work, productionEnvironment = defaultPro
   return verified ?? work.delivery.deployment?.observedAt ?? null;
 }
 
-/**
- * When the live release was observed serving a merged item, and only then (AGENTS.md: a delivery
- * stays pending until the release serves it). With a post-deployment smoke proof asked for, that
- * is the passing verdict bound to the deployed commit; otherwise the production observation
- * (`releaseObservedAt`). Null while neither exists, and for work closed without delivery.
- */
-export function servedAt(work: Work, productionEnvironment = defaultProductionEnvironment): string | null {
-  const delivery = work.delivery;
-  if (work.stage !== 'done' || work.closure || !delivery) return null;
-  if (!work.policy?.deploySmoke) return releaseObservedAt(work, productionEnvironment);
-  const smoke = delivery.smoke;
-  return delivery.deployment && smoke?.result === 'pass' && smoke.sha === delivery.deployment.sha && smoke.mergeSha === delivery.mergeSha ? smoke.at : null;
-}
+/** When the live release was observed serving a merged item (`releaseObservedAt`): informational, never a hold (GY-1981). */
+export const servedAt = releaseObservedAt;
 
-/**
- * When a merged item leaves the flow (the Deploy step). `delivery.deployment` is written only for
- * policies that ask for a post-deployment smoke proof, so its absence never holds work at Deploy:
- * without that proof the item leaves the flow when the release is observed serving it, or at its
- * merge when no production observation covers it yet — it is then delivered but not yet known to
- * be live (`servedAt` stays null). With the proof asked for, it leaves on the passing verdict.
- */
-export function deliveredAt(work: Work, productionEnvironment = defaultProductionEnvironment): string | null {
+/** When a merged item leaves the flow: at its merge (GY-1981: done = merged). Null for work closed without delivery. */
+export function deliveredAt(work: Work): string | null {
   const delivery = work.delivery;
   if (work.stage !== 'done' || work.closure || !delivery) return null;
-  const served = servedAt(work, productionEnvironment);
-  if (served || work.policy?.deploySmoke) return served;
   return delivery.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt;
 }
 
@@ -1482,22 +1463,8 @@ export function productionHold(report: any): ProductionHold {
   };
 }
 
-/**
- * When a merged item left the flow, as every reader counts it: when the release was observed
- * serving it; else, where the production watch observes production, never while it reports the
- * item unserved or failed, or while the item merged after the watch's last pass (not looked for
- * yet) — it is at Deploy until a live observation is recorded; else `deliveredAt` — its merge, or
- * the passing post-deployment check its policy asks for. Only with no production observation at
- * all (or for a merge older than the watch's window) does a merge alone take it out of the flow.
- */
-export function flowExitAt(work: Work, productionEnvironment = defaultProductionEnvironment, hold: ProductionHold = noProductionHold): string | null {
-  const served = servedAt(work, productionEnvironment);
-  if (served) return served;
-  if (hold.unserved.has(work.key) || hold.failed.has(work.key)) return null;
-  const merged = time(work.delivery?.mergedAt ?? '');
-  if (hold.observedAt !== null && work.stage === 'done' && !work.closure && merged !== null && merged > hold.observedAt) return null;
-  return deliveredAt(work, productionEnvironment);
-}
+/** When a merged item left the flow, as every reader counts it: its merge (`deliveredAt`), whatever production serves (GY-1981). */
+export const flowExitAt = (work: Work) => deliveredAt(work);
 
 export interface StepMove { at: string; from: FlowStep | null; to: FlowStep | null; pr: number | null; carried: boolean }
 /**
@@ -1535,7 +1502,7 @@ export function stepMoves(dataset: Pick<FlowDataset, 'facts' | 'carryIn'> & { fr
   }
   // Recorded as delivered before the gate fact that said so (a merge-time `deliveredAt`), it
   // leaves Deploy at that fact, never before it; a delivery after the cutoff is not in the report.
-  const left = flowExitAt(item, productionEnvironment, dataset.production);
+  const left = flowExitAt(item);
   if (at === 'deploy' && left && time(left) !== null && time(left)! <= cutoff) {
     const exit = moves.length && time(left)! < time(moves.at(-1)!.at)! ? moves.at(-1)!.at : left;
     if (time(exit)! < start) return [];

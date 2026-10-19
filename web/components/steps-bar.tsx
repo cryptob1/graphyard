@@ -1,7 +1,7 @@
 import { stepIds, stepLabel, type PrSteps } from '../../src/model/pr-steps';
 
 /**
- * The seven pull-request steps as one bar (GY-161): done, current (live) and pending segments,
+ * The six pull-request steps as one bar (GY-161): done, current (live) and pending segments,
  * with the current step's plain-words label under it. The Work page row, the phone card and the
  * item page all draw this component from `prSteps`, so the three can never disagree.
  */
@@ -27,7 +27,7 @@ export function StepsDetail({ steps }: { steps: PrSteps }) {
 }
 
 /**
- * The seven step names above the Moving rows, laid out as the same track as each row's bar (same
+ * The six step names above the Moving rows, laid out as the same track as each row's bar (same
  * element, same gap, one equal share per step) so every name sits over its own segment.
  */
 export function StepNames() {

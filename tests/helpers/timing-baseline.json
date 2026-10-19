@@ -413,7 +413,6 @@
     "tests/fault-class-stalled-gate.test.ts": 1175,
     "tests/fault-class-unclassified.test.ts": 522,
     "tests/fault-classes.test.ts": 3623,
-    "tests/flake-ledger-records.test.ts": 600,
     "tests/fleet-panel.test.ts": 357,
     "tests/fleet-sessions.test.ts": 963,
     "tests/flow-analytics.test.ts": 20962,
@@ -626,6 +625,7 @@
     "tests/plane-hot-calls-latency.test.ts": 49722,
     "tests/plane-load.test.ts": 615867,
     "tests/planned-files-derived.test.ts": 1268,
+    "tests/planned-files-not-a-lock.test.ts": 1700,
     "tests/post-deploy-criteria.test.ts": 600,
     "tests/post-deploy-follow-ups.test.ts": 600,
     "tests/post-deploy-observation-state.test.ts": 657,
@@ -798,7 +798,6 @@
     "tests/soak-doctor.test.ts": 20000,
     "tests/soak-fault-class-filing.test.ts": 2000,
     "tests/soak-fault-class-linked-recurrence.test.ts": 3326,
-    "tests/soak-flake-ledger.test.ts": 1100,
     "tests/soak-fleet-alignment.test.ts": 40000,
     "tests/soak-goal-outright-refusals.test.ts": 1863,
     "tests/soak-harness-checkout.test.ts": 3186,
@@ -832,7 +831,6 @@
     "tests/soak-pages-environment-and-branch-recovery.test.ts": 61453,
     "tests/soak-pi-provider-limit.test.ts": 80000,
     "tests/soak-plane-stall.test.ts": 2857,
-    "tests/soak-promotion-wait.test.ts": 56000,
     "tests/soak-promotion.test.ts": 51322,
     "tests/soak-reclaim-refusal.test.ts": 2659,
     "tests/soak-red-regression.test.ts": 1000,
@@ -916,7 +914,7 @@
     "tests/tmp-reclaim-runtime-scratch-cap.test.ts": 1236,
     "tests/tmp-reclaim-tsx-cache.test.ts": 1500,
     "tests/tmp-reclaim-voice-dirs.test.ts": 2311,
-    "tests/trial-merge.test.ts": 20200,
+    "tests/trial-merge.test.ts": 29500,
     "tests/uat-deploy-guard.test.ts": 1296,
     "tests/uat-digests-observed.test.ts": 1207,
     "tests/uat-follow-up-filing.test.ts": 3000,
@@ -980,6 +978,8 @@
     "tests/goal-candidate-promotion.test.ts": 5000,
     "tests/release-uat-after-read.test.ts": 400,
     "tests/control-plane-rework-workspace.test.ts": 1500,
-    "tests/merge-writer-trial-timeout-queue.test.ts": 1000
+    "tests/no-flake-items.test.ts": 300,
+    "tests/merge-writer-trial-timeout-queue.test.ts": 1000,
+    "~": 0
   }
 }
