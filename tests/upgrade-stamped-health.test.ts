@@ -153,7 +153,10 @@ test('unit:upgrade-serves-stamped-release — graphyard upgrade of an installed 
         if (step.id === 'checkout' || step.id === 'health') return live.run(step);
         if (step.id === 'redeploy') {
           const image = `${imageRepository}:${version}`;
-          assert.match(step.command, new RegExp(`install --repo upgrade-gate/fixture --provider compose .*--image ${image.replaceAll('.', '\\.')} --apply$`));
+          // GY-2168: the redeploy names the checkout the checkout step moved to the candidate, so the
+          // image builds from that tree however the pinned CLI's own code root stands.
+          assert.ok(step.command.includes(`--source-root ${cliRoot} --apply`), step.command);
+          assert.match(step.command, new RegExp(`install --repo upgrade-gate/fixture --provider compose .*--image ${image.replaceAll('.', '\\.')} .*--apply$`));
           upgraded = await composeInstall(cliRoot, image, workdir, port, docker);
         }
       },
