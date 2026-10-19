@@ -39,7 +39,7 @@ import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from 
 import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
-import { baseTree } from '../cli/planned-files-intent.js';
+import { baseTree, currentBaseTree } from '../cli/planned-files-intent.js';
 import type { ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
@@ -294,12 +294,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     deferWindow: (work, body) => mutate(`work/${work.id}/window`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => {
-      // GY-1764: the base tree read after a fetch that succeeded; a failed fetch leaves a tree that can lag the base, so no terminal refusal may rest on it.
-      try { await run('git', ['fetch', '--quiet', 'origin', current().baseBranch], { cwd: root, timeoutMs: 30_000 }); }
-      catch (error) { throw new Error(`the base tree of ${current().baseBranch} could not be refreshed (${message(error)}); a terminal scope refusal waits for a current read`); }
-      return (await baseTree(root, current().baseBranch, run)).files;
-    }, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
+    decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await currentBaseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
     basePaths: paths => basePaths(root, current().baseBranch, paths, run),
