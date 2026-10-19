@@ -35,7 +35,7 @@ Minutely scan (`GET /api/interventions` → `scan`; `GRAPHYARD_INTERVENTION_PATT
 
 ## Flaky test
 
-The merge writer reruns a trial's failing files on the same merge commit; a pass is a trial flake on the item's merge ledger, which the [flake ledger](validation.md#flake-ledger) reads. No CI check or job log is read (GY-2010).
+The merge writer reruns a trial's failing files on the same merge commit; a pass on the rerun lands, filing nothing. No CI check or job log is read (GY-2010).
 
 ## Accepted evidence turns out to be wrong
 

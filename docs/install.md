@@ -39,11 +39,11 @@ node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --plan
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Writes credentials, [variables](deployment.md#variables); deploys; registers the deploy key; writes no branch protection. One apply at once (`apply.lock`, partials too; dead/pid-reused holders reclaimed). Install neither reads nor restores branch protection: protection an earlier install wrote stays until the operator changes it on GitHub. **Verify** `/healthz`.
+Writes credentials, [variables](deployment.md#variables); deploys; registers the deploy key; writes no branch protection. One apply at once (`apply.lock`; dead holders reclaimed). Protection an earlier install wrote stays until the operator changes it on GitHub. **Verify** `/healthz`.
 
 ## Step 3: deploy key
 
-`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`; a host generates its own, below) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` unless already listed (title `graphyard-merge-writer-HOST`). It is the only credential Graphyard holds on GitHub: Graphyard has no GitHub API client, runs no `gh api`, mints no installation token and serves no webhook (`/api/github/webhook` is 404); what it asks of GitHub goes through `gh` subcommands (`repo deploy-key`, `workflow run`, `secret`, `pr`). Release-candidate installs leave `release/*` branches and `uat`/`production` environments pending, with commands. The merge writer trial-merges each submitted head and pushes the base with it alone over an SSH origin; the loop re-registers a missing key each setup run. An install set up with an App may delete it, its rulesets and webhook; a bundle rewrite drops `GITHUB_APP_*`, `GITHUB_WEBHOOK_SECRET` and `GRAPHYARD_REVERT_APPROVER_*`, which the control plane no longer reads. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
+`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`; a host generates its own, below) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` unless already listed (title `graphyard-merge-writer-HOST`). It is the only credential Graphyard holds on GitHub: Graphyard has no GitHub API client, runs no `gh api`, mints no installation token and serves no webhook (`/api/github/webhook` is 404); what it asks of GitHub goes through `gh` subcommands (`repo deploy-key`, `workflow run`, `secret`, `pr`). Release-candidate installs leave `release/*` branches and `uat`/`production` environments pending, with commands. The merge writer trial-merges each submitted head and pushes the base with it alone over an SSH origin; the loop re-registers a missing key each setup run. A bundle rewrite drops `GITHUB_APP_*`, `GITHUB_WEBHOOK_SECRET` and `GRAPHYARD_REVERT_APPROVER_*`; an old App, its rulesets and webhook may be deleted. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
 
 ## Step 4: summary
 
@@ -81,7 +81,6 @@ Price: `--confirm-price`/`--max-monthly`; `--migrate` stops loop, fences `GRAPHY
 | `Cloning OWNER/REPO` (host) | `gh repo deploy-key list` shows the host's key, rerun
 | `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
 | fresh database (401) | `up` re-issues credentials
-| `Unknown option '--github-app'` (or `--reuse-app`, `--restore-protection`) | install takes no App or protection flag (GY-2009); drop it
 
 ## Agent execution contract
 
@@ -93,4 +92,4 @@ Run steps 1–5 (1, 2, 4 with `--observe-only`); never weaken gates.
 
 ## Done when
 
-Plan listed the deploy key and no App or protection; apply registered the key; `/api/status.github` is false; documentation reflects this (or `--no-docs` is true).
+Plan listed the deploy key and no App or protection; apply registered the key; documentation reflects this (or `--no-docs` is true).
