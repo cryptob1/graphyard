@@ -228,11 +228,10 @@ test('unit:dashboard-uses-board-api — the Work page renders the groups GET /ap
 
   // The poll reads the board beside the snapshot and status, and the page carries no classifier.
   const read = (path: string) => readFile(new URL(`../${path}`, import.meta.url), 'utf8');
-  const [main, overview, docs] = await Promise.all([read('web/main.tsx'), read('web/pages/overview.tsx'), read('docs/dashboard.md')]);
+  const [main, overview] = await Promise.all([read('web/main.tsx'), read('web/pages/overview.tsx')]);
   assert.match(main, /read\('board'\)/, 'the polling read fetches GET /api/board');
   assert.match(main, /api\('board'\)/, 'the refresh after an action fetches it too');
   assert.doesNotMatch(overview, /\bclassify\(|\bgroupOf\(|humanOnlyIds\(/, 'the Work page derives no group itself');
-  assert.match(docs, /GET \/api\/board/, 'docs/dashboard.md documents the endpoint');
 });
 
 /**

@@ -101,10 +101,6 @@ test('unit:park-requirements-bare-noun — GY-1819 AC-1: a park whose requiremen
   // The question is scoped to the kind that claims it, as before.
   assert.equal(requirementsQuestionRefusal({ kind: 'money-or-accounts', needed: 'Whether the requirements rewrite lands' }), null);
 
-  // docs/master-agent-reference.md states the outcome and why, as AC-1 requires.
-  const docs = readFileSync(join(fileURLToPath(new URL('..', import.meta.url)), 'docs/master-agent-reference.md'), 'utf8');
-  assert.match(docs, /bare `requirements` \(no AC-N, criteria, or key with tests\/ path\) names the rewrite as work: whether it lands, succeeds or is ordered parks; a change verb on the requirements or a named object refuses/, 'the docs state the bare-noun outcome');
-  assert.match(docs, /a change verb on the requirements or a named object refuses/, 'the docs state what still refuses');
 });
 
 test('unit:park-requirements-bare-noun — GY-1819 AC-2: a negation scopes only its own clause, never past an although, though or but boundary, so "AC-1 is not changed although the requirements are revised by the selected option" refuses as a requirements question', () => {

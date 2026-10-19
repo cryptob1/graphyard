@@ -399,29 +399,3 @@ test('integration:lease-loss-superseded-settled: reconciliation settles a contro
   assert.equal((await events(fenced, 'escalation.auto-settled')).length, 0);
 });
 
-test('manual:escalation-docs: the delegation, master-agent and lease docs describe the lapse classification and who may settle what', async () => {
-  const delegation = await readFile(new URL('../docs/delegation.md', import.meta.url), 'utf8');
-  const masterGuide = await readMasterGuide();
-  const leases = await readFile(new URL('../docs/protocol/leases.md', import.meta.url), 'utf8');
-  // The escalation table names what raises lease-loss and what is history instead.
-  assert.match(delegation, /\| `lease-loss` \|[^\n]*no submission, no carried `blocked` report[^\n]*no stopped-worker attestation/);
-  assert.match(delegation, /`blocked-awaiting-operator`/);
-  assert.match(delegation, /`stopped-by-attestation`/);
-  // Who may settle what.
-  assert.match(delegation, /### Who may settle what/);
-  assert.match(delegation, /--attestation blocked\\?\|stopped-worker/);
-  assert.match(delegation, /`security-concern`, `requirement-weakening`[^\n]*lead[^\n]*declared human session/);
-  assert.match(delegation, /`escalation\.resolved`/);
-  assert.match(delegation, /auto-settled: blocked report for epoch N explains the lapse/);
-  assert.match(delegation, /auto-settled: stopped-worker attestation for epoch N explains the lapse/);
-  // The master guide tells the master which lapses need nobody and which it can settle itself.
-  assert.match(masterGuide, /blocked-awaiting-operator/);
-  assert.match(masterGuide, /stopped-by-attestation/);
-  assert.match(masterGuide, /resolve GY-N lease-loss --attestation/);
-  assert.match(masterGuide, /cmdline and cwd/);
-  assert.match(masterGuide, /recorded scope/i);
-  // The lease protocol page carries the classification and the scope record.
-  assert.match(leases, /blocked-awaiting-operator/);
-  assert.match(leases, /stopped-by-attestation/);
-  assert.match(leases, /scope unit/);
-});

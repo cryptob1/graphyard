@@ -416,7 +416,7 @@ test('manual:goal-pipeline-docs-review — the docs describe the goal pipeline (
   assert.match(guide, /\(how-graphyard-works\.md#from-goal-to-work-items\)/);
   assert.match(works, /^## From goal to work items$/m);
   assert.match(works, /intake, acceptance, approval, planning, approval and delivery/);
-  for (const fragment of ['`planner` role', 'at most 400 words', '`plannedFiles`', 'refused with the reason', 'Another identity approves the plan', '`planned`, then `delivering`', 'before its dependencies are delivered', '`delivered` once every item is done and production serves it'])
+  for (const fragment of ['`planner` role', 'at most 400 words', 'a plan of files', 'refused with the reason', 'Another identity approves the plan', '`planned`, then `delivering`', 'before its dependencies are delivered', '`delivered` once every item is done and production serves it'])
     assert.ok(works.includes(fragment), `docs/how-graphyard-works.md states ${fragment}`);
   assert.match(validation, /`goal deliver` needs each done and served in production/);
   for (const [name, text] of [['master-agent.md', guide], ['how-graphyard-works.md', works], ['validation.md', validation]] as const)
