@@ -42,10 +42,10 @@ test('unit:master-block-migrated — master init writes the worker block only an
   try {
     await setup(fresh);
     const written = await readFile(join(fresh, 'AGENTS.md'), 'utf8');
-    assert.equal(written, managedInstructions('', url), 'a fresh AGENTS.md carries the worker block only');
+    assert.equal(written, managedInstructions(''), 'a fresh AGENTS.md carries the worker block only');
     assert.doesNotMatch(written, /graphyard-master|Graphyard master agent/);
 
-    const existing = `${pre}${managedInstructions('', url).trimStart()}\n${legacyBlock}${post}`;
+    const existing = `${pre}${managedInstructions('').trimStart()}\n${legacyBlock}${post}`;
     await writeFile(join(migrated, 'AGENTS.md'), existing);
     await setup(migrated);
     assert.equal(await readFile(join(migrated, 'AGENTS.md'), 'utf8'), withoutMasterInstructions(existing), 'only the master block is removed');
@@ -71,15 +71,15 @@ test('unit:master-guide-carries-role-instructions — graphyard master guide pri
 test('unit:agents-md-worker-block-only — sync regeneration renders the worker block and drops a master block; Graphyard\'s own AGENTS.md has none', async () => {
   const renderers = await agentsRenderers(repositoryRoot);
   assert.equal(renderers.source, 'worktree');
-  const clean = managedInstructions('# Rules\n', url);
+  const clean = managedInstructions('# Rules\n');
   const conflicted = `${clean.replace('Renew ownership at least every 30 seconds', '<<<<<<< HEAD\nRenew ownership at least every 20 seconds\n=======\nRenew ownership at least every 45 seconds\n>>>>>>> origin/main')}\n${legacyBlock}\n`;
-  const rendered = regenerateManagedBlocks(conflicted, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text), url));
+  const rendered = regenerateManagedBlocks(conflicted, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text)));
   assert.equal(rendered, `${clean}\n\n`, 'the worker block is rendered afresh and the master block is gone');
-  assert.equal(regenerateManagedBlocks(`${clean}${legacyBlock}${legacyBlock}`, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text), url)), null, 'duplicate master markers are left for the worker');
+  assert.equal(regenerateManagedBlocks(`${clean}${legacyBlock}${legacyBlock}`, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text))), null, 'duplicate master markers are left for the worker');
   // A CLI released before GY-1493 probes the merged tree for managedMasterInstructions and runs it on
   // a conflicted AGENTS.md that still carries the block: the tree's export drops that block only.
   const { managedMasterInstructions } = await import('../src/master.js') as unknown as { managedMasterInstructions: (existing: string) => string };
-  const earlierCli = (text: string) => { const worker = renderers.managedInstructions(text, url); return worker.includes('<!-- graphyard-master -->') ? managedMasterInstructions(worker) : worker; };
+  const earlierCli = (text: string) => { const worker = renderers.managedInstructions(text); return worker.includes('<!-- graphyard-master -->') ? managedMasterInstructions(worker) : worker; };
   assert.equal(regenerateManagedBlocks(conflicted, earlierCli), `${clean}\n\n`, 'an earlier CLI never turns AGENTS.md into the master text alone');
   const own = await readFile(join(repositoryRoot, 'AGENTS.md'), 'utf8');
   assert.doesNotMatch(own, /graphyard-master -->|## Graphyard master agent/);
