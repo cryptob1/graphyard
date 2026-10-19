@@ -1239,7 +1239,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // Past the cap, a head whose capped rework an approver refused is re-reviewed with that refusal (GY-1575 AC-2); a
         // control-plane launch carries the same section, so the re-review lists the refused findings as FOLLOW-UP there too (GY-2078).
-        const refusal = !reviewerApp || !pastReviewCap(work, reviewRoundCapOf(config)) ? null
+        const refusal = !reviewerApp && !plane || !pastReviewCap(work, reviewRoundCapOf(config)) ? null
           : await (dependencies.cappedRefusal ?? (dependencies.mint ? async () => null : readCappedRefusal(config)))(work, binding.sha);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).

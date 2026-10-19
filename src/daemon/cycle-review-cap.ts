@@ -192,8 +192,9 @@ export function capRefusalOf(refused: { id: string; outcome?: string | null; inp
  */
 export function cappedRefusalRequest(work: Work, sha: string, config: Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>, history: readonly { id: string; action: string; state: string; input?: any; reason?: string; outcome?: string | null; refusal?: { approver?: string; reason?: string; at?: string } | null }[],
   all: Parameters<typeof refusalFollowUps>[2]): string | null {
-  if (!config.reviewer) return null;
-  const reviewer = `${config.reviewer.slug}[bot]`;
+  // A control-plane reviewer with no App is named by its agent (GY-2078): the head's latest control-plane verdict names it.
+  const reviewer = config.reviewer ? `${config.reviewer.slug}[bot]` : work.observation?.source === 'control-plane' ? work.observation.reviews.filter(review => review.sha === sha && review.source === 'control-plane').at(-1)?.reviewer : undefined;
+  if (!reviewer) return null;
   // The change request the refusal judged, by which an unmarked refusal is dated against the policy revision (GY-1577).
   const judged = work.observation?.reviews.filter(review => review.sha === sha && review.reviewer.toLowerCase() === reviewer.toLowerCase()).at(-1);
   const refused = refusedCappedRework(history, { sha, reviewer, reviewId: judged?.id ?? null, ...(judged?.submittedAt ? { submittedAt: judged.submittedAt } : {}) }, work);
@@ -353,7 +354,7 @@ async function reviewCapStepWithin(cycle: Cycle) {
     if (standing) ({ refusal, answer } = standing);
     else if (judged) refusal = capRefusalOf(refused!);
     if (judged) {
-      const own = !!config.reviewer && capped.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
+      const own = controlPlaneWithdrawal(item, capped.reviewId) || !!config.reviewer && capped.reviewer.toLowerCase() === `${config.reviewer.slug}[bot]`.toLowerCase();
       if (!own || capped.reviewId === null)
         return escalate(`${capped.reason}; the independent approver refused its capped rework as non-blocking (decision ${refusal!.id}), but Graphyard cannot withdraw a verdict it did not obtain through its reviewer App`);
     }

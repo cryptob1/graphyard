@@ -32,17 +32,17 @@ const BASE = 1_792_000_000_000; // a fixed epoch millisecond every fixture insta
 const at = (offsetMs = 0) => new Date(BASE + offsetMs).toISOString();
 const refusalReason = 'The finding is real but not blocking: the hotspot budget is a follow-up, not a defect of this head. File it as its own item and let the reviewer list it as a FOLLOW-UP.';
 const root = await temporaryDirectory('capped-withdrawal-master');
-const config = masterConfigSchema.parse({
+const masterConfig = masterConfigSchema.parse({
   version: 1, url: 'https://graphyard.example', credentialFile: `${root}/coordinator.token`, cliPath: '/outside/graphyard.mjs',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project',
   autoMerge: true, mergeMethod: 'merge', workers: [],
   reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: `${root}/reviewer.pem`, boundAt: at() },
-}) as MasterConfig;
+}) as MasterConfig, config = masterConfig;
 
 /** A control-plane item past its review-round cap with the reviewer's change request standing on its head. */
-function capped(body: string, reviewId = 4242): Work {
+function capped(body: string, reviewId = 4242, reviewer = reviewerBot): Work {
   const candidate = { sha: H, baseSha: B, pr: 0, branch: 'graphyard/gy-2078-1', author: 'graphyard-opencode-1' };
-  const observation = { source: 'control-plane', candidate, checks: [], reviews: [{ reviewer: reviewerBot, sha: H, state: 'CHANGES_REQUESTED', id: reviewId, submittedAt: at(), body, blocking: blockingFindings(body), source: 'control-plane' }],
+  const observation = { source: 'control-plane', candidate, checks: [], reviews: [{ reviewer, sha: H, state: 'CHANGES_REQUESTED', id: reviewId, submittedAt: at(), body, blocking: blockingFindings(body), source: 'control-plane' }],
     merged: false, mergeSha: null, mergeable: true, protected: false, files: ['src/a.ts'], scopeFiles: [], at: at(60_000), baseTip: B, baseTipContained: true } as never as Work['observation'];
   return { id: 'work-2078', key: 'GY-2078', title: 'Hotspot budgets', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
     criteria: [{ id: 'AC-1', text: 'The widget counts every frob.', proofs: ['unit:frob-count'] }], policy: { checks: ['test'], review: true, reviewProvider: 'control-plane' },
@@ -54,14 +54,14 @@ function capped(body: string, reviewId = 4242): Work {
 const followUp = { id: 'work-2079', key: 'GY-2079', title: 'Former hotspot files exceed their size budgets after GY-2078', description: 'Named by the refusal of GY-2078\'s capped rework.', stage: 'backlog', createdAt: at(240_000) } as unknown as Work;
 
 /** The capped rework the loop requested for the head under policy revision 1, then the approver's refusal of it. */
-const decision = (state: 'requested' | 'refused') => ({ id: '334c52c6-467e-4fe4-b81f-2c761e07a066', action: 'rework', state,
-  input: { binding: cappedReworkBinding(H, reviewerBot), previousWorkerStopped: true },
+const decision = (state: 'requested' | 'refused', reviewer = reviewerBot) => ({ id: '334c52c6-467e-4fe4-b81f-2c761e07a066', action: 'rework', state,
+  input: { binding: cappedReworkBinding(H, reviewer), previousWorkerStopped: true },
   reason: `[Decided from the control-plane observation taken at ${at(60_000)} of candidate ${H}; if the item has moved since, this request no longer describes it.] ${cappedRevisionMark(1)} GY-2078 is in review round 5, past its cap of 3.`,
   approvedBy: null, requestedAt: at(120_000),
   refusal: state === 'refused' ? { approver: 'graphyard-approver-graphyard', reason: refusalReason, at: at(180_000) } : null });
 
 /** The review-cap step over the production effect wiring: the withdrawal runs through the real `withdrawReview` effect. */
-function harness(item: Work, history: ReturnType<typeof decision>[], others: Work[] = []) {
+function harness(item: Work, history: ReturnType<typeof decision>[], others: Work[] = [], config: MasterConfig = masterConfig) {
   const state = emptyDaemonState(config), performed: DaemonAction[] = [];
   const world: { writes: { path: string; data: unknown }[]; children: string[][]; fetches: string[]; wakes: string[]; history: ReturnType<typeof decision>[] } =
     { writes: [], children: [], fetches: [], wakes: [], history };
@@ -237,4 +237,22 @@ test('unit:capped-withdrawal-failed-earlier-recovers — an item stranded by a w
   await stuck.cycle();
   assert.deepEqual(stuck.world.writes, []);
   assert.match(stuck.state.actions[cappedEscalationKey(stuck.item, H)]!.detail, /withdrawing it failed 5 times/);
+});
+
+test('unit:capped-withdrawal-agent-reviewer — a control-plane loop with no reviewer App, whose reviewer posts under its agent name, withdraws the refused capped change request and re-reviews the head with the findings as FOLLOW-UP, never escalating it as a verdict it did not obtain', async () => {
+  const agentReviewer = 'claude-reviewer-1';
+  const { reviewer: _app, ...rest } = masterConfig;
+  const appless = rest as MasterConfig;
+  const run = harness(capped('BLOCKING: former hotspot files exceed their size budgets.', 4242, agentReviewer), [decision('refused', agentReviewer)], [followUp], appless);
+  await run.cycle();
+  assert.deepEqual(run.world.writes.map(write => write.path), [`work/${run.item.id}/review-withdraw`]);
+  assert.equal(run.state.actions[cappedEscalationKey(run.item, H)], undefined, 'nothing is escalated');
+  assert.equal(run.state.actions[cappedRereviewKey(run.item, H)]!.state, 'done', 'the head is re-reviewed');
+  // The re-review launch finds the refusal under the agent's name, so its prompt lists the findings as FOLLOW-UP.
+  const withdrawnItem = structuredClone(run.item);
+  withdrawnItem.observation!.reviews = withdrawnItem.observation!.reviews.map(review => ({ ...review, state: 'DISMISSED' }));
+  assert.match(cappedRefusalRequest(withdrawnItem, H, appless, [decision('refused', agentReviewer)], [followUp])!, /list these findings as FOLLOW-UP threads/);
+  // A nits-only control-plane change request is withdrawn too, with no approver.
+  const nits = harness(capped('The helper could be named more clearly.', 4243, agentReviewer), [], [], appless);
+  assert.equal(cappedReview(nits.item, appless)!.kind, 'follow-up');
 });
