@@ -92,14 +92,14 @@ before(async () => {
   // pass evaluates between full passes is tests/incremental-reconcile.test.ts's concern (GY-1124).
   engine.reconcileFullEvaluationMs = 0;
   // 700 items, 150 of them open (the first created is the template for the rest), 547 settled
-  // deliveries, and 3 done ones still holding a lease, a legacy queue entry and a deployment row.
+  // deliveries, and 3 done ones still holding a lease, a legacy queue entry and a verify-deployment action from before GY-1981.
   const template = await createItem('Scale template');
   openItems = [template];
   heldDone = [
     await insert(doneDocument(template, 'GY-727H1', { lease: { owner: 'worker', epoch: 1, expiresAt: new Date(Date.now() - 60_000).toISOString() } })),
     // A legacy queue entry a stored document may still carry: the reconciler's write drops it (GY-1236).
     await insert(doneDocument(template, 'GY-727H2', { queue: { sequence: 5, enqueuedAt: new Date().toISOString(), policyRevision: 1, speculation: null } } as Partial<Work>)),
-    await insert(doneDocument(template, 'GY-727H3', { nextAction: { kind: 'verify-deployment' } as Work['nextAction'] })),
+    await insert(doneDocument(template, 'GY-727H3', { nextAction: { kind: 'verify-deployment' } as unknown as Work['nextAction'] })),
   ];
   for (let n = 0; n < 547; n++) await insert(doneDocument(template, `GY-727S${n}`));
   for (let n = 0; n < 149; n++) openItems.push(await createItem(`Scale item ${n}`));

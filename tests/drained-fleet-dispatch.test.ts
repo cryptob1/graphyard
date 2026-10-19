@@ -156,7 +156,6 @@ test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a f
     workerCredentials: async list => available(list), producerCredentials: async () => ({}),
     dispatchWorker: async (item, chosen) => { launched.push(`${item.key}:${chosen.name}`); return {}; },
     launchReview: async () => ({}), launchProducer: async () => ({}),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }) as any,
   });
   const row = { id: 'row-1', kind: 'dispatch', work: 'id-GY-1310', key: 'GY-1310', inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] } } as unknown as ActionRow;
   assert.match(String(await handlers.dispatch!(row, { id: 'executor-1', host: 'coordinator-host' })), /dispatched GY-1310 to one/);
@@ -167,7 +166,7 @@ test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a f
   const refuse = controlPlaneHandlers(() => config(fleet), {
     snapshot: async () => ({ work: items, now: observedAt }), mutate: async () => ({}), agents: async () => working,
     workerCredentials: async list => available(list), producerCredentials: async () => ({}), dispatchWorker: async () => ({}),
-    launchReview: async () => ({}), launchProducer: async () => ({}), observeDeployment: async () => ({}) as any,
+    launchReview: async () => ({}), launchProducer: async () => ({}),
   }).dispatch!;
   await assert.rejects(async () => refuse(row, { id: 'executor-1', host: 'coordinator-host' }), /no worker profile can take GY-1310: one \(Herdr agent agent-one is working\)/);
 });

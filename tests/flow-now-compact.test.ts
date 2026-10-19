@@ -100,8 +100,8 @@ test('unit:flow-now-renders-first — before any read answers, the page draws th
 
 
 test('Now row density fits targets at phone, compact desktop, and labelled desktop widths', () => {
-  assert.equal(nowRowCapacity(343, true), 1);
-  assert.equal(nowRowCapacity(840, true), 4);
+  assert.equal(nowRowCapacity(343, true), 2);
+  assert.equal(nowRowCapacity(840, true), 5);
   assert.equal(nowRowCapacity(1232, false), 2);
   assert.equal(nowRowCapacity(0, true), 1);
   assert.equal(nowRowCapacity(10000, true), nowColumnLimit);

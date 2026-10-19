@@ -27,7 +27,7 @@ import { matchRoute, type RouteContext } from '../src/server/routes.js';
 
 // The 2026-10-05 `at` instants are the clock each replay installs with mock.timers before its first call; stubEngine's new Date() stamp runs only inside those replays, on that stubbed clock.
 const at = (time: string) => Date.parse(`2026-10-05T${time}Z`);
-const kinds: NextActionKind[] = ['request-review', 'approve-scope', 'reclaim', 'verify-deployment', 'resync', 'dispatch'];
+const kinds: NextActionKind[] = ['request-review', 'approve-scope', 'reclaim', 'resync', 'dispatch'];
 const host = 'vishrog', slot = (n: number) => `graphyard-master@${host}/${n}`;
 const actor = { id: 'graphyard-master', role: 'coordinator' } as Principal;
 

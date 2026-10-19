@@ -56,7 +56,7 @@ for (const [instance, sha, pr, handedIn, approvedAt] of [
     assert.ok(prompt.includes(reasons[instance]), 'the worker reads the findings the round was sent back for, so no criterion has to restate them');
     assert.match(prompt, new RegExp(`rework round of change #${pr} at head ${sha.slice(0, 8)}`));
     assert.match(prompt, /resubmitting the same head answers nothing/);
-    assert.match(prompt, /scope-request/, 'a file the finding needs is asked for by the worker, which the loop decides, not added by a requirements revision');
+    assert.doesNotMatch(prompt, /scope-request/, 'the worker edits the file it needs and submits; nothing is asked for (GY-1991)');
   });
 }
 

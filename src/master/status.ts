@@ -6,7 +6,7 @@ import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
 import { observationPass } from '../model/loop-observation.js';
-import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, loopObservationProofs, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, deploySmokeRequired, isClosed, closedHistory, deliveryState, postDeployMs, productionLatencyMs, rollbackGuidance } from '../model.js';
+import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, loopObservationProofs, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, isClosed, closedHistory } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, restoredApproval, refusedReconciliation, blockedPastProbe } from '../merge-queue.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
@@ -328,7 +328,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // The split relation (GY-1126): a child's parent, or a parent's children and the run that split it.
       split: splitRelation(work) };
   });
-  const delivered = snapshot.work.filter(work => work.stage === 'done' && work.delivery && deploySmokeRequired(work.policy)).map(work => deliveredRow(work, now, baseBranch));
   // Every delivery whose gates had not passed at the merge, apart by how it was judged: reconciled — the
   // record at the merge cutoff satisfied every gate — or operator-authorized, where it did not
   // and an operator took responsibility (GY-94). Neither is mistaken for the other or for a routine merge.
@@ -370,7 +369,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'running').length : 0), 0),
       dispatchAwaiting: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length,
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
-      awaitingSmoke: delivered.filter(row => row.state === 'awaiting-deployment' || row.state === 'awaiting-smoke').length, postDeployFailures: delivered.filter(row => row.state === 'delivered-with-failure').length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
       humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: fleet.effective, idleWorkers: idle.length,
       restoredApprovals: rows.filter(row => row.restoredApproval).length,
@@ -388,7 +386,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     closed: closedHistory(snapshot.work),
     // GY-1779: the readings the loop owes loop-owned observation items, with the loop's last record of each (`reading:ITEM:RELEASE`).
     pendingReadings: pendingReadings(rows, snapshot.work, loop, now),
-    workers: workerSessions, reviews, producers: sessions.producers, work: rows, delivered, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
     // Every split parent and its children's progress (GY-1126): the parent is delivered when they all are.
     splits: splitReport(snapshot.work),
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) },
@@ -444,18 +442,6 @@ export function recoveredDeliveries(work: Work[]) {
     operatorAuthorized: done.filter(item => item.delivery.operatorAuthorization).map(item => ({ ...cite(item, item.delivery.operatorAuthorization), authorization: 'operator' as const, execution: null,
       operator: item.delivery.operatorAuthorization.operator as string, refusedDecision: item.delivery.operatorAuthorization.refusedDecision as string, unmet: item.delivery.operatorAuthorization.unmet as string[], judgement: item.delivery.operatorAuthorization.judgement as string })),
   };
-}
-/**
- * The second confidence layer, per delivered item that asked for it: what the release served, what
- * the trusted producer found, and — on a failure — exactly what to roll back. Failures stay listed;
- * nothing here ages out or is cleared by a later delivery.
- */
-function deliveredRow(work: Work, now: number, baseBranch: string) {
-  const { mergedAt, mergeSha, deployment, smoke } = work.delivery!;
-  return { key: work.key, title: work.title, mergedAt, mergeSha, state: deliveryState(work)!,
-    deployment: deployment ? { sha: deployment.sha, covers: deployment.covers, source: deployment.source, observedAt: deployment.observedAt } : null,
-    smoke: smoke ? { result: smoke.result, sha: smoke.sha, producer: smoke.producer, at: smoke.at, executed: smoke.executed, skipped: smoke.skipped, url: smoke.url ?? null } : null,
-    postDeployMs: postDeployMs(work, now), productionLatencyMs: productionLatencyMs(work), mergeToProductionMs: mergeToProductionMs(work), rollback: rollbackGuidance(work, baseBranch), split: splitRelation(work) };
 }
 /** Time from the accepted merge to the observed deployment covering it: merge-to-production latency. */
 export function mergeToProductionMs(work: Work): number | null {
