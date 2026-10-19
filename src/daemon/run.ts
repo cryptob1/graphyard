@@ -27,7 +27,7 @@ import { divergedHead } from '../cli/checkout-restore-act.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
 import { mainWatchSummary } from './main-watch.js';
-import { mergeWriterSummary } from './cycle-merge-writer.js';
+import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
 import { stallNeedsMaster, wakeMasterForStalls } from './cycle-master.js';
 import { admitStalledCycle, noteCycleStalls, noteStepFailure, noteStepsSucceeded, readReviewerProfileFailures, remedyStalledSteps, stallHeldEffects, stallRemedyRunner, stallSubjectKey, type ProfileRemedyPorts, type StepStallRemedyRunner } from './step-stalls.js';
 import { detachRuns } from '../runner/registry.js';
@@ -449,7 +449,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
         const selfUpgrade = effects.selfUpgrade;
         if (!stopping) await serveRestore(keepAlive);
-        await guard.betweenCycles(stopping || !selfUpgrade ? undefined : current => selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
+        // An upgrade restarts the loop, which would kill a merge trial in flight: it waits for the trial to settle (a merge leaves the next cycle free).
+        await guard.betweenCycles(stopping || !selfUpgrade ? undefined : async current => mergeWriterInFlight(current) ? { outcome: 'skipped' as const, reason: 'a merge trial is in flight' } : selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
         // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
         // is for a cycle that hangs, and a thrown one has just proved it did not.
         if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
