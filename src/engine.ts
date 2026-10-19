@@ -3192,6 +3192,7 @@ export class Engine {
       at ??= new Date();
       await db.query('INSERT INTO plane_liveness(id,tick_at) VALUES(true,$1) ON CONFLICT (id) DO NOTHING', [at]);
       const previous = (await db.query('SELECT tick_at FROM plane_liveness WHERE id = true FOR UPDATE')).rows[0].tick_at as Date;
+      let served: string | null | undefined;
       if (at.getTime() > previous.getTime()) {
         if (at.getTime() - previous.getTime() > planeStallMs)
           await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
@@ -3205,16 +3206,18 @@ export class Engine {
         // The read is one indexed query per process, and the commit comparison makes a retried tick
         // (a failed transaction leaves the field unset) idempotent.
         if (this.servedCommit === undefined) {
-          const commit = buildIdentity().commit;
+          served = buildIdentity().commit;
           const last = await db.query(`SELECT payload->>'commit' AS commit FROM events WHERE kind = 'plane.deploy' ORDER BY created_at DESC LIMIT 1`);
-          if (commit && last.rows[0]?.commit !== commit)
+          if (served && last.rows[0]?.commit !== served)
             await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)',
-              ['graphyard', 'plane.deploy', JSON.stringify({ details: { commit, from: previous.toISOString(), to: at.toISOString() } })]);
-          this.servedCommit = commit;
+              ['graphyard', 'plane.deploy', JSON.stringify({ details: { commit: served, from: previous.toISOString(), to: at.toISOString() } })]);
         }
         await db.query('UPDATE plane_liveness SET tick_at = $1 WHERE id = true', [at]);
       }
       await db.query('COMMIT');
+      // The field moves once the row is on the ledger: a failed transaction left it unset, and the
+      // next tick's commit comparison retries the whole check without recording anything twice.
+      if (served !== undefined) this.servedCommit = served;
     } catch {
       await db?.query('ROLLBACK').catch(() => {}); // the next beat records it
     } finally { db?.release(); }
