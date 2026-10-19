@@ -6,7 +6,6 @@ import { reclaimableNow } from '../master/worktrees.js';
 import { standingDiskLine, worktreePassOf } from '../master/worktree-disk.js';
 import { type Work } from '../model/work.js';
 import { pendingCaseChanges } from './master-status-case-changes.js';
-import { installationMerger } from '../executor.js';
 import { deployLine, leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { loopCodeRoot } from '../daemon/checkout-state.js';
 import { daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
@@ -114,14 +113,14 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Open item with no named action: waiting on another item or a live session raises nothing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
-  // Requests, conflicts, stalls, executors, owed judgments: derivedAttention (the loop reads it too).
-  const { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, executors, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+  // Requests, conflicts, stalls, owed judgments: derivedAttention (the loop reads it too).
+  const { generatedFiles, docs, overflow, interventions, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // GY-2015: the writer summary the cursor holds, so a held trial refusal reads as the loop reads it.
       mergeWriter: cycling?.mergeWriter ?? null,
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
-  const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, executors: releases.executors, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
+  const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
   const promotion = promotionSummaryWithLag(cursor?.promotion, lag.report, lag.attention, Date.parse(snapshot.now), intervalMs);
   // GY-1773: a held snapshot ahead of the dirty checkout left behind; a refused seal check.
   // GY-1899: the pin lives under the running CLI's checkout, where the upgrade's holdCliAt wrote it.
@@ -130,18 +129,15 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
-  // Exactly one component merges (GY-245): the loop, where one is installed or running, else the executors.
-  const merger = installationMerger({ loop: { configured: !!setup.supervisor.installed, running: !!cycling?.running, autoMerge: master.autoMerge },
-    declaration: executors.supervision.declaration, served: executors.presence.served });
   const { changes: caseChanges, items: caseChangeItems } = await pendingCaseChanges(sections, masterApi);
   const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...caseChangeItems, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [])];
-  // First: loop health and stalls, dispatcher, unclaimable actions, merger, release lag (GY-437).
-  const ahead = [...loopItems, ...stallItems, ...dispatchItems, ...executors.attention, ...merger.attention, ...lag.attention];
+  // First: loop health and stalls, dispatcher, release lag (GY-437).
+  const ahead = [...loopItems, ...stallItems, ...dispatchItems, ...lag.attention];
   attentionItems.unshift(...ahead);
   // Setup that stops every launch, or leaves the loop unsupervised, is the master's to repair.
   attentionItems.push(...setupItems);
-  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...delivery.attention);
+  attentionItems.push(...generatedFiles, ...overflow); attentionItems.push(...interventions.attentionItems, ...(throughput.attention ? [throughput.attention] : []), ...delivery.attention);
   attentionItems.splice(loopItems.length + dispatchItems.length, 0, ...resources.attention);
   // Everything the control plane takes from the operator's own credential alone, from the
   // human-only rule table, answered on the dashboard's Needs you page (GY-102).
@@ -154,11 +150,11 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + releases.attention.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + caseChangeItems.length + resources.attention.length + delivery.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + stalled.length + overlong.length + triage.length + ahead.length + overflow.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + caseChangeItems.length + resources.attention.length + delivery.attention.length } }, snapshot.work);
   const sectionsReport = await assembleStatusSections({
     master, snapshot, coordinator, cli, probe, observation, health, hs,
-    merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
-    owed, executors, releases, lag, status, disk, managedRoot, inventory, reclaimPlan,
+    setup, administration, daemon, dispatch, reviewRecords, producerRecords,
+    owed, lag, status, disk, managedRoot, inventory, reclaimPlan,
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals: cycling?.approvals ?? [],
   });
   return {

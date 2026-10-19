@@ -1,9 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { generateKeyPairSync } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
@@ -18,12 +15,6 @@ import { actorlessSubmissions } from '../src/cli/actorless-submissions.js';
 import { faultClassOf, workFaults } from '../src/model/fault-classes.js';
 import { restatements } from '../src/daemon/faults.js';
 import { actionStallThreshold } from '../src/model/action-progress.js';
-// The executor process as it runs in production: its modules loaded by its own entry point, one
-// `tsImport` each, and its effects built by the same function (scripts/graphyard-executor.mjs).
-// @ts-expect-error The standalone executor is a dependency-free entry point script.
-import { controlPlaneEffects, load } from '../scripts/graphyard-executor.mjs';
-import { startedAtOnce } from './helpers/launch-shell.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01/02 instants are past fixture ats whose stall reading (actionStall) reads row history, not the clock; Date.now()/new Date() stamp live submissions and mint tokens.
 
 // GY-1090 names this file for its proof: manual:fault-class-stalled-gate. The master loop filed 61
@@ -57,7 +48,6 @@ interface Instance {
   sha?: string; group?: string; proofs?: string[];
 }
 const instances: Instance[] = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1090-stalled-gate.json', import.meta.url)), 'utf8'));
-const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const base = '55193b8c5915665695b2205451be306005418a6d';
 const shift = (at: string, ms: number) => new Date(Date.parse(at) + ms).toISOString();
 // Written out rather than imported, so this file loads against the base and each instance there
@@ -107,7 +97,6 @@ for (const instance of instances.filter(entry => entry.action === 'resync')) {
 
 // ---- dispatch and request-review: a session the loop launched already answers the head -------------
 
-const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 
 /** The item as submitted and observed at `at` — now, for a launch, whose candidate must be freshly observed. */
 function submitted(instance: Instance, extra: Partial<Work> = {}, at = new Date(Date.now() - 60_000).toISOString()): Work {
@@ -122,38 +111,6 @@ function submitted(instance: Instance, extra: Partial<Work> = {}, at = new Date(
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }], violations: [], ...extra } as unknown as Work;
 }
 
-// Loaded once, as the executor process loads them once at its start.
-let executorModules: ReturnType<typeof load> | undefined;
-let reviewerKey: string | undefined;
-/** A coordinator checkout with one producer profile and a bound reviewer App, as the executor host has. */
-async function executorHost() {
-  const root = await temporaryDirectory('gy-1090'), credentials = await temporaryDirectory('gy-1090-credentials');
-  execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-  const modules = await (executorModules ??= load());
-  const status = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-  await modules.master.setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, status as typeof fetch);
-  const credential = join(credentials, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  await modules.master.saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-claude-1', kind: 'claude', credentialFile: credential, concurrency: 4 },
-    async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'manual:*'] } }));
-  const privateKey = reviewerKey ??= generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } }).privateKey;
-  await modules.reviewer.bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') },
-    async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
-  await modules.reviewer.saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', concurrency: 2 });
-  const loaded = await modules.master.loadMasterConfig(root);
-  const config = { ...loaded, run: { ...loaded.run, reviewerProfile: 'claude-reviewer' } };
-  const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
-  return { root, modules, config, mint, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
-}
-
-/** The executor's handlers over one item, wired exactly as `scripts/graphyard-executor.mjs` wires them. */
-function executorHandlers(host: Awaited<ReturnType<typeof executorHost>>, item: Work) {
-  const snapshot = async () => ({ work: [item], now: new Date().toISOString() });
-  const effects = controlPlaneEffects(host.modules, { root: host.root, current: () => host.config, run: herdr, snapshot, mutate: async () => ({}) });
-  return host.modules.executor.controlPlaneHandlers(() => host.config, { ...effects, agents: async () => [], recordSession: undefined,
-    producerCredentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])) });
-}
-const executor = { id: 'graphyard-master@vishrog/1', host: 'vishrog' };
-
 // The proof-dispatch instances cannot recur at all since GY-1235: proofs gate nothing (unit tests run
 // in CI, e2e in UAT), so dispatch opens no producer request for the executor to claim on any head.
 for (const instance of instances.filter(entry => entry.action === 'dispatch')) {
@@ -165,24 +122,18 @@ for (const instance of instances.filter(entry => entry.action === 'dispatch')) {
   });
 }
 
+// The request-review instances cannot recur since GY-1984: no executor claims a review row; the
+// loop's dispatcher launches the one session the head's request is answered by.
 for (const instance of instances.filter(entry => entry.action === 'request-review')) {
-  test(`manual:fault-class-stalled-gate — ${instance.id}: the executor's request-review settles on the reviewer session the loop launched on ${instance.sha!.slice(0, 7)}`, async () => {
+  test(`manual:fault-class-stalled-gate — ${instance.id}: one review request is raised on ${instance.sha!.slice(0, 7)}, for the loop's dispatcher alone to answer`, () => {
     assert.match(instance.reason!, new RegExp(`^A reviewer session for ${instance.subject} is already pending on ${instance.sha!.slice(0, 7)} .*one review request is answered by one session`));
-    const host = await executorHost();
-    try {
-      // A review is requested once the head's mechanical proofs pass (GY-115).
-      const item = submitted(instance, { evidence: [{ id: 'evidence-1', proof: 'unit:x', sha: instance.sha!, baseSha: base, policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: new Date().toISOString() }] } as Partial<Work>);
-      reconcileAutoDispatch(item, [item], new Date());
-      const request = item.autoDispatch!.review!;
-      assert.equal(request.sha, instance.sha);
-      // The loop's tick launches the session first, from its own process.
-      await host.modules.reviewer.launchReview(host.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdr, mint: host.mint, requestId: request.id });
-      const handlers = executorHandlers(host, item);
-      const action = { id: `row-${instance.id}`, key: item.key, work: item.id, kind: 'request-review', gate: 'review', state: 'claimed', attempts: 1, history: [],
-        inputs: { kind: 'request-review', provider: 'github', requestId: request.id, pr: request.pr, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } } as unknown as ActionRow;
-      for (const _failure of instance.failures!) assert.match(String(await handlers['request-review']!(action, executor)), new RegExp(`${instance.subject}'s review of ${instance.sha!.slice(0, 12)} is left to reviewer session \\S+ already answering that head`));
-      assert.equal((await host.modules.reviewer.readReviewLedger(host.root)).reviews.length, 1, 'no second session was launched');
-    } finally { await host.cleanup(); }
+    // A review is requested once the head's mechanical proofs pass (GY-115).
+    const item = submitted(instance, { evidence: [{ id: 'evidence-1', proof: 'unit:x', sha: instance.sha!, baseSha: base, policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: new Date().toISOString() }] } as Partial<Work>);
+    reconcileAutoDispatch(item, [item], new Date());
+    const request = item.autoDispatch!.review!;
+    assert.equal(request.sha, instance.sha);
+    reconcileAutoDispatch(item, [item], new Date());
+    assert.equal(item.autoDispatch!.review!.id, request.id, 'the same request stands on a second reconciliation');
   });
 }
 

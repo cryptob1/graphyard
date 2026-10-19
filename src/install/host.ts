@@ -17,7 +17,7 @@ import { herdrBoundElsewhere, herdrPluginBinding } from '../repository-setup.js'
 import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
 import { HerdrSetupFailure, herdrServerUnit, herdrServerUnitText } from '../herdr-host.js';
 import { herdrConnectCommands } from '../herdr-connect.js';
-import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, legacyExecutorTemplate, legacyLoopUnit, parseInstallUnits, perInstallUnits, readInstallUnits, unrecordedInstallUnits } from './units.js';
+import { installUnitsFile, type InstallUnits, legacyExecutorTemplate, legacyLoopUnit, parseInstallUnits, perInstallUnits, readInstallUnits, unrecordedInstallUnits } from './units.js';
 
 /**
  * The self-contained Graphyard host (GY-717).
@@ -25,7 +25,7 @@ import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, le
  * One machine runs everything: Postgres and the server (the release image, built on the host when
  * the registry does not have it, as system units, so they come back after a reboot with nobody
  * logged in), and — under one dedicated `graphyard` account
- * with lingering enabled — Herdr, the master loop, the executors and every agent runtime. Sessions no
+ * with lingering enabled — Herdr, the master loop and every agent runtime. Sessions no
  * longer compete with the operator's own processes, and the dashboard reaches Herdr on the same
  * machine, so the session viewer needs no relay.
  *
@@ -35,9 +35,9 @@ import { executorGlob, executorInstance, installUnitsFile, type InstallUnits, le
  * record (fingerprints, never values). The cloud provisioning token is used by the installer on the
  * operator's machine and never reaches the host. Agent accounts are connected from the dashboard
  * (Settings › Agents › Connect an account, GY-409): a pasted API key is sealed in the browser to the
- * host's own key and opened only by the host's executor; a subscription runs the runtime's own login
+ * host's own key and opened only by the host's loop; a subscription runs the runtime's own login
  * there and the dashboard shows its URL and code — the operator never logs into the machine. The
- * executors create each connected account's login home under `<install>/accounts`, because the
+ * the loop creates each connected account's login home under `<install>/accounts`, because the
  * graphyard user manager carries GRAPHYARD_AGENT_ENVIRONMENTS pointing there.
  */
 
@@ -59,7 +59,7 @@ export interface HostLayout {
   workdir: string;
   /** Postgres data: the attached volume on Hetzner, /var/lib/graphyard/<install> on an existing machine. */
   dataPath: string;
-  /** The Graphyard checkout the loop and executors run from, and its CLI. */
+  /** The Graphyard checkout the loop runs from, and its CLI. */
   graphyard: string; cli: string;
   /** The managed repository's checkout: the loop's working directory, where worktrees are made. */
   checkout: string;
@@ -84,7 +84,7 @@ export function hostLayout(installId: string, workdir: string, dataPath: string)
 export const hostTokenFile = (layout: HostLayout, principal: string) => `${layout.tokensDirectory}/${principal}.token`;
 /**
  * The graphyard user manager's environment: GRAPHYARD_AGENT_ENVIRONMENTS puts every login home the
- * executors create for a dashboard connect under `<install>/accounts`, and GRAPHYARD_CONFIG_HOME
+ * the loop creates for a dashboard connect under `<install>/accounts`, and GRAPHYARD_CONFIG_HOME
  * keeps the credentials `master init` and the reviewer setup write inside `<install>/` too.
  */
 export const hostEnvironmentFile = (layout: HostLayout) => `${layout.home}/.config/environment.d/graphyard.conf`;
@@ -98,7 +98,7 @@ export const hostDatabasePasswordFile = (layout: HostLayout) => `${layout.config
 /**
  * How the dashboard connects an account: a provider of GY-409's Settings › Agents connect flow, by
  * its id there. `api-key` is pasted once, sealed in the browser to the host's public key, relayed as
- * ciphertext and opened by the host's executor only; `login` runs the runtime's own sign-in on the
+ * ciphertext and opened by the host's loop only; `login` runs the runtime's own sign-in on the
  * host and shows its URL and device or one-time code in the dashboard. `file` is where, inside the
  * account's login home, the host writes the credential (mode 0600).
  */
@@ -137,7 +137,7 @@ export interface HostAccount {
 
 /**
  * The first account of each runtime a fresh installation connects: `claude-a`, `codex-a`,
- * `opencode-a` — the name and login home the host's executor gives the first connect of that runtime
+ * `opencode-a` — the name and login home the host's loop gives the first connect of that runtime
  * under `<install>/accounts` — and `pi-a`, the PI_CODING_AGENT_DIR of the first Pi (z.ai key) connect.
  */
 export const defaultAccountName = (kind: string) => `${kind}-a`;
@@ -208,15 +208,12 @@ export function hostUnitFiles(installId: string, layout: HostLayout, owner: stri
 }
 
 /**
- * The loop and executor units: written by `master init` and `graphyard-executor.mjs --install` on
- * the host, from the same templates as a workstation (GY-114, GY-105), and named for the install's
- * repository (GY-1441) so a second install on the same host never shares them.
+ * The loop unit: written by `master init` on the host, from the same template as a workstation
+ * (GY-114), and named for the install's repository (GY-1441) so a second install on the same host
+ * never shares it.
  */
-export function supervisedUnits(layout: HostLayout, executors: number, units: InstallUnits): HostUnit[] {
-  return [
-    { name: units.master, scope: 'user', path: `${layout.userUnitDirectory}/${units.master}`, role: 'master loop' },
-    ...Array.from({ length: executors }, (_, index) => ({ name: executorInstance(units, index + 1), scope: 'user' as const, path: `${layout.userUnitDirectory}/${units.executorTemplate}`, role: `executor slot ${index + 1}` })),
-  ];
+export function supervisedUnits(layout: HostLayout, units: InstallUnits): HostUnit[] {
+  return [{ name: units.master, scope: 'user', path: `${layout.userUnitDirectory}/${units.master}`, role: 'master loop' }];
 }
 
 // ---------------------------------------------------------------------------
@@ -228,7 +225,6 @@ export interface HostSettings {
   /** `--local`: the installer runs on the host itself. */
   local: boolean;
   workers: number;
-  executors: number;
   migrate: boolean;
   /** The old database URL (GRAPHYARD_MIGRATE_DATABASE_URL); registered with the vault, never printed. */
   migrationSource: string | null;
@@ -241,7 +237,7 @@ export interface HostSettings {
   secretsUnreadable?: string | null;
   /** `UID:GID` of the graphyard account, resolved on the host once it exists. */
   owner: string | null;
-  /** Where the loop, executors and restore run the Graphyard CLI from: this installer's own commit. */
+  /** Where the loop and restore run the Graphyard CLI from: this installer's own commit. */
   ref: string;
   /** Where the installer's own CLI is, for the migration's backup on this machine. */
   localCli: string;
@@ -250,7 +246,7 @@ export interface HostSettings {
   localNode: string;
   /** The operator machine's install directory, for the migration's backup file. */
   localDirectory: string;
-  /** This machine's executor host id: a moved account whose login home is here brings its login along. */
+  /** This machine's host id: a moved account whose login home is here brings its login along. */
   localHost: string;
 }
 
@@ -349,7 +345,7 @@ export function bootstrapScript(layout: HostLayout) {
     'command -v bwrap >/dev/null || apt-get install -y bubblewrap',
     `if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then echo 'kernel.apparmor_restrict_unprivileged_userns=0' > /etc/sysctl.d/60-graphyard-bwrap.conf && sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0; fi`,
     `id -u ${HOST_USER} >/dev/null 2>&1 || useradd --create-home --shell /bin/bash ${HOST_USER}`,
-    // The probe runs as the account the loop and executors run as, with the isolation flags a
+    // The probe runs as the account the loop runs as, with the isolation flags a
     // contained dependency install uses: root passing it says nothing about an unprivileged user.
     `runuser -u ${HOST_USER} -- bwrap ${HOST_BWRAP_PROBE.join(' ')} true`,
     `loginctl enable-linger ${HOST_USER}`,
@@ -399,13 +395,13 @@ export const hostDeployKeyFile = (layout: HostLayout, installId: string) => `${l
 const hostSshCommand = (key: string) => `ssh -i ${key} -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new`;
 
 export const migrationSteps = [
-  { id: 'migrate.freeze', title: 'Stop the old master loop and its executors on this machine' },
+  { id: 'migrate.freeze', title: 'Stop the old master loop on this machine' },
   { id: 'migrate.fence', title: `Fence the old database named by ${MIGRATE_SOURCE_VARIABLE} (graphyard db fence): new sessions are read-only and every open one is ended, so the old server, its webhooks and any session still running against it can no longer write after the backup` },
   { id: 'migrate.backup', title: `Take a verified logical backup of the old database named by ${MIGRATE_SOURCE_VARIABLE} (graphyard db backup, then db verify)` },
   { id: 'migrate.copy', title: 'Copy the backup to the host (mode 0600, graphyard account)' },
   { id: 'migrate.restore', title: 'Restore it into the host Postgres before the server starts (graphyard db restore)' },
   { id: 'migrate.cutover', title: 'Start the server on the restored ledger with credentials generated on the host: the old coordinator token is not among them, so the old loop is refused every lease' },
-  { id: 'migrate.reregister', title: 'Re-register executors (they register on start) and move every registry account onto the host, with its login when it is on this machine' },
+  { id: 'migrate.reregister', title: 'Move every registry account onto the host, with its login when it is on this machine' },
 ] as const;
 
 const restoredMarker = (layout: HostLayout) => `${layout.migrationDirectory}/restored`;
@@ -418,7 +414,6 @@ async function freezeOldLoop(ctx: AdapterContext) {
   // The record lives in the managed checkout master init ran in, never beside the installer's CLI.
   const old = readInstallUnits(ctx.host!.localRoot);
   await local.exec('systemctl', ['--user', 'disable', '--now', old.master], { allowFailure: true, timeout: 180_000 });
-  await local.exec('systemctl', ['--user', 'stop', executorGlob(old)], { allowFailure: true, timeout: 900_000 });
   const state = await local.exec('systemctl', ['--user', 'is-active', old.master], { allowFailure: true, timeout: 60_000 });
   if (state.stdout.trim() === 'active') throw new Error(`The old master loop is still running on this machine after systemctl --user disable --now ${old.master}; stop it, then rerun graphyard install --migrate --apply`);
 }
@@ -544,7 +539,7 @@ export function hostPlan(ctx: AdapterContext): HostPlan {
   const accounts = hostAccounts(layout, null);
   return {
     user: layout.user, configDirectory: layout.configDirectory, checkout: layout.checkout,
-    units: [...hostUnitFiles(ctx.installId, layout, `${HOST_USER}:${HOST_USER}`).map(({ name, scope, path, role }) => ({ name, scope, path, role })), ...supervisedUnits(layout, host.executors, perInstallUnits(ctx.repository))],
+    units: [...hostUnitFiles(ctx.installId, layout, `${HOST_USER}:${HOST_USER}`).map(({ name, scope, path, role }) => ({ name, scope, path, role })), ...supervisedUnits(layout, perInstallUnits(ctx.repository))],
     runtimes: hostRuntimes.map(runtime => ({ kind: runtime.kind, program: runtime.program, package: runtime.package })),
     credentials: [
       ...host.principals.map(principal => ({ path: hostTokenFile(layout, principal.id), mode: '0600' as const, holds: `${principal.role} credential of ${principal.id}` })),
@@ -566,7 +561,7 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
   const actions: PlanAction[] = [
     { id: 'host.bootstrap', target: 'host', state, title: `Prepare the machine: Docker, Node 24, git, gh and bubblewrap when missing, the ${HOST_USER} account with lingering, and ${plan.configDirectory} (mode 0700)`, command: 'sh -c <bootstrap script>' },
     { id: 'host.credentials', target: 'host', state, title: `Write every Graphyard credential on the host only, mode 0600, owned by ${HOST_USER}; the provisioning token never leaves this machine`, values: plan.credentials.map(entry => ({ name: entry.path, value: REDACTED, secret: true, note: entry.holds })) },
-    { id: 'host.graphyard', target: 'host', state, title: `Check out Graphyard at ${host.ref} in ${host.layout.graphyard} for the loop, the executors and restores`, command: `git clone ${GRAPHYARD_SOURCE} ${host.layout.graphyard}` },
+    { id: 'host.graphyard', target: 'host', state, title: `Check out Graphyard at ${host.ref} in ${host.layout.graphyard} for the loop and restores`, command: `git clone ${GRAPHYARD_SOURCE} ${host.layout.graphyard}` },
     { id: 'host.image', target: 'host', state, title: `Pull the server image ${ctx.image}; when the registry does not have it, build it on the host from ${host.layout.graphyard} at ${host.ref}`, command: `docker image inspect ${ctx.image} || docker build --tag ${ctx.image} ${host.layout.graphyard}` },
     ...plan.units.filter(unit => unit.scope === 'system').map(unit => ({ id: `host.unit.${unit.role}`, target: 'host' as const, state, title: `Supervise ${unit.role} with the system unit ${unit.path} (Restart=always, starts at boot)`, command: `systemctl enable --now ${unit.name}` })),
     ...(host.migrate ? migrationSteps.map(step => ({ id: step.id, target: 'host' as const, state: 'create' as const, title: step.title })) : []),
@@ -575,7 +570,6 @@ function hostActions(ctx: AdapterContext, observation: AdapterObservation): Plan
     { id: 'host.checkout', target: 'host', state, title: `Clone ${ctx.repository} over SSH into ${plan.checkout}, the loop's working directory, with the merge writer's deploy key (${hostDeployKeyFile(host.layout, ctx.installId)}); workers commit there as Graphyard and push nothing` },
     { id: 'host.environment', target: 'host', state, title: `Point the ${HOST_USER} user manager at ${host.layout.accountsDirectory} for login homes and ${host.layout.configDirectory} for credentials (${hostEnvironmentFile(host.layout)})` },
     { id: 'host.master', target: 'host', state, title: `Configure the master loop with the coordinator credential (master init --token-stdin) and supervise it as ${host.layout.userUnitDirectory}/${perInstallUnits(ctx.repository).master}` },
-    { id: 'host.executors', target: 'host', state, title: `Supervise ${host.executors} executor slot(s) as ${executorInstance(perInstallUnits(ctx.repository), 'N')} user units (Restart=always with a bounded RestartSec; the install fails without it, GY-1431); the resident executor registers the host's connect key and serves every dashboard connect` },
     ...(host.migrate
       ? [{ id: 'host.accounts', target: 'host' as const, state, title: `Move every registry account of an installed runtime onto this host at ${host.layout.accountsDirectory}/<account> (mode 0700), copying its login (0600) when it is on this machine; any other is disabled until connected again in ${CONNECT_PATH}` }]
       : [{ id: 'host.accounts', target: 'host' as const, state, title: `Create ${host.layout.accountsDirectory} (mode 0700): each account connected from the dashboard gets its login home there (${plan.accounts.map(account => account.home).join(', ')} first) and is registered in the agent registry when its smoke prompt passes` }]),
@@ -790,7 +784,7 @@ export async function hostProfilesOnly(ctx: AdapterContext): Promise<{ host: str
 
 /**
  * Everything after the server is healthy and GitHub is connected: runtimes, Herdr, the managed
- * checkout, the loop and executors, account homes, and the registry placing each account here.
+ * checkout, the loop, account homes, and the registry placing each account here.
  */
 export async function installHostFleet(ctx: AdapterContext, request: HostFleetRequest): Promise<HostFleetResult> {
   const host = ctx.host!;
@@ -881,8 +875,6 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   const legacy = recorded === null ? await Promise.all([legacyLoopUnit, legacyExecutorTemplate].map(async name => ({ path: `${layout.userUnitDirectory}/${name}`, text: await readRemote(remote, `${layout.userUnitDirectory}/${name}`) }))) : [];
   const installUnits = parseInstallUnits(recorded, `${layout.checkout}/${installUnitsFile} on ${hostName}`, () => unrecordedInstallUnits(layout.checkout, legacy, HOST_HOME));
   await asUser(remote, layout.checkout, 'systemctl', ['--user', 'enable', '--now', installUnits.master]);
-  const executors = await asUser(remote, layout.checkout, 'env', [...environment, 'node', `${layout.graphyard}/scripts/graphyard-executor.mjs`, '--install', '--count', String(host.executors)], { allowFailure: true });
-  if (executors.code !== 0) throw new Error(`Installing ${host.executors} executor unit(s) on ${hostName} failed: ${failure(ctx, executors)}`);
 
   // One worker profile per worker principal, each with its own credential file on the host.
   const workers: ProfileRegistration['workers'] = [];
@@ -899,7 +891,7 @@ export async function installHostFleet(ctx: AdapterContext, request: HostFleetRe
   const system = hostUnitFiles(ctx.installId, layout, owner).filter(unit => unit.scope === 'system');
   const systemStates = await unitStates(remote, system.map(unit => unit.name));
   const herdrUnits = [...new Set(['graphyard-herdr.service', herdr?.unit ?? 'graphyard-herdr.service'])].map(name => ({ name, scope: 'user' as const, path: `${layout.userUnitDirectory}/${name}`, role: name === 'graphyard-herdr.service' ? 'herdr' : 'herdr instance' }));
-  const userUnits = [...herdrUnits, ...supervisedUnits(layout, host.executors, installUnits)];
+  const userUnits = [...herdrUnits, ...supervisedUnits(layout, installUnits)];
   const userState = await asUser(remote, HOST_HOME, 'systemctl', ['--user', 'is-active', ...userUnits.map(unit => unit.name)], { allowFailure: true });
   const userLines = userState.stdout.split('\n');
   const units = [

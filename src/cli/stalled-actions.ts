@@ -1,5 +1,5 @@
 import { agentOwner, humanOwner, type AttentionItem } from '../master.js';
-import { describeRemedyRecord, stallRemedy, standingRemedy } from '../stall-remedies.js';
+import { stallRemedy } from '../stall-remedies.js';
 import { actionStallMaxMs, actionStallRecheckMs, queueSnapshot } from '../model/action-progress.js';
 import type { Work } from '../model.js';
 
@@ -34,20 +34,14 @@ const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}
  * row nobody is acting on: a row being attempted and getting nowhere is never the quieter failure.
  *
  * A reason the registry binds to a remedy (GY-949, src/stall-remedies.ts) names that remedy as the
- * next step instead — the one the loop applies itself, with what its attempt did once the row
- * records one, or the bounded decision that owns it. Only a reason the registry does not recognise
- * keeps the generic instruction.
+ * next step instead: the bounded decision that owns it. Only a reason the registry does not
+ * recognise keeps the generic instruction.
  */
 export function stalledActionAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
   return queueSnapshot(snapshot.work, new Date(snapshot.now)).stalled.map(entry => {
     const stallLine = `${entry.stall!.failures} attempts in a row failed for one unchanged reason — ${entry.stall!.reason} — and it has been open ${elapsed(entry.waitedMs)} over ${entry.attempts} attempt(s)${entry.retryAt ? `; next attempt at ${entry.retryAt}` : ''}`;
     const bound = stallRemedy(entry.stall!.reason);
-    const work = snapshot.work.find(item => item.id === entry.work);
-    const attempt = bound?.applies === 'loop' && work ? standingRemedy(work, entry.id, entry.stall!.reason) : null;
-    const next = !bound ? generic
-      : !attempt ? bound.next
-      : attempt.outcome === 'refused' ? `Nothing to retry: ${describeRemedyRecord(attempt)}. The loop does not apply it again for this unchanged run; the row is escalated once with the refusal and the remedy named, and clearing what the refusal names (master status shows a pending sudo code) lets the row's recheck pick the change up`
-      : `Nothing to run by hand: ${describeRemedyRecord(attempt)}. The row's recheck picks the change up; should the reason stand, the run is escalated with the remedy named rather than the remedy applied again`;
+    const next = bound?.next ?? generic;
     // GY-2014: permanent installation-level reasons bind to their remedies above and raise the
     // installation's setup (or credential / reviewer-identity) line rather than a per-item
     // stalled-action instance that the stalled-gate class would count toward recurrence.
@@ -60,7 +54,7 @@ export function stalledActionAttention(snapshot: { work: Work[]; now: string }):
     if (bound?.kind === 'credential-401') return {
       subject: 'setup',
       kind: 'setup' as const,
-      text: `The installation's worker claim credential is refused: ${entry.key}'s ${entry.kind} action has failed ${stallLine}. The fault is the host-owned credential, not ${entry.key}'s: renew it once for this unchanged run`,
+      text: `The installation's worker claim credential is refused: ${entry.key}'s ${entry.kind} action has failed ${stallLine}. The fault is the host-owned credential, not ${entry.key}'s: renew it`,
       ...agentOwner('master', next),
     };
     if (bound?.kind === 'reviewer-identity') return {

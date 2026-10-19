@@ -301,12 +301,12 @@ export function ConnectWizard({ providers, hosts, wizard, setWizard, onConnect, 
       <button data-pick-provider={entry.id} onClick={() => setWizard({ ...wizard, provider: entry.id, host: wizard.host ?? hosts[0]?.host ?? null, error: '' })}>
         <strong>{entry.label}</strong><br/><small>{entry.help}</small>
       </button></li>)}</ul>}
-    {!provider && !hosts.length && <p role="status">No agent host has registered its key yet. Start the executor on your agent host; it registers its key by itself, and this list fills in.</p>}
+    {!provider && !hosts.length && <p role="status">No agent host has registered its key yet. Start the master loop on your agent host; it registers its key by itself, and this list fills in.</p>}
     {provider && <form className="grant-form" aria-label="Connect the account" onSubmit={event => { event.preventDefault(); onConnect(provider.id, wizard.host ?? hosts[0]?.host ?? '', wizard.key); }}>
       <p>{provider.label} — {provider.kind === 'api-key' ? 'paste the key; it is sealed to the host in this browser before it is sent.' : 'the host starts the provider\'s own login; you finish the sign-in in your own browser.'}</p>
       <label>Agent host<select name="host" value={wizard.host ?? ''} onChange={event => setWizard({ ...wizard, host: event.target.value })}>{hosts.map(entry => <option key={entry.host} value={entry.host}>{entry.host}</option>)}</select></label>
       {provider.kind === 'api-key' && <label>The provider's key<input type="password" name="key" autoComplete="off" value={wizard.key} onChange={event => setWizard({ ...wizard, key: event.target.value })}/></label>}
-      {provider.kind === 'api-key' && !hostKeys && <p role="status" className="amber">That host has not registered its key yet; its executor registers it by itself shortly.</p>}
+      {provider.kind === 'api-key' && !hostKeys && <p role="status" className="amber">That host has not registered its key yet; its master loop registers it by itself shortly.</p>}
       {wizard.error && <p role="alert" className="amber">{wizard.error}</p>}
       <button disabled={!!wizard.busy || provider.kind === 'api-key' && !hostKeys} data-connect-submit>{wizard.busy || provider.kind === 'api-key' ? 'Connect' : 'Start the login'}</button>
       <button type="button" onClick={onClose}>Close</button>
@@ -344,7 +344,7 @@ export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick
     } catch (error) { if (version === request.current) setLoadError((error as Error).message); }
   }, [api]);
   useEffect(() => { void load(); void api('agent-registry/connect/providers').then(about => setProviders(about.providers ?? [])).catch(() => {}); void api('agent-registry/connect/host-key').then(about => setHosts(about.hosts ?? [])).catch(() => {}); }, [api, load]);
-  // An open connect moves on its own (the host's executor works it): poll until nothing is open.
+  // An open connect moves on its own (the host's master loop works it): poll until nothing is open.
   const open = connects.some(connect => openState(connect.state));
   useEffect(() => {
     if (!open) return;
@@ -373,7 +373,7 @@ export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick
       let sealed: { ephemeral: string; iv: string; ciphertext: string } | undefined;
       if (provider.kind === 'api-key') {
         const registered = hosts.find(entry => entry.host === host)?.publicKey;
-        if (!registered) throw new Error(`The host ${host} has not registered its key yet; its executor registers it by itself shortly.`);
+        if (!registered) throw new Error(`The host ${host} has not registered its key yet; its master loop registers it by itself shortly.`);
         // Sealed here, in the browser: the server stores and relays ciphertext only.
         sealed = await sealForHost(registered, key);
       }
@@ -387,7 +387,7 @@ export default function FleetPage({ api, status, observedAt, onOpenSetup }: Pick
     const host = connects.find(entry => entry.id === id)?.host;
     let registered = hosts.find(entry => entry.host === host)?.publicKey;
     if (!registered) registered = ((await api('agent-registry/connect/host-key')).hosts as ConnectHostView[] ?? []).find(entry => entry.host === host)?.publicKey;
-    if (!registered) throw new Error(`The host ${host} has not registered its key yet; its executor registers it by itself shortly.`);
+    if (!registered) throw new Error(`The host ${host} has not registered its key yet; its master loop registers it by itself shortly.`);
     await api(`agent-registry/connect/${id}/answer`, { sealed: await sealForHost(registered, code.trim()) });
     await load();
   };

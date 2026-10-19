@@ -9,7 +9,6 @@ import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import type { NextActionKind } from '../src/model/next-action.js';
 import { classifyAttention, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, worktreeRootAttention, writeFailure, masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
@@ -17,8 +16,8 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { daemonSummary } from '../src/daemon/run.js';
 import { cycleFaults } from '../src/daemon/faults.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
-import { emptyDispatchCursor, launchingKinds, runDispatchTick, runExecutorTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { hostMemoryAttention, hostMemoryFloor, hostMemoryHold, memoryConsumers, memoryRecoveryMarginBytes, type HostMemoryReading } from '../src/master-resources.js';
+import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { hostMemoryAttention, hostMemoryFloor, memoryConsumers, memoryRecoveryMarginBytes, type HostMemoryReading } from '../src/master-resources.js';
 import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
@@ -691,23 +690,6 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   const tick = await runDispatchTick(config, emptyDispatchCursor(config), dispatchEffects, () => at);
   assert.equal(launched.length, 0, 'no reviewer or producer is launched');
   assert.ok(tick.waiting.length > 0 && tick.waiting.every(wait => /below its 6\.2 GB floor, so new session launches on it are deferred/.test(wait.reason)));
-  // The executor claims no launching row meanwhile: the rows wait in the queue without failing.
-  const claims: NextActionKind[][] = [];
-  const presences: NextActionKind[][] = [];
-  const serves: NextActionKind[][] = [];
-  const idle = await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async request => { claims.push(request.kinds); serves.push(request.serves ?? []); return { action: null }; }, settle: async () => {},
-    present: async request => { presences.push(request.kinds); },
-    handlers: { dispatch: async () => 'launched', 'request-review': async () => 'launched', resync: async () => 'resynced' }, launchHold: () => hostMemoryHold('machine-a', async () => memory, () => at) });
-  assert.deepEqual(claims, [['resync']]);
-  // GY-1538: the hold defers launches, it does not stop the executor serving them, so presence
-  // still names every kind it runs; otherwise the control plane reports dispatch and request-review
-  // unserved and files a configuration fault for a deferral (GY-1515, GY-1537, GY-1530). The claim
-  // carries that set itself, so no presence-only request follows it.
-  assert.deepEqual(serves, [['dispatch', 'request-review', 'resync']]);
-  assert.deepEqual(presences, []);
-  assert.ok(claims[0].every(kind => !launchingKinds.includes(kind)));
-  assert.match(idle.reason, /launches none: host machine-a has 2\.0 GB/);
-
   // Barely back over the floor is not recovered: the deferral lifts only past the margin, so a host hovering at it does not flap.
   memory = { totalBytes: 62 * GiB, availableBytes: hostMemoryFloor(62 * GiB) + memoryRecoveryMarginBytes / 2 };
   await runCycle(config, state, loopEffects(log, () => memory));
@@ -724,10 +706,6 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   launched.length = 0;
   await runDispatchTick(config, emptyDispatchCursor(config), dispatchEffects, () => at);
   assert.ok(launched.includes('review'), 'reviewer launches resume (GitHub delivery requests no producer at submit)');
-  claims.length = 0;
-  await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async request => { claims.push(request.kinds); return { action: null }; }, settle: async () => {},
-    handlers: { dispatch: async () => 'launched', resync: async () => 'resynced' }, launchHold: () => hostMemoryHold('machine-a', async () => memory, () => at) });
-  assert.ok(claims[0].includes('dispatch'), 'the executor claims dispatch rows again');
 });
 
 test('the reclaim pass is stamped with the cycle snapshot clock, not a later wall-clock read', async () => {

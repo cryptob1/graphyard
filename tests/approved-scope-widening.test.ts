@@ -1,9 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 // Namespace imports, so a tree without the change still loads and its cases fail on what they exercise.
@@ -219,76 +216,17 @@ test('integration:decision-refused-gy-1696-replay — a worker\'s ask for trunca
   }
 });
 
-// GY-1764 rework, AC-1/AC-3: the replay above posts the offenders itself; these drive the entry point the
-// loop really claims — the executor's approve-scope handler — against the real control plane, once with an
-// injected tree and once with the wiring a shipped executor builds itself from its coordinator checkout.
-const executorEffects = (repositoryFiles?: () => Promise<ReadonlySet<string>>) => ({
-  snapshot: async () => ({ work: (await store.list()) as Work[], now: '2026-10-13T08:30:00.000Z' }),
-  mutate: async (path: string, body: unknown) => (await ok(token(coordinator), 'POST', path, body)) as unknown,
-  agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
-  dispatchWorker: async () => { throw new Error('not reached'); }, launchReview: async () => { throw new Error('not reached'); },
-  launchProducer: async () => { throw new Error('not reached'); }, observeDeployment: async () => { throw new Error('not reached'); },
-  ...(repositoryFiles ? { repositoryFiles } : {}),
-});
-
-async function claimedExecutorAsk(title: string, paths: readonly string[]) {
+// A worker's scope ask on a claimed item, against the real control plane.
+async function claimedAsk(title: string, paths: readonly string[]) {
   const work = await claimed(`GY-1696 replay: ${title}`);
   await ok(token(implementer), 'POST', `work/${work.id}/scope`, { epoch: work.epoch, paths, reason: 'AC-1 is a live observation only a master session can record' });
   return work;
 }
 
-const executorRow = (work: Work) => ({ key: work.key, work: work.id, kind: 'approve-scope', inputs: { kind: 'approve-scope', epoch: work.epoch } }) as never;
-
-async function refusedNotRouted(work: Work, title: string) {
-  const decided = await reload(work.id);
-  assert.equal(decided.scopeRequest?.decision?.state, 'refused', `${title}: refused`);
-  assert.equal(decided.scopeRequest?.decision?.nonRepository, true, `${title}: as its own verdict`);
-  const now = Date.parse(decided.lease!.expiresAt) - 60_000;
-  assert.equal(routableScopeRequest(decided, now), null, `${title}: the claimed action's refusal is never routed`);
-  assert.equal(decisionsModule.scopeRoutineDecision(decided, now, true), null, `${title}: and forms no requirements decision`);
-  assert.deepEqual((await decisions(decided)).filter(entry => entry.action === 'requirements'), [], `${title}: none was requested`);
-  return decided;
-}
-
-test('integration:approve-scope-executor-claimed-path — a claimed approve-scope action reads the tree, and the control plane refuses what it refutes', async () => {
-  const { controlPlaneHandlers } = await import('../src/executor.js');
-  const tree = new Set(['src/model/scope.ts', 'src/daemon/cycle-scope.ts', 'docs/master-agent.md', 'README.md', 'package.json']);
-  const handlers = controlPlaneHandlers(() => ({}) as never, executorEffects(() => Promise.resolve(tree)) as never);
-  for (const [title, paths] of [['truncated fields', ['daemon.relea', 'upgrade.align']], ['install-local credential', ['.graphyard/master.json']]] as const) {
-    const work = await claimedExecutorAsk(title, paths);
-    const report = await handlers['approve-scope']!(executorRow(work), { id: 'executor-1', host: 'scope-host' }) as string;
-    assert.match(report, /refused — /);
-    await refusedNotRouted(work, title);
-  }
-});
-
-test('integration:approve-scope-executor-default-tree — the executor builds its evidence read from the coordinator checkout it loads from', async () => {
-  const { controlPlaneHandlers } = await import('../src/executor.js');
-  // A clean fake checkout: bin/graphyard.mjs committed, origin/main at it, so the executor's own
-  // baseTree read resolves without a network and the checkout guard finds nothing dirty.
-  const checkout = await temporaryDirectory('executor-checkout');
-  const git = (args: string[]) => execFileSync('git', ['-C', checkout, ...args], { stdio: ['ignore', 'pipe', 'ignore'] });
-  await (await import('node:fs/promises')).mkdir(join(checkout, 'bin'), { recursive: true });
-  await writeFile(join(checkout, 'bin/graphyard.mjs'), '');
-  git(['init', '-q', '-b', 'main', '.']);
-  git(['add', 'bin/graphyard.mjs']);
-  git(['-c', 'user.email=executor@test', '-c', 'user.name=executor', 'commit', '-q', '-m', 'base']);
-  git(['remote', 'add', 'origin', checkout]); // the executor's mandatory `git fetch origin main` resolves against the checkout itself
-  git(['fetch', '-q', 'origin', 'main']);
-  const handlers = controlPlaneHandlers(() => ({ cliPath: join(checkout, 'bin/graphyard.mjs'), baseBranch: 'main' }) as never, executorEffects() as never);
-  for (const paths of [['daemon.relea'], ['.graphyard/master.json']]) {
-    const title = `default tree: ${paths.join(', ')}`;
-    const work = await claimedExecutorAsk(title, paths);
-    await handlers['approve-scope']!(executorRow(work), { id: 'executor-1', host: 'scope-host' });
-    const decided = await refusedNotRouted(work, title);
-    assert.match(decided.scopeRequest!.decision!.reason, /not a repository file|install-local/);
-  }
-});
-
 test('integration:scope-request-command-evidence — the request command answers a scope ask in one transaction with the asker\'s tree evidence, refuse-only', async () => {
   // The typed scope-request branch applies the rule in the transaction that records the ask; the
   // evidence rides with it, validated and restricted to the paths the ask names (GY-1764).
-  const work = await claimedExecutorAsk('request command evidence', ['daemon.relea']);
+  const work = await claimedAsk('request command evidence', ['daemon.relea']);
   const asked = await ok(token(implementer), 'POST', `work/${work.id}/request`, { type: 'scope-request', epoch: work.epoch, paths: ['daemon.relea'], reason: 'AC-1 is a live observation only a master session can record', release: false, nonRepository: [{ path: 'daemon.relea', nearMiss: 'daemon.release', why: 'untracked' }] }) as Work;
   assert.equal(asked.scopeRequest?.decision?.state, 'refused');
   assert.equal(asked.scopeRequest?.decision?.nonRepository, true, 'refused as its own verdict, in the transaction that recorded the ask');
@@ -297,7 +235,7 @@ test('integration:scope-request-command-evidence — the request command answers
   assert.deepEqual((await decisions(asked)).filter(entry => entry.action === 'requirements'), [], 'no approver session is spent');
   // A report that names a path the ask does not name is ignored, so a bad report never refuses an ask:
   // the verdict stays the ordinary rule refusal, which the loop may still put to the approver.
-  const unasked = await claimedExecutorAsk('request command ignores unasked evidence', ['daemon.relea']);
+  const unasked = await claimedAsk('request command ignores unasked evidence', ['daemon.relea']);
   const other = await ok(token(implementer), 'POST', `work/${unasked.id}/request`, { type: 'scope-request', epoch: unasked.epoch, paths: ['daemon.relea'], reason: 'AC-1 is a live observation only a master session can record', release: false, nonRepository: [{ path: 'upgrade.align', nearMiss: null, why: 'untracked' }] }) as Work;
   assert.equal(other.scopeRequest?.decision?.state, 'refused');
   assert.equal(other.scopeRequest?.decision?.nonRepository, undefined, 'the unasked offender is ignored');

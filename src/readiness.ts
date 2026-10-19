@@ -91,19 +91,19 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
   // GY-2010: the control plane is the only merge writer and holds no GitHub App, so the App, its
   // permissions and the main guard's revert approver are not required; they pass in the same words the Setup checklist uses.
 
-  // GY-1859: a live coordinator or executor is not proof the install runs the right code. One line
+  // GY-1859: a live coordinator is not proof the install runs the right code. One line
   // names both paths — the unit still on the old code, and this checkout — and the rerun that
   // replaces them, so an install an earlier checkout left behind is never read as set up. Judged
   // only when the reading was attempted (`setup.loopCode` is present, null when it failed): facts
   // from a reader before the field name no unit state, and gain no item.
   const loopCode = setup && 'loopCode' in setup ? setup.loopCode ?? null : null;
   const loopCodeRead = !!setup && 'loopCode' in setup;
-  const loopCodeStale = loopCode ? [loopCode.loopStale, loopCode.executorStale].filter(Boolean).join('; ') : null;
+  const loopCodeStale = loopCode?.loopStale ?? null;
   const rerunUp = `rerun graphyard up${loopCode?.repository ? ` --repo ${loopCode.repository}` : ''} --agent from this checkout: its master-loop step rewrites the units to it and restarts them`;
-  if (loopCodeRead) item({ id: 'loop-code', title: 'The coordinator and its executors run this checkout', profiles: all,
+  if (loopCodeRead) item({ id: 'loop-code', title: 'The coordinator runs this checkout', profiles: all,
     status: !loopCode ? 'unknown' : loopCode.error ? 'unknown' : loopCodeStale ? 'missing' : 'ready',
     detail: !loopCode ? 'the units this install runs were not read' : loopCode.error ? `the units this install records are unreadable: ${loopCode.error}`
-      : loopCodeStale ?? `the loop${loopCode.loop ? ` (${loopCode.loop.unit} at ${loopCode.loop.path})` : ' (no unit installed)'}${loopCode.loopCommit ? ` at ${loopCode.loopCommit.slice(0, 12)}` : ''} and its executors run this checkout (${loopCode.cli.root})`,
+      : loopCodeStale ?? `the loop${loopCode.loop ? ` (${loopCode.loop.unit} at ${loopCode.loop.path})` : ' (no unit installed)'}${loopCode.loopCommit ? ` at ${loopCode.loopCommit.slice(0, 12)}` : ''} runs this checkout (${loopCode.cli.root})`,
     recovery: loopCodeStale ? rerunUp : !loopCode ? rerunUp : null });
 
   const proposal = facts.proposal ?? null;

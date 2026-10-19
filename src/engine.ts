@@ -46,7 +46,6 @@ import { sameObservationInputs } from './model/observation-save.js';
 import { adoptSchema, adoptedBranchHeld, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, gitBranchName, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
-import { recordStallRemedy, remedyFlows, remedyOutcomes, stallRemedyKinds } from './stall-remedies.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
 import { livenessFallback, livenessOf, livenessRepairEntry, rowDueAt, stalledActionLifts, waitDueAt } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, resolveSatisfiedScopeRequests, type AgentRequest } from './model/agent-requests.js';
@@ -212,15 +211,9 @@ const actionClaimSchema = z.object({
   work: z.string().min(1).max(200).optional(),
 }).strict();
 /** A presence-only poll (GY-1288): who is asking, where, and what it runs — a claim's own fields, claiming nothing. */
-export const executorPresenceSchema = actionClaimSchema.pick({ executor: true, host: true, kinds: true, serves: true }).strict();
 const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
 // A renewal carries no result: it says only that the executor named on the claim is still
 // inside the handler, and asks for the lease it already holds to run on.
-// A remedy record names the remedy, the unchanged reason it was applied for and what it did (GY-949).
-const actionRemedySchema = z.object({
-  remedy: z.enum(stallRemedyKinds), reason: z.string().trim().min(1).max(2000), outcome: z.enum(remedyOutcomes),
-  detail: z.string().trim().min(1).max(2000), flows: z.array(z.enum(remedyFlows)).min(1).max(3),
-}).strict();
 const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 // A resync names the instant its claim was made, so the answer says whether an observation saved
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
@@ -2543,29 +2536,6 @@ export class Engine {
       const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
-    });
-  }
-  /**
-   * Record the loop's attempt of the remedy a stalled row's reason binds to (GY-949). The row keeps
-   * one record per unchanged run (`recordStallRemedy` refuses a second), so the loop applies a
-   * remedy at most once for a run however many of its cycles see the row, and the attention and the
-   * escalation read what it did from the row itself. The item is evaluated with the record, so a
-   * refused remedy's escalation is queued in the same transaction rather than whenever the item is
-   * next evaluated — for an item no reconciliation job wakes, never.
-   */
-  async recordActionRemedy(actor: Principal, id: string, input: unknown) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    const data = actionRemedySchema.parse(input);
-    return this.store.transaction(async (db, now) => {
-      const work = await this.actionOwner(db, id, undefined, true);
-      demand(work, 'Action is not open on any work item', 404);
-      const row = recordStallRemedy(work!, id, data, actor.id, now);
-      const all = (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item);
-      this.evaluate(work!, all, now);
-      await this.recordDispatch(db, work!, now);
-      await save(db, work!, actor.id, 'action.remedied', now, { id, kind: row.kind, remedy: data.remedy, outcome: data.outcome, flows: data.flows, detail: data.detail, reason: data.reason });
-      if (work!.submission) await wakeJob(db, work!.id);
-      return { action: row, work: { id: work!.id, key: work!.key } };
     });
   }
   /**

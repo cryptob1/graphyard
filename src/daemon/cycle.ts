@@ -14,7 +14,6 @@ import { masterSessionStep } from './cycle-master.js';
 import { scopeStep, successorStep } from './cycle-scope.js';
 import { blockerStep } from './cycle-blockers.js';
 import { reclaimStep } from './cycle-reclaim.js';
-import { hostSupervisionStep } from './cycle-host.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
@@ -23,7 +22,6 @@ import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
 import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
-import { remedyStep } from './cycle-remedies.js';
 import { mainWatchStep } from './main-watch.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
@@ -226,8 +224,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   const { settled, budget } = await timings.step('scope', () => scopeStep(cycle));
   // 2c. Open items planning a file the base split or renamed are re-planned onto its successors.
   await timings.step('successors', () => successorStep(cycle, settled));
-  // 2c2. The host's systemd user manager revived and its declared executor slots started (GY-1428), before the probes below read it.
-  await timings.step('host supervision', () => cycle.isolate('config', null, 'host supervision', () => hostSupervisionStep(cycle)));
   // 2d. Every standing blocker is re-checked: its cause probed, cleared once the probe passes (GY-1008).
   await timings.step('blockers', () => blockerStep(cycle));
   spent('decisions');
@@ -252,12 +248,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   await timings.step('reviews and proofs', () => shepherdStep(cycle));
   spent('dispatch');
-
-  // 6b. A stalled row whose unchanged reason binds to a remedy the loop applies gets it, once per
-  //     run (GY-949): the browser flow runs beside the cycle, and its outcome is recorded on the row.
-  await timings.step('remedies', () => cycle.isolate('config', null, 'stall remedies', () => remedyStep(cycle)));
-  await settleLaunches();
-  spent('decisions');
 
   await timings.step('merges', () => mergeStep(cycle));
   // 6b'. The control-plane merge executor (GY-1524): open intents reconciled, then one head trial-merged,

@@ -63,7 +63,7 @@ export interface InstallDependencies {
   adapter?: ProviderAdapter;
   /** Where --migrate reads GRAPHYARD_MIGRATE_DATABASE_URL (process.env by default). */
   environment?: NodeJS.ProcessEnv;
-  /** The Graphyard commit a self-contained host runs its loop and executors from (this checkout's HEAD by default). */
+  /** The Graphyard commit a self-contained host runs its loop from (this checkout's HEAD by default). */
   graphyardRef?: string;
   /** How the local provider keeps its runtime alive (a systemd user unit by default); a test runs it in-process. */
   localSupervisor?: LocalSupervisor;
@@ -392,7 +392,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
     databasePassword, port: inputs.port ?? SERVER_PORT, portExplicit: inputs.port !== undefined, dataPath,
     railwayDir: `${directory}/railway`,
     host: selfContained ? {
-      layout: hostLayout(installId, workdir, dataPath ?? `/var/lib/graphyard/${installId}`), local: !!inputs.local, workers, executors: 2,
+      layout: hostLayout(installId, workdir, dataPath ?? `/var/lib/graphyard/${installId}`), local: !!inputs.local, workers,
       migrate: !!inputs.migrate, migrationSource, tokens, principals, claim: null, owner: null,
       ref: dependencies.graphyardRef ?? sourceCommit(dependencies.sourceRoot ?? fileURLToPath(new URL('../..', import.meta.url))),
       localCli: dependencies.cliPath ?? fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url)), localNode: process.execPath, localDirectory: directory, localRoot: root, localHost: dependencies.hostId ?? hostname(),

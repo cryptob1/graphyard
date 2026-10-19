@@ -49,7 +49,7 @@ test('unit:docs-repo-policy-wording — README and the how-it-works guide attrib
   assert.doesNotMatch(passages[0], /judged from the merge delta,/, 'the risk class is no longer described as judged from the merge delta alone');
   // The qualification is net-zero in words on a saturated set: it trims prose, it does not raise the budget.
   const budget = parseRepositoryConfig(read('graphyard.json')).documentation.wordBudget!;
-  // GY-2172 halved the set and lowered the budget to the new total plus 10%.
-  assert.equal(budget.total, 8_489, 'the docs word budget total stays at the halved set plus 10%; trim prose instead of raising it');
+  // GY-2172 halved the set and lowered the budget to the new total plus 10%; GY-1984 dropped the executor prose (8,484).
+  assert.equal(budget.total, 8_484, 'the docs word budget total stays at the halved set plus 10%; trim prose instead of raising it');
   assert.equal(budget.perPage, 1_200, 'the docs word budget per-page cap stays 1,200; trim prose instead of raising it');
 });

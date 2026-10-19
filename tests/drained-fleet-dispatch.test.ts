@@ -13,8 +13,6 @@ import * as failures from '../src/daemon/dispatch-failures.js';
 import { dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
 import { classifyBlocker, environmentalBlockerClasses } from '../src/model/blocker-class.js';
 import { workerSlotWait } from '../src/model/action-kinds.js';
-import { controlPlaneHandlers } from '../src/executor.js';
-import type { ActionRow } from '../src/model/actions.js';
 import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -133,7 +131,7 @@ test('unit:idle-agent-profile-dispatchable — a profile whose name a finished, 
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a finished session, the loop and an executor both dispatch the ready priority-1 item', async () => {
+test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a finished session, the loop dispatches the ready priority-1 item', async () => {
   const items = [work('GY-1309', { stage: 'done', epoch: 2 }), work('GY-1310', { priority: 1 })];
   // The loop: one tick dispatches, and records no "No worker profile can take" escalation.
   const dispatched: string[] = [];
@@ -149,26 +147,10 @@ test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a f
   assert.deepEqual(dispatched, ['GY-1310:one'], 'the drained fleet takes the ready item');
   assert.deepEqual(Object.values(state.actions).filter(action => /No worker profile can take/.test(action.detail ?? '')), []);
 
-  // The executor's dispatch handler, from the same snapshot.
-  const launched: string[] = [];
-  const handlers = controlPlaneHandlers(() => config(fleet), {
-    snapshot: async () => ({ work: items, now: observedAt }), mutate: async () => ({}), agents: async () => drained(),
-    workerCredentials: async list => available(list), producerCredentials: async () => ({}),
-    dispatchWorker: async (item, chosen) => { launched.push(`${item.key}:${chosen.name}`); return {}; },
-    launchReview: async () => ({}), launchProducer: async () => ({}),
-  });
-  const row = { id: 'row-1', kind: 'dispatch', work: 'id-GY-1310', key: 'GY-1310', inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] } } as unknown as ActionRow;
-  assert.match(String(await handlers.dispatch!(row, { id: 'executor-1', host: 'coordinator-host' })), /dispatched GY-1310 to one/);
-  assert.deepEqual(launched, ['GY-1310:one']);
-
-  // The refusal still fires when no profile is genuinely launchable.
+  // The loop still dispatches nothing when no profile is genuinely launchable.
   const working = drained().map(agent => ({ ...agent, agent_status: 'working' }));
-  const refuse = controlPlaneHandlers(() => config(fleet), {
-    snapshot: async () => ({ work: items, now: observedAt }), mutate: async () => ({}), agents: async () => working,
-    workerCredentials: async list => available(list), producerCredentials: async () => ({}), dispatchWorker: async () => ({}),
-    launchReview: async () => ({}), launchProducer: async () => ({}),
-  }).dispatch!;
-  await assert.rejects(async () => refuse(row, { id: 'executor-1', host: 'coordinator-host' }), /no worker profile can take GY-1310: one \(Herdr agent agent-one is working\)/);
+  await runCycle(config(fleet), emptyDaemonState(config(fleet)), { ...effects, agents: async () => working, herdr: () => ({ agents: working, available: true }) }, () => clock);
+  assert.deepEqual(dispatched, ['GY-1310:one'], 'a working fleet takes nothing');
 });
 
 test('unit:dispatch-blocker-clears-on-fleet-recovery — fleet-idle failures never reach the bound, and a dispatch-failure blocker clears once a profile can launch', async () => {

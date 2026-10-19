@@ -6,13 +6,11 @@ import { join } from 'node:path';
 import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
-import type { ActionRow } from '../src/model/actions.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, verdictIngestGraceMs, type DispatchEffects } from '../src/auto-dispatch.js';
-import { controlPlaneHandlers } from '../src/executor.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01 verdict timestamps are the recorded GY-1083 instances and only order replayed verdicts; observedAt, closedAt, requestedAt and expiry are built relative to Date.now().
@@ -22,8 +20,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // reviewer session posted its verdict, and the loop's reconciliation, reading GitHub directly,
 // settled its ledger record `completed` with that verdict. The control plane closes the request
 // only once its own observation reads the verdict, minutes later, and in that window a launcher —
-// the executor's request-review row (GY-957, GY-811, GY-566, GY-453, GY-887, GY-980, GY-1078) or
-// the loop's tick past its ingest grace (GY-806, GY-980) — still read the request as open, found no
+// an executor's request-review row (GY-957, GY-811, GY-566, GY-453, GY-887, GY-980, GY-1078, since
+// removed) or the loop's tick past its ingest grace (GY-806, GY-980) — still read the request as open, found no
 // pending session, and launched a second one whose verdict conflicted with the first.
 // The test is named for the proof it produces: manual:fault-class-review-convergence.
 
@@ -124,16 +122,6 @@ for (const [index, instance] of instances.entries()) {
       assert.equal(request.state, 'requested', 'the launchers read the request as still open');
       const first = answered(instance, verdictIngestGraceMs + 60_000);
       await updateReviewLedger(master.root, ledger => { ledger.reviews = [first]; });
-
-      // The executor's request-review row, as in GY-957, GY-811, GY-566, GY-453, GY-887, GY-980 and GY-1078.
-      const handlers = controlPlaneHandlers(() => config, {
-        snapshot: async () => ({ work: [work], now: new Date().toISOString() }), mutate: async () => ({}), agents: () => [],
-        workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => ({}), launchProducer: async () => ({}),
-        launchReview: (target, dispatch, herdr, observedAt) => launchReview(master.root, target, 'claude-reviewer', herdr, observedAt, { run: master.run, mint: master.mint, requestId: dispatch.id }),
-      });
-      const action = { id: 'action-1', work: work.id, key: work.key, gate: 'review', kind: 'request-review', inputs: { kind: 'request-review', provider: 'github', requestId: request.id, pr: instance.pr, sha: instance.sha, baseSha: base, policyRevision: instance.policyRevision } } as unknown as ActionRow;
-      const settled = await handlers['request-review']!(action, { id: 'exec-1', host: 'h' });
-      assert.match(String(settled), new RegExp(`already answered by reviewer session ${first.agentName} with ${instance.verdicts[0][1]} \\(review ${instance.verdicts[0][0]}\\)`));
 
       // The loop's tick past its ingest grace, as in GY-806 and GY-980.
       const tick = await runDispatchTick(config, emptyDispatchCursor(config), {

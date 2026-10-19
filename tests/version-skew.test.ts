@@ -238,17 +238,17 @@ test('unit:state-files-forward-tolerant — setupRepository keeps what a newer C
   const input = { url: 'http://127.0.0.1:4310', cliPath: launcher, hostId: 'host-a', token: 'worker-token-'.padEnd(40, 'x') };
   try {
     // The newer CLI's setup declares a field this version does not know; the forward-tolerant schema keeps it and the writer writes it.
-    await setupRepository(root, { ...input, futureConnection: { addedBy: 'a newer CLI' } } as any, { fetcher, executors: false });
+    await setupRepository(root, { ...input, futureConnection: { addedBy: 'a newer CLI' } } as any, { fetcher });
     assert.deepEqual((await loadConnection(root) as any)!.futureConnection, { addedBy: 'a newer CLI' });
     // The older CLI's rerun builds its input fresh from the fields it declares — the exact drop the item forbids.
-    await setupRepository(root, { ...input }, { fetcher, executors: false });
+    await setupRepository(root, { ...input }, { fetcher });
     const reread = await loadConnection(root) as any;
     assert.deepEqual(reread!.futureConnection, { addedBy: 'a newer CLI' }, 'the rerun kept the newer field the file already held');
     assert.equal(reread!.hostId, 'host-a');
     assert.equal(reread!.principal, 'worker-a', 'the rerun still writes the fields it verifies');
     // Setup rerun against a newly selected server with no credential (install.ts drops the saved one):
     // only undeclared fields ride along, so server A's token and principal never pair with server B.
-    await setupRepository(root, { url: 'http://localhost:4311', cliPath: launcher, hostId: 'host-a' }, { fetcher, executors: false });
+    await setupRepository(root, { url: 'http://localhost:4311', cliPath: launcher, hostId: 'host-a' }, { fetcher });
     const moved = await loadConnection(root) as any;
     assert.equal(moved!.url, 'http://localhost:4311');
     assert.equal(moved!.token, undefined, 'the old server\'s token is not carried to the new one');

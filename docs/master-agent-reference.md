@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 7 | executors -->
+<!-- page: Operate Graphyard | 7 | typed actions -->
 # Master-agent reference
 
 ## Items, scope and human waits
@@ -17,9 +17,9 @@ Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `g
 
 Graphyard's one remote credential is the merge writer's deploy key ([install](install.md)). `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing credential. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; `harness` drift is reapplied each cycle.
 
-## Typed actions and executors
+## Typed actions
 
-`nextAction`: `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`escalate`. `dispatch`/`request-review` complete if a session answers the head. Three failures, unchanged reason: stalled rather than retrying; backoff never outlives it. A declared executor kind the running code no longer has stops no slot (GY-2163): the slot serves the kinds the code still runs, and `--install` rewrites `.graphyard/executors.json` without them.
+`nextAction`: `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`escalate`. `dispatch`/`request-review` complete if a session answers the head. Three failures, unchanged reason: stalled rather than retrying; backoff never outlives it.
 
 ## Recovery
 

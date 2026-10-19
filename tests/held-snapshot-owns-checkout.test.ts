@@ -31,7 +31,6 @@ const iso = (offsetMs = 0) => new Date(clock + offsetMs).toISOString();
 const git = (root: string, ...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 /** The runner's error carries git's exit status, as the loop's own child runner's does. */
 const runPlain: ChildRun = async (command, args) => execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-const restarted = (to: string) => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
 const verified = (sha: string): DaemonState['deployment'] => deploymentObservationSchema.parse({ source: 'endpoint', sha, at: iso(), reason: null, deployed: ['GY-1'], pending: [] });
 
 /**
@@ -71,11 +70,10 @@ async function world(label: string, launcher: 'snapshot' | 'checkout') {
   return { origin, root, snapshot, loaded, tip, master };
 }
 
-/** The upgrade's dependencies: the real git, recorded fleet restarts and self re-executions, the fixed clock. */
+/** The upgrade's dependencies: the real git, recorded self re-executions, the fixed clock. */
 function recording(root: string) {
-  const calls = { executors: [] as string[], self: 0, persisted: 0 };
+  const calls = { self: 0, persisted: 0 };
   const deps = (extra: Partial<SelfUpgradeDeps> = {}): SelfUpgradeDeps => ({ root, run: runPlain,
-    restartExecutors: async to => { calls.executors.push(to); return restarted(to); },
     restartSelf: async () => { calls.self += 1; }, persist: async () => { calls.persisted += 1; }, now: () => clock, ...extra });
   return { calls, deps };
 }
@@ -136,17 +134,16 @@ test('unit:held-snapshot-owns-checkout — an alignment that cannot move the ser
     assert.deepEqual(held, { outcome: 'up-to-date', commit: loaded }, 'the alignment targets the served commit, not the tip');
     assert.equal(readHeldCli(root), loaded, 'the pin stays on the server\u2019s commit');
     assert.ok(!existsSync(heldCliSnapshotAt(root, tip)), 'no snapshot of the unserved tip was cut');
-    assert.deepEqual(calls.executors, [], 'no fleet restart onto code the server does not report');
     assert.equal(calls.self, 0);
     assert.ok(calls.persisted >= 1, 'the pass still records its alignment');
     assert.equal(git(root, 'rev-parse', 'HEAD'), loaded, 'the checkout is untouched');
     assert.equal(await readFile(join(root, 'AGENTS.md'), 'utf8'), 'instructions for A, rewritten by repository setup\n');
 
     // The server moves to B (its deployment verified): now the pin follows it exactly — the tip is
-    // snapshotted for the dirty checkout, the launcher pinned, the loop and the fleet restarted on.
+    // snapshotted for the dirty checkout, the launcher pinned, the loop restarted on.
     state.deployment = verified(tip);
     const moved = await performSelfUpgrade(master, state, deps({ loadedFrom: join(snapshot, 'src', 'daemon', 'upgrade.ts') }));
-    assert.deepEqual(moved, { outcome: 'upgraded', from: loaded, to: tip, code: true, executors: restarted(tip), self: true, left: { checkout: loaded, dirty: ['AGENTS.md'] } });
+    assert.deepEqual(moved, { outcome: 'upgraded', from: loaded, to: tip, code: true, self: true, left: { checkout: loaded, dirty: ['AGENTS.md'] } });
     assert.equal(readHeldCli(root), tip, 'the pin names the commit the server reports');
     assert.deepEqual(state.upgrade.snapshot, { at: iso(), commit: tip, checkout: loaded, dirty: ['AGENTS.md'] });
   } finally {
@@ -168,15 +165,13 @@ test('unit:held-snapshot-owns-checkout — a clean checkout an undeployable upgr
     assert.deepEqual(held, { outcome: 'up-to-date', commit: loaded }, 'the checkout holds the served commit and stays there');
     assert.equal(readHeldCli(root), loaded, 'the pin names the commit the server reports');
     assert.equal(git(root, 'rev-parse', 'HEAD'), loaded, 'the checkout never moved onto the unserved tip');
-    assert.deepEqual(calls.executors, []);
     assert.equal(calls.self, 0);
 
     // The same tip, now verified served: the alignment moves onto it and restarts, as it always did.
     state.deployment = verified(tip);
     const moved = await performSelfUpgrade(master, state, deps());
-    assert.deepEqual(moved, { outcome: 'upgraded', from: loaded, to: tip, code: true, executors: restarted(tip), self: true });
+    assert.deepEqual(moved, { outcome: 'upgraded', from: loaded, to: tip, code: true, self: true });
     assert.equal(git(root, 'rev-parse', 'HEAD'), tip);
-    assert.deepEqual(calls.executors, [tip]);
     assert.equal(calls.self, 1);
     assert.equal(readHeldCli(root), null, 'the move lifted the pin: the checkout runs the served release itself');
   } finally {
