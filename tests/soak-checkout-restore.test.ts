@@ -45,7 +45,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 
 const worktree = fileURLToPath(new URL('..', import.meta.url));
 const helper = fileURLToPath(new URL('./helpers/checkout-restore-serve-child.ts', import.meta.url));
-/** The fixture release's CLI entry: starts the serve helper the way bin/graphyard.mjs starts src/cli.ts, naming the snapshot it runs from. */
+/** The fixture release's CLI entry: starts the serve helper the way the act's serve child starts a release's own src/cli.ts (GY-2437), naming the snapshot it runs from. */
 const releaseEntry = `#!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -70,7 +70,8 @@ async function installation() {
   execFileSync('git', ['init', '-q', '-b', 'main', main], { stdio: 'ignore' });
   git(main, 'config', 'user.email', 't@example.com'); git(main, 'config', 'user.name', 'T');
   await mkdir(join(main, 'src', 'cli'), { recursive: true }); await mkdir(join(main, 'bin'), { recursive: true });
-  await writeFile(join(main, 'bin', 'graphyard.mjs'), releaseEntry);
+  await writeFile(join(main, 'src', 'cli.ts'), releaseEntry);
+  await writeFile(join(main, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
   await writeFile(join(main, 'src', 'cli', 'checkout-restore-release.ts'), `export const checkoutRestoreServeFlag = '--serve';\nexport const checkoutRestoreGrantVariable = ${JSON.stringify(checkoutRestoreGrantVariable)};\nexport const checkoutRestoreGrantKind = ${JSON.stringify(checkoutRestoreGrantKind)};\n`);
   await writeFile(join(main, 'src', 'loop.ts'), 'export const loop = 1;\n');
   await writeFile(join(main, '.gitignore'), '.graphyard/\n');
