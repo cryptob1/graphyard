@@ -89,7 +89,7 @@ export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 /** GY-852: paste by pane_id, else name (profiles reuse names across sessions). */
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
-/** An item the loop files as the operator-agent: a fault-class item, or the docs trim item (GY-574), which names no class. */
+/** An item the loop files as the operator-agent: a fault-class item, which names no class. */
 export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffects, ReadingEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;

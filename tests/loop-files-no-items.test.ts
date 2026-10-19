@@ -102,7 +102,7 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
   console.error = line => logs.push(String(line));
   try {
     state.mergeWriter = emptyMergeWriterState();
-    const mergeSha = sha('merged'), reads = { ...effects, mergeWriter: { advisory: async () => ({ build: 'fail', failed: ['tests/docs-budget.test.ts'] }) } };
+    const mergeSha = sha('merged'), reads = { ...effects, mergeWriter: { advisory: async () => ({ build: 'fail', failed: ['tests/module-budgets.test.ts'] }) } };
     const step = advisoryStep as (cycle: unknown, delivered: { key: string; mergeSha: string } | null) => Promise<boolean>;
     await step({ state, effects: reads, now: () => clock, performed: [] }, { key: 'GY-87', mergeSha });
     await advisoryIdle(state);
@@ -112,15 +112,6 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
   assert.equal(logs.length, 1, JSON.stringify(logs));
   assert.match(logs[0]!, /The advisory budget tests failed on .*they are advisory, so nothing is refused, reverted or filed/);
   assert.deepEqual(Object.values(state.actions).filter(action => /advisory/i.test(action.detail) && action.work), [], 'the advisory failure files nothing');
-
-  // 5. Docs headroom exhausted: the attention line asks the master to trim, and files nothing.
-  const { docsHeadroomStatus } = await import('../src/daemon/faults.js');
-  const { docsWordBudgetOf } = await import('../src/model/documentation.js');
-  const budget = docsWordBudgetOf({ paths: ['docs/', 'README.md'], wordBudget: { total: 100, perPage: 1_000 } })!;
-  const docs = await docsHeadroomStatus('/repository', 'main', () => ({ budget, pages: { 'README.md': 60, 'docs/a.md': 45 } }));
-  assert.equal(docs.attention.length, 1, 'saturated docs raise the line');
-  assert.equal(docs.attention[0]!.role, 'master');
-  assert.match(docs.attention[0]!.next, /the loop files no item for documentation headroom/);
 
   // The recurring classes the cycle saw stand as recorded instances, never items.
   assert.ok(Object.values(state.actions).every(action => action.kind !== 'fault' || !/^Filed /.test(action.detail)), 'no fault item is filed');
@@ -154,7 +145,7 @@ test('unit:no-flake-or-advisory-items — a test that fails then passes on rerun
   console.error = line => logs.push(String(line));
   try {
     state.mergeWriter = emptyMergeWriterState();
-    const reads = { ...effects, mergeWriter: { advisory: async () => ({ build: 'fail', failed: ['tests/docs-budget.test.ts'] }) } };
+    const reads = { ...effects, mergeWriter: { advisory: async () => ({ build: 'fail', failed: ['tests/module-budgets.test.ts'] }) } };
     const step = advisoryStep as (cycle: unknown, delivered: { key: string; mergeSha: string } | null) => Promise<boolean>;
     await step({ state, effects: reads, now: () => clock, performed: [] }, { key: 'GY-87', mergeSha: sha('merged') });
     await advisoryIdle(state);

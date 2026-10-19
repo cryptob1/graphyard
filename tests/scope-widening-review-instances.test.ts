@@ -91,9 +91,10 @@ test('manual:intervention-pattern-scope-widening-review — GY-1717 against the 
   assert.deepEqual(widenings(baseFold, rows1717, []).map(asRecorded), [recorded1717]);
 });
 
-test('manual:intervention-pattern-scope-widening-review — GY-1717 against the candidate: the docs-budget gate beside a planned docs page is the revised record\'s own scope, so nothing is counted', () => {
-  assert.deepEqual(widenings(foldInterventions, rows1717, []), []);
-  assert.equal(impliedWidening({ added: ['tests/docs-budget.test.ts'], before: gy1717.before, criteria: [...gy1717.criteria, gy1717.added], documentation: docs }), true);
+test('manual:intervention-pattern-scope-widening-review — GY-1717 against the candidate: the docs-budget gate it rode in on is gone (GY-2515), so the revision reads as a widening again', () => {
+  assert.deepEqual(widenings(foldInterventions, rows1717, []).map(asRecorded), [recorded1717]);
+  assert.equal(impliedWidening({ added: ['tests/docs-budget.test.ts'], before: gy1717.before, criteria: [...gy1717.criteria, gy1717.added], documentation: docs }), false,
+    'the gate was the only ground for that path, and GY-2515 removed it');
 });
 
 // ---- GY-1700 ----------------------------------------------------------------------------------------
@@ -172,8 +173,15 @@ test('manual:intervention-pattern-scope-widening-review — GY-1662 against the 
   assert.deepEqual(widenings(baseFold, rows1662, snapshot1662).map(asRecorded), [recorded1662]);
 });
 
-test('manual:intervention-pattern-scope-widening-review — GY-1662 against the candidate: the duplicate\'s planned test and the companions beside the plan are the revised record\'s own scope, so nothing is counted', () => {
-  assert.deepEqual(widenings(foldInterventions, rows1662, snapshot1662), []);
+test('manual:intervention-pattern-scope-widening-review — GY-1662 against the candidate: the duplicate\'s planned test and the timing companion still imply, but the docs-budget gate path no longer does (GY-2515), so the revision counts', () => {
+  assert.deepEqual(widenings(foldInterventions, rows1662, snapshot1662).map(asRecorded), [recorded1662]);
+  const added = gy1662.after.filter(path => !gy1662.before.includes(path));
+  assert.equal(impliedWidening({ added, before: gy1662.before, criteria: [...gy1662.criteria, gy1662.added], documentation: docs, absorbed: gy1664.planned }), false,
+    'the one dead path is the docs-budget gate, whose ground GY-2515 removed');
+  assert.equal(impliedWidening({ added: ['tests/master-harness-remedy.test.ts', 'tests/helpers/timing-baseline.json'], before: gy1662.before, criteria: [...gy1662.criteria, gy1662.added], documentation: docs, absorbed: gy1664.planned }), true,
+    'the duplicate\'s plan and the timing companion are still the revised record\'s own scope');
+  assert.equal(impliedWidening({ added: ['tests/master-harness-remedy.test.ts', 'tests/helpers/timing-baseline.json'], before: gy1662.before, criteria: [...gy1662.criteria, gy1662.added], documentation: docs, absorbed: [] }), false,
+    'without the duplicate\'s plan its test is a widening');
 });
 
 test('manual:intervention-pattern-scope-widening-review — a duplicate\'s plan is read as its rows held it at the revision, so a later plan or closure never erases an earlier widening', () => {
@@ -221,9 +229,11 @@ test('manual:intervention-pattern-scope-widening-review — a duplicate planned 
   assert.equal(rows.some(row => row.workId === duplicate.id && row.seq < revision.seq), false, 'no row of the duplicate before the revision is in the window');
   assert.equal((await store.pool.query(`SELECT count(*)::int AS n FROM events WHERE work_id = $1 AND created_at < $2`, [duplicate.id, since])).rows[0].n > 0, true, 'its plan was set before the window');
 
-  // GY-1662's instance with no in-window duplicate row: the plan the ledger carries absorbs the test; without it the revision is a widening.
+  // GY-1662's instance with no in-window duplicate row: the plan the ledger carries absorbs the duplicate's test;
+  // the docs-budget gate path GY-2515 ungrounded, the revision reads as a widening either way, so the absorption
+  // is judged directly on the paths that remain live.
   const replayed = { ...rows1662[1], absorbed: revision.absorbed };
-  assert.deepEqual(widenings(foldInterventions, [replayed], snapshot1662), []);
+  assert.deepEqual(widenings(foldInterventions, [replayed], snapshot1662).map(asRecorded), [recorded1662]);
   assert.deepEqual(widenings(foldInterventions, [rows1662[0], { ...replayed, absorbed: [] }], snapshot1662).map(asRecorded), [recorded1662], 'a ledger read that found no plan absorbs nothing, whatever the folded rows hold');
   assert.deepEqual(widenings(baseFold, [replayed], snapshot1662).map(asRecorded), [recorded1662], 'the base counted it');
 });
@@ -235,7 +245,7 @@ test('manual:intervention-pattern-scope-widening-review — a revision adding a 
   assert.deepEqual(widenings(foldInterventions, rows1662, [snapshot1662[0]]).map(asRecorded), [recorded1662]);
   // A duplicate of another item carries nothing into this one.
   assert.deepEqual(widenings(foldInterventions, rows1662, [snapshot1662[0], { ...closed1664, closure: { ...closed1664.closure, ref: 'GY-9999' } }]).map(asRecorded), [recorded1662]);
-  // A source file no criterion names, beside the docs-budget gate, keeps GY-1717's revision a widening.
+  // A source file no criterion names keeps GY-1717's revision a widening, beside the docs-budget path whose ground GY-2515 removed.
   const wider = rows1717.map(row => ({ ...row, work: { ...row.work, plannedFiles: [...gy1717.after, 'src/launch.ts'] } }));
   assert.deepEqual(widenings(foldInterventions, wider, []).map(entry => entry.blocked), ['files outside plannedFiles: tests/docs-budget.test.ts, src/launch.ts']);
   // A row that carries no criteria to judge by, or adds nothing, is never read as implied.
@@ -248,8 +258,10 @@ test('manual:intervention-pattern-scope-widening-review — a path only a review
   const followUp = (origin: unknown, description: string | null) => ({ id: gy1717.id, key: 'GY-1717', stage: 'review', title: gy1717.title, criteria: gy1717.criteria, plannedFiles: gy1717.after, documentation: docs, origin, description });
   const finding = { reviewFollowUps: { parent: 'GY-1600', findings: [{ path: 'src/launch.ts', text: 'the launch refuses nothing', ref: 'abc123' }] } };
   const described = { reviewFollowUps: { parent: 'GY-1600', findings: [{ text: 'the launch refuses nothing', ref: 'abc123' }] } };
-  assert.deepEqual(widenings(foldInterventions, wider, [followUp(finding, null)]), []);
-  assert.deepEqual(widenings(foldInterventions, wider, [followUp(described, 'Fix the refusal in src/launch.ts.')]), []);
+  // The docs-budget gate the wider revision also added is gone (GY-2515), so the revision counts as a widening
+  // whatever grounds src/launch.ts; the follow-up ground itself is judged by the engine below.
+  assert.equal(widenings(foldInterventions, wider, [followUp(finding, null)]).length, 1);
+  assert.equal(widenings(foldInterventions, wider, [followUp(described, 'Fix the refusal in src/launch.ts.')]).length, 1);
   // The same description on an item that is no review follow-up implies nothing.
   assert.equal(widenings(foldInterventions, wider, [followUp(null, 'Fix the refusal in src/launch.ts.')]).length, 1);
   assert.equal(impliedWidening({ added: ['src/launch.ts'], before: gy1717.after, criteria: gy1717.criteria, documentation: docs, origin: finding as Work['origin'] }), true);

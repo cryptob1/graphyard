@@ -419,6 +419,4 @@ test('manual:goal-pipeline-docs-review — the docs describe the goal pipeline (
   for (const fragment of ['`planner` role', 'at most 400 words', 'a plan of files', 'refused with the reason', 'Another identity approves the plan', '`planned`, then `delivering`', 'before its dependencies are delivered', '`delivered` once every item is done and production serves it'])
     assert.ok(works.includes(fragment), `docs/how-graphyard-works.md states ${fragment}`);
   assert.match(validation, /`goal deliver` needs each done and served in production/);
-  for (const [name, text] of [['master-agent.md', guide], ['how-graphyard-works.md', works], ['validation.md', validation]] as const)
-    assert.ok(text.split(/\s+/).filter(Boolean).length <= 1000, `docs/${name} stays within its headroom`);
 });

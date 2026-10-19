@@ -169,7 +169,7 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
       { rule: 'Bash(git commit:*)', why: 'Commit the resolved merge.' },
       { rule: `Bash(${push})`, why: 'Push the resolved merge to the item\'s own branch: a plain push, never forced, refused by GitHub when the branch moved.' },
       { rule: 'Bash(npm ci)', why: 'Install dependencies when the checkout has none linked.' },
-      { rule: 'Bash(npm test:*)', why: 'Rerun the docs obligation and word-budget tests.' },
+      { rule: 'Bash(npm test:*)', why: 'Rerun the docs obligation check.' },
     ];
     const forced = workerHarnessPlan({ cliPath: input.cliPath, branch: input.branch, baseBranch: input.baseBranch, credentialHome: input.credentialHome }).deny
       .filter(entry => entry.rule.startsWith('Bash(git push ') || entry.rule.startsWith('Bash(git -* push '));
