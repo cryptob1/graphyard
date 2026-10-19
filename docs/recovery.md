@@ -11,7 +11,7 @@ Postgres/S3 (`GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_*`); over `
 
 ## Rollback
 
-Completes when [verified](delivery.md#observe-and-verify):
+The loop rolls back failed [continuous deploys](delivery.md#release-candidates). Others complete when [verified](delivery.md#observe-and-verify):
 
 ```json
 {"kind":"registration","id":"production-rollback","expectedRevision":0,"principalId":"railway-rollback","role":"rollback","environment":{"id":"production","revision":1},"adapterVersion":"custom-v1","proofs":[],"enabled":true,"services":["api","web"],"rollback":{"fencing":"provider","automatic":true}}
@@ -45,4 +45,4 @@ Executors `POST` `/api/delivery/rollback-claim`, then `rollback-settle` (`applie
 
 ## Coordinator recovery
 
-Self-merge stalled the loop, or main-watch froze: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; verified promotions repin.
+Self-merge stalled the loop, or main-watch froze: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin.
