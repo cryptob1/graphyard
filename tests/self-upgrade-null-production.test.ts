@@ -250,20 +250,15 @@ test('unit:loaded-revision-names-last-restart-attempt — a restart owed that ca
   assert.doesNotMatch(loadedRevision(state, { ...revision, checkout: tip }, clock.now).detail!, /stalled/);
 });
 
-test('unit:loaded-revision-exception-rules — the promotion grace counts nothing only for a loop running the release production verifiably serves, and the owed-restart exception holds only for an attempt within the bound', () => {
+test('unit:loaded-revision-exception-rules — no promotion grace is left (GY-1983), and the owed-restart exception holds only for an attempt within the bound', () => {
   const revision = { behind: 81, loaded, checkout, movedAt: faultAt - 3 * hour };
   const now = faultAt;
   const cursor = (overrides: Record<string, unknown>) => ({ upgrade: { alignedRelease: loaded, pending: null }, actions: {}, ...overrides }) as Parameters<typeof owedUpgrade>[0];
   const reading = (upgrade: ResourceInputs['upgrade']) => readResources({ now, reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, disk: null,
     profiles: { workers: [], reviewers: [], producers: [] }, revision, upgrade }).find(entry => entry.id === 'loaded-revision')!;
 
-  // Branch 1, the promotion grace: the loop loaded the release production verifiably serves, and
-  // what it has not loaded waits on a promotion not yet due — nothing counts.
-  const serving = cursor({ deployment: { source: 'endpoint', sha: loaded, pending: ['GY-1436', 'GY-1437'] }, promotion: { nextDueAt: iso(now + 30 * minute), inFlight: false } });
-  const graced = reading(owedUpgrade(serving));
-  assert.equal(graced.used, 0);
-  assert.match(graced.detail!, /runs the verified release production serves, and GY-1436, GY-1437 wait on the promotion due/);
-  // The promotion overdue with nothing in validation, or production serving another release: it counts.
+  // Branch 1, the promotion grace, no longer applies (GY-1983): no promotion is ever due or in
+  // validation, so a loop behind its checkout counts whatever production serves.
   assert.equal(reading(owedUpgrade(cursor({ deployment: { source: 'endpoint', sha: loaded, pending: ['GY-1436'] }, promotion: { nextDueAt: iso(now - minute), inFlight: false } }))).used, 81);
   assert.equal(reading(owedUpgrade(cursor({ deployment: { source: 'endpoint', sha: tip, pending: ['GY-1436'] }, promotion: { nextDueAt: iso(now + 30 * minute), inFlight: false } }))).used, 81);
   // The fault's shape: production null (or unavailable) proves no served release, so no grace.

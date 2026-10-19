@@ -3,34 +3,19 @@
 
 Releases ([rollback](recovery.md#rollback)): `admin` sets policy; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
 
-## Release candidates
+## Continuous deploy
 
-Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`/`release/production` (`graphyard release`).
+**The master loop deploys continuously** (compose/local installs): between cycles each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case; passing, `promotion` names it and the loop restarts onto it. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`), unless the tip migrated the database; two tries until main moves. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable fail; timeouts re-queue. Release candidates, UAT, holds, soaks and promotion are gone (GY-1983); old `rc-*` tags and candidate events stay readable. `release.yml` publishes `ghcr.io/cryptob1/graphyard:X.Y.Z` on a `vX.Y.Z` tag.
 
-- `release cut [--trigger schedule|manual] [--max-prs N]` tags `rc/ID` with ≤N merges (`GRAPHYARD_RC_MAX_PRS`=10).
-- `POST /api/candidates` (`admin`/`coordinator`/`intent:create`; Idempotency-Key; `trigger`/`waitMinutes`/`since`/`sinceSha`): ≤5 oldest uncut → `C-N` (`members`/`sourceSha`/`identity`); `schedule` waits five/`waitMinutes`; floor: newest `rc/`. Tags `rc/ID` at `sourceSha`; one validation (identical replays, else 409). `everyMerges`>5→5. `POST /api/candidates/ID/promotion` selects once on ≤4h validation passing all required cases at `sha`/`identity`/`artifact`/`release`, else 409; `/api/delivery` keeps last.
-- `release uat ID` deploys `uat`, refused while unjudged <4h candidates serve; a verdictless job tags `rc-uat/ID` cancelled (git-only; unpromotable).
-- `release validate ID --url UAT_URL [--api] [--suite NAME=COMMAND]...` awaits `/healthz`, re-reading it 120s post-suites (an unreadable read recovering to the candidate SHA passes; unreadable past the window fails unreadable); runs endpoint/API (`GRAPHYARD_UAT_TOKEN`)/`browser`/suites ([validation](validation.md#release-verdicts); `GRAPHYARD_UAT_URL`, never `GRAPHYARD_TOKEN`); records `rc-uat/ID`.
-- `release promote ID` (or [accepted flakes](validation.md#release-verdicts)) deploys `rc-production/ID`; `release verify --url URL` confirms; workflow tags `YYYY.M.D[.N]`+`stable`, `version`/`/healthz` report. Direct promotion seals [imported-run hold](validation.md#release-verdicts); `admin`/`operator-agent` seal **released** holds only ([filing credential](#release-filing-credential)); unsealable refuses; planes without operator agents promote unsealed.
-- `GRAPHYARD_RELEASE_BUILD` records digests; with `GRAPHYARD_DEPLOY_DIGESTS` `uat`/`promote` deploy them, else SHA. A recorded build promotes by digest, never rebuilt, once UAT names it.
-- Failures file [holds](validation.md#release-holds), else `release follow-up ID`.
-- `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
+### Pre-merge gate
 
-**The master loop deploys continuously** (compose/local installs): between cycles each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case; passing, `promotion` names it and the loop restarts onto it. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`), unless the tip migrated the database; two tries until main moves; `graphyard master config promoteEveryMinutes` no longer applies. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases.
-
-### Release filing credential
-
-UAT's `GRAPHYARD_TOKEN` (`GRAPHYARD_RELEASE_TOKEN`) files holds/follow-ups as `graphyard-release-follow-up` (only `intent:create`, items `*`); the loop's hourly `master setup --apply` keeps it, else `master status` names the administrator's step (`graphyard operator-agent setup FILE --token-stdin`). `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`, likewise `graphyard-e2e-recorder` with only `e2e:record`, never admin. Uat imports first run read-only `release seal-check ID` (`GET /api/validation/import/seal-authority`, recording `rc-seal-check/ID.AT`); refusal fails pre-seal, `master status` naming `GRAPHYARD_RELEASE_TOKEN` (`uat`), role, rotation.
-
-### Pre-merge gate and release-candidate validation
-
-Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/chart/`upgrade` (`scripts/upgrade-from-stable.mjs`: `stable` compose upgrades intact, `/healthz`=candidate version+commit; none: skipped); UAT's `zero-touch` merges an item.
+Required: `typecheck`, `test`; the merge writer's trial runs every affected test file, the soak and timing budgets included (`scripts/ci-tests.mjs`).
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
 ### One delivery path
 
-Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard writes main ([redesign](delivery-redesign.md)).
+Exact-head gates merge; [the loop](#continuous-deploy) deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)).
 
 ### Main guard
 
@@ -38,13 +23,13 @@ Every 30s the guard reverts merges failing parent-passed checks; the [revert app
 
 ## Managed repositories
 
-`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` writes the policy to `graphyard.json` (`candidateSchedule`/`--candidate-cron CRON|off`), writes no `.github/workflows` file and removes generated `graphyard-release-candidate.yml`/`graphyard-promotion.yml` copies. `deploy.adapter`: `railway`|`command` (`deploy.uat`/`deploy.production`, given `GRAPHYARD_CANDIDATE_SHA`). `--delivery local|per-pr` overrides; `install --plan` lists.
+`init --scan` splits checks (`delivery.mergeGate`/per-candidate); `--apply` writes the policy to `graphyard.json` (`candidateSchedule`/`--candidate-cron CRON|off`), writes no `.github/workflows` file and removes generated `graphyard-release-candidate.yml`/`graphyard-promotion.yml` copies. `--delivery local|per-pr` overrides; `install --plan` lists.
 
 `mode: local` (`control-plane` default): `{"previews":"local","candidateMaxChanges":5,"productionVerification":true}`, `command` adapter, generated workflows removed; `delivery.applications` `{id,kind:"static",directory,build}`/`{id,kind:"compose",file,service,port}`; `delivery.cases` case→application; invalid refuse `init`/`install`/`/api/status` (`project.error`); **Delivery** shows it.
 
 Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds publish `/preview/KEY/`; Compose apps run isolated (own project/state/database/images; no `.env`/`include`/`extends`; refuse credentials/sockets/privileges/outside paths; `GRAPHYARD_PREVIEW_CPUS`/`_MEMORY_MB`/`_PIDS`/`_LIFETIME_MINUTES`/`_COMPOSE_LIMIT`/`_SERVICES`); `GRAPHYARD_PREVIEW_ORIGIN` serves, else sandboxed; endings/restarts remove containers/volumes/networks/images first.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (else generic); `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}` (else generic); `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed `GRAPHYARD_REPOSITORY_POLICY`; `doctor` prints it.
 
 ```json
 {"kind":"environment","id":"production","expectedRevision":0,"repository":"owner/repository","url":"https://app.example.test","instance":"production-cluster","immutable":true,"services":["api","web"],"resources":["production-smoke-account"],"delivery":{"freshnessSeconds":300,"approvalRequired":true}}
@@ -86,7 +71,7 @@ Bound cases preview items (head/main; `GRAPHYARD_PREVIEW_TITLE`): static builds 
 {"environment":{"id":"production","revision":1},"sha":"0123456789abcdef0123456789abcdef01234567","services":["api","web"],"observedAt":"2026-09-18T20:15:07Z","release":"20260918T200000Z","artifact":"tree:89abcdef0123456789abcdef0123456789abcdef"}
 ```
 
-An observation never yields Production verified: smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`, executed, none skipped. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows it. Candidates verify on newest `observe-sha`/sweep (`GRAPHYARD_PRODUCTION_IDENTITY_URL`) matching `release`/`sourceSha`/`artifact`; else `mismatched`/`unknown`.
+An observation never yields Production verified: smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`, executed, none skipped. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` per `freshnessSeconds`; `graphyard delivery` shows it. A recorded candidate promotion verifies on newest `observe-sha`/sweep (`GRAPHYARD_PRODUCTION_IDENTITY_URL`) matching `release`/`sourceSha`/`artifact`; else `mismatched`/`unknown`.
 
 `master status` `delivery`: `readyToMerged`/`mergedToProduction`/`stages` p50/p90; 7-day p90 over `deliverySpeed` alerts.
 

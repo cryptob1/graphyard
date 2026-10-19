@@ -9,7 +9,7 @@ Only Graphyard writes to main.
 
 1. **Head submission under a lease:** `complete GY-N EPOCH --head SHA`; the lease ends in the same transaction.
 2. **One serial merge writer** records merge intent, then pushes the exact tested merge commit with the install's deploy key, leased on the tested tip; between them it trial-merges and runs build and fast tests on the merged tree.
-3. **Candidates every ~10 merges or 15 quiet minutes.** The exact tested commit is promoted. On E2E failure the newest item related to the failing cases is reverted.
+3. **Each new main is deployed by the loop** ([continuous deploy](delivery.md#continuous-deploy)), its E2E cases run, and a failing deploy is rolled back.
 4. **One independent reviewer per item.** Sensitive diffs get a blocking review before step 2; the rest a non-blocking review after merge.
 
 ## Merge writer
@@ -20,7 +20,7 @@ Four oldest heads share one trial and push, each delivered at its commit; a fail
 
 Removed: GitHub Apps, branch protection, required checks, PR approval, merge queue, plannedFiles and scope requests, sync-restore, proof-producer sessions, approver agents outside sensitive diffs, docs and module budgets, rulesets, auto-merge.
 
-Kept: leases and epochs, the transactional ledger, two risk lanes, UAT on a pinned commit.
+Kept: leases and epochs, the transactional ledger, two risk lanes.
 
 ## The merger
 

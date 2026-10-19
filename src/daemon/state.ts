@@ -151,13 +151,11 @@ export const deploymentObservationSchema = z.object({
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
 /**
- * GY-1302: the loop's promotion drive (`promotionCycle`), as GitHub's scheduled runs are best-effort.
- * `dispatchedAt` is the loop's own last dispatch, so a run GitHub has not listed is never dispatched
- * twice; `lastDispatchAt`, the later of it and the newest listed cut, starts the `promoteEveryMinutes`
- * gap. GY-1488: `cutSha` is the tip the newest candidate cut; one concluded unpromoted is not re-cut.
- * GY-1491: `candidates`, the newest (merges each carries, merges on main behind it); `candidateAtDispatch`, the newest at the last dispatch.
+ * The release reading the continuous deploy (GY-1982) writes and master status reads: the base tip
+ * the loop last saw, the commit it last deployed and when, and why it did not. Not strict: a cursor
+ * written while the release-candidate drive ran (GY-1983 removed it) still carries its candidate,
+ * soak, seal-check, dispatch and run fields, which load and are dropped.
  */
-const sealCheckSchema = z.object({ mayseal: z.boolean(), role: z.string().max(64), needed: z.array(z.string().max(64)).max(8), at: z.string().max(64), secret: z.string().max(100), environment: z.string().max(100) }).strict();
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
   mainSha: z.string().nullable(),
@@ -165,42 +163,10 @@ export const promotionStateSchema = z.object({
   promotedAt: z.string().nullable(),
   /** First-parent merges on the base branch production does not run yet; null when unknown. */
   behind: z.number().int().min(0).nullable(),
-  /** When the base branch tip and the promotion record were last fetched; reused for `promotionLedgerReadMs`. */
-  ledgerReadAt: z.string().nullable().default(null),
-  inFlight: z.boolean(),
-  runsReadAt: z.string().nullable(),
-  dispatchedAt: z.string().nullable(),
-  lastDispatchAt: z.string().nullable(),
-  cutSha: z.string().nullable().optional(),
-  candidateAtDispatch: z.string().max(100).nullable().optional(),
-  candidates: z.array(z.object({
-    id: z.string().max(100),
-    sha: z.string().max(64),
-    cutAt: z.string().max(64),
-    prs: z.number().int().min(0).nullable(),
-    queued: z.number().int().min(0).nullable(),
-    /** GY-1513: the advisory soak's verdict as the candidate's record (rc-soak/ID) keeps it, once its run recorded one. */
-    soak: z.object({ result: z.string().max(32), at: z.string().max(64), run: z.string().max(500).nullable() }).strict().nullable().optional(),
-    /** GY-1882: the candidate's newest seal check (rc-seal-check/ID.AT): whether the uat release credential may seal its imports. */
-    sealCheck: sealCheckSchema.optional(),
-  }).strict()).max(5).optional(),
-  /** GY-1882: the newest candidates' seal checks, read on their own while the drive reads no ledger (promotion off, or no local ports). */
-  sealChecks: z.array(z.object({ id: z.string().max(100), sealCheck: sealCheckSchema.optional() }).strict()).max(5).optional(),
-  sealChecksReadAt: z.string().nullable().optional(),
-  /** GY-1513: the newest advisory soak runs (release-candidate-soak.yml), by the SHA each soaks; never holds promotion back. */
-  soaks: z.array(z.object({
-    sha: z.string().max(64),
-    status: z.string().max(32),
-    conclusion: z.string().max(32).nullable(),
-    createdAt: z.string().max(64),
-    url: z.string().max(500).nullable(),
-  }).strict()).max(10).optional(),
-  soaksReadAt: z.string().nullable().optional(),
-  nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
   /** GY-1982: the base tip whose continuous deploy failed, the step and why, and what the loop did about it. */
   deployFailed: z.object({ sha: z.string().max(64), step: z.string().max(32), reason: z.string().max(500), rolledBackTo: z.string().max(64).nullable(), kept: z.boolean(), attempts: z.number().int().min(1), at: z.string().max(64) }).strict().nullable().optional(),
-}).strict();
+});
 export type PromotionState = z.infer<typeof promotionStateSchema>;
 
 /** What one reclamation did, kept on the cursor so `master status` reports it without rescanning. */
@@ -515,8 +481,8 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
-  promotion: promotionStateSchema.nullable().default(null), // the loop's promotion drive (GY-1302)
-  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits and the promotion freeze; lazy as main-watch.ts imports this module
+  promotion: promotionStateSchema.nullable().default(null), // the continuous deploy's release reading (GY-1982)
+  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits; lazy as main-watch.ts imports this module
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),

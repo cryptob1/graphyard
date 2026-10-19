@@ -117,8 +117,6 @@ export interface InstallInputs {
    * saved registration or the checkout's `.graphyard/github-app.json` before asking for a browser click.
    */
   githubAppFile?: string;
-  /** Create the cost-bearing UAT and production resources the plan marks as human decisions (GY-1102). */
-  createEnvironments?: boolean;
 }
 
 export function installIdFor(repository: string) {

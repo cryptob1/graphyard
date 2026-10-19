@@ -49,10 +49,8 @@ test('--plan produces a complete ordered plan and redacts every value that is a 
     assert.equal(values.find(value => value.name === 'GITHUB_REPOSITORY')!.value, 'owner/project');
 
     // The plan states the exact human inputs and nothing else is required of a person.
-    // Per-pr delivery has no UAT or production environments to create, so no --create-environments step.
     // GY-2009: no App browser step among them.
     assert.equal(plan.humanSteps.length, 2);
-    assert.doesNotMatch(plan.humanSteps.join(' '), /--create-environments/);
     assert.match(plan.humanSteps.join(' '), /provider CLI and GitHub CLI/);
     assert.ok(!plan.actions.some(action => action.human && /browser confirmation/i.test(action.human)), 'no App browser step');
 

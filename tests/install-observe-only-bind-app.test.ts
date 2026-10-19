@@ -71,18 +71,15 @@ async function observeOnlyInstallation(options: {
       return { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: bound, githubAppId: bound ? APP_ID : null, githubInstallationId: bound ? INSTALLATION_ID : null };
     } });
   await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, delivery: releaseCandidate }));
-  const calls = { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 };
+  const calls = { githubApp: 0, registerProfiles: 0, runHerdr: 0 };
   const logs: string[] = [];
   const deps: InstallDependencies = { ...fixture.deps, log: line => logs.push(line),
     githubApp: async () => { calls.githubApp++; throw new Error('observation-only must not open the App flow'); },
     registerProfiles: async () => { calls.registerProfiles++; throw new Error('observation-only must not register profiles'); },
     runHerdr: () => { calls.runHerdr++; return ''; } };
-  const wrap = (adapter: any) => ({ ...adapter, provision: async (...args: any[]) => { calls.provision++; return adapter.provision(...args); } });
   // The observation-only control plane this App is bound to, deployed first by a plain observation-only apply.
   const observe = async (mode: 'plan' | 'apply') => {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway', observeOnly: true }, deps, mode);
-    session.delivery.adapter = wrap(session.delivery.adapter);
-    return session;
+    return prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway', observeOnly: true }, deps, mode);
   };
   const first = await observe('apply');
   await applyInstall(first, await buildPlan(first));
@@ -286,7 +283,7 @@ test('unit:observe-only-bind-app-writes-only-app-variables — graphyard app bin
     assert.ok(!JSON.stringify(record).includes(IMPORTED_SECRET), 'the record holds the webhook secret');
     assert.ok(summary.nextSteps.some(step => /Observation-only: GitHub App graphyard-owner-project-imported \(app 310077\) is bound to the control plane, and nothing owner\/project or its product owns was changed/.test(step)));
     assert.ok(logs.some(line => /Repointing the App webhook/.test(line)));
-    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 });
+    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0 });
 
     // A second identical run: every step is reported satisfied, and nothing is written again.
     const replanned = await bindPlan();
@@ -320,10 +317,9 @@ test('unit:bind-app-holds-protection-wiring-profiles-herdr — graphyard app bin
     await importApp();
     const plan = await bindPlan();
     const heldActions = plan.actions.filter(action => action.state === 'held');
-    assert.deepEqual(heldActions.map(action => action.id), ['github.protection', 'release.branches', 'release.github-environments', 'release.railway.project', 'release.railway.uat', 'release.railway.production', 'verify.webhook', 'local.workers', 'local.profiles', 'local.herdr']);
+    assert.deepEqual(heldActions.map(action => action.id), ['github.protection', 'verify.webhook', 'local.workers', 'local.profiles', 'local.herdr']);
     for (const action of heldActions) assert.ok(action.held!.startsWith(`${OBSERVE_ONLY_HELD}: `), `${action.id} is not named as held by observation-only`);
     assert.match(plan.actions.find(action => action.id === 'github.protection')!.held!, /branch protection, auto-merge and merge-queue settings are never written/);
-    assert.match(plan.actions.find(action => action.id === 'release.branches')!.held!, /release refs are not created/);
     assert.match(plan.actions.find(action => action.id === 'verify.webhook')!.held!, /no check run is published/);
     assert.match(plan.actions.find(action => action.id === 'local.profiles')!.held!, /no profile, supervisor unit or master loop/);
     assert.match(plan.actions.find(action => action.id === 'local.herdr')!.held!, /Herdr is left untouched/);
@@ -341,7 +337,7 @@ test('unit:bind-app-holds-protection-wiring-profiles-herdr — graphyard app bin
     assert.deepEqual(summary.profiles.reviewers, []);
     assert.equal(summary.profiles.master.configured, false);
     assert.equal(summary.profiles.repository.herdr, false);
-    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 });
+    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0 });
     assert.deepEqual((await readRecord()).principals, principalsBefore, 'the bind changed the principals');
 
     let lines = fixture.allCommandLines().slice(mark);
@@ -374,7 +370,7 @@ test('unit:bind-app-holds-protection-wiring-profiles-herdr — graphyard app bin
     assert.ok(!lines.some(line => /--method (POST|PUT|PATCH|DELETE)/.test(line)), 'the observation-only rerun wrote to GitHub');
     requests = fixture.requests.slice(requestsBefore);
     assert.ok(!requests.some(request => request.method === 'PATCH' && request.url.endsWith('/app/hook/config')), 'the observation-only rerun repointed the webhook');
-    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 });
+    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0 });
   } finally { await fixture.cleanup(); }
 });
 

@@ -83,7 +83,7 @@ function instanceState(instance: typeof instances[number], shape: 'awaiting' | '
   } else {
     // Production serves what the loop loaded, and the promotion that would serve the rest is overdue.
     state.deployment = { source: 'endpoint', sha: instance.loaded, at: instance.at, reason: null, deployed: [], pending: ['GY-1450'] };
-    state.promotion = { checkedAt: instance.at, mainSha: instance.checkout, promotedSha: instance.loaded, promotedAt: null, behind: instance.behind, ledgerReadAt: null, inFlight: false, runsReadAt: null, dispatchedAt: null, lastDispatchAt: null, nextDueAt: iso(at - hour), reason: null };
+    state.promotion = { checkedAt: instance.at, mainSha: instance.checkout, promotedSha: instance.loaded, promotedAt: null, behind: instance.behind, reason: null };
   }
   return state;
 }
@@ -148,8 +148,7 @@ test('manual:fault-class-resources — GY-1464: the restart owed while productio
 
   // GY-1982: the promotion schedule no longer holds the pass; the loop deploys and restarts onto its tip.
   const waiting = instanceState(instance, 'served-overdue'), fake = new FakeGit(instance.checkout, instance.checkout), fleet = { held: false, self: 0, executors: [] as string[] };
-  waiting.promotion = { ...waiting.promotion!, nextDueAt: iso(faultAt + 30 * minute) };
-  assert.equal(loadedRevision(waiting, revision, faultAt).used, 0);
+  assert.ok((loadedRevision(waiting, revision, faultAt).used ?? 0) > 0, 'no promotion is ever due since GY-1983, so nothing excuses the lag until the restart lands');
   assert.equal((await performSelfUpgrade(master, waiting, deps(fake, { now: faultAt }, fleet))).outcome, 'upgraded');
   assert.equal(fleet.self, 1);
 

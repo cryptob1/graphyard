@@ -14,7 +14,6 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks } from '../src/model/delivery-policy.js';
-import { renderReleasePipeline } from '../src/install/release-pipeline.js';
 import { prepareInstall, repositoryDelivery } from '../src/install/index.js';
 import { installIdFor } from '../src/install/types.js';
 import { harness, REPOSITORY } from './install-harness.js';
@@ -103,7 +102,6 @@ test('integration:goal-local-delivery-onboarding — normal init of a fixture re
   for (const path of [...generatedWorkflowFiles, deliveryWorkflowFile]) assert.equal(await exists(join(root, path)), false, `${path} is not generated`);
   assert.equal(delivery.deploy.adapter, 'command');
   const policy = deliveryPolicySchema.parse(delivery);
-  assert.deepEqual(renderReleasePipeline(policy), []);
   assert.deepEqual(requiredPullRequestChecks(policy), ['test', 'build'], 'pull requests wait only on the repository\'s own checks, never a generated workflow\'s');
   // The install reads the committed declaration and deploys it for the control plane to serve.
   const installed = await repositoryDelivery(root);

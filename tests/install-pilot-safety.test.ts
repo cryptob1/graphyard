@@ -268,7 +268,7 @@ test('unit:install-app-timeout-resume — the resume command carries every insta
     reviewer: 'claude-reviewer', reviewPolicy: 'agent', requiredChecks: ['ci / test', "lint's check"], reviewCount: 2,
     sshHost: '203.0.113.7', sshUser: 'deploy', sshKey: 'operator key', workspace: 'My Team', image: 'ghcr.io/example/graphyard:1.2',
     port: 4320, serverName: 'foo', serverType: 'cx32', location: 'fsn1', maxMonthly: 19.52, confirmPrice: 7.05,
-    createEnvironments: true, herdr: 'rebind',
+    herdr: 'rebind',
   };
   const roundTrip = async (request: InstallRequest) => {
     const command = resumeCommand({ inputs: { baseBranch: 'main', ...request } as any });
@@ -279,7 +279,7 @@ test('unit:install-app-timeout-resume — the resume command carries every insta
   };
   const server = await roundTrip(everything);
   assert.deepEqual(server.parsed, { ...everything, noGithubApp: true }, 'every request is App-free (GY-2009)');
-  for (const flag of ['--ssh-user deploy', "--ssh-key 'operator key'", '--server-name foo', '--server-type cx32', '--location fsn1', '--create-environments', '--max-monthly 19.52', '--confirm-price 7.05', "--workspace 'My Team'", '--herdr-rebind']) assert.ok(server.command.includes(flag), `${flag} in ${server.command}`);
+  for (const flag of ['--ssh-user deploy', "--ssh-key 'operator key'", '--server-name foo', '--server-type cx32', '--location fsn1', '--max-monthly 19.52', '--confirm-price 7.05', "--workspace 'My Team'", '--herdr-rebind']) assert.ok(server.command.includes(flag), `${flag} in ${server.command}`);
   // A self-contained host keeps --target, --local and --migrate; --no-herdr survives too.
   const host: InstallRequest = { repository: REPOSITORY, provider: 'host', selfContained: true, local: true, migrate: true, herdr: 'skip' };
   const resumedHost = await roundTrip(host);

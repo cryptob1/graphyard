@@ -18,6 +18,6 @@ export { masterSessionStep, masterLaunchKey, masterSetupKey, type MasterRotation
 export { cycleFaults, baseConflictInMotion, timingFaultAttention, onceAnnotations, herdrFaultKinds, restatements, endFailingRuns, fileRecurringFaultClasses, faultRecurrenceReport, faultStep, faultObservationIntervalMs, baseConflictWaitBoundMs, mergeBaseDismissalWaitBoundMs, mergeBaseDismissalInMotion, reworkDecisionWaitBoundMs, reworkDecisionInMotion, containmentSettleWaitBoundMs, containmentInMotion, owedContainmentLine, owedEscalationInMotion, type ReportedAttention, type FaultSources } from './daemon/faults.js';
 export { automaticScopeGrounds, successorStep } from './daemon/cycle-scope.js';
 export { closeEndedWorkerPanes } from './daemon/cycle-reclaim.js';
-export { deploymentPageSize, deploymentListingPages, maxDeploymentRequests, productionEnvironmentRecord, observeDeployment, promotionWorkflow, promotionReads } from './daemon/deployment.js';
+export { deploymentPageSize, deploymentListingPages, maxDeploymentRequests, productionEnvironmentRecord, observeDeployment } from './daemon/deployment.js';
 export { daemonSummary, noteConfigReload, noteWatchdog, runDaemon } from './daemon/run.js';
 export { baseFailureStep, baseFailureAttention } from './daemon/cycle-base-failures.js';

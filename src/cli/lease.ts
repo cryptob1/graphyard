@@ -85,11 +85,8 @@ export function bindEvidence(input: unknown, work: { key: string; candidate?: { 
   return evidence;
 }
 
-/**
- * `release GY-N EPOCH` gives up the lease. The word is shared with release candidates, so
- * src/cli/release.ts owns the one `release` entry and hands it a work key.
- */
-export const releaseLeaseCommand: CliCommand = {
+/** `release GY-N EPOCH` gives up the lease. */
+const releaseLeaseCommand: CliCommand = {
   name: 'release',
   scope: 'work',
   help: ['  release GY-N EPOCH            Release current lease'],
@@ -110,6 +107,7 @@ export const leaseCommands = defineCommands([
     help: ['  heartbeat GY-N EPOCH          Extend current lease (refused once the epoch is submitted)'],
     run: async (context, work) => context.print(await workMutation(context, work)('heartbeat', { epoch: Number(context.args[0]) })),
   },
+  releaseLeaseCommand,
   {
     name: 'register',
     scope: 'work',

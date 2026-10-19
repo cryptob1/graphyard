@@ -21,9 +21,6 @@ test('the packaged release names one version everywhere it is stamped', () => {
   for (const marker of ['ARG GRAPHYARD_VERSION', 'ARG GRAPHYARD_BUILD_REVISION', 'ENV GRAPHYARD_VERSION=${GRAPHYARD_VERSION}', 'org.opencontainers.image.version="${GRAPHYARD_VERSION}"', 'org.opencontainers.image.revision="${GRAPHYARD_BUILD_REVISION}"']) assert.ok(dockerfile.includes(marker), marker);
   const release = read('.github/workflows/release.yml');
   assert.ok(release.includes("tags: ['v*.*.*']") && release.includes('scripts/verify-image-release.mjs') && release.includes('docker push'), 'tagged releases verify the image contract before publishing');
-  const candidate = read('.github/workflows/release-candidate.yml');
-  assert.ok(candidate.includes('scripts/verify-image-release.mjs'), 'every release-candidate image is held to the release contract');
-  assert.ok(candidate.includes('deploy/helm/exercise.sh'), 'the chart exercise runs in release-candidate validation');
   accessSync(resolve('deploy/helm/exercise.sh'), constants.X_OK);
   // The running process reports its dated release, or `unreleased <sha>` (GY-1959).
   assert.match(releaseInfo().version, /^(\d{4}\.\d{1,2}\.\d{1,2}(\.\d+)?|unreleased \S+)$/);
@@ -80,8 +77,8 @@ test('the chart refuses to render without credentials and renders the documented
   }
 });
 
-// The chart exercise (deploy/helm/exercise.sh) runs on a real cluster only in release-candidate
-// validation, so its request helper and its pod selection are proved here on their own: the shell
+// The chart exercise (deploy/helm/exercise.sh) runs on a real cluster only outside this suite
+// (by hand), so its request helper and its pod selection are proved here on their own: the shell
 // functions are cut out of the script by name and run against a local server or a fixture, and the
 // script's order of operations is read from its text, as the rest of this file reads the workflows.
 const exercise = read('deploy/helm/exercise.sh');

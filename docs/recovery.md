@@ -11,7 +11,7 @@ Postgres/S3 (`GRAPHYARD_ARTIFACT_BACKEND=s3`, `GRAPHYARD_ARTIFACT_S3_*`); over `
 
 ## Rollback
 
-The loop rolls back failed [continuous deploys](delivery.md#release-candidates). Others complete when [verified](delivery.md#observe-and-verify):
+The loop rolls back failed [continuous deploys](delivery.md#continuous-deploy). Others complete when [verified](delivery.md#observe-and-verify):
 
 ```json
 {"kind":"registration","id":"production-rollback","expectedRevision":0,"principalId":"railway-rollback","role":"rollback","environment":{"id":"production","revision":1},"adapterVersion":"custom-v1","proofs":[],"enabled":true,"services":["api","web"],"rollback":{"fencing":"provider","automatic":true}}
@@ -41,7 +41,7 @@ Executors `POST` `/api/delivery/rollback-claim`, then `rollback-settle` (`applie
 
 ## Main watch
 
-`graphyard master main-watch status` prints the unexplained commits; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. `GRAPHYARD_MAIN_WATCH_FREEZE=true` freezes promotion until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`).
+`graphyard master main-watch status` prints the unexplained commits; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. An admin acknowledges one with `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`).
 
 ## Coordinator recovery
 

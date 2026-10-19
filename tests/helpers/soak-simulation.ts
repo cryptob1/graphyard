@@ -150,22 +150,14 @@ import { type DiagnosisRun, type Failover, type RegistryFailover, MANUAL, type M
  */
 export let days = 0;
 /**
- * GY-1513: a promotion day's shape. Each release run validates for `validationMs` from its dispatch and,
- * with `promoteAfterMs` set, promotes its candidate that long in (null: the main day's runs never
- * promote; production moves on its own deploys). Each cut candidate's advisory soak is listed
- * `listedAfterMs` after the dispatch and concludes `soakMs` after it, so it outlives the run.
- */
-export interface PromotionDay { validationMs?: number; promoteAfterMs?: number | null; soakMs?: number }
-/**
  * GY-1519: the main watch over the day's moving main. Each `foreign` commit is pushed straight onto
  * main at `at` by `author`, and an admin acknowledges it through the real route `acknowledgeAfterMs`
  * after it landed (null: never). The day's own pushes to main — the file split, the NOTICE, the docs
  * reword, each a single-parent commit no delivery explains — are the operator's, acknowledged
- * `acknowledgeOwnAfterMs` after they landed (null: never). With `freeze` the loop's promotion drive
- * takes the watch's freeze. Once the watch has raised its first line, the day fills the cursor past
+ * `acknowledgeOwnAfterMs` after they landed (null: never). Once the watch has raised its first line, the day fills the cursor past
  * its bound so `pruneDaemonState` really retires the line's row, as a busy day's would be.
  */
-export interface MainWatchDay { freeze: boolean; foreign: { at: number; author: string; subject: string; acknowledgeAfterMs: number | null }[]; acknowledgeOwnAfterMs: number | null }
+export interface MainWatchDay { foreign: { at: number; author: string; subject: string; acknowledgeAfterMs: number | null }[]; acknowledgeOwnAfterMs: number | null }
 /** A commit on the day's main the watch cannot explain: pushed by the suite (`own: false`) or by the day's own script (`own: true`). */
 export interface MainWatchLanding { sha: string; at: number; subject: string; author: string; own: boolean; acknowledgeAt: number | null; acknowledgedAt: number | null }
 /**
@@ -227,11 +219,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * blocker recorded on the fleet-idle cause before the loop could reclaim.
    */
   drained?: { finishAt: number; seeded: number };
-  /**
-   * GY-1302: wire the loop's promotion drive over the day's moving main, with a stubbed ledger, run
-   * list, dispatch and (GY-1513) soak-run list; `true` is the main day's shape, an object another.
-   */
-  promotion?: boolean | PromotionDay;
   /** GY-1519: wire the loop's main watch over the day's main, with foreign commits an admin acknowledges (MainWatchDay). */
   mainWatch?: MainWatchDay;
   /**
@@ -1665,134 +1652,23 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     }
     return api(principals.coordinator, 'POST', `work/${work.id}/decomposition`, event);
   };
-  // GY-1302: the loop's promotion drive. Main moves with every merge of the day while production
-  // moves only on its deploys, so a promotion is due all day; each dispatched candidate validates
-  // for ninety minutes and GitHub lists it only two minutes after the dispatch, so the loop's own
-  // record of its dispatch is what holds the next one back meanwhile. GY-1488: promotion is
-  // continuous, so a dispatch is spaced only by the ten-minute minimum gap, and a candidate that
-  // concluded without production moving to it is never cut again from the same tip. For the day's first hour every
-  // dispatch is refused (a token without actions: write), and for the half hour after it the remote
-  // cannot be fetched: neither failure is repeated every cycle. GY-1491: each run cuts a candidate of
-  // at most ten merges after the last one, stamped by a runner clock three minutes behind the loop's.
-  // A backlog of 23 merges lands on an otherwise idle main at hour eight; the second run after it cuts
-  // nothing (a refused cut), and one more merge lands at hour sixteen, so the queue goes out as
-  // 10, then (after that merge) 10 and 4.
-  // GY-1513: the advisory soak of each cut candidate runs in a workflow of its own and outlives the
-  // release run, which concludes at promote; the loop reads the soak runs only for master status.
-  // On the main day the runs never promote (production moves on its own deploys); a promotion day
-  // promotes `promoteAfterMs` in, so the next candidate follows inside the gap while the last soaks.
-  // Soak reads fail for the half hour from hour two, which no cycle fails on.
-  const promotionDay = typeof options.promotion === 'object' ? options.promotion : {};
-  const promotion = { ledgerReads: 0, runReads: 0, dispatches: [] as number[], cuts: [] as string[], violations: [] as string[], validationMs: promotionDay.validationMs ?? 90 * minute, listedAfterMs: 2 * minute,
-    failDispatchUntil: hour, failLedger: [hour, hour + 30 * minute] as const, failedDispatches: [] as number[], failedLedgerReads: 0,
-    maxPrs: 10, runnerSkewMs: 3 * minute, landings: [{ at: 8 * hour, merges: 23, landed: false }, { at: 16 * hour, merges: 1, landed: false }],
-    mainline: [github.tip] as string[], seenTip: github.tip, candidates: [] as { id: string; sha: string; cutAt: string; prs: number; queued: number }[],
-    backlogDispatches: [] as number[], cutNothingAt: 2, emptyRuns: [] as number[], followed: [] as (string | null)[],
-    promoteAfterMs: promotionDay.promoteAfterMs ?? null, soakMs: promotionDay.soakMs ?? 110 * minute, soaks: [] as { id: string; sha: string; startedAt: number; endsAt: number; result: 'success' | 'failure' }[],
-    soakReads: 0, failedSoakReads: 0, failSoak: [2 * hour, 2 * hour + 30 * minute] as const, promoted: null as { id: string; sha: string; at: number } | null, promotions: [] as number[],
-    // When main first moved past the last cut (null once dispatched), the delay from each promoting run's conclusion to the dispatch that followed it with main already ahead, and the dispatches made while the last soak still ran.
-    aheadSince: null as number | null, followDelays: [] as number[], soakOverlaps: 0 };
-  // The stub's main: every tip the day's merges move it to, then the landed backlogs on top.
-  const promotedMain = () => {
-    const into = clock.now() - dayStart;
-    if (github.tip !== promotion.seenTip) { promotion.seenTip = github.tip; promotion.mainline.push(github.tip); }
-    for (const landing of promotion.landings) if (!landing.landed && into >= landing.at) {
-      landing.landed = true;
-      for (let index = 0; index < landing.merges; index++) promotion.mainline.push(createHash('sha1').update(`backlog ${landing.at} ${index}`).digest('hex'));
-    }
-    return promotion.mainline.at(-1)!;
-  };
-  const queuedBehind = (sha: string) => promotion.mainline.length - 1 - promotion.mainline.lastIndexOf(sha);
-  // A promotion day's runs promote their candidate `promoteAfterMs` after the dispatch: the ledger's production record moves to it then.
-  const promoteDue = () => {
-    if (promotion.promoteAfterMs === null) return;
-    promotion.dispatches.forEach((at, index) => {
-      const candidate = promotion.candidates.find(entry => entry.id === `rc-${index + 1}`), promotesAt = at + promotion.promoteAfterMs!;
-      if (candidate && clock.now() >= promotesAt && (!promotion.promoted || promotion.promoted.at < promotesAt)) { promotion.promoted = { id: candidate.id, sha: candidate.sha, at: promotesAt }; promotion.promotions.push(promotesAt); }
-    });
-  };
-  const promotedSha = () => promotion.promoted?.sha ?? production.sha;
-  const soakUrl = (soak: { id: string }) => `https://github.test/owner/repo/actions/runs/soak-${soak.id}`;
-  // The candidate's record carries the soak's verdict once its run recorded it (release-candidate-soak.yml's record job).
-  const soakRecordOf = (candidate: { id: string }) => {
-    const soak = promotion.soaks.find(entry => entry.id === candidate.id);
-    return soak && clock.now() >= soak.endsAt ? { result: soak.result === 'success' ? 'passed' : 'failed', at: new Date(soak.endsAt).toISOString(), run: soakUrl(soak) } : null;
-  };
-  const promotionEffect: DaemonEffects['promotion'] = options.promotion ? {
-    ledger: async () => {
-      promotion.ledgerReads++;
-      const into = clock.now() - dayStart, mainSha = promotedMain();
-      if (into >= promotion.failLedger[0] && into < promotion.failLedger[1]) { promotion.failedLedgerReads++; throw new Error('git fetch: Could not resolve host: github.com'); }
-      promoteDue();
-      return { mainSha, promotedSha: promotedSha(), promotedAt: promotion.promoted ? new Date(promotion.promoted.at).toISOString() : null, behind: mainSha === promotedSha() ? 0 : 1,
-        candidates: promotion.candidates.slice(-5).reverse().map(candidate => ({ ...candidate, queued: queuedBehind(candidate.sha), soak: soakRecordOf(candidate) })) };
-    },
-    runs: async () => {
-      promotion.runReads++;
-      return promotion.dispatches.filter(at => clock.now() - at >= promotion.listedAfterMs).reverse()
-        .map(at => ({ status: clock.now() < at + promotion.validationMs ? 'in_progress' : 'completed', createdAt: new Date(at).toISOString(), event: 'workflow_dispatch', headSha: promotion.cuts[promotion.dispatches.indexOf(at)] }));
-    },
-    // GY-1513: the soak workflow's runs as gh lists them, newest first, each named for the SHA it soaks.
-    soaks: async () => {
-      promotion.soakReads++;
-      const into = clock.now() - dayStart;
-      if (into >= promotion.failSoak[0] && into < promotion.failSoak[1]) { promotion.failedSoakReads++; throw new Error('gh: HTTP 502 Bad Gateway'); }
-      return promotion.soaks.filter(soak => clock.now() >= soak.startedAt).slice(-20).reverse().map(soak => ({ sha: soak.sha, status: clock.now() < soak.endsAt ? 'in_progress' : 'completed',
-        conclusion: clock.now() < soak.endsAt ? null : soak.result, createdAt: new Date(soak.startedAt).toISOString(), url: soakUrl(soak) }));
-    },
-    dispatch: async () => {
-      const now = clock.now(), last = promotion.dispatches.at(-1), tip = promotedMain(), into = Math.round((now - dayStart) / minute);
-      if (now - dayStart < promotion.failDispatchUntil) { promotion.failedDispatches.push(now); throw new Error('gh: HTTP 403: Resource not accessible by integration'); }
-      promoteDue();
-      if (tip === promotedSha()) promotion.violations.push(`+${into} min: dispatched while production runs main`);
-      if (last !== undefined && now < last + promotion.validationMs) promotion.violations.push(`+${into} min: dispatched while the candidate of +${Math.round((last - dayStart) / minute)} min is in validation`);
-      const gap = deploymentStep.defaultPromoteEveryMinutes * minute;
-      // GY-1513: the gap spaces runs that concluded without promoting; a run that promoted is followed at once.
-      const lastPromoted = last !== undefined && !!promotion.promoted && promotion.promoted.at >= last;
-      if (last !== undefined && now - last < gap && !lastPromoted) promotion.violations.push(`+${into} min: dispatched ${Math.round((now - last) / minute)} min after the last`);
-      if (last !== undefined && lastPromoted && promotion.aheadSince !== null && promotion.aheadSince <= last + promotion.validationMs) promotion.followDelays.push(now - (last + promotion.validationMs));
-      if (promotion.soaks.some(soak => soak.startedAt <= now && now < soak.endsAt)) promotion.soakOverlaps++;
-      promotion.aheadSince = null;
-      const refused = promotion.failedDispatches.at(-1);
-      if (refused !== undefined && now - refused < gap) promotion.violations.push(`+${into} min: dispatched ${Math.round((now - refused) / minute)} min after a refused attempt`);
-      // A tip already cut goes out again only for the merges a newer capped candidate left queued behind it.
-      const newest = promotion.candidates.at(-1) ?? null;
-      if (promotion.cuts.includes(tip) && !(newest && queuedBehind(newest.sha) > 0 && newest.id !== promotion.followed.at(-1)))
-        promotion.violations.push(`+${into} min: cut ${tip.slice(0, 12)} again after its candidate concluded with nothing queued behind a new candidate`);
-      promotion.dispatches.push(now); promotion.cuts.push(tip); promotion.followed.push(newest?.id ?? null);
-      if (promotion.landings[0].landed) promotion.backlogDispatches.push(now);
-      // The run cuts at most maxPrs merges after the newest candidate, at the last in merge order; the configured one cuts nothing.
-      if (promotion.backlogDispatches.length === promotion.cutNothingAt) { promotion.emptyRuns.push(now); return; }
-      const from = newest ? promotion.mainline.lastIndexOf(newest.sha) : -1, waiting = promotion.mainline.length - 1 - from;
-      if (newest && waiting <= 0) return;
-      const prs = newest ? Math.min(waiting, promotion.maxPrs) : 1, sha = newest ? promotion.mainline[from + prs] : tip;
-      const id = `rc-${promotion.dispatches.length}`;
-      promotion.candidates.push({ id, sha, cutAt: new Date(now - promotion.runnerSkewMs).toISOString(), prs, queued: queuedBehind(sha) });
-      // The run starts the candidate's soak, which gh lists once it is queued; every third one fails, deciding nothing.
-      promotion.soaks.push({ id, sha, startedAt: now + promotion.listedAfterMs, endsAt: now + promotion.soakMs, result: promotion.soaks.length % 3 === 2 ? 'failure' : 'success' });
-    },
-  } : undefined;
   // GY-1519: the loop's main watch. Its history read walks main's first parents in the simulated
-  // GitHub from the tip down to the promoted commit (the production record), everything since it as
-  // the real read does; its policy read is the real control plane's. Foreign commits land straight on
-  // main at their time and are acknowledged by the admin through the real route, both inside the
-  // read, as the promotion day's landings are; the day's own single-parent pushes are acknowledged
+  // GitHub from the tip down to the commit production serves, everything since it as the real read
+  // does; its policy read is the real control plane's. Foreign commits land straight on main at their
+  // time and are acknowledged by the admin through the real route, both inside the read; the day's own single-parent pushes are acknowledged
   // the same way. The day counts every read and the largest history and unknown list the watch held,
   // when each commit was first and last unknown, and whether the cursor's bound really pruned a
   // raised line's row.
   const mainWatchDay = options.mainWatch && { ...options.mainWatch, landed: [] as MainWatchLanding[], foreignLanded: new Set<number>(),
-    historyReads: 0, policyReads: 0, largestHistory: 0, largestUnknown: 0, reports: [] as { sha: string; at: number; detail: string }[], filled: false, rowPruned: false, frozenAt: [] as number[], unfrozenAt: [] as number[], reasons: new Set<string>(),
+    historyReads: 0, policyReads: 0, largestHistory: 0, largestUnknown: 0, reports: [] as { sha: string; at: number; detail: string }[], filled: false, rowPruned: false,
     // When each commit was first and last unknown; every change the policy read returned; and any commit the list dropped before its acknowledgement was recorded (the suite expects none).
-    unknownSeen: new Map<string, { first: number; last: number }>(), policyLog: [] as { at: number; acknowledged: string[]; windows: string[] }[], vanished: [] as { sha: string; at: number; tip: string | null; unknown: string[]; frozen: string | null }[],
+    unknownSeen: new Map<string, { first: number; last: number }>(), policyLog: [] as { at: number; acknowledged: string[]; windows: string[] }[], vanished: [] as { sha: string; at: number; tip: string | null; unknown: string[] }[],
     observe(result: Awaited<ReturnType<typeof runCycle>>, at: number) {
       for (const action of result.actions) if (action.detail.startsWith('Main watch:')) this.reports.push({ sha: action.detail.match(/commit ([0-9a-f]{40})/)?.[1] ?? '', at, detail: action.detail });
       this.largestUnknown = Math.max(this.largestUnknown, state.mainWatch?.unknown.length ?? 0);
       for (const entry of state.mainWatch?.unknown ?? []) { const seen = this.unknownSeen.get(entry.sha); if (seen) seen.last = at; else this.unknownSeen.set(entry.sha, { first: at, last: at }); }
       for (const [sha, seen] of this.unknownSeen) if (seen.last !== at && !this.vanished.some(entry => entry.sha === sha) && this.landed.find(entry => entry.sha === sha)?.acknowledgedAt === null)
-        this.vanished.push({ sha, at, tip: state.mainWatch?.tip ?? null, unknown: (state.mainWatch?.unknown ?? []).map(entry => entry.sha.slice(0, 8)), frozen: state.mainWatch?.frozen?.sha.slice(0, 8) ?? null });
-      const frozen = !!state.mainWatch?.frozen, was = this.frozenAt.length > this.unfrozenAt.length;
-      if (frozen && !was) this.frozenAt.push(at); else if (!frozen && was) this.unfrozenAt.push(at);
-      if (state.promotion?.reason) this.reasons.add(state.promotion.reason.replace(/frozen since \S+?: /, 'frozen since T: '));
+        this.vanished.push({ sha, at, tip: state.mainWatch?.tip ?? null, unknown: (state.mainWatch?.unknown ?? []).map(entry => entry.sha.slice(0, 8)) });
       const row = Object.keys(state.actions).find(key => key.startsWith('main-watch:'));
       if (row && !this.filled) {
         for (let index = 0; index < retainedActions + 20; index++) state.actions[`dispatch:filler:${index}`] = { kind: 'dispatch', work: null, principal: null, state: 'done', detail: 'filler', attempts: 1, epoch: null, cycle: state.cycle, at: new Date(clock.now() + index).toISOString() } as never;
@@ -1800,7 +1676,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       } else if (this.filled && !row) this.rowPruned = true;
     } };
   const mainWatchEffect: DaemonEffects['mainWatch'] = mainWatchDay ? {
-    freeze: mainWatchDay.freeze,
     history: async () => {
       const now = clock.now();
       mainWatchDay.foreign.forEach((foreign, index) => {
@@ -1811,7 +1686,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       });
       // As the real read: everything since the production record, however much landed; only a record
       // the first-parent walk never reaches (none here) falls back to the newest `mainWatchHistoryLimit`.
-      const since = promotedSha(), commits: MainWatchCommit[] = [];
+      const since = production.sha, commits: MainWatchCommit[] = [];
       let reached = false;
       for (let at: string | undefined = github.tip; at; at = github.commits.get(at)?.parents[0]) {
         if (at === since) { reached = true; break; }
@@ -1894,7 +1769,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       ...(undated ? { requestedAt: undefined, refusal: entry.refusal ? { ...entry.refusal, at: undefined } : entry.refusal } : {}) }) };
   };
   const effects: DaemonEffects = {
-    ...(promotionEffect ? { promotion: promotionEffect } : {}),
     ...(mainWatchEffect ? { mainWatch: mainWatchEffect } : {}),
     ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
       wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
@@ -3297,8 +3171,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (options.staleMerge && await restartOnMerge(now)) { elapsed += minute; await moveClock(minute); continue; }
       if (loopWakeDay && !await loopWakeDay.tick(elapsed)) { elapsed += loopWakeDay.tickMs; await moveClock(loopWakeDay.tickMs); continue; }
       master.cycleOf = cycles;
-      // GY-1513: when main first moves past the last cut, so a promoting run's follow-up is timed from its conclusion.
-      if (promotionEffect && promotion.aheadSince === null && promotedMain() !== promotion.cuts.at(-1)) promotion.aheadSince = clock.now();
       // GY-916: the supervisor restarts the loop for its own reasons: a new process, the same unit.
       if (loopRestarts.length && elapsed >= loopRestarts[0]) { loopRestarts.shift(); await processStart(state); }
       try {
@@ -3548,7 +3420,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const tmp = { root: tmpRoot, backlog, deadOwned, cache, heldDirectory, liveOwned, hourly, passes: tmpPasses, peak: tmpPeak, reports: await readReclaimReports(reclaimRoot), left: existsSync(tmpRoot) ? readdirSync(tmpRoot) : [] };
   if (process.env.SOAK_TRACE) console.error(`landing: ${github.landingChecks} checks over ${github.landingBases.size} bases, ${github.ancestorCompares} ancestor compares, ${github.blindCompares} blind compares; false landing refusals: ${landingRefusals.map(entry => `${entry.key}@+${Math.round(entry.elapsed / minute)}min ${entry.sha.slice(0, 12)}`).join(', ') || 'none'}`);
   engine.execute = executeAll;
-  return { blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, coordinateOutageDay, panes, supervisedDay, stuck, unboundedDay, provisionDay, promotion, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
+  return { blockedHoldDay: holdDay, unmatchedRefusals, capAnswers, askedAgain, readinessDay, waitsDay, outageDay, coordinateOutageDay, panes, supervisedDay, stuck, unboundedDay, provisionDay, throughput, reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, faulted, observed, failures, production, cycles, reportedDispatches, state, dayStart, tmp, headless, herdr, hand, stranded, withdrawals, resumes, strandedLaunches, escalations, spent, attestations, producerRuns, abandoned, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, landingRefusals, foreignPane, previousWorktrees, closedLeased,
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },

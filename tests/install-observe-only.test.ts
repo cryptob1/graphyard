@@ -43,7 +43,7 @@ async function observeOnlyFixture(interrupt = 0, existing = false) {
   const fixture = await harness({ provider: 'railway', extraResponses: statefulRailway(railway),
     statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: false, githubAppId: null, githubInstallationId: null } });
   await writeFile(join(fixture.root, 'graphyard.json'), JSON.stringify({ documentation: { paths: ['README.md'], changelog: null }, delivery: releaseCandidate }));
-  const calls = { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 };
+  const calls = { githubApp: 0, registerProfiles: 0, runHerdr: 0 };
   const logs: string[] = [];
   const deps: InstallDependencies = { ...fixture.deps, log: line => logs.push(line),
     githubApp: async () => { calls.githubApp++; throw new Error('observation-only must not bind an App'); },
@@ -51,8 +51,6 @@ async function observeOnlyFixture(interrupt = 0, existing = false) {
     runHerdr: () => { calls.runHerdr++; return ''; } };
   const prepare = async (mode: 'plan' | 'apply') => {
     const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway', observeOnly: true }, deps, mode);
-    const adapter = session.delivery.adapter;
-    session.delivery.adapter = { ...adapter, provision: async (...args) => { calls.provision++; return adapter.provision(...args); } };
     return session;
   };
   return { fixture, railway, calls, logs, prepare };
@@ -67,7 +65,7 @@ test('unit:install-observe-only-changes-nothing — install --observe-only --app
   assert.deepEqual({ observeOnly: request.observeOnly, noGithubApp: request.noGithubApp, herdr: request.herdr }, { observeOnly: true, noGithubApp: true, herdr: 'skip' });
   assert.match(resumeCommand({ inputs: { ...request, baseBranch: 'main' } as any }), /--no-herdr --observe-only --apply$/);
   assert.doesNotMatch(resumeCommand({ inputs: { ...request, baseBranch: 'main' } as any }), /--no-github-app|--github-app|--reuse-app/, 'GY-2009: the resume command carries no App flag');
-  for (const flag of [['--reviewer', 'claude'], ['--workers', '2'], ['--create-environments'], ['--herdr-rebind'], ['--producer-proof', 'unit']])
+  for (const flag of [['--reviewer', 'claude'], ['--workers', '2'], ['--herdr-rebind'], ['--producer-proof', 'unit']])
     assert.throws(() => installRequestFromArgs(['--provider', 'railway', '--repo', REPOSITORY, '--observe-only', ...flag]), new RegExp(`--observe-only changes nothing the repository owns.*${flag[0]}`));
 
   const { fixture, calls, logs, prepare } = await observeOnlyFixture();
@@ -76,12 +74,11 @@ test('unit:install-observe-only-changes-nothing — install --observe-only --app
     assert.equal(plan.observeOnly, true);
     assert.ok(plan.preflight.every(item => item.ok), JSON.stringify(plan.preflight.filter(item => !item.ok)));
     const heldIds = plan.actions.filter(action => action.state === 'held').map(action => action.id);
-    assert.deepEqual(heldIds, ['github.app', 'release.branches', 'release.github-environments', 'release.railway.project', 'release.railway.uat', 'release.railway.production', 'local.workers', 'local.profiles', 'local.herdr']);
+    assert.deepEqual(heldIds, ['github.app', 'local.workers', 'local.profiles', 'local.herdr']);
     for (const action of plan.actions.filter(entry => entry.state === 'held')) assert.ok(action.held!.startsWith(`${OBSERVE_ONLY_HELD}: `), `${action.id} is not named as held by observation-only`);
-    assert.match(plan.actions.find(action => action.id === 'release.branches')!.held!, /release refs are not created/);
     // GY-2009: no install plans a branch-protection write, so observation-only has none to hold.
     assert.ok(!plan.actions.some(action => action.id === 'github.protection'));
-    assert.match(plan.actions.find(action => action.id === 'release.railway.uat')!.held!, /product deployment adapter does not run/);
+    assert.ok(!plan.actions.some(action => action.id.startsWith('release.')), 'GY-1983: no release ref or product environment is planned');
     assert.ok(!plan.principals.some(principal => principal.role === 'worker' || principal.role === 'producer'), 'a worker principal was planned');
     // The control plane itself is still deployed.
     for (const id of ['provider.provision.project', 'provider.env.core', 'provider.deploy']) assert.notEqual(plan.actions.find(action => action.id === id)!.state, 'held');
@@ -94,7 +91,7 @@ test('unit:install-observe-only-changes-nothing — install --observe-only --app
     assert.match(summary.protection, /held by observation-only/);
     assert.deepEqual(summary.profiles.workers, []);
     assert.equal(summary.profiles.master.configured, false);
-    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0, provision: 0 });
+    assert.deepEqual(calls, { githubApp: 0, registerProfiles: 0, runHerdr: 0 });
 
     const lines = fixture.allCommandLines();
     for (const pattern of mutations) assert.ok(!lines.some(line => pattern.test(line)), `observation-only ran ${lines.find(line => pattern.test(line))}`);

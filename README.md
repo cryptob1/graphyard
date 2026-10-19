@@ -23,8 +23,8 @@ graphyard up --agent --goal GOAL.md
 3. A worker agent takes over: the worker builds each work item on its own branch.
 4. Graphyard checks the merged tree: build, tests and the change's E2E cases against its preview, before the merge to main itself.
 5. An independent agent reviews, before the merge for sensitive changes and after the merge for everything else, by default.
-6. About every ten merges a release candidate goes to a test environment for UAT + E2E (user acceptance, end-to-end suite).
-7. A passing candidate is promoted to production and checked there: production verified.
+6. The loop deploys each new main to production and runs the E2E cases against it.
+7. A passing deploy stays and is checked there: production verified; a failing one is rolled back.
 8. A failure anywhere is reverted or fixed by a new work item.
 
 graphyard.json sets sensitive paths (`risk.sensitive`) and normal-change review timing (`review.normalChanges`): [delivery](docs/delivery.md). Only Graphyard writes to main.
@@ -34,8 +34,8 @@ flowchart LR
   A[Goal] --> B[Planner] --> C[Work items] --> D[Worker builds] --> E[Graphyard checks the merged tree]
   E --> F[Merge to main] -->|normal: after| G[Review]
   E -.->|sensitive: before| G -.-> F
-  F --> H[Release candidate] --> I[UAT + E2E] --> J[Production verified]
-  I -.->|failure: new work item| C
+  F --> H[Deploy + E2E] --> J[Production verified]
+  H -.->|failure: rollback, new work item| C
 ```
 
 Text equivalent: steps 1-8.

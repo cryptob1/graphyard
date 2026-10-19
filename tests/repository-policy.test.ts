@@ -271,22 +271,6 @@ test('unit:repo-risk-policy — the installer deploys graphyard.json\'s policy a
   assert.match(await readFile(new URL('../scripts/configure-integrations.mjs', import.meta.url), 'utf8'), /\[policy\.variable\]: policy\.value/);
 });
 
-test('unit:repo-review-and-pending-policy — under e2e.pendingOutcomes blocking a failing pending-outcome case opens a release hold; non-blocking files none (GY-1802)', async () => {
-  const { resolveRepositoryPolicy } = await policyModule();
-  const { assessHolds, e2eRecord } = await import('../src/release-holds.js');
-  const candidate = { id: '20261008T120000Z', sha: H, pendingOutcomes: ['outcome-a'] } as unknown as Parameters<typeof e2eRecord>[1];
-  const contract = { outcomes: [{ id: 'outcome-a', title: 'Outcome A', cases: ['pending-case'] }] } as unknown as Parameters<typeof assessHolds>[0];
-  const run = { ...report([{ id: 'pending-case', verdict: 'failed' }]), runId: `rc-${candidate.id}` };
-  for (const [rule, opened] of [['blocking', 1], ['non-blocking', 0]] as const) {
-    const policy = resolveRepositoryPolicy({ e2e: { pendingOutcomes: rule } });
-    const e2e = e2eRecord(run, candidate, contract, policy)!;
-    assert.deepEqual(e2e.blocking, rule === 'blocking' ? ['pending-case'] : [], rule);
-    assert.equal(e2e.cases[0].pending, rule === 'blocking' ? undefined : true, `${rule}: the record marks the case pending only when it does not block`);
-    const holds = assessHolds(contract, candidate, { deployedSha: H, e2e }, [], at, policy);
-    assert.equal(holds.filter(entry => entry.kind === 'open').length, opened, `${rule}: ${opened} hold opened`);
-  }
-});
-
 test('unit:repo-risk-policy — the item page shows the risk the server\'s policy gives, served on /api/status, not the browser\'s generic reading', async () => {
   const { resolveRepositoryPolicy, repositoryPolicy } = await policyModule();
   const { createElement } = await import('react');
@@ -316,10 +300,9 @@ test('unit:repo-risk-policy — the item page shows the risk the server\'s polic
   assert.match(statusRoute, /repositoryPolicy: repositoryPolicy\(\)/, '/api/status serves the policy in force');
 });
 
-test('unit:repo-review-and-pending-policy — a candidate validates under its own checkout\'s e2e.pendingOutcomes, not the plane\'s installed GRAPHYARD_REPOSITORY_POLICY: a failing pending case fails the suite and opens a hold', async () => {
+test('unit:repo-review-and-pending-policy — a checkout\'s cases run under its own e2e.pendingOutcomes, not the plane\'s installed GRAPHYARD_REPOSITORY_POLICY: a failing pending case fails the suite', async () => {
   const { repositoryPolicy, repositoryPolicyVariable, setRepositoryPolicy } = await policyModule();
   const { projectCaseSuite } = await import('../src/release-project.js');
-  const { releaseHolds } = await import('../src/release-holds.js');
   const checkout = await temporaryDirectory('candidate-policy');
   await writeFile(join(checkout, 'graphyard.json'), `${JSON.stringify({ e2e: { pendingOutcomes: 'blocking' } })}\n`);
   await mkdir(join(checkout, 'e2e', 'cases'), { recursive: true });
@@ -327,8 +310,8 @@ test('unit:repo-review-and-pending-policy — a candidate validates under its ow
     steps: [{ kind: 'http', name: 'read /level', method: 'GET', path: '/level', status: 200, expect: [] }] }));
   const fetcher = (async (input: string | URL) => new URL(String(input)).pathname === '/healthz'
     ? new Response(JSON.stringify({ ok: true, commit: H }), { headers: { 'content-type': 'application/json' } }) : new Response('not yet', { status: 503 })) as typeof fetch;
-  const candidate = { id: '20261008T120000Z', sha: H, pendingOutcomes: ['outcome-a'] } as unknown as Parameters<ReturnType<typeof releaseHolds>>[0];
-  const contract = { outcomes: [{ id: 'outcome-a', title: 'Outcome A', cases: ['pending-case'], criteria: [] }] } as unknown as Parameters<typeof releaseHolds>[1]['contract'];
+  const candidate = { id: '20261008T120000Z', pendingOutcomes: ['outcome-a'] };
+  const contract = { outcomes: [{ id: 'outcome-a', title: 'Outcome A', cases: ['pending-case'], criteria: [] }] } as unknown as NonNullable<Parameters<typeof projectCaseSuite>[2]>['contract'];
   // The plane was installed with a policy that keeps pending outcomes non-blocking, as the installer's variable carries it.
   const saved = process.env[repositoryPolicyVariable];
   process.env[repositoryPolicyVariable] = JSON.stringify({ e2e: { pendingOutcomes: 'non-blocking' } });
@@ -341,9 +324,6 @@ test('unit:repo-review-and-pending-policy — a candidate validates under its ow
       assert.equal(result.passed, false, `the candidate's blocking rule fails the suite: ${result.detail}`);
       assert.doesNotMatch(result.detail, /pending, not blocking/);
       assert.equal(report!.pendingOutcomes, 'blocking', 'the report names the rule it was judged under');
-      const filed: string[] = [];
-      const outcome = await releaseHolds(() => '', { contract, push: false, now: () => new Date(at), report: async () => report, file: async item => { filed.push(item.title); return 'GY-99'; } })(candidate, { deployedSha: H } as Parameters<ReturnType<typeof releaseHolds>>[1]);
-      assert.deepEqual([outcome.e2e?.blocking, outcome.holds.map(entry => entry.kind), filed.length], [['pending-case'], ['open'], 1], 'the holds judge by the same rule');
     }
   } finally {
     setRepositoryPolicy(null);

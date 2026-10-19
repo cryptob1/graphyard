@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { listTestFiles, releaseCandidateTests, repositoryRoot } from '../scripts/ci-tests.mjs';
+import { listTestFiles, repositoryRoot } from '../scripts/ci-tests.mjs';
 import { paneSweepLimit } from '../src/daemon/cycle-reclaim.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import { diagnosisSettled } from '../src/runner/payloads.js';
@@ -35,13 +35,12 @@ import { docsSyncCutoffLeadMs } from '../src/daemon/docs-sync-route.js';
  */
 soakControlPlanes('soak-day', 404);
 
-test('unit:soak-invariants-hold — the soak runs as one suite per concern (GY-1363): at least four tests/soak-*.test.ts files, each the release-candidate soak suite and within 1,500 lines, no test name in two of them, and no tests/soak.test.ts holding them all', () => {
+test('unit:soak-invariants-hold — the soak runs as one suite per concern (GY-1363): at least four tests/soak-*.test.ts files, each in the ordinary suite and within 1,500 lines, no test name in two of them, and no tests/soak.test.ts holding them all', () => {
   const suites = listTestFiles().filter(file => /^tests\/soak-[\w-]+\.test\.ts$/.test(file));
   assert.ok(suites.length >= 4, `the soak is split per concern: ${suites.join(', ')}`);
   assert.ok(!existsSync(join(repositoryRoot, 'tests/soak.test.ts')), 'no single file holds every soak scenario');
   const owners = new Map<string, string[]>();
   for (const file of suites) {
-    assert.equal(releaseCandidateTests[file], 'soak', `${file} runs as the release-candidate soak suite`);
     const lines = readFileSync(join(repositoryRoot, file), 'utf8').split('\n');
     assert.ok(lines.length <= 1500, `${file} stays within 1,500 lines (${lines.length})`);
     for (const line of lines) {
@@ -55,7 +54,7 @@ test('unit:soak-invariants-hold — the soak runs as one suite per concern (GY-1
 test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen items delivered and every system invariant holding after every cycle', { timeout: 360_000 }, async () => {
   const began = performance.now();
   const hours = Number(process.env.SOAK_HOURS ?? 24);
-  const day = await simulateDay({ hours, backlog: true, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit, staleDiagnosis: true, promotion: true });
+  const day = await simulateDay({ hours, backlog: true, github806: true, remedies: true, plan: { blockedMerge: blockedMergeItem, ...memoryDay }, diagnosisLimit, staleDiagnosis: true });
   assertLaunchesConfined(day, coordinatorRoot!);
   const { reconciled, outside, items, final, github, sessions, docsSyncRuns, docsSyncRoot, lost, launches, violations, observed, failures, production, cycles, reportedDispatches, dayStart, tmp, state, attestations, producerRuns, spentHead, actionKeys, upgrades, refusalSamples, guardReads, checkout, herdr, landingRefusals, foreignPane, previousWorktrees, closedLeased, mergeQueuePosts, approverPanes, herdrClosed, diagnosisModel, diagnosisRuns, decideCalls, baseBreak, baseFailure, decided, misreads, prompts, exitedLive, exitedClosed, exitedRowsSeen, lanesSeen, laneApplications, approverWorks, diagnosisRaces, diagnosisRequestRaces } = day;
   const undelivered = final.filter(item => item.stage !== 'done' || !item.delivery);

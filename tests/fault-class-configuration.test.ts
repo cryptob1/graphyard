@@ -662,19 +662,3 @@ for (const [key, recorded] of [['GY-1674', gy1674Recorded], ['GY-1696', gy1696Re
     assert.notEqual(baseKind.blockerKind(recorded), blockerKind(recorded), 'the fault kind it is filed under changed with the classifier');
   });
 }
-
-test('manual:fault-class-configuration — setup|setup|2026-10-12T22:43:03.250Z: run on the release serving then and on the candidate, a host with no install admin credential gets the same one-time administrator step, a credential only a person can issue', async () => {
-  const { importAt } = await import('./helpers/base-tree.js');
-  const { provisionReleaseFiling, releaseFilingAdministratorStep } = await import('../src/master/release-filing.js');
-  const base = await importAt('2fda1fb43a971b45238d2b93f7b52c02c27ca179', 'src/master/release-filing.ts');
-  const master = { url: 'https://graphyard.example', repository: 'owner/project' };
-  // The instance reproduces at the release serving it, and the candidate answers it the same way: the fault is the missing human credential, named once as the administrator's step, not a master retry.
-  for (const module of [base, { provisionReleaseFiling, releaseFilingAdministratorStep }]) {
-    const unavailable = await module.provisionReleaseFiling(master, { apply: true }, { adminToken: async () => null });
-    assert.equal(unavailable.state, 'unavailable');
-    assert.equal(unavailable.next, module.releaseFilingAdministratorStep('owner/project'));
-    const failed = await module.provisionReleaseFiling(master, { apply: true }, { adminToken: async () => { throw new Error('unreadable'); } });
-    assert.deepEqual([failed.state, failed.next], ['failed', 'graphyard master setup --apply'], 'a failure is retried by the loop\'s own setup run');
-  }
-  assert.equal((await provisionReleaseFiling(master, { apply: true }, { adminToken: async () => null })).next, (await base.provisionReleaseFiling(master, { apply: true }, { adminToken: async () => null })).next);
-});

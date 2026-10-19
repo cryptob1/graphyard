@@ -6,8 +6,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { acknowledgeCommand, classifyMainCommits, mainWatchAttention, mainWatchFreezeFromEnv, mainWatchHistoryLimit, mainWatchKey, mainWatchReads, mainWatchSettleMs, mainWatchStateSchema, type MainWatchCommit, type MainWatchPolicy, type MainWatchReads } from '../src/daemon/main-watch.js';
-import { promotionCycle, promotionFrozenReason, promotionReadWindows, type PromotionReads } from '../src/daemon/deployment.js';
+import { acknowledgeCommand, classifyMainCommits, mainWatchAttention, mainWatchHistoryLimit, mainWatchKey, mainWatchReads, mainWatchSettleMs, mainWatchStateSchema, type MainWatchCommit, type MainWatchPolicy, type MainWatchReads } from '../src/daemon/main-watch.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { Store } from '../src/store.js';
@@ -19,7 +18,7 @@ import { mainWatchUsage } from '../src/cli/master/operations.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1519: the main watch reads main's first-parent history from the coordinator checkout, labels
-// every commit by what explains it, reports the rest once each, and freezes promotion when asked.
+// every commit by what explains it, and reports the rest once each.
 
 const start = Date.parse('2030-02-01T00:00:00Z');
 const minute = 60_000, hour = 60 * minute;
@@ -39,7 +38,7 @@ const delivered = (key: string, mergeSha: string) => item({ id: key, key, stage:
 const raised = (actions: { detail: string }[]) => actions.filter(action => action.detail.startsWith('Main watch:'));
 
 /** A loop's effects around the watch: nothing dispatches, decides or reverts; the watch's reads are the test's. */
-function effectsFor(world: { work: Work[] | (() => Work[]); now: () => number; mainWatch: MainWatchReads | null; promotion?: PromotionReads | null }) {
+function effectsFor(world: { work: Work[] | (() => Work[]); now: () => number; mainWatch: MainWatchReads | null }) {
   const decided: string[] = [];
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
@@ -51,33 +50,30 @@ function effectsFor(world: { work: Work[] | (() => Work[]); now: () => number; m
     decisions: async () => ({ decisions: [] }),
     persist: async () => {},
     mainWatch: world.mainWatch,
-    ...(world.promotion ? { promotion: world.promotion } : {}),
   } as unknown as DaemonEffects;
   return { effects, decided };
 }
-const reads = (history: MainWatchCommit[] | (() => MainWatchCommit[]), policy: Partial<MainWatchPolicy> | (() => Partial<MainWatchPolicy>) = {}, freeze = false): MainWatchReads => ({
-  freeze,
+const reads = (history: MainWatchCommit[] | (() => MainWatchCommit[]), policy: Partial<MainWatchPolicy> | (() => Partial<MainWatchPolicy>) = {}): MainWatchReads => ({
   history: async () => { const commits = typeof history === 'function' ? history() : history; return { tip: commits[0]?.sha ?? null, since: sha('promoted'), commits }; },
   policy: async () => { const read = typeof policy === 'function' ? policy() : policy; return { acknowledged: read.acknowledged ?? [], directMergeWindows: read.directMergeWindows ?? [] }; },
 });
 
-test('unit:main-watch-classify — every first-parent commit is labelled github-delivery, ledger, revert, candidate-revert, direct-merge or unknown, in that precedence; a commit equal to an item\'s delivery.mergeSha is github-delivery even when the ledger names it too, and one nothing explains is unknown', () => {
-  const history = [commit('f0', 'ledger merge'), commit('f1', 'ledger merge GitHub also delivered'), commit('f2', 'merged by github'), commit('f3', 'revert of a broken merge'), commit('f4', 'candidate revert'),
+test('unit:main-watch-classify — every first-parent commit is labelled github-delivery, ledger, revert, direct-merge or unknown, in that precedence; a commit equal to an item\'s delivery.mergeSha is github-delivery even when the ledger names it too, and one nothing explains is unknown', () => {
+  const history = [commit('f0', 'ledger merge'), commit('f1', 'ledger merge GitHub also delivered'), commit('f2', 'merged by github'), commit('f3', 'revert of a broken merge'),
     commit('f5', 'operator pushed inside the window', 'Operator', '2030-01-15T12:00:00.000Z'), commit('f6', 'a stranger pushed', 'Stranger'), commit('f7', 'outside the window', 'Operator', '2030-01-20T12:00:00.000Z')];
   const labelled = classifyMainCommits(history, {
     ledger: { 'GY-10': { mergeSha: sha('f0') }, 'GY-16': { mergeSha: sha('f1').toUpperCase() }, 'GY-11': { mergeSha: null } },
     deliveries: [{ key: 'GY-12', mergeSha: sha('f2') }, { key: 'GY-13', mergeSha: sha('f1') }],
     mainGuardReverts: [{ key: 'GY-14', revertSha: sha('f3') }, { key: 'GY-15', revertSha: null }],
-    candidateReverts: [{ sha: sha('f4'), id: 'rc-7' }],
     directMergeWindows: [{ since: '2030-01-15T00:00:00.000Z', until: '2030-01-16T00:00:00.000Z' }],
   });
   assert.deepEqual(labelled.map(entry => [entry.label, entry.by]), [
-    ['ledger', 'GY-10'], ['github-delivery', 'GY-13'], ['github-delivery', 'GY-12'], ['revert', 'GY-14'], ['candidate-revert', 'rc-7'], ['direct-merge', 'direct-merge window since 2030-01-15T00:00:00.000Z'], ['unknown', null], ['unknown', null]]);
+    ['ledger', 'GY-10'], ['github-delivery', 'GY-13'], ['github-delivery', 'GY-12'], ['revert', 'GY-14'], ['direct-merge', 'direct-merge window since 2030-01-15T00:00:00.000Z'], ['unknown', null], ['unknown', null]]);
   assert.equal(labelled[1].sha, sha('f1'));
-  assert.deepEqual(classifyMainCommits([], { ledger: {}, deliveries: [], mainGuardReverts: [], candidateReverts: [], directMergeWindows: [] }), []);
+  assert.deepEqual(classifyMainCommits([], { ledger: {}, deliveries: [], mainGuardReverts: [], directMergeWindows: [] }), []);
 });
 
-test('unit:main-watch-step — the step runs after deployment verification, stores state.mainWatch (checkedAt, tip, unknown, frozen) in the daemon state schema from what the snapshot and the reads explain, skips a loop without reads, and lets a settling commit age before judging it', async () => {
+test('unit:main-watch-step — the step runs after deployment verification, stores state.mainWatch (checkedAt, tip, unknown) in the daemon state schema from what the snapshot and the reads explain, skips a loop without reads, and lets a settling commit age before judging it', async () => {
   const work = [item({ id: 'w1', key: 'GY-1', stage: 'done', delivery: { mergedAt: iso(start), mergeSha: sha('d1'), authorizationRevision: 1, children: [{ key: 'GY-1a', mergeSha: sha('d1a'), mergedAt: iso(start) }] } }),
     item({ id: 'w2', key: 'GY-2', stage: 'done', mainGuardReverts: [{ mergeSha: sha('broken'), pr: 1, failing: ['test'], revert: null, state: 'merged', at: iso(start), settledAt: iso(start), revertSha: sha('r1'), reason: null }] }),
     item({ id: 'w3', key: 'GY-3', stage: 'done', mergeLedger: { key: 'GY-3', state: 'pushed', head: sha('h3'), baseTip: sha('b'), mergeSha: sha('l3'), risk: 'low', intentAt: iso(start), pushedAt: iso(start), observedTip: null, refusal: null, events: 2 } })];
@@ -88,10 +84,10 @@ test('unit:main-watch-step — the step runs after deployment verification, stor
   const { effects } = effectsFor({ work, now: () => now, mainWatch: reads(history, { directMergeWindows: windows }) });
   const { metrics } = await runCycle(config, state, effects, () => now);
   assert.ok(state.mainWatch, 'the watch recorded its state');
-  assert.deepEqual(state.mainWatch, { checkedAt: iso(now), tip: sha('u1'), unknown: [{ sha: sha('u1'), subject: 'Add a hidden toggle', author: 'A. Stranger', at: iso(start - hour) }], frozen: null });
+  assert.deepEqual(state.mainWatch, { checkedAt: iso(now), tip: sha('u1'), unknown: [{ sha: sha('u1'), subject: 'Add a hidden toggle', author: 'A. Stranger', at: iso(start - hour) }] });
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).mainWatch, state.mainWatch, 'the state round-trips through the daemon state schema');
   assert.deepEqual(mainWatchStateSchema.parse(state.mainWatch), state.mainWatch);
-  assert.throws(() => mainWatchStateSchema.parse({ ...state.mainWatch, extra: true }));
+  assert.deepEqual(mainWatchStateSchema.parse({ ...state.mainWatch, frozen: { sha: sha('u1'), since: iso(start) } }), state.mainWatch, 'a cursor carrying the removed promotion freeze still loads, the freeze dropped');
   const steps = (metrics.timings?.steps ?? []).map(step => step.step);
   assert.ok(steps.indexOf('main watch') > steps.indexOf('deployment verification'), `the main watch runs after deployment verification: ${steps.join(', ')}`);
   // Nothing to read from: no reads, no state.
@@ -115,7 +111,7 @@ test('unit:main-watch-step — the step runs after deployment verification, stor
   assert.equal(raised(result.actions).length, 0);
   now += 3 * minute; items = [...work, delivered('GY-9', sha('m9'))];
   result = await runCycle(config, state, settlingWorld.effects, () => now);
-  assert.equal(state.mainWatch?.tip, sha('m9'), 'delivered: the verdict covers the tip at once, fresh as it is, so promotion never waits for a recorded merge');
+  assert.equal(state.mainWatch?.tip, sha('m9'), 'delivered: the verdict covers the tip at once, fresh as it is, so the verdict never waits for a recorded merge');
   now += mainWatchSettleMs;
   result = await runCycle(config, state, settlingWorld.effects, () => now);
   assert.equal(state.mainWatch?.tip, sha('m9'), 'settled and delivered: the verdict still covers the tip');
@@ -137,11 +133,11 @@ test('unit:main-watch-no-github-requests — the history is read from the coordi
   git('init', '-q', '-b', 'main');
   const shas: string[] = [];
   for (let n = 1; n <= 4; n++) { git('commit', '-q', '--allow-empty', '-m', `Commit ${n}`); shas.push(git('rev-parse', 'HEAD')); }
-  // The checkout's remote-tracking tip, as the promotion ledger's fetch leaves it.
+  // The checkout's remote-tracking tip, as the loop's fetch leaves it.
   git('update-ref', 'refs/remotes/origin/main', shas[3]);
   const commands: string[][] = [];
   const run = (command: string, args: string[]) => { commands.push([command, ...args]); if (command !== 'git') throw new Error(`${command} is not git`); return execFileSync(command, args, { encoding: 'utf8' }); };
-  const watch = mainWatchReads(config, root, run, { policy: async () => ({ acknowledged: [], directMergeWindows: [] }), freeze: false });
+  const watch = mainWatchReads(config, root, run, { policy: async () => ({ acknowledged: [], directMergeWindows: [] }) });
   // No promotion record yet: the newest commits, bounded.
   const whole = await watch.history();
   assert.equal(whole.tip, shas[3]); assert.equal(whole.since, null);
@@ -176,11 +172,9 @@ test('unit:main-watch-no-github-requests — the history is read from the coordi
   assert.equal(Object.keys(state.actions).filter(key => key.startsWith('main-watch:')).length, 212, 'each unknown commit is reported once');
   assert.equal(mainWatchAttention(state.mainWatch ?? null, 'main').length, 212, 'one attention item per unknown commit');
   assert.equal(state.mainWatch?.unknown[0].sha, head);
-  assert.equal(mainWatchFreezeFromEnv({}), false);
-  assert.equal(mainWatchFreezeFromEnv({ GRAPHYARD_MAIN_WATCH_FREEZE: 'true' }), true);
 });
 
-test('unit:main-watch-report-only — without the freeze each unknown commit raises one main-watch attention item naming its sha, subject and author, once per sha across cycles, the cursor\'s action pruning, a restart and the history window advancing past it; nothing is reverted, reworked or decided, and promotion is not frozen', async () => {
+test('unit:main-watch-report-only — each unknown commit raises one main-watch attention item naming its sha, subject and author, once per sha across cycles, the cursor\'s action pruning, a restart and the history window advancing past it; nothing is reverted, reworked or decided', async () => {
   const s1 = commit('s1', 'Tweak the login copy', 'Jo Stranger'), s2 = commit('s2', 'Bump a pin', 'Jo Stranger');
   let history = [s1, s2], now = start, work: Work[] = [];
   let state = emptyDaemonState(config);
@@ -218,63 +212,17 @@ test('unit:main-watch-report-only — without the freeze each unknown commit rai
   assert.deepEqual(state.mainWatch?.unknown, []);
   assert.deepEqual(world.decided, [], 'no rework, revert or decision was requested');
   assert.ok(Object.keys(state.actions).every(key => key.startsWith('main-watch:') || !/revert|rework/.test(key)));
-  assert.equal(state.mainWatch?.frozen, null);
 });
 
-test('unit:main-watch-freeze — with freeze: true promotionCycle takes the frozen commit and dispatches nothing, naming it and the acknowledge command, and a tip the watch has not classified waits; through the loop the freeze stands until the admin\'s acknowledgement is read, surviving the production record moving past the commit, then the next promotion goes out', async () => {
-  const frozen = { sha: sha('x1'), since: iso(start) };
-  const ledger = { mainSha: sha('x1'), promotedSha: sha('old'), promotedAt: iso(start - hour), behind: 1, candidates: [] };
-  let dispatches = 0;
-  const promotion: PromotionReads = { ledger: async () => ledger, runs: async () => [], dispatch: async () => { dispatches += 1; } };
-  const held = await promotionCycle(null, promotion, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen, watchedTip: sha('x1') });
-  assert.equal(held.dispatched, false); assert.equal(held.failure, null); assert.equal(dispatches, 0);
-  assert.equal(held.state.reason, promotionFrozenReason(frozen));
-  assert.ok(held.state.reason!.includes(sha('x1')) && held.state.reason!.includes(acknowledgeCommand(sha('x1'))), held.state.reason!);
-  const unwatched = await promotionCycle(null, promotion, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: sha('older') });
-  assert.equal(unwatched.dispatched, false); assert.match(unwatched.state.reason!, /has not classified the base branch tip/); assert.equal(dispatches, 0);
-  const lifted = await promotionCycle(null, promotion, { now: start, everyMinutes: 10, intervalMs: 20_000, frozen: null, watchedTip: sha('x1') });
-  assert.equal(lifted.dispatched, true); assert.equal(dispatches, 1);
-
-  // Through the loop: the watch freezes on the newest unknown commit, promotion holds, the acknowledgement lifts it.
-  dispatches = 0;
-  let now = start, acknowledged: MainWatchPolicy['acknowledged'] = [], history = [commit('x1', 'Force-pushed fix', 'Nobody Known')], since = sha('old');
-  const watch: MainWatchReads = { freeze: true, history: async () => ({ tip: history[0].sha, since, commits: history }), policy: async () => ({ acknowledged, directMergeWindows: [] }) };
-  const state = emptyDaemonState(config);
-  const world = effectsFor({ work: [], now: () => now, mainWatch: watch, promotion });
-  await runCycle(config, state, world.effects, () => now);
-  assert.deepEqual(state.mainWatch?.frozen, { sha: sha('x1'), since: iso(now) });
-  assert.match(state.actions[mainWatchKey(sha('x1'))]!.detail, /Promotion is frozen until an admin acknowledges it/);
-  const began = state.mainWatch!.frozen!.since;
-  for (let n = 0; n < 3; n++) { now += 20_000; await runCycle(config, state, world.effects, () => now); }
-  assert.equal(state.mainWatch?.frozen?.since, began, 'the freeze keeps the time it began');
-  // An operator promotes by hand past the commit: the production record moves and the read no longer reaches it; the freeze stands.
-  since = sha('x1'); history = [commit('x2', 'Merge pull request #2', 'graphyard[bot]')];
-  ledger.mainSha = sha('x2');
-  // The promotion drive re-reads the ledger once its window has passed; the watch reads the checkout every cycle.
-  now += promotionReadWindows(20_000).ledgerMs;
-  for (let n = 0; n < 2; n++) { now += 20_000; await runCycle(config, state, world.effects, () => now); }
-  assert.deepEqual(state.mainWatch?.unknown.map(entry => entry.sha), [sha('x2'), sha('x1')], 'the commit the read no longer reaches is kept');
-  assert.deepEqual(state.mainWatch?.frozen, { sha: sha('x2'), since: began }, 'the newest unknown commit heads the freeze, which keeps the time it began');
-  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('main-watch:')).length, 2, 'each commit raised once');
-  acknowledged = [{ sha: sha('x2'), reason: 'my merge', by: 'human-operator', at: iso(now) }];
-  now += 20_000; await runCycle(config, state, world.effects, () => now);
-  assert.deepEqual(state.mainWatch?.frozen, { sha: sha('x1'), since: began }, 'the older unacknowledged commit still freezes, since when it first did');
-  acknowledged = [...acknowledged, { sha: sha('x1'), reason: 'I pushed it', by: 'human-operator', at: iso(now) }];
-  now += 20_000; await runCycle(config, state, world.effects, () => now);
-  assert.equal(state.mainWatch?.frozen, null, 'acknowledged: the freeze lifts');
-  assert.deepEqual(state.mainWatch?.unknown, []);
-  assert.deepEqual(world.decided, []);
-});
-
-test('unit:main-watch-status — master status shows mainWatch (unknown count, newest unknown sha, frozen) inside the daemon section through daemonSummary, one attention item per unknown commit names the acknowledge command (with the admin credential on stdin), and docs/recovery.md\'s Main watch paragraph is at most 60 words naming it', () => {
+test('unit:main-watch-status — master status shows mainWatch (unknown count, newest unknown sha) inside the daemon section through daemonSummary, one attention item per unknown commit names the acknowledge command (with the admin credential on stdin), and docs/recovery.md\'s Main watch paragraph is at most 60 words naming it', () => {
   const state: DaemonState = emptyDaemonState(config);
-  assert.deepEqual(daemonSummary(state, start, 20_000).mainWatch, { checkedAt: null, tip: null, unknown: 0, newestUnknown: null, frozen: null });
-  state.mainWatch = { checkedAt: iso(start), tip: sha('n1'), unknown: [{ sha: sha('n1'), subject: 'Newest', author: 'A', at: iso(start) }, { sha: sha('n2'), subject: 'Older', author: 'B', at: iso(start - 1) }], frozen: { sha: sha('n1'), since: iso(start) } };
-  assert.deepEqual(daemonSummary(state, start, 20_000).mainWatch, { checkedAt: iso(start), tip: sha('n1'), unknown: 2, newestUnknown: sha('n1'), frozen: { sha: sha('n1'), since: iso(start) } });
+  assert.deepEqual(daemonSummary(state, start, 20_000).mainWatch, { checkedAt: null, tip: null, unknown: 0, newestUnknown: null });
+  state.mainWatch = { checkedAt: iso(start), tip: sha('n1'), unknown: [{ sha: sha('n1'), subject: 'Newest', author: 'A', at: iso(start) }, { sha: sha('n2'), subject: 'Older', author: 'B', at: iso(start - 1) }] };
+  assert.deepEqual(daemonSummary(state, start, 20_000).mainWatch, { checkedAt: iso(start), tip: sha('n1'), unknown: 2, newestUnknown: sha('n1') });
   const attention = mainWatchAttention(state.mainWatch, 'main');
   assert.equal(attention.length, 2);
   assert.ok(attention.every(entry => entry.subject === 'main-watch' && entry.role === 'master' && !entry.human));
-  assert.match(attention[0].text, new RegExp(`commit ${sha('n1')} on main \\("Newest" by A at `)); assert.match(attention[0].text, /Promotion is frozen/);
+  assert.match(attention[0].text, new RegExp(`commit ${sha('n1')} on main \\("Newest" by A at `)); assert.match(attention[0].text, /Reported only/);
   assert.match(attention[1].text, /Reported only/);
   assert.ok(attention[0].next.includes(acknowledgeCommand(sha('n1'))));
   assert.equal(acknowledgeCommand(sha('n1')), `graphyard master main-watch acknowledge ${sha('n1')} --reason TEXT --admin-token-stdin`, 'the command reads the admin credential from stdin: the master holds none');
@@ -288,7 +236,7 @@ test('unit:main-watch-status — master status shows mainWatch (unknown count, n
   assert.ok(paragraph.includes('--admin-token-stdin') && paragraph.includes('POST /api/main-watch/acknowledge') && paragraph.includes('Idempotency-Key'), 'the docs name the credential flow and the API');
 });
 
-test('unit:main-watch-docs-names-read-routes — the Main watch paragraph names the read-only routes beside the freeze and acknowledge command', () => {
+test('unit:main-watch-docs-names-read-routes — the Main watch paragraph names the read-only routes beside the acknowledge command', () => {
   const docs = readFileSync(fileURLToPath(new URL('../docs/recovery.md', import.meta.url)), 'utf8');
   assert.ok(docs.includes('GET /api/main-watch'));
   assert.ok(docs.includes('graphyard master main-watch status'));
@@ -325,7 +273,7 @@ async function request(credential: string, path: string, body?: unknown, key = r
 }
 
 test('integration:main-watch-acknowledge-admin-only — the route is registered through src/server/routes.ts; only an admin credential records policy.main-watch.acknowledged; coordinator, worker and operator-agent identities are refused and nothing is written; a retried key replays, a second acknowledgement of the same sha records nothing new, and the loop reads the list', async () => {
-  assert.deepEqual(registerApiRoutes([]).map(module => module.name), ['main-watch', 'candidates'], 'routes.ts registers the main watch module (and GY-1904\'s candidates)');
+  assert.deepEqual(registerApiRoutes([]).map(module => module.name), ['main-watch'], 'routes.ts registers the main watch module');
   assert.ok(apiRoutes.some(module => module.name === 'main-watch'), 'the assembled API table holds it');
   const target = sha('acknowledged');
   for (const credential of [token(coordinator), token(worker), agent.token]) {
