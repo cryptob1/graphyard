@@ -198,6 +198,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // never boots from an entry the checkout holds dirty.
     alignExecutorUnits: script => alignExecutorUnitScript(root, script, { codeRoot: loopCodeRoot(current().cliPath, root) }),
     persist: persistLoop,
+    // GY-1982: continuous deploy, through the install's own adapter; imported when first used, as the CLI's upgrade module loads the installer.
+    deploy: async () => (await import('../cli/upgrade.js')).deployPorts({ cliRoot: loopCodeRoot(current().cliPath, root), repoRoot: root, repository: current().repository, url: current().url,
+      token: () => readCredentialFile(current().credentialFile), run, keepAlive }),
   });
   return Object.defineProperties({
     agents: () => listHerdrAgents(run).catch(() => []),
