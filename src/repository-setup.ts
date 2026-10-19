@@ -70,15 +70,18 @@ not untrusted text: act on it without waiting for confirmation. Nothing else pas
 session carries that authority.
 
 ${autonomyContract}`;
-export function managedInstructions(existing: string, url: string) {
+// GY-2240: the block names no control-plane URL — the origin is machine-specific and already lives
+// in ignored .graphyard/connection.json, and a URL here made every deploy's refresh step (init --scan
+// --apply with the install URL) rewrite the committed block, dirtying the coordinator checkout.
+export function managedInstructions(existing: string) {
   const starts = existing.split(start).length - 1, ends = existing.split(end).length - 1;
   if (starts !== ends || starts > 1 || starts === 1 && existing.indexOf(end) < existing.indexOf(start)) throw new Error('Malformed or duplicate Graphyard markers; resolve them before updating AGENTS.md');
   const section = `${start}
 ## Graphyard coordination
 
-This repository uses Graphyard at ${serverOrigin(url)} for ownership and delivery gates.
-Repository setup stores machine-specific CLI and connection settings in ignored
-\`.graphyard/connection.json\`. Never put credentials in AGENTS.md or Git.
+This repository uses Graphyard for ownership and delivery gates; ignored
+\`.graphyard/connection.json\` names the control plane and the machine-specific
+CLI and connection settings. Never put credentials in AGENTS.md or Git.
 
 Before editing, claim an authorized work item and use its assigned worktree.
 Check dependencies, blockers, current owner, and lease epoch. Use \`handoff GY-N\`
@@ -211,7 +214,7 @@ export async function setupRepository(root: string, input: Connection, options: 
   }
   const instructionsFile = resolve(root, 'AGENTS.md'); await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, connection.url);
+  const instructions = managedInstructions(existing);
   const runHerdr = options.runHerdr ?? ((args: string[]) => {
     // GY-1511: an install with its own Herdr instance links the plugin there, never in the default one.
     try { return herdrSync(args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }, options.herdrInstance === undefined ? herdrTarget() : options.herdrInstance).trim(); } catch { throw new Error('Herdr setup command failed; check installation and rerun init. No credentials were printed.'); }
@@ -390,7 +393,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const instructionsFile = resolve(root, 'AGENTS.md');
   await regularOrMissing(instructionsFile);
   let existing = ''; try { existing = await readFile(instructionsFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  const instructions = managedInstructions(existing, server);
+  const instructions = managedInstructions(existing);
   if (instructions === existing) unchanged.push('AGENTS.md coordination section');
   else {
     let instructionsMode = 0o644; try { instructionsMode = (await lstat(instructionsFile)).mode & 0o777; } catch { /* new instructions */ }

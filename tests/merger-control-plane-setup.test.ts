@@ -8,7 +8,6 @@ import { setupMaster } from '../src/master.js';
 import { mergerNotRequired, setupChecklist } from '../src/model/setup-checklist.js';
 import { setupFromZeroChecks, setupLine, setupSteps } from '../src/setup-from-zero.js';
 import { applyProposal, managedInstructions, scanProposal, setupRepository } from '../src/repository-setup.js';
-import { managedServerUrl } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -52,21 +51,19 @@ test('unit:setup-checklist-control-plane — doctor\'s setup-from-zero checks pr
 });
 
 test('unit:agents-block-control-plane — the AGENTS.md worker block says complete GY-N EPOCH --head SHA with no push or pull request, and this repository\'s own block is a faithful rendering', async () => {
-  const url = 'https://graphyard.example';
-  const block = managedInstructions('# Rules\n', url);
+  const block = managedInstructions('# Rules\n');
   assert.match(block, /Submit the commit with `complete GY-N EPOCH --head SHA` \(the control plane is the merge\nwriter; the shared object store already holds SHA\)\. This reports implementation\ncompletion and ends your lease in the same transaction; it does not set Done\./);
   assert.ok(!block.includes('PR_NUMBER') && !/\bpush\b/.test(block.replace(/nothing is pushed/g, '')), 'the block names no pull request and asks for no push');
   assert.match(block, /`complete` your last action: do not heartbeat or edit after it\./);
-  assert.equal(managedInstructions(block, url), block, 'regenerating keeps it exactly once');
+  assert.equal(managedInstructions(block), block, 'regenerating keeps it exactly once');
   const agents = await readFile(join(import.meta.dirname, '../AGENTS.md'), 'utf8');
-  const recorded = managedServerUrl(agents);
-  assert.ok(recorded, 'this repository\'s AGENTS.md names its server');
-  assert.equal(managedInstructions(agents, recorded!), agents, 'this repository\'s AGENTS.md is the rendering, regenerated to match');
+  assert.ok(!/uses Graphyard at \S+ for ownership/.test(agents), 'this repository\'s AGENTS.md names no server: the origin lives in ignored .graphyard/connection.json (GY-2240)');
+  assert.equal(managedInstructions(agents), agents, 'this repository\'s AGENTS.md is the rendering, regenerated to match');
 });
 
 test('unit:agents-block-control-plane — master init (with no GitHub App), worker init and init --apply write the --head block whatever merger the status reports', async () => {
   const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-  const expected = managedInstructions('', 'https://graphyard.example');
+  const expected = managedInstructions('');
   const repository = async (label: string) => {
     const root = await temporaryDirectory(label);
     execFileSync('git', ['init', '-q', root]);
