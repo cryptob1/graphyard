@@ -335,18 +335,6 @@ test('unit:loaded-revision-fetch-failure-is-no-restart-attempt — an origin out
   assert.match(resourceAttention([counted])[0].text, /stalled on fetch-failed/);
 });
 
-test('unit:self-upgrade-observed-production-keeps-promotion-wait — production observed serving none of the awaited deliveries is not unverified: while the loop runs the release production serves and the promotion is on schedule, the checkout ahead of the loop waits on it, with no fetch and no restart', async () => {
-  const state = faultState({ owed: false }), fake = new FakeGit(checkout, tip), fleet = { held: false, self: 0, executors: [] as string[] };
-  state.deployment = { source: 'endpoint', sha: loaded, at: iso(faultAt), reason: null, deployed: [], pending: ['GY-1436', 'GY-1437'] };
-  state.promotion = { checkedAt: iso(faultAt), mainSha: tip, promotedSha: loaded, promotedAt: null, behind: 2, ledgerReadAt: null, inFlight: false, runsReadAt: null, dispatchedAt: null, lastDispatchAt: null, nextDueAt: iso(faultAt + 30 * minute), reason: null };
-  assert.deepEqual(await performSelfUpgrade(master, state, deps(fake, { now: faultAt }, fleet)), { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' });
-  assert.deepEqual({ fetches: fake.fetches, checkouts: fake.checkouts, executors: fleet.executors, self: fleet.self }, { fetches: 0, checkouts: [], executors: [], self: 0 });
-  // The same cursor with production unobservable is the gap GY-1445 closes.
-  state.deployment = { source: 'unavailable', sha: null, at: iso(faultAt), reason: 'the production endpoint did not answer', deployed: [], pending: ['GY-1436', 'GY-1437'] };
-  assert.equal((await performSelfUpgrade(master, state, deps(fake, { now: faultAt }, fleet))).outcome, 'upgraded');
-  assert.equal(fleet.self, 1);
-});
-
 test('unit:self-upgrade-processed-gap-keys-on-loaded — a docs-only pass counts as processed only when it diffed from what the loop loaded: one taken from a later commit leaves the loaded code gap owed', async () => {
   const state = faultState({ owed: false }), fake = new FakeGit(checkout, checkout), fleet = { held: false, self: 0, executors: [] as string[] };
   const between = full('5eedba5e0001');
@@ -654,7 +642,7 @@ test('unit:loaded-revision-fault-clears — once the self-upgrade\'s restart lan
   assert.match(read.reading.detail!, /the checkout is at 63530ca74a00/);
 });
 
-test('unit:self-upgrade-unverified-still-restarts — with production unobserved (null or unavailable), the owed restart completes onto the checkout\'s own head, even one a release-lagged hold left owed: the served-release gate never pins the loop on stale code', async () => {
+test('unit:self-upgrade-unverified-still-restarts — with production unobserved (null or unavailable), or observed on an earlier release, the owed restart completes onto the checkout\'s own head', async () => {
   for (const deployment of [null, { source: 'unavailable' as const, sha: null, at: iso(faultAt), reason: 'the endpoint did not answer', deployed: [], pending: ['GY-1581'] }]) {
     // An owed restart onto the checkout, no hold yet: the pass completes it.
     const state = faultState(), fake = new FakeGit(checkout, checkout), clock = { now: faultAt }, fleet = { held: false, self: 0, executors: [] as string[] };
@@ -666,30 +654,11 @@ test('unit:self-upgrade-unverified-still-restarts — with production unobserved
     assert.equal(fake.ancestryReads, 0, 'an unobserved plane is never asked to serve the move');
     assert.equal(state.upgrade.stalled, undefined);
 
-    // A restart held while production was observed on an earlier release, then the plane went
-    // unobserved: the owed restart onto the checkout's own head completes on the next pass.
-    const lagged = faultState(), same = new FakeGit(checkout, checkout), quiet = { held: false, self: 0, executors: [] as string[] };
-    lagged.upgrade.stalled = { cause: 'release-lagged', reason: `restart held: production serves release ${loaded.slice(0, 12)}, which does not contain ${checkout.slice(0, 12)} yet`, since: iso(faultAt - hour), at: iso(faultAt - minute) };
-    lagged.actions['upgrade:held'] = { kind: 'config', work: null, principal: null, state: 'waiting', detail: lagged.upgrade.stalled.reason, attempts: 1, epoch: null, cycle: 0, at: iso(faultAt - minute) };
-    lagged.deployment = deployment;
-    const pins: (string | null)[] = [];
-    const resumed = await performSelfUpgrade(master, lagged, { ...deps(same, clock, quiet), holdCli: async commit => { pins.push(commit); } });
-    assert.equal(resumed.outcome, 'upgraded', `production ${deployment?.source ?? 'null'}: the held restart completes once the plane is unobserved`);
-    assert.deepEqual(quiet.executors, [checkout]);
-    assert.equal(quiet.self, 1);
-    assert.equal(lagged.upgrade.pending, null);
-    assert.equal(lagged.upgrade.stalled, undefined);
-    assert.equal(lagged.actions['upgrade:held']?.state, 'done', `production ${deployment?.source ?? 'null'}: the hold's waiting row is settled by the unobserved completion`);
-    assert.match(lagged.actions['upgrade:held']!.detail, /is no longer held: production is no longer observed/);
-    assert.deepEqual(pins, [null], `production ${deployment?.source ?? 'null'}: the CLI pinned to the earlier release is unpinned with the restart`);
   }
-  // The contrast: the same owed restart with production observed serving the loaded release, which
-  // does not contain the checkout, is held — only an observed release engages the gate.
+  // GY-1982: production observed serving the loaded release, which does not contain the checkout,
+  // holds nothing either: the release-lagged hold is gone.
   const observed = faultState(), fake = new FakeGit(checkout, checkout), fleet = { held: false, self: 0, executors: [] as string[] };
   observed.deployment = { source: 'endpoint', sha: loaded, at: iso(faultAt), reason: null, deployed: ['GY-1580'], pending: ['GY-1581'] };
-  const held = await performSelfUpgrade(master, observed, deps(fake, { now: faultAt }, fleet));
-  assert.equal(held.outcome, 'pending');
-  assert.deepEqual([fleet.executors, fleet.self], [[], 0]);
-  assert.equal(observed.upgrade.stalled?.cause, 'release-lagged');
-  assert.ok(fake.ancestryReads > 0);
+  assert.equal((await performSelfUpgrade(master, observed, deps(fake, { now: faultAt }, fleet))).outcome, 'upgraded');
+  assert.deepEqual([fleet.executors, fleet.self], [[checkout], 1]);
 });
