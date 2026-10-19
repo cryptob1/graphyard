@@ -142,19 +142,15 @@ test('manual:fault-class-resources — GY-1464: each loaded-revision instance, w
   }
 });
 
-test('manual:fault-class-resources — GY-1464: the restart owed while production is observed holds exactly where the reading excuses the lag: a loop running the release production serves with the promotion on schedule waits, a docs-only gap already processed stays idle', async () => {
+test('manual:fault-class-resources — GY-1464: the restart owed while production is observed holds exactly where the reading excuses the lag: the promotion schedule no longer holds it (GY-1982), a docs-only gap already processed stays idle', async () => {
   const instance = instances[2], faultAt = Date.parse(instance.at);
   const revision = { behind: instance.behind, loaded: instance.loaded, checkout: instance.checkout, movedAt: faultAt - 3 * hour };
 
-  // The promotion on schedule: the reading counts nothing and the pass owes no restart.
+  // GY-1982: the promotion schedule no longer holds the pass; the loop deploys and restarts onto its tip.
   const waiting = instanceState(instance, 'served-overdue'), fake = new FakeGit(instance.checkout, instance.checkout), fleet = { held: false, self: 0, executors: [] as string[] };
   waiting.promotion = { ...waiting.promotion!, nextDueAt: iso(faultAt + 30 * minute) };
   assert.equal(loadedRevision(waiting, revision, faultAt).used, 0);
-  assert.deepEqual(await performSelfUpgrade(master, waiting, deps(fake, { now: faultAt }, fleet)), { outcome: 'skipped', reason: 'no delivered item is verified deployed yet' });
-  // Once the promotion falls overdue the reading counts again, and so the pass restarts.
-  const overdue = faultAt + 31 * minute;
-  assert.equal(loadedRevision(waiting, revision, overdue).used, instance.behind);
-  assert.equal((await performSelfUpgrade(master, waiting, deps(fake, { now: overdue }, fleet))).outcome, 'upgraded');
+  assert.equal((await performSelfUpgrade(master, waiting, deps(fake, { now: faultAt }, fleet))).outcome, 'upgraded');
   assert.equal(fleet.self, 1);
 
   // A docs-only gap the loop already processed from what it loaded restarts nothing, cycle after cycle.

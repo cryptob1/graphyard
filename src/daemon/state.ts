@@ -198,6 +198,8 @@ export const promotionStateSchema = z.object({
   soaksReadAt: z.string().nullable().optional(),
   nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
+  /** GY-1982: the base tip whose continuous deploy failed, the step and why, and what the loop did about it. */
+  deployFailed: z.object({ sha: z.string().max(64), step: z.string().max(32), reason: z.string().max(500), rolledBackTo: z.string().max(64).nullable(), kept: z.boolean(), attempts: z.number().int().min(1), at: z.string().max(64) }).strict().nullable().optional(),
 }).strict();
 export type PromotionState = z.infer<typeof promotionStateSchema>;
 
@@ -571,7 +573,11 @@ export const daemonStateSchema = z.object({
     refusedFilings: z.array(z.object({ digest: z.string().max(80), at: z.number() }).strict()).default([]),
     /** When the approver remedy last read each open item's decision history, by item id. */
     decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
-  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {} })),
+    /** GY-2005: set when the loop's progress watchdog fires (cycle.ts, at the onset of its progressAttention lines): the next doctorStep launches a run at once, past the interval. */
+    watchdogDue: z.boolean().default(false),
+    /** GY-2005: whether the last cycle ended with the progress watchdog's lines standing — its edge, so the resolver fires once per stall, not every cycle. */
+    watchdogStanding: z.boolean().default(false),
+  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {}, watchdogDue: false, watchdogStanding: false })),
   /**
    * Per recurring-fault item key or invariant-violation instance id, the diagnostician run the loop
    * launched for it and what became of the diagnosis (GY-439, src/daemon/diagnosis.ts).

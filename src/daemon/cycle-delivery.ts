@@ -11,9 +11,8 @@ import { readyToRetry } from './sessions.js';
 import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, standingVerdict, type RoutineDecision } from './decisions.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
-import { defaultDeploymentReuseMinutes, defaultPromoteEveryMinutes, deploymentDetail, deploymentStepBudgetMs, promotionCycle, promotionWorkflow, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
+import { defaultDeploymentReuseMinutes, deploymentDetail, deploymentStepBudgetMs, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { mainGuardAttention } from '../main-guard.js';
-import { promotionFreeze } from './main-watch.js';
 import { readingDueNow, readingsStep } from './cycle-readings.js';
 import { openThroughputOwner, throughputAnsweredAt, throughputClaim, throughputDecisionCause, throughputDecisionRelease, throughputHandAsked, throughputOwnerAnsweredBy, throughputOwnerClosure, throughputOwnerItem, throughputRemeasureAt, throughputSelfAsked, throughputStallText, type ThroughputStall } from '../throughput.js';
 
@@ -125,28 +124,7 @@ export async function deploymentStep(cycle: Cycle) {
   //      publication is retried next cycle and holds nothing else back.
   if (effects.publishProductionEnvironment) await effects.publishProductionEnvironment().catch(() => undefined);
 
-  // 7a''. Promotion is the loop's, not GitHub's cron, which is best-effort and on 2026-10-05 dropped
-  //       four scheduled runs in a row (GY-1302): as soon as the base branch has moved past the last
-  //       promoted SHA and the last cut, no candidate is in validation and the run.promoteEveryMinutes
-  //       minimum gap has passed since the last dispatch (GY-1488), the release-candidate workflow is
-  //       dispatched with promote=true.
-  //       A failed read or dispatch is recorded under one key and retried with backoff, and the
-  //       cycle's read and dispatch stamps are kept, so a failure never repeats every cycle.
-  const promotion = effects.promotion, promotionFailure = 'promotion:failed';
-  if (promotion && readyToRetry(state.actions[promotionFailure], state.cycle)) {
-    const checked = await withinDeploymentBudget(state, 'promotion', () => promotionCycle(state.promotion ?? null, promotion, { now: now(), everyMinutes: config.run.promoteEveryMinutes ?? defaultPromoteEveryMinutes, intervalMs: config.run.intervalSeconds * 1000, ...promotionFreeze(effects.mainWatch?.freeze ?? false, state.mainWatch) }), deadline, now);
-    if (checked === stillVerifying) deferred.push('the promotion check');
-    else {
-      if (!checked.ok) throw checked.error;
-      const result = checked.value;
-      state.promotion = result.state;
-      if (result.failure) {
-        const detail = `Promotion could not be checked or dispatched: ${result.failure}`;
-        performed.push(await record(state, promotionFailure, { kind: 'deployment', work: null, principal: null, state: 'failed', detail, attempts: (state.actions[promotionFailure]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      } else if (state.actions[promotionFailure]) delete state.actions[promotionFailure];
-      if (result.dispatched) performed.push(await record(state, `promotion:${result.state.mainSha}`, { kind: 'deployment', work: null, principal: null, state: 'done', detail: result.state.reason ?? `Dispatched ${promotionWorkflow}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-    }
-  }
+  // 7a''. GY-1982: no promotion drive: the between-cycles self-upgrade deploys each new base tip itself.
 
   // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
   //        the loop records a measurement for the release the control plane serves, with its own
