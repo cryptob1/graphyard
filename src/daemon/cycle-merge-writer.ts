@@ -8,7 +8,7 @@ import type { MergerMode } from '../merger-mode.js';
 import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-ground.js';
 import { installIdFor } from '../install/types.js';
-import { mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
+import { defaultMergeWriterRetrials, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../merge-writer/trial.js';
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import { loadProjectDelivery } from '../project-applications.js';
@@ -39,6 +39,8 @@ export type PendingRework = z.infer<typeof pendingReworkSchema>;
 export const unconfirmedRecordSchema = z.object({ key: z.string().max(100), id: z.string().max(100), attempt: z.string().max(100), write: z.number().int().min(0).max(1000),
   event: z.record(z.string(), z.unknown()), sentAt: instant, replays: z.number().int().min(0).max(100_000), lastError: z.string().max(2000) }).strict();
 export type UnconfirmedRecord = z.infer<typeof unconfirmedRecordSchema>;
+/** GY-2053: the newest attempt progress the writer's own summary keeps, so a multi-attempt flight keeps showing movement. */
+const attemptProgressSchema = z.object({ at: instant, what: z.string().max(2000) }).strict();
 /** `state.mergeWriter`: when the writer last delivered, the heads owed a merge oldest first (a trial-timeout yield last, GY-2079), the merge in flight, the newest refusals, the reworks still to be confirmed, and the heads yielding their queue turn. */
 export const mergeWriterStateSchema = z.object({
   lastMergeAt: instant.nullable().default(null),
@@ -47,6 +49,10 @@ export const mergeWriterStateSchema = z.object({
   inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional() }).strict().nullable().default(null),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
   reworks: z.array(pendingReworkSchema).max(mergeWriterKeptReworks).default([]),
+  /** GY-2053: the newest attempt progress — a retrial's intent, a trial verdict, a push, a reconcile — recorded beside every ledger write a flight or reconcile makes, so the movement the summary reports advances inside a long flight. Absent until a write records it. */
+  progress: attemptProgressSchema.optional(),
+  /** GY-2053: the writer's own motion bound, its configured worst case for one flight ((retrials + 1) × the trial timeout plus a cycle); the owed-decision readers hold a held head inside it. Absent until the writer step first runs. */
+  motionBoundMs: z.number().int().min(0).optional(),
   /** GY-2079: the heads whose merge trial timed out, yielding their queue turn until they leave the queue; absent until one does. `count` is the timeouts counted toward the refusal bound (only where another head passed since the previous one); `reason` is set while the bound refusal it names is still owed. */
   timeouts: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, at: instant, count: z.number().int().min(1).max(100_000), othersPassed: z.boolean(), reason: z.string().max(2000).nullable() }).strict()).max(mergeWriterKeptTimeouts).optional(),
   /** GY-1852: record writes whose reply was lost, replayed with their exact input before anything new starts; absent until one is. */
@@ -301,14 +307,41 @@ const statusOf = (error: unknown) => { const status = (error as { status?: unkno
 const replyUnknown = (error: unknown) => { const status = statusOf(error); return status === null || status >= 500 || status === 408 || status === 429; };
 
 /**
+ * GY-2053: the writer's configured worst case for one flight — every retrial its settings allow, each one trial timeout, plus one cycle — the
+ * bound a held head's motion is judged inside (owed-report.ts `mergeWriterMotionBound`), so a hold outlives however long a legal flight runs.
+ */
+export const mergeWriterFlightBoundMs = (run: { mergeWriter?: { retrials?: number }; intervalSeconds?: number }) =>
+  ((run.mergeWriter?.retrials ?? defaultMergeWriterRetrials) + 1) * trialTimeoutMinutes * 60_000
+    + (run.intervalSeconds ?? 20) * 1000;
+
+/**
+ * GY-2053: what one recorded write says, as the reader reads it — the attempt step the writer's summary reports as its newest movement.
+ * Every ledger write a flight or a reconcile makes is attempt progress: a retrial's intent, a trial verdict, a push, a reconcile.
+ */
+export const attemptProgressLine = (item: { key: string }, event: MergeRecordEvent): string => {
+  const sha = (value: unknown) => typeof value === 'string' && value ? value.slice(0, 12) : null;
+  switch (event.kind) {
+    case 'intent': return `${item.key}'s head ${sha(event.head)} recorded its merge intent on base tip ${sha(event.baseTip)} as merge ${sha(event.mergeSha)}`;
+    case 'trial': return `${item.key}'s merge ${sha(event.mergeSha)} recorded its trial (${event.outcome})`;
+    case 'pushed': return `${item.key}'s merge ${sha(event.mergeSha)} was recorded pushed`;
+    case 'reconciled': return `${item.key}'s merge ${sha(event.mergeSha)} was reconciled: the base holds it`;
+    case 'refused': return `${item.key}'s head ${sha(event.head)} recorded its refusal: ${event.reason.slice(0, 300)}`;
+    default: return `${item.key} recorded a ${(event as { kind: string }).kind} step`;
+  }
+};
+
+/**
  * The record port of one attempt (GY-1852): every write carries the attempt id and its place in the
  * attempt, so its key (`mergeRecordKey`) is never sent with any other input. A write whose reply is
  * unknown is kept on `state.mergeWriter.unconfirmed` with its exact input, for `replayUnconfirmed`.
+ * Each write is also the attempt progress the summary reports (GY-2053), recorded before it is
+ * sent: the write itself is the writer moving, whatever its reply turns out to be.
  */
 export function attemptRecorder(writer: MergeWriterState, record: MergePorts['record'], attempt: string, at: () => string): MergePorts['record'] {
   let next = 0;
   return async (item, event) => {
     const mergeAttempt = { id: attempt, write: next++ };
+    writer.progress = { at: at(), what: attemptProgressLine(item, event) };
     try { return await record({ ...item, mergeAttempt }, event); }
     catch (error) {
       if (!keyReusedRefusal(error) && replyUnknown(error)) {
@@ -430,6 +463,9 @@ export async function mergeWriterStep(cycle: Cycle) {
   writer.timeouts ??= []; // GY-2079: the yields the queue turns over, read plainly below and persisted with the rest.
   const at = () => new Date(now()).toISOString();
   let changed = false, delivered: { key: string; mergeSha: string } | null = null;
+  // GY-2053: the summary names its own motion bound — the configured worst case for one flight — so the owed-decision readers hold a held head through the whole live flight however the install configures retrials.
+  const motionBoundMs = mergeWriterFlightBoundMs(cycle.config?.run ?? {});
+  if (writer.motionBoundMs !== motionBoundMs) { writer.motionBoundMs = motionBoundMs; changed = true; }
   const flight = flights.get(state);
   if (flight?.settled) {
     flights.delete(state);
@@ -551,9 +587,16 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (changed) await effects.persist(state);
 }
 
-/** The `mergeWriter` section of `master status` and the daemon summary: the queue, the merge in flight, the last delivery, the newest refusals and the reworks still owed. */
-export const mergeWriterSummary = (writer: MergeWriterState | null | undefined) =>
-  writer ? { queue: writer.queue, inFlight: writer.inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals, reworks: writer.reworks } : { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] };
-/** That section's shape, as the owed-attention reader takes it (owed-report.ts, GY-2015): the summary master status and the fault step both hold. */
-export type MergeWriterSummary = ReturnType<typeof mergeWriterSummary>;
+/**
+ * The `mergeWriter` section of `master status` and the daemon summary: the queue, the merge in flight, the last delivery, the newest refusals, the reworks still owed, and — GY-2053 — the attempt progress and motion bound the owed-decision readers hold a head inside. The two new fields are
+ * optional, so a summary an older loop built, or a writer that has not run yet, reads as before.
+ */
+export type MergeWriterSummary = {
+  queue: MergeWriterState['queue']; inFlight: MergeWriterState['inFlight']; lastMergeAt: string | null;
+  refusals: MergeWriterState['refusals']; reworks: MergeWriterState['reworks'];
+  progress?: MergeWriterState['progress']; motionBoundMs?: MergeWriterState['motionBoundMs'];
+};
+export const mergeWriterSummary = (writer: MergeWriterState | null | undefined): MergeWriterSummary =>
+  writer ? { queue: writer.queue, inFlight: writer.inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals, reworks: writer.reworks, progress: writer.progress, motionBoundMs: writer.motionBoundMs }
+    : { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] };
 export type { MergeRecordEvent };
