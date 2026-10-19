@@ -134,6 +134,8 @@ export function providerResponses(provider: Provider, state: { installed: boolea
 export function githubResponses(state: FakeState, repository = REPOSITORY, branch = 'main') {
   return [
     { match: 'gh auth status', result: `Logged in to github.com account installer` },
+    { match: 'deploy-key list', result: '[]' },
+    { match: 'deploy-key add', result: 'ok' },
     { match: `gh api repos/${repository}/commits/${branch}/check-runs`, result: JSON.stringify({ check_runs: [{ name: 'test', app: { id: CI_APP_ID, slug: 'github-actions' } }, { name: 'typecheck', app: { id: CI_APP_ID, slug: 'github-actions' } }] }) },
     { match: `gh api repos/${repository}/commits/${branch}`, result: JSON.stringify({ sha: HEAD_SHA }) },
     { match: '--method PUT', result: '{}' },
@@ -260,7 +262,7 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     // The served roster (GET /api/principals), as the control plane lists it: ids, roles, kinds and grants, never tokens.
     if (url.endsWith('/api/principals')) return json(200, { principals: deployedRoster(transport, remotes).map(principal => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [], leases: [] })) });
     if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
-    if (url.endsWith('/api/status')) return json(200, typeof options.statusBody === 'function' ? options.statusBody() : options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: true, githubAppId: GRAPHYARD_APP_ID, githubInstallationId: 500 });
+    if (url.endsWith('/api/status')) return json(200, typeof options.statusBody === 'function' ? options.statusBody() : options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository, github: false, githubAppId: null, githubInstallationId: null });
     if (url.includes('/app/installations/') && url.endsWith('/access_tokens')) return json(201, { token: 'installation-token-for-tests', expires_at: new Date(Date.now() + 3_600_000).toISOString() });
     const app = appOfJwt(options.apps ?? [], String((init.headers ?? {}).Authorization ?? ''));
     if (app && url.endsWith('/app')) return json(200, { id: app.appId, slug: app.slug, owner: { login: app.account ?? repository.split('/')[0] }, permissions: app.permissions ?? requiredPermissions(controlPlanePermissions) });

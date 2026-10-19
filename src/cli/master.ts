@@ -69,8 +69,6 @@ export const masterCommands = defineCommands([
       '  master merge                  Say that GitHub merges; Graphyard runs no merge of its own',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
       '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
-      '  master verify-deployment GY-N Verify that the deployed release serves a delivery and emits',
-      '                                the current instructions; records the exact release observed',
       '  master reading GY-N pass|fail DETAIL',
       '                                Record by hand a loop-owned observation reading the loop could not take',
       '  master run [--once] [--interval SECONDS]',
@@ -107,7 +105,7 @@ export const masterCommands = defineCommands([
     ],
     async run(context) {
       const { id } = context;
-      // GY-1732: the observed release's own post-deploy filer, run by verify-deployment from an isolated checkout of
+      // GY-1732: the observed release's own post-deploy filer, run by the loop's readings from an isolated checkout of
       // that release; it opens no session and takes no root — the delivered item and readings arrive on stdin.
       if (id === 'post-deploy-checks') return postDeployChecksCommand();
       const root = context.repositoryRoot();

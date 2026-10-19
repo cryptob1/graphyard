@@ -51,17 +51,15 @@ test('--apply provisions Postgres and the application, sets every variable, and 
       assert.equal(summary.webhookUrl, `${expectedUrl[provider]}/api/github/webhook`);
       assert.equal(summary.status.role, 'admin');
       assert.equal(summary.status.repository, 'owner/project');
-      assert.equal(summary.github?.appId, GRAPHYARD_APP_ID);
-      assert.deepEqual(summary.github?.ciAppIds, [CI_APP_ID]);
-      // A local Compose install registers no webhook and polls GitHub, so its delivery check is skipped (GY-1474).
-      if (provider === 'compose') assert.equal(summary.webhook.skipped, true, summary.webhook.detail);
-      else assert.equal(summary.webhook.delivered, true, `${provider} webhook: ${summary.webhook.detail}`);
+      // GY-2009: no GitHub App is registered, so there is no webhook delivery to verify.
+      assert.equal(summary.github, null);
+      assert.equal(summary.webhook.skipped, true, summary.webhook.detail);
 
       const lines = fixture.allCommandLines();
       if (provider === 'railway') {
         assert.ok(lines.some(line => line.includes('railway add --database postgres')), 'Postgres was not provisioned');
         const up = lines.filter(line => line.includes('railway up'));
-        assert.ok(up.length >= 2, 'the application was not deployed');
+        assert.ok(up.length >= 1, 'the application was not deployed');
         for (const line of up) assert.match(line, /railway up \S+ --service graphyard-owner-project --ci --detach/, `the deploy did not name its source and service: ${line}`);
         assert.ok(lines.some(line => line.includes('railway domain --service')), 'no HTTPS domain was obtained');
       } else {
@@ -74,15 +72,18 @@ test('--apply provisions Postgres and the application, sets every variable, and 
         const environment = bundle(fixture, 'server.env')!;
         assert.equal(environment.mode, 0o600);
         assert.equal(bundle(fixture, 'db.env')!.mode, 0o600);
-        for (const name of ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH', 'GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET', 'GITHUB_CI_APP_IDS']) {
+        for (const name of ['HOST', 'PORT', 'DATABASE_URL', 'GRAPHYARD_PRINCIPALS', 'GITHUB_REPOSITORY', 'GITHUB_BASE_BRANCH']) {
           assert.ok(environment.content.includes(`${name}=`), `${provider} did not set ${name}`);
+        }
+        for (const name of ['GITHUB_APP_ID', 'GITHUB_INSTALLATION_ID', 'GITHUB_PRIVATE_KEY_FILE', 'GITHUB_WEBHOOK_SECRET']) {
+          assert.ok(!environment.content.includes(`${name}=`), `${provider} set the App variable ${name}`);
         }
         if (provider !== 'compose') assert.match(bundle(fixture, 'Caddyfile')!.content, /graphyard\.example\.test \{/);
       }
 
       const record = JSON.parse(await readFile(join(session.directory, 'install.json'), 'utf8'));
       assert.equal(record.url, expectedUrl[provider]);
-      assert.equal(record.github.appId, GRAPHYARD_APP_ID);
+      assert.ok(!record.github, 'no App is recorded');
       assert.equal(record.principals.length, session.principals.length);
     } finally { await fixture.cleanup(); }
   }
@@ -193,12 +194,14 @@ test('Railway secrets are sent over standard input and never appear in a process
   const fixture = await harness({ provider: 'railway' });
   try {
     const { session } = await apply(fixture, 'railway');
-    const secrets = ['GRAPHYARD_PRINCIPALS', 'GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET'];
+    const secrets = ['GRAPHYARD_PRINCIPALS'];
     for (const name of secrets) {
       const command = fixture.transport.commands.find(entry => entry.args.includes('--stdin') && entry.args.includes(name));
       assert.ok(command, `${name} was not sent over stdin`);
       assert.ok(command!.input && command!.input.length > 0);
     }
+    // GY-2009: no App, so no App key or webhook secret is set at all.
+    for (const name of ['GITHUB_PRIVATE_KEY', 'GITHUB_WEBHOOK_SECRET']) assert.ok(!fixture.transport.commands.some(entry => entry.args.includes(name)), `${name} was set`);
     for (const command of fixture.transport.commands) {
       for (const token of session.tokens.values()) assert.ok(!command.args.some(argument => argument.includes(token)), 'a credential reached a process argument');
     }
@@ -207,34 +210,17 @@ test('Railway secrets are sent over standard input and never appear in a process
   } finally { await fixture.cleanup(); }
 });
 
-test('the App-bound merge check is required only once Graphyard has published it', async () => {
+test('GY-2009: install writes no branch protection and requires no App-bound merge check', async () => {
   const fresh = await harness({ provider: 'compose' });
   try {
     const { summary } = await apply(fresh, 'compose');
-    const put = fresh.transport.commands.find(command => command.args.includes('--method') && command.args.includes('PUT'))!;
-    const payload = JSON.parse(put.input!);
-    assert.ok(!payload.required_status_checks.checks.some((check: any) => check.context === CHECK_NAME), 'a check that does not exist yet must not be required');
-    // The merge queue lands a candidate that is deliberately behind the base branch.
-    assert.equal(payload.required_status_checks.strict, false);
-    assert.equal(payload.enforce_admins, true);
-    assert.equal(payload.required_conversation_resolution, false, 'the review gate is the verdict; threads block nothing');
-    assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 1);
-    assert.ok(summary.nextSteps.some(step => step.includes(CHECK_NAME)), 'the operator must be told to rerun once the check exists');
+    assert.ok(!fresh.allCommandLines().some(line => /\/protection|\/rulesets/.test(line)), 'no protection or ruleset endpoint is called');
+    assert.ok(!fresh.transport.commands.some(command => command.args.includes('PUT') && command.args.some(arg => arg.endsWith('/protection'))));
+    assert.ok(!summary.nextSteps.some(step => step.includes(CHECK_NAME)), 'no rerun is owed for a merge check');
   } finally { await fresh.cleanup(); }
-
-  const published = await harness({ provider: 'compose', protection: { required_status_checks: { strict: false, checks: [{ context: CHECK_NAME, app_id: null }] }, enforce_admins: { enabled: false }, required_pull_request_reviews: { required_approving_review_count: 0 } } });
-  try {
-    const { summary } = await apply(published, 'compose');
-    // The last protection write; the release pipeline's GitHub environments are PUTs of their own.
-    const put = published.transport.commands.filter(command => command.args.includes('--method') && command.args.includes('PUT') && command.args.some(arg => arg.endsWith('/protection'))).at(-1)!;
-    const payload = JSON.parse(put.input!);
-    const merge = payload.required_status_checks.checks.find((check: any) => check.context === CHECK_NAME);
-    assert.equal(merge.app_id, GRAPHYARD_APP_ID, 'the merge check must be bound to the Graphyard App');
-    assert.ok(!summary.nextSteps.some(step => step.includes(CHECK_NAME)));
-  } finally { await published.cleanup(); }
 });
 
-test('the multi-line App private key is written beside the bundle and mounted, never into the env file', async () => {
+test('the env file is one variable per line, and GY-2009 writes no App private key beside the bundle or into it', async () => {
   const fixture = await harness({ provider: 'compose' });
   try {
     await apply(fixture, 'compose');
@@ -245,21 +231,14 @@ test('the multi-line App private key is written beside the bundle and mounted, n
       assert.match(line, /^[A-Za-z_][A-Za-z0-9_]*=/, `env-file line is not a variable assignment: ${line.slice(0, 30)}`);
     }
     const parsed = parseEnv(environment.content);
-    assert.ok(!environment.content.includes('PRIVATE KEY'), 'the raw PEM reached the env file');
+    assert.ok(!environment.content.includes('PRIVATE KEY'), 'a PEM reached the env file');
     assert.equal(parsed.GITHUB_PRIVATE_KEY, undefined);
-    assert.equal(parsed.GITHUB_PRIVATE_KEY_FILE, PRIVATE_KEY_CONTAINER_PATH);
+    assert.equal(parsed.GITHUB_PRIVATE_KEY_FILE, undefined);
     assert.equal(parsed.HOST, '0.0.0.0');
     assert.ok(parsed.DATABASE_URL?.startsWith('postgres://'), 'the parsed env file lost the core variables');
-
-    const key = bundle(fixture, 'github-private-key.pem')!;
-    assert.ok(key, 'the private key sidecar file was not written');
-    assert.equal(key.mode, 0o600);
-    // The image runs USER node (uid 1000) and a bind mount keeps host ownership, so the key
-    // must be given to the container user at write time: anything else crash-loops the server.
-    assert.equal(key.owner, '1000:1000');
-    assert.equal(key.content, appKey);
-    // The key is mounted read-only, beside the operator's checkout the server observes heads from.
-    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`volumes: \\["\\./github-private-key\\.pem:${PRIVATE_KEY_CONTAINER_PATH}:ro", "${fixture.root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:/repo"\\]`));
+    assert.equal(bundle(fixture, 'github-private-key.pem'), null, 'no App key sidecar is written');
+    // The operator's checkout the server observes heads from is still mounted.
+    assert.match(bundle(fixture, 'compose.yaml')!.content, new RegExp(`"${fixture.root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:/repo"`));
   } finally { await fixture.cleanup(); }
 });
 
@@ -354,18 +333,13 @@ test('a uid-1000 container reads the key a real transport wrote, through a real 
   } finally { await rm(workdir, { recursive: true, force: true }); }
 });
 
-test('the agent review policy sets zero native approvals without relaxing any other protection', async () => {
+test('the agent review policy writes no branch protection and registers no reviewer App (GY-2009)', async () => {
   const fixture = await harness({ provider: 'compose' });
   try {
     const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'compose', reviewPolicy: 'agent', reviewer: 'claude' }, fixture.deps);
     const summary = await applyInstall(session, await buildPlan(session));
-    const payload = JSON.parse(fixture.transport.commands.find(command => command.args.includes('PUT'))!.input!);
-    assert.equal(payload.required_pull_request_reviews.required_approving_review_count, 0);
-    assert.equal(payload.enforce_admins, true);
-    assert.equal(payload.required_status_checks.strict, false);
-    assert.deepEqual(summary.reviewers, [{ name: 'claude', appId: GRAPHYARD_APP_ID + 1, botUserId: 900_001 }]);
-    const environment = bundle(fixture, 'server.env')!;
-    assert.match(environment.content, /GRAPHYARD_REVIEWER_APPS=\[\{"id":"claude"/);
+    assert.ok(!fixture.transport.commands.some(command => command.args.includes('PUT') && command.args.some(arg => arg.endsWith('/protection'))));
+    assert.deepEqual(summary.reviewers, []);
   } finally { await fixture.cleanup(); }
 });
 
@@ -452,7 +426,7 @@ test('unit:railway-app-bind-keeps-normal-install-upload — a normal Railway ins
     assert.equal(summary.health, true);
     const lines = fixture.allCommandLines();
     const ups = lines.filter(line => line.includes('railway up'));
-    assert.ok(ups.length >= 2, 'the normal install did not upload source');
+    assert.ok(ups.length >= 1, 'the normal install did not upload source');
     for (const line of ups) assert.match(line, /railway up \S+ --service graphyard-owner-project --ci --detach/);
     assert.ok(lines.some(line => /--set GRAPHYARD_BUILD_SHA=/.test(line)), 'the normal install did not stamp GRAPHYARD_BUILD_SHA');
     // App bind uses redeploy; a full install must not have swapped to redeploy-only.
@@ -483,7 +457,7 @@ test('Railway runs against the Graphyard link directory and deploys the Graphyar
       assert.equal(command.cwd, projectCommand ? session.context.railwayDir : undefined, `railway ${command.args[0]} ran in ${command.cwd ?? 'the process cwd (the managed repository)'}`);
     }
     const up = railway.filter(command => command.args[0] === 'up');
-    assert.ok(up.length >= 2);
+    assert.ok(up.length >= 1);
     for (const command of up) {
       assert.equal(command.args[1], sourceRoot, 'the deploy did not upload the Graphyard checkout');
       assert.ok(!command.args.some(argument => argument === fixture.root), 'the deploy uploaded the managed repository');

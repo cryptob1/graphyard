@@ -321,8 +321,11 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   assert.equal(live.mergeWriter.lastMergeAt, iso(start));
   assert.ok(recorded.actions.some(action => action.state === 'done' && /^Merged GY-1 head/.test(action.detail)), JSON.stringify(recorded.actions.map(action => action.detail)));
   assert.deepEqual(on.events.slice(0, 4).map(event => event.kind), ['intent', 'trial', 'pushed', 'reconciled']);
+  assert.equal(live.mergeWriter.inFlight, null, 'the cycle that lands a merge starts no trial');
+  await runCycle(config, live, effects, now);
   assert.deepEqual([live.mergeWriter.queue.map(entry => entry.key), inFlightKey(live)], [['GY-2'], 'GY-2'], 'the delivered head leaves the queue and the next one is merged, one at a time');
   await mergeWriterIdle(live);
+  await runCycle(config, live, effects, now);
   await runCycle(config, live, effects, now);
   assert.deepEqual([live.mergeWriter.queue, live.mergeWriter.inFlight, on.recorded.filter(row => row.event.kind === 'reconciled').map(row => row.key)], [[], null, ['GY-1', 'GY-2']]);
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(live))).mergeWriter, live.mergeWriter, 'the state round-trips through the daemon state schema');
@@ -742,4 +745,17 @@ test('integration:executor-reconcile-after-crash — holds reads the whole first
   assert.ok(secondParents.length >= 2, 'the merged heads are second parents');
   for (const head of secondParents) assert.equal(await reads.holds(head), false, `${head.slice(0, 12)} is only a second parent`);
   assert.equal(await reads.holds('b'.repeat(40)), false);
+});
+
+test('unit:hotfix-merges-first — a head titled "Hotfix: …" is merged before older queued heads; among hotfixes and among the rest the oldest submission goes first', () => {
+  const old = submitted(1, 50), fix = submitted(2, 1, ['src/app.ts'], { title: 'Hotfix: unblock the queue' }), olderFix = submitted(3, 5, ['src/app.ts'], { title: 'hotfix: earlier one' }), plain = submitted(4, 20);
+  assert.deepEqual(mergeQueue([old, fix, olderFix, plain], {}, start).queue.map(entry => entry.key), ['GY-3', 'GY-2', 'GY-1', 'GY-4']);
+  assert.equal(nextToMerge([old, fix], {}, start)?.key, 'GY-2');
+});
+
+test('unit:oldest-item-first — among non-hotfix heads the item filed first merges first, so a head redone after a refusal does not rejoin at the back', () => {
+  const fresh = submitted(1, 50, ['src/app.ts'], { createdAt: iso(start - 60 * minute) }), redone = submitted(2, 1, ['src/app.ts'], { createdAt: iso(start - 300 * minute) });
+  assert.deepEqual(mergeQueue([fresh, redone], {}, start).queue.map(entry => entry.key), ['GY-2', 'GY-1']);
+  const fix = submitted(3, 1, ['src/app.ts'], { title: 'Hotfix: x', createdAt: iso(start - minute) });
+  assert.equal(nextToMerge([fresh, redone, fix], {}, start)?.key, 'GY-3', 'a hotfix still goes first');
 });
