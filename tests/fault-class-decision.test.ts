@@ -21,6 +21,10 @@ import { githubUnobservedRefusal, pushRefusal, trialRefusal } from '../src/model
 // GY-2053's own exports are read through namespaces (and its summary type as a type), so the base exercise loads this file and each new replay fails on its assertion.
 import * as owed from '../src/cli/owed-report.js';
 import * as mergeWriterModule from '../src/daemon/cycle-merge-writer.js';
+import * as mergeExecutor from '../src/merge-writer/executor.js';
+import { foldInterventions } from '../src/interventions/fold.js';
+import { computeInterventionReport } from '../src/interventions/report.js';
+import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import type { MergeWriterSummary } from '../src/daemon/cycle-merge-writer.js';
 import { readDecisions } from '../src/server/decision-ledger.js';
 import { humanNeeded, type NextAction } from '../src/model/next-action.js';
@@ -1533,4 +1537,175 @@ test('integration:owed-decision-writer-flight-replay — the 09:32:04Z shape sta
   assert.deepEqual(queue, [], 'the serial queue drained, one head at a time');
   // The whole replay filed not one decision instance: the writer's own flight was never a judgment.
   assert.deepEqual(state.faults.instances.filter(instance => instance.faultClass === 'decision'), []);
+});
+
+// GY-2166 names this file for its proof: manual:fault-class-decision. The master loop filed 4
+// decision faults in 24 hours on 19 October 2026. Three were `owed-decision` lines — GY-2078 at
+// 06:02:41.169Z (owed 32m), GY-2046 and GY-2085 at 06:03:29.213Z (owed 30m) — each an item whose
+// synced head was refused at the test gate `merge writer has not trialled … on 9a33429aea6b` while
+// the ledger still held the writer's own `trial failed` refusal of that exact head from 05:40:00Z.
+// The upgrade restart of 05:40:25Z (GY-2053's merge landing mid-flight) kept the persisted ledger
+// and lost the in-memory flights, so the settlement that would have added the rework the refusal
+// grounds never ran: the queue rightly dropped the trial-refused head, and the item's escalate
+// action waited on a judgment nobody owed. The fourth was the `intervention-pattern` on
+// `interventions` at 05:41:28.284Z: three bypass interventions at the test stage in 7 days — each
+// the writer's own `merge.reconciled` delivery (a batch landing while its item still read `test`:
+// GY-1981, GY-2082, GY-2053), which the fold counted as "merged without a merge execution" because
+// the intent, trial and pushed rows that prove the execution are kinds it does not read.
+//
+// The shared cause: the writer's steps outlive their in-flight context, and the readers meet the
+// record without it. The candidate grounds both readings in the record itself: the rework a
+// trial-failure refusal holds for the candidate's exact head is re-derived from the ledger every
+// cycle (requestPendingReworks seeds what the queue's drop implies, sharing the predicate with
+// mergeQueue), and the fold exempts the writer's own reconcile — a reconciled row naming no
+// reconciliation — as the guarded path reporting itself. Each instance is replayed as the record
+// stood when the loop counted it. Against the base each new subtest fails: the instance reproduces.
+
+const gy2166Base = '9a33429aea6b'.padEnd(40, '0');
+const gy2166Heads: Record<string, string> = { 'GY-2078': '235d19e50d77'.padEnd(40, '0'), 'GY-2046': 'cfeac5ecc9df'.padEnd(40, '0'), 'GY-2085': '7a5ba7141a40'.padEnd(40, '0') };
+const gy2166Refusals: Record<string, string> = {
+  'GY-2078': 'trial failed: the merge conflicts in docs/protocol/work-commands.md, src/daemon/effects-production.ts, tests/soak-review.test.ts',
+  'GY-2046': 'trial failed: the merge conflicts in docs/how-graphyard-works.md, docs/operations-reference.md, docs/operations.md, docs/validation.md',
+  'GY-2085': 'trial failed: the merge conflicts in docs/master-agent-reference.md',
+};
+const gy2166Instances = [
+  { subject: 'GY-2078', at: '2026-10-19T06:02:41.169Z', owed: '32m', owedMs: 32 * 60_000 + 30_000 },
+  { subject: 'GY-2046', at: '2026-10-19T06:03:29.213Z', owed: '30m', owedMs: 30 * 60_000 + 30_000 },
+  { subject: 'GY-2085', at: '2026-10-19T06:03:29.213Z', owed: '30m', owedMs: 30 * 60_000 + 30_000 },
+];
+
+/**
+ * An instance's item as the restart left it: build and review passed, the test gate refusing the
+ * trial the ledger's own `trial failed` refusal of this exact head says failed, and the rework that
+ * refusal grounds unasked — the queue's only reason to drop the head is the refusal itself.
+ */
+function gy2166Item(subject: string, countedAt: string, owedMs: number): Work {
+  const work = standing({ subject, detail: '', owedMs: 0, owed: '' }, new Date(Date.parse(countedAt) - owedMs).toISOString());
+  const sha = gy2166Heads[subject]!, refusal = trialRefusal(sha, gy2166Base);
+  const action: NextAction = { kind: 'escalate', work: work.id, key: subject, gate: 'test', refusal,
+    reason: `${subject} is refused at the test gate and no executor step answers it: ${refusal}`,
+    inputs: { kind: 'escalate', trigger: 'test', detail: refusal } as NextAction['inputs'], llmRole: null,
+    binding: `test:1:${sha.slice(0, 12)}:${gy2166Base.slice(0, 12)}:${refusal}` };
+  Object.assign(work, {
+    stage: 'test', candidate: { sha, baseSha: gy2166Base, pr: 2166, branch: `graphyard/${subject.toLowerCase()}-1`, author: 'implementer' },
+    nextAction: { ...action, needsHuman: humanNeeded(action)! },
+    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: true, reasons: [] }, { name: 'test', passed: false, reasons: [refusal] }],
+    mergeLedger: { key: subject, state: 'refused', head: sha.toLowerCase(), baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason: gy2166Refusals[subject] }, events: 2 },
+  });
+  Object.assign(work.actionQueue!.actions[0], { kind: 'escalate', gate: 'test', binding: action.binding, refusal, reason: action.reason });
+  return work;
+}
+
+/**
+ * The writer as the two upgrade restarts left it at the count: the persisted queue holding seven
+ * other heads, GY-2010's flight alive and moving, and none of the three — the settlements that
+ * owed their reworks never ran, and the refusals of 05:40Z are not even in the kept tail.
+ */
+function gy2166Writer(at: string): MergeWriterSummary {
+  const now = Date.parse(at);
+  const others: [string, string, number][] = [['GY-2010', '924c6a729a40', 30], ['GY-2091', '3911c01e6948', 169], ['GY-2092', 'af58a672e005', 164], ['GY-2151', 'eec450afa312', 121], ['GY-2159', 'e08b79257227', 159], ['GY-2163', 'd58f40194edb', 138], ['GY-2164', '4f58a04d806f', 134]];
+  return { lastMergeAt: new Date(now - 31 * 60_000).toISOString(),
+    queue: others.map(([key, head, minutes]) => ({ key, id: `work-${key}`, head: head.padEnd(40, '0'), submittedAt: new Date(now - minutes * 60_000).toISOString(), waitingMs: minutes * 60_000 })),
+    inFlight: { key: 'GY-2010', id: 'work-GY-2010', head: '924c6a729a40'.padEnd(40, '0'), startedAt: new Date(now - 7 * 60_000).toISOString() },
+    refusals: [{ key: 'GY-1982', head: 'd5db216c4503'.padEnd(40, '0'), reason: 'trial failed: tests tests/delivery-redesign-doc.test.ts', at: new Date(now - 68 * 60_000).toISOString() }],
+    reworks: [], progress: undefined, motionBoundMs: mergeWriterModule.mergeWriterFlightBoundMs({ intervalSeconds: 20 }) };
+}
+
+for (const entry of gy2166Instances) test(`manual:fault-class-decision — owed-decision|${entry.subject}|${entry.at}: the trial-refused head whose rework the restart lost reproduces`, () => {
+  const now = Date.parse(entry.at), work = gy2166Item(entry.subject, entry.at, entry.owedMs), writer = gy2166Writer(entry.at);
+  // The shared record: the ledger's refusal of the exact candidate head is what takes the head out of the queue...
+  assert.equal(mergeExecutor.trialRefusalHeld(work.candidate, (work as { mergeLedger: MergeLedgerState }).mergeLedger)?.reason, gy2166Refusals[entry.subject]);
+  assert.deepEqual(mergeExecutor.mergeQueue([work], { [entry.subject]: (work as { mergeLedger: MergeLedgerState }).mergeLedger }, now).queue.map(row => row.key), [],
+    `${entry.subject}'s head waits for its rework, not a second trial`);
+  // ...so the GY-2015 hold cannot apply: the head is in neither the queue nor the flight, and the line stood unbounded.
+  assert.equal(owed.mergeWriterHolds(work, writer, now), null);
+  const { reported, counted } = observedFaults([work], entry.at, writer);
+  assert.deepEqual(reported.map(line => line.text),
+    [`${entry.subject} is refused at the test gate and no executor step answers it: merge writer has not trialled ${gy2166Heads[entry.subject]!.slice(0, 12)} on ${gy2166Base.slice(0, 12)} — no executor may run it; resolving ${entry.subject}'s test refusal has been owed for ${entry.owed}`]);
+  assert.deepEqual(counted.map(fault => `${fault.kind}|${fault.subject}`), [`owed-decision|${entry.subject}`], 'against the base the instance reproduces');
+});
+
+test('manual:fault-class-decision — the ledger re-derives the rework its trial-failure refusal grounds, and the returned item owes nothing', async () => {
+  const entry = gy2166Instances[0]!, at = entry.at, now = Date.parse(at);
+  const work = gy2166Item(entry.subject, at, entry.owedMs);
+  const state = emptyDaemonState(config());
+  state.mergeWriter = mergeWriterModule.mergeWriterStateSchema.parse(gy2166Writer(at));
+  const performed: { detail: string }[] = [], decides: { key: string; action: string; reason: string; input: { previousWorkerStopped: boolean; binding: string } }[] = [];
+  const effects = {
+    decide: async (item: Work, action: string, reason: string, input: { previousWorkerStopped: boolean; binding: string }) => {
+      decides.push({ key: item.key, action, reason, input });
+      // The server applies the writer's grounded rework with the writer as its approver (GY-1524): the item is returned to a worker the moment the request lands.
+      work.reworkRequested = true;
+      return { id: `decision-${item.key}` } as never;
+    }, persist: async () => {} } as unknown as DaemonEffects;
+  const changed = await mergeWriterModule.requestPendingReworks({ state, effects, now: () => now, snapshot: { work: [work], now: at }, performed } as never);
+  assert.equal(changed, true, 'the ledger grounded the rework the lost settlement owed');
+  const head = gy2166Heads[entry.subject]!.toLowerCase();
+  assert.deepEqual(decides, [{ key: entry.subject, action: 'rework', ...mergeWriterModule.trialFailureRework(work, head, gy2166Refusals[entry.subject]!) } as (typeof decides)[number]],
+    'asked once, with the writer\'s own binding for the refused head');
+  assert.deepEqual(state.mergeWriter.reworks, [], 'the request confirmed, the record owes no more');
+  // The next cycle reads the item returned to a worker: the open action is the new head the rework
+  // dispatches, inside the rework round's own bound — the instance's line never stands again.
+  const returned = standing({ subject: entry.subject, detail: gy2166Refusals[entry.subject]!, owedMs: 0, owed: '' }, at);
+  returned.reworkRequested = true;
+  assert.equal(reworkDecisionInMotion(returned, now), true, 'the rework round is the loop\'s own motion');
+  assert.deepEqual(observedFaults([returned], at, gy2166Writer(at)).counted.map(fault => fault.kind), [], 'no decision fault stands on the returned item');
+});
+
+test('manual:fault-class-decision — the ledger grounds nothing for a base-moved refusal, an applied rework, another head\'s refusal, or a debt already owed', async () => {
+  const at = gy2166Instances[0]!.at, now = Date.parse(at);
+  const state = emptyDaemonState(config());
+  state.mergeWriter = mergeWriterModule.mergeWriterStateSchema.parse(gy2166Writer(at));
+  const decided: string[] = [];
+  const effects = { decide: async (item: Work) => { decided.push(item.key); return { id: `decision-${item.key}` } as never; }, persist: async () => {} } as unknown as DaemonEffects;
+  const item = (fields: Record<string, unknown>) => Object.assign(gy2166Item('GY-2078', at, 60_000), fields) as Work;
+  const ledger = (head: string, reason: string) => ({ key: 'GY-2078', state: 'refused', head, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason }, events: 2 });
+  // A base-moved refusal is the queue's own re-entry, never a rework; an item whose rework the server already applied is not asked again; a refusal of an older head grounds nothing for the candidate that replaced it.
+  const moved = item({ mergeLedger: ledger(gy2166Heads['GY-2078']!.toLowerCase(), 'base moved 3 times') });
+  const applied = item({ reworkRequested: true });
+  const stale = item({ mergeLedger: ledger('abcd'.padEnd(40, '0'), gy2166Refusals['GY-2078']!) });
+  const changed = await mergeWriterModule.requestPendingReworks({ state, effects, now: () => now, snapshot: { work: [moved, applied, stale], now: at }, performed: [] } as never);
+  assert.deepEqual([changed, decided, state.mergeWriter.reworks], [false, [], []], 'only a trial-failure refusal of the exact candidate head is a debt the record re-derives');
+  // A debt already on the writer's state (asked for, unconfirmed) is retried, never duplicated: a refusal keeps one record, aged; a confirmation clears it.
+  const owedItem = item({});
+  state.mergeWriter.reworks = [{ key: 'GY-2078', id: owedItem.id, head: gy2166Heads['GY-2078']!.toLowerCase(), reason: gy2166Refusals['GY-2078']!, refusedAt: at, attempts: 1, lastError: 'route down (HTTP 503)' }];
+  let fail = true;
+  const retrying = { decide: async (item: Work) => { if (fail) throw new Error('route down (HTTP 503)'); decided.push(item.key); return { id: `decision-${item.key}` } as never; }, persist: async () => {} } as unknown as DaemonEffects;
+  const refused = await mergeWriterModule.requestPendingReworks({ state, effects: retrying, now: () => now, snapshot: { work: [owedItem], now: at }, performed: [] } as never);
+  assert.deepEqual([refused, state.mergeWriter.reworks.map(entry => [entry.key, entry.attempts])], [true, [['GY-2078', 2]]], 'the standing record is what asks again, once');
+  fail = false;
+  const confirmed = await mergeWriterModule.requestPendingReworks({ state, effects: retrying, now: () => now, snapshot: { work: [owedItem], now: at }, performed: [] } as never);
+  assert.deepEqual([confirmed, decided, state.mergeWriter.reworks], [true, ['GY-2078'], []], 'confirmed, the record owes no more');
+});
+
+/** The three deliveries the intervention pattern counted, as the ledger holds them: the writer's batch recording each head reconciled while its item still read `test` — no reconciliation provenance, because none was needed. */
+const gy2166Bypasses = [
+  { seq: 2808385, workId: '45f6fe9e-0d3d-4779-9b01-c53672724eee', key: 'GY-1981', at: '2026-10-19T00:57:31.738Z', mergeSha: 'e1e1'.padEnd(40, '0') },
+  { seq: 2816799, workId: '139afcb5-3d7e-4be1-8187-24c26a4a3289', key: 'GY-2082', at: '2026-10-19T03:12:20.841Z', mergeSha: 'e2e2'.padEnd(40, '0') },
+  { seq: 2825229, workId: '24a69d21-4674-448a-9d08-c146d5ba86db', key: 'GY-2053', at: '2026-10-19T05:30:48.736Z', mergeSha: gy2166Base },
+];
+
+const gy2166FoldRows = () => gy2166Bypasses.map(entry => ({ seq: entry.seq, workId: entry.workId, actor: 'cryptob1-graphyard-master', kind: 'merge.reconciled', at: entry.at,
+  details: null, payload: { mergeSha: entry.mergeSha, observedTip: gy2166Base }, stageBefore: 'test', work: { key: entry.key, stage: 'test', title: entry.key, epoch: 7, blocker: null } }));
+const gy2166Delivered = () => gy2166Bypasses.map(entry => ({ id: entry.workId, key: entry.key, title: entry.key, stage: 'done', epoch: 7, plannedFiles: ['docs/'], blocker: null,
+  delivery: { mergedAt: entry.at, mergeSha: entry.mergeSha, authorizationRevision: 1 }, observation: { merged: true, mergedAt: entry.at, mergeSha: entry.mergeSha, source: 'control-plane', conversations: { unresolved: [] } } } as unknown as Work));
+
+test('manual:fault-class-decision — intervention-pattern|interventions|2026-10-19T05:41:28.284Z: the writer\'s own reconciled deliveries are no bypass, so the test-stage pattern cannot fire', () => {
+  const at = '2026-10-19T05:41:28.284Z', policy = { threshold: 3, windowDays: 7 };
+  // The three deliveries the pattern counted, replayed as the ledger holds them. Against the base
+  // the fold counts each as a bypass at the stage its item still read — the instance reproduces at
+  // the first assertion, which the candidate answers: the reconcile is the guarded path reporting itself.
+  const folded = foldInterventions(gy2166FoldRows() as never[], gy2166Delivered(), at);
+  assert.deepEqual(folded.interventions.map(entry => `${entry.kind}|${entry.stage}|${entry.trigger}`), [], 'the writer\'s own reconcile is no bypass: the instance does not reproduce');
+  const report = computeInterventionReport(folded, gy2166Delivered(), policy, { days: 7, now: at });
+  const pattern = report.patterns.find(entry => entry.kind === 'bypass' && entry.stage === 'test');
+  assert.ok((pattern?.count ?? 0) === 0 && !(pattern?.crossed ?? false), 'the test-stage bypass pattern cannot fire');
+  // A delivery the record refused and an approver authorized past it names its provenance on the row: the fold still counts it, at the stage it was needed at.
+  const details = { mergeSha: gy2166Base, reasons: ['review missing'], mergedAt: '2026-10-19T05:35:00.000Z' };
+  const refused = { seq: 2825300, workId: '24a69d21-4674-448a-9d08-c146d5ba86db', actor: 'graphyard', kind: 'merge.reconciliation.refused', at: '2026-10-19T05:35:00.000Z',
+    details, payload: { details }, stageBefore: 'test', work: { key: 'GY-2053', stage: 'test', title: 'GY-2053', epoch: 7, blocker: null } };
+  const authorized = { seq: 2825301, workId: refused.workId, actor: 'vish', kind: 'merge.operator-authorized', at: '2026-10-19T05:36:00.000Z',
+    details: { decision: 'd1', requestedBy: 'vish', approvedBy: 'an-approver', operator: 'vish', unmet: ['review missing'], judgement: 'hotfix', ...details }, payload: { details: { requestedBy: 'vish', ...details } }, stageBefore: 'test', work: refused.work };
+  const real = foldInterventions([refused, authorized] as never[], [gy2166Delivered()[2]!], at);
+  assert.deepEqual(real.interventions.map(entry => `${entry.kind}|${entry.stage}|${entry.trigger}`), ['bypass|test|operator-authorized'], 'a delivery past the record, with its provenance, is still counted');
 });
