@@ -1,7 +1,7 @@
 <!-- page: Start here | 1 | lifecycle, authority. -->
 # How Graphyard works
 
-Graphyard decides whether work advances; runtimes (Herdr) run sessions, each starting with role-scoped ≤500-word digest from applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
+Graphyard decides whether work advances; runtimes (Herdr) run sessions, each opening with role-scoped ≤500-word digest of applied records (`.graphyard/project-memory.json`; `projectMemory` in `master status`).
 
 ## One trip from setup to Done
 
@@ -14,9 +14,9 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions, each sta
 
 ## From goal to work items
 
-Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Merged, `planner` role writes ≤3-sentence `summary`, architecture note (at most 400 words) and items, each naming one-sentence `plain`, outcomes, cases, `plannedFiles` and predecessors; a serving-release criterion carries `manual:post-deploy/NAME` beside a buildable one. A plan leaving outcome uncovered, parallel items sharing file, naming a criterion twice or touching a required case is refused with the reason; three refused rounds go to master. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`; `plain` becomes `summary`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it (deployed; smoke proof where policy asks).
+Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Merged, `planner` role writes a ≤3-sentence `summary`, architecture note (at most 400 words) and items, each naming one-sentence `plain`, outcomes, cases, `plannedFiles` and predecessors; a serving-release criterion carries `manual:post-deploy/NAME` beside a buildable one. A plan leaving outcome uncovered, parallel items sharing file, naming a criterion twice or touching a required case is refused with the reason; three refused rounds go to master. Another identity approves the plan (`goal plan-approve`); loop creates and releases items (`planned`, then `delivering`; `plain` becomes `summary`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it (smoke proof where policy asks).
 
-A 401/403/409/422 refusal redrafts acceptance or re-releases plan an hour later; a 422 plan post or validation-failed payload is a refused round (reason fed back as `lastRefusal`), retried in ten minutes, as others re-post. `POST /goals/GY-N/land` fetches base (≤20s); failing, checkout origin base must hold it, else `503`.
+401/403/409/422 refusals redraft acceptance or re-release plan in an hour; a 422 plan or failed validation is a refused round (`lastRefusal`), retried, like other errors, in ten minutes. `POST /goals/GY-N/land` fetches base (≤20s); failing, checkout origin base must hold it, else `503`.
 
 ## Risk lanes
 
@@ -28,7 +28,7 @@ A 401/403/409/422 refusal redrafts acceptance or re-releases plan an hour later;
 
 **Risk class** (`sensitive`/`normal`; unknown: sensitive): delta paths vs `graphyard.json` `risk.sensitive` (generic default), in `graphyard status`. **Review timing**: sensitive before merge, normal after unless `review.normalChanges: pre-merge` ([delivery](delivery.md)).
 
-All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard-risk-lane`), nor any lane's rework grounded on the exact head: trusted proof failed on it, approver refused its `manual:` attestation (loop-requested), or control plane's test merge onto moved base conflicted (not GitHub's; `src/model/rework-ground.ts`). A returned head spent its ground (later retry-cap reworks wait). Grounded reworks are no [intervention](dashboard.md).
+All lanes require `e2e:` proofs; low/medium reworks need no approver (`graphyard-risk-lane`), nor reworks grounded on the exact head: trusted proof failed on it, approver refused its loop-requested `manual:` attestation, or control plane's (not GitHub's) test merge onto moved base conflicted. A returned head spent its ground; grounded reworks are no [intervention](dashboard.md).
 
 ## Who holds which authority
 
