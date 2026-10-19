@@ -37,7 +37,7 @@ Once green, **Describe what you want built** records a goal.
 
 ## Troubleshooting: manual steps
 
-`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite; **HUMAN** marks agent-impossible steps.
+`graphyard doctor` prints `setupFromZero.lines`: `PASS`/`FAIL` per prerequisite; **HUMAN** marks agent-impossible steps. The install writes no drop-in, so `FAIL unit-overrides` names each drop-in on its loop or executor units and its removal command.
 
 ## 1. Machine prerequisites
 
