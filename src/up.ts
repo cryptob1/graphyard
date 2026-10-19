@@ -787,7 +787,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         const result = await deps.cli(installArgs('--apply'));
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
-        return 'control plane installed without a GitHub App (--no-github-app)';
+        return 'control plane installed without a GitHub App';
       }
       // The install waits on the App pages itself, as long as this run waits on a person (900 s
       // without a bound); it then pauses (exit 1) and a rerun resumes it. The page's clock starts
@@ -1725,7 +1725,7 @@ export async function redeemSignInClaim(link: string, fetcher: typeof fetch = fe
 }
 
 /** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
-export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', '.github/workflows'] as const;
+export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json'] as const;
 export { onboardingBranch };
 /** The onboarding files every apply writes; a publish without one refuses (GY-1480). */
 export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;

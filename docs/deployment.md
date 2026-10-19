@@ -29,7 +29,7 @@ CI proofs publish via one principal (`manual:*`, `e2e:*` refused); its posted ru
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy `production` shows no attention. The serving commit comes only from the configured deployment endpoint (GitHub deployments are not read); without one, `master verify-deployment` is the sole evidence. A fresh `master verify-deployment` outranks a lagging list and the build's `/healthz` commit. Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses observations `run.deploymentReuseMinutes` (15; `0` every cycle).
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy `production` shows no attention. The serving commit comes from Railway's API or the configured deployment endpoint (GitHub deployments are not read). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses observations `run.deploymentReuseMinutes` (15; `0` every cycle).
 
 Release lag and `loaded-revision` [resource](operations-reference.md#control-plane-resources) skip deliveries awaiting [promotion](delivery.md). Self-upgrades await production serving them (`release-lagged`, `upgrade:held`); `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, loops to it; held executors' owed restarts aren't faults.
 
@@ -37,7 +37,7 @@ Observing a release reports post-deploy checks it does not yet see; nothing is f
 
 ### Deployment incident
 
-Railway deploys `release/production` in ~1min. `/healthz` `commit` at tip: `graphyard master verify-deployment GY-N` per pending delivery; else `railway deployment list` shows failures; redeploy ([manual fallback](#manual-fallback)), verify.
+Railway deploys `release/production` in ~1min. `/healthz` `commit` behind tip: `railway deployment list` shows failures; redeploy ([manual fallback](#manual-fallback)), verify.
 
 #### Production environment name
 

@@ -353,7 +353,7 @@ test('integration:typed-next-action — an unsettled containment fence escalates
     snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
     mutate: async path => engine.resyncWork(executorA, path.split('/')[1]),
     agents: () => [], workerCredentials: async () => ({}), producerCredentials: async () => ({}),
-    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable, observeDeployment: unusable,
+    dispatchWorker: unusable, launchReview: unusable, launchProducer: unusable,
   });
   const who = { id: executorA.id, host: 'host-1' };
   await assert.rejects(async () => handlers.reclaim!({ ...reclaimRow, work: fenced.id, key: fenced.key }, who),
@@ -528,9 +528,6 @@ function fleetExecutor(identity: Principal, host: string, log: FleetLog, mine: S
       for (const proof of request.proofs ?? []) await engine.execute(producer, 'evidence', current.id, { proof, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
       return launched('producer', item, 'pane-p');
     },
-    // The shape the guarded broker returns: its own account of what it did, never a verdict that
-    // the item is merged — only the observation says that.
-    observeDeployment: async delivered => ({ source: 'endpoint', sha: mergeSha, at: new Date().toISOString(), reason: null, deployed: delivered.map(item => item.key), pending: [] }),
     recordSession: (item, handle) => engine.execute(identity, 'session', item.id, handle, randomUUID()),
   });
   // Every handler is wrapped so the log records which executor ran which attempt; nothing else
@@ -822,10 +819,10 @@ test('integration:worker-pull-model — a free worker asks the control plane for
 
 test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle runs with the escalation handler disabled, and no executor step needs a language model', async () => {
   // The roles are declared per kind: judgment happens inside what an action starts, never in the
-  // executor step that starts it. Four kinds name a judgment; the other five are mechanical.
+  // executor step that starts it. Four kinds name a judgment; the other four are mechanical.
   assert.deepEqual(Object.entries(nextActionLlmRoles).filter(([, role]) => role !== null).map(([kind]) => kind).sort(),
     ['dispatch', 'escalate', 'request-review', 'request-rework'].sort());
-  assert.deepEqual([...mechanicalActionKinds].sort(), ['approve-scope', 'merge', 'reclaim', 'resync', 'verify-deployment'].sort());
+  assert.deepEqual([...mechanicalActionKinds].sort(), ['approve-scope', 'merge', 'reclaim', 'resync'].sort());
   assert.deepEqual([...llmRoles].sort(), ['approve-decision', 'implement', 'produce-evidence', 'resolve-escalation', 'review']);
   // Every judgment the project names has exactly one action that starts it, and nothing else does.
   assert.deepEqual([...new Set(Object.values(nextActionLlmRoles))].filter(Boolean).sort(), ['approve-decision', 'implement', 'resolve-escalation', 'review'],
@@ -840,7 +837,7 @@ test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle ru
   assert.ok(!executorKinds(effects.handlers).includes('escalate'));
   // Not a configuration choice: a kind whose judgment happens in the step itself may never have a
   // handler, and the executor entry point refuses one that does (src/cli/executor.ts).
-  assert.deepEqual([...executorRunnableKinds].sort(), ['approve-scope', 'dispatch', 'merge', 'reclaim', 'request-review', 'resync', 'verify-deployment'].sort());
+  assert.deepEqual([...executorRunnableKinds].sort(), ['approve-scope', 'dispatch', 'merge', 'reclaim', 'request-review', 'resync'].sort());
   assert.match(judgmentInExecutorLoop({ ...effects.handlers, escalate: async () => 'resolved' })!, /^escalate is a judgment made in the step itself/);
   assert.match(judgmentInExecutorLoop({ 'request-rework': async () => 'reworked' })!, /^request-rework is a judgment made in the step itself/);
 
@@ -857,9 +854,8 @@ test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle ru
   assert.ok(delivered.delivery?.mergeSha);
   assert.ok(!log.executed.some(entry => entry.kind === 'escalate'), 'no escalation was needed to deliver');
   assert.ok(!log.executed.some(entry => entry.kind === 'merge'), 'no executor ran a merge');
-  // GY-1824: the delivery's serving release is recorded by an executor too, smoke policy or not.
-  await drain([effects], log, mine);
-  assert.ok((await reload(delivered)).delivery?.deployment, 'an executor recorded the serving release of the no-smoke delivery');
+  // Done = merged (GY-1981): nothing is left for an executor once the merge is recorded.
+  assert.equal(delivered.nextAction, null, 'a delivered item owes no action');
 
   // An item that does raise an escalation stalls at that row rather than being resolved by the
   // loop: the escalation handler is outside the critical path, not quietly automated inside it.

@@ -30,6 +30,8 @@ test('every supported provider produces a complete ordered plan that applies not
       for (const required of ['local.credentials', 'provider.env.core', 'provider.deploy', 'provider.url', 'verify.health', 'github.deploy-key', 'verify.status', 'local.profiles', 'local.herdr']) {
         assert.ok(ids.includes(required), `${provider} plan is missing ${required}`);
       }
+      // GY-2009: no App, App variables, webhook, CI App ids or branch protection on any provider.
+      for (const absent of ['github.app', 'github.env', 'github.webhook', 'github.ci-app-ids', 'github.protection']) assert.ok(!ids.includes(absent), `${provider} plan must not plan ${absent}`);
       assert.ok(ids.some(id => id.startsWith('provider.provision.')), `${provider} plan must provision compute`);
       // Postgres is provisioned on every provider, not only the managed one.
       assert.ok(plan.actions.some(action => /Postgres/i.test(action.title)), `${provider} plan must provision Postgres`);

@@ -750,7 +750,6 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   if (candidateModel) {
     const wiring = wiringActions(session.delivery.context);
     const environments = session.delivery.adapter.plan(session.delivery.context);
-    // Observation-only reads the release refs and creates none: a missing one is held, not created.
     if (observeOnly) actions.push(...wiring.map(action => action.state === 'satisfied' ? action : held(action, action.id === 'release.branches' ? 'missing release refs are not created' : 'missing GitHub environments are not created')),
       ...environments.map(action => action.state === 'satisfied' ? action : held(action, `the ${session.delivery.policy.deploy.adapter} product deployment adapter does not run`)));
     else actions.push(...wiring, ...environments);
@@ -1155,7 +1154,7 @@ export function resumeCommand(session: Pick<InstallSession, 'inputs'>) {
   const value = (name: string, given: string | number | undefined | null) => given === undefined || given === null || given === '' ? [] : [`--${name}`, shellWord(String(given))];
   const values = (name: string, given: string[] | undefined) => (given ?? []).flatMap(item => value(name, item));
   const flag = (name: string, given: boolean | undefined) => given ? [`--${name}`] : [];
-  const flags: Record<keyof InstallRequest, string[]> = {
+  const flags: Partial<Record<keyof InstallRequest, string[]>> = {
     provider: inputs.selfContained || inputs.provider === 'host' ? ['--target', inputs.provider] : ['--provider', inputs.provider],
     selfContained: [],
     repository: value('repo', inputs.repository),

@@ -143,9 +143,9 @@ const emptyFaultRecord = () => ({ instances: [] as never[], open: {} as Record<s
 /** Several items stalled on one of GY-2014's permanent reasons. */
 function boundReasonStalls() {
   const reasons: { key: string; kind: ActionRow['kind']; reason: string }[] = [
-    { key: 'GY-1963', kind: 'verify-deployment', reason: 'Deployment endpoint answered 404' },
-    { key: 'GY-1960', kind: 'verify-deployment', reason: 'Deployment endpoint answered 404' },
-    { key: 'GY-1976', kind: 'verify-deployment', reason: 'Deployment endpoint answered 404' },
+    { key: 'GY-1963', kind: 'resync', reason: 'Deployment endpoint answered 404' },
+    { key: 'GY-1960', kind: 'resync', reason: 'Deployment endpoint answered 404' },
+    { key: 'GY-1976', kind: 'resync', reason: 'Deployment endpoint answered 404' },
     { key: 'GY-1994', kind: 'dispatch', reason: 'Command failed: node bin/graphyard.mjs claim GY-1994\n{"error":"A valid Graphyard bearer token is required"}' },
     { key: 'GY-1998', kind: 'request-review', reason: 'The control plane refused the reviewer launch of GY-1998 (400): Invalid input' },
     { key: 'GY-2009', kind: 'request-review', reason: 'The control plane refused the reviewer launch of GY-2009 (400): Invalid input' },

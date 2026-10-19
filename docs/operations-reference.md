@@ -11,7 +11,7 @@ Within a priority: a submitted attempt (returned rework) precedes unsubmitted it
 
 ### Perpetual master loop
 
-`master verify-deployment GY-N` emits instructions, refusing *unobserved*, *stale* (rerun), merge-missing/recorded releases; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment counts.
+Release health is one status line; without `--deployment-url`, newest successful [`productionEnvironment`](deployment.md#production-environment-name) deployment counts.
 
 ## Lost worker before submission
 
@@ -61,7 +61,7 @@ Compaction deletes past `GRAPHYARD_LEDGER_RETENTION_DAYS` (14), appending `ledge
 
 ## Delivered with a failed smoke proof
 
-Stays Done, **delivered with failure**.
+Stays Done and delivered; fix forward in a follow-up item.
 
 ## Merge bypass
 

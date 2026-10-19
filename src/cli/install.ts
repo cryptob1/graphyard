@@ -12,6 +12,14 @@ import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { runDoctor } from './install-doctor.js';
 
+/** GY-2009: install registers no GitHub App, so `up --reuse-app` would reuse nothing; it is refused rather than silently ignored. */
+export const upAppReuseRefusal = 'graphyard up --reuse-app is refused: install registers no GitHub App and the merge writer\'s deploy key is its only GitHub access (GY-2009); rerun without --reuse-app';
+export function refuseUpAppReuse(args: readonly (string | undefined)[]): void {
+  if (args.some(arg => arg === '--reuse-app' || arg?.startsWith('--reuse-app='))) throw new Error(upAppReuseRefusal);
+}
+/** up's usage without the refused --reuse-app line. */
+export const upUsageWithoutAppReuse = upUsage.split('\n').filter(line => !line.trimStart().startsWith('--reuse-app')).join('\n');
+
 /**
  * The capacity variables that accompany the principals `init --apply` registers: derived from
  * the roster in .graphyard/principals.json, and — when the operator credential reaches the
@@ -103,7 +111,8 @@ export const installCommands = defineCommands([
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
     async run(context) {
-      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsage); return; }
+      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsageWithoutAppReuse); return; }
+      refuseUpAppReuse([context.id, ...context.args]);
       const result = await upCommand(context.repositoryRoot(), () => context.activeCliPath(), [context.id, ...context.args].filter((value): value is string => value !== undefined));
       context.print(result);
       if ('exitCode' in result) process.exitCode = result.exitCode;

@@ -2,7 +2,6 @@ import { dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { attestationWait } from './unproduced-attestation.js';
 import { standingEscalations } from './escalation.js';
 import { proofStep } from './action-proof-step.js';
-import { deliveryState, deploymentUnrecorded } from './delivery.js';
 import { isDelivered } from './closure.js';
 import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
@@ -97,8 +96,8 @@ export function nextAction(work: Work, all: Work[], now: Date): OpenAction | nul
  * long the item has held it.
  *
  * The order is the order a delivery actually unblocks in: a typed request an agent left behind
- * first, because a session gave up its lease waiting for that answer; then the deployment a
- * delivered item still owes; then an assignment nobody holds any more; then a live worker blocked
+ * first, because a session gave up its lease waiting for that answer; then a delivered item, which
+ * owes nothing; then an assignment nobody holds any more; then a live worker blocked
  * on a scope answer; then the first refusing gate; and finally the merge a fully proven candidate
  * is authorized for. A standing escalation is not in that order at all: it refuses delivery, the
  * merge gate carries its refusal like any other, and `carriedAction` (concerns.ts) decides what it
@@ -138,18 +137,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     { kind: 'escalate', trigger: 'decision', detail: decision.decider.command ?? decision.reason }, `request:${decision.id}`);
 
   if (work.stage === 'done' && work.closure) return waits({ kind: 'settled', on: null, detail: `${key} was closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''} by ${work.closure.by}: ${work.closure.reason}` });
-  if (work.stage === 'done') {
-    const state = deliveryState(work);
-    // GY-1824: a delivery whose serving release is unrecorded owes the verify-deployment path
-    // whatever its smoke policy says and however old its merge — the executor records it exactly as
-    // it records a smoke item's, filing and releasing any owed post-deploy follow-up first. Done
-    // items are evaluated only on delivery and by the reconciliation pass, which pulls older settled
-    // deliveries in a few at a time (`deploymentBackfillPerPass`), so the backfill stays bounded.
-    if (work.delivery && (state === 'awaiting-deployment' || (state === 'delivered' && deploymentUnrecorded(work))))
-      return make('verify-deployment', `${key} merged as ${short(work.delivery.mergeSha)} and no deployment carrying it has been observed`,
-        { kind: 'verify-deployment', mergeSha: work.delivery.mergeSha, mergedAt: work.delivery.mergedAt, state }, `delivery:${work.delivery.mergeSha}`);
-    return waits({ kind: 'settled', on: null, detail: `${key} is delivered (${state}); its gates are history and no gate refuses it` });
-  }
+  // Done = merged (GY-1981): a delivery owes nothing more, whatever its smoke policy or deployment record.
+  if (work.stage === 'done') return waits({ kind: 'settled', on: null, detail: `${key} is delivered; its gates are history and no gate refuses it` });
 
   // A running decomposition holds dispatch: an item mid-split is not offered to workers.
   if (decompositionHold(work, now.getTime())) return waits({ kind: 'session', on: 'decomposition', detail: `${key} is being split into child items before dispatch` }, 'ready', 'Splitting into child items before dispatch');

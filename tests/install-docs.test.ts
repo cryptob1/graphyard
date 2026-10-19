@@ -39,7 +39,8 @@ test('docs/install.md is an agent-executable runbook with commands, verification
 
   // Every step names its command and how to verify it.
   const steps = [...runbook.matchAll(/^## (Step \d[^\n]*)\n([\s\S]*?)(?=^## )/gm)];
-  assert.ok(steps.length >= 5, `expected numbered steps, found ${steps.length}`);
+  // GY-2009: no App confirmation or first-pull-request App step; plan, apply and summary remain.
+  assert.ok(steps.length >= 3, `expected numbered steps, found ${steps.length}`);
   assert.ok(steps.some(step => step[2].includes('install --provider PROVIDER --repo OWNER/REPO --plan')));
   assert.ok(steps.some(step => step[2].includes('install --provider PROVIDER --repo OWNER/REPO --apply')));
   assert.ok(steps.filter(step => /Verify|Expected output|Verification/.test(step[2])).length >= 3, 'each step must state what to verify');
@@ -53,7 +54,7 @@ test('docs/install.md is an agent-executable runbook with commands, verification
   assert.match(runbook, /Approval of the printed plan/);
   assert.match(runbook, /^Ask only: \*\*Which provider\*\*; \*\*Provider login\*\*; \*\*Approval of the printed plan\*\*\. Graphyard registers no GitHub App/m);
 
-  // A missing provider CLI is not a fifth thing to ask a human for: every provider row carries
+  // A missing provider CLI is not a fourth thing to ask a human for: every provider row carries
   // the command that installs it, so a live install stops only for the account behind it.
   const providers = runbook.slice(runbook.indexOf('### Providers'), runbook.indexOf('## Step 1'));
   for (const command of ['npm i -g @railway/cli', 'brew install hcloud', 'get.docker.com']) {

@@ -4,7 +4,7 @@ import { StepNames } from '../components/steps-bar';
 import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../../src/model/duration';
 import { groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
-import { leftFlowAt, releaseView } from '../../src/model/release';
+import { releaseView, servedFor } from '../../src/model/release';
 import { stalledCards } from '../../src/model/actionless';
 import { groupFaults, statusFaults, workFaults } from '../../src/model/fault-classes';
 import { backlogCounts } from '../../src/model/machine-backlog';
@@ -23,8 +23,8 @@ const week = 7 * 24 * 60 * 60 * 1000;
  * clock. What shipped is one line at the foot, linking to the Shipped page: shipped means the
  * release was observed serving it, dated from that observation. The latest is the newest merge
  * (GY-168), whether or not a release was recorded for it; the merges not yet seen live are the
- * ones the control plane's production observation holds at Deploy (`leftFlowAt`) — none where
- * production serves the newest merge, and none claimed where nothing observes production.
+ * ones the control plane's production observation reports unserved — none where production serves
+ * the newest merge, and none claimed where nothing observes production.
  */
 export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, stepMoves }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
@@ -54,7 +54,8 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   // a merge the production watch reports pending or failed, or merged after its last pass. With no
   // production observation nothing is claimed: a smoke-gated merge is not "not live" by default.
   // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
-  const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && leftFlowAt(w, release) === null).length;
+  const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && !servedFor(w, release)
+    && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
   const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>

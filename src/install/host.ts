@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { composeBundle, composeRunning, emptyObservation, hetznerAddress, httpHealth, markersFromEnvFile, publicHostname, readRemote, unroutableAddress, type AdapterContext, type AdapterObservation, type BundleFile, type ProviderAdapter } from './adapters.js';
 import { fingerprint, generateToken, workerPrincipals } from './secrets.js';

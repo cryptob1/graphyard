@@ -119,8 +119,9 @@ test('no two test files share a database port under the required check, so paral
   // The required check separates them, in CI and in the stability run alike, and nothing else collides.
   const environment = requiredCheckEnvironment(testPortBase);
   assert.deepEqual(shared(environment), []);
-  const ci = await source('../.github/workflows/ci.yml');
-  for (const [name, value] of Object.entries(environment)) assert.ok(ci.includes(`${name}=${value} `) && /GRAPHYARD_EVENTS_TEST_PORT=\d+ [^\n]*npm test/.test(ci), `ci.yml runs npm test with ${name}=${value}`);
+  // GY-2009: no ci.yml; the suite runner (which the merge writer's trial runs) sets the same separation.
+  const { testPortEnvironment } = await import('../src/cli/test-isolation.js');
+  for (const [name, value] of Object.entries(environment)) assert.equal(testPortEnvironment(testPortBase)[name], value, `the suite runner sets ${name}=${value}`);
 });
 
 test('the recorded baseline holds twenty consecutive passing runs of the required check and the spread of every timing assertion in the suite', async t => {

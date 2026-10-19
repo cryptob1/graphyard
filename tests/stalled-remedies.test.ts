@@ -31,7 +31,7 @@ const endedSince = (row: ActionRow) => actionStall({ ...row, history: row.histor
 const shift = (at: string, ms: number) => new Date(Date.parse(at) + ms).toISOString();
 
 /** An open item whose `kind` row failed `failures` times for `reason`, the last at `at`. */
-function stalledItem(key: string, kind: 'resync' | 'dispatch' | 'verify-deployment' | 'request-review', reason: string, at: string, failures = actionStallThreshold) {
+function stalledItem(key: string, kind: 'resync' | 'dispatch' | 'request-review', reason: string, at: string, failures = actionStallThreshold) {
   const id = randomUUID(), binding = `${kind}:1`;
   const first = shift(at, -failures * 60_000);
   const history: ActionRecord[] = [{ at: shift(first, -60_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: `${key} needs ${kind}` }];
@@ -306,7 +306,7 @@ for (const instance of instances) {
 
 // ---- GY-2014: permanent installation-level reasons ----------------------------------------------
 
-test('unit:stall-remedy-deployment-endpoint-4xx — a verify-deployment row three failures deep on "Deployment endpoint answered 4xx" binds to the installation setup remedy', () => {
+test('unit:stall-remedy-deployment-endpoint-4xx — a row three failures deep on "Deployment endpoint answered 4xx" binds to the installation setup remedy', () => {
   for (const status of [400, 401, 403, 404]) {
     const bound = stallRemedy(endpoint4xx(status));
     assert.equal(bound?.kind, 'installation-setup', `status ${status}`);
@@ -318,7 +318,7 @@ test('unit:stall-remedy-deployment-endpoint-4xx — a verify-deployment row thre
   assert.equal(stallRemedy('Deployment endpoint answered 503'), null, '5xx stays unbound: another service\'s fault');
   assert.equal(stallRemedy('Deployment endpoint is unreachable: timeout'), null);
   const at = '2026-10-18T03:00:00.000Z';
-  const { work } = stalledItem('GY-1963', 'verify-deployment', endpoint4xx(404), at);
+  const { work } = stalledItem('GY-1963', 'resync', endpoint4xx(404), at);
   assert.ok(work.actionQueue!.actions[0].stall, 'three failures classify as a stall');
   assert.equal(stallRemedy(work.actionQueue!.actions[0].stall!.reason)?.kind, 'installation-setup');
 });

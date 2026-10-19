@@ -39,7 +39,7 @@ export function ciProducerProvisioningSteps(repository: string, url: string) {
     `Restrict the ${ciReportingEnvironment} environment to the default branch before storing any secret in it`,
     `gh secret set ${ciProducerSecret} --repo ${repository} --env ${ciReportingEnvironment}   # paste the ${ciProducerId} token; never commit it`,
     `gh variable set GRAPHYARD_URL --repo ${repository} --env ${ciReportingEnvironment} --body ${url}`,
-    `Deploy the principals array including ${ciProducerId} as GRAPHYARD_PRINCIPALS; the CI lane is live once acceptance.yml runs on the next candidate push`,
+    `Deploy the principals array including ${ciProducerId} as GRAPHYARD_PRINCIPALS; the token is then held for a producer that reports proofs for a candidate`,
   ];
 }
 

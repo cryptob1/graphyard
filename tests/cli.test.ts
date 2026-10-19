@@ -1068,7 +1068,7 @@ test('master run executes the durable loop as a supervised process and master st
   }
 });
 
-test('sync merges origin/BASE without rebasing, passes in-scope and new files, and refuses every out-of-scope file that no longer matches the base', async () => {
+test('sync merges origin/BASE without rebasing and judges only the merge: in-scope, new and outside files all pass, and a real conflict stops the merge', async () => {
   const cwd = await temporaryDirectory('sync');
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json');
     const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/', 'tests/'], workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] };
@@ -1097,18 +1097,16 @@ test('sync merges origin/BASE without rebasing, passes in-scope and new files, a
     // The loop fetches the shared object store; sync itself fetches nothing.
     await git(clone, 'fetch', '-q', 'origin');
     const clean = JSON.parse((await sync()).stdout);
-    assert.equal(clean.ok, true); assert.equal(clean.merged, true); assert.equal(clean.baseTip, mainTip); assert.deepEqual(clean.refused, []);
-    assert.deepEqual(clean.files.map((f: any) => [f.path, f.kind]), [['src/scoped/feature.ts', 'in-scope']]);
+    assert.equal(clean.ok, true); assert.equal(clean.merged, true); assert.equal(clean.baseTip, mainTip);
+    assert.equal(clean.refused, undefined); assert.equal(clean.files, undefined, 'the merge alone is judged; nothing is listed against plannedFiles');
+    assert.ok(!/--restore/.test(clean.next), clean.next);
     await git(clone, 'merge-base', '--is-ancestor', mainTip, 'HEAD'); await git(clone, 'merge-base', '--is-ancestor', own, 'HEAD');
     assert.equal(await git(clone, 'rev-list', '--count', '--merges', 'HEAD'), '1', 'the base branch is merged, never rebased');
     // The worker re-resolves shipped files in favour of its branch and deletes one; a new file is fine.
     await writeFile(join(clone, 'src/shipped.ts'), 'export const shipped = 2;\nexport const kept = true;\n'); await rm(join(clone, 'src/other.ts'));
     await mkdir(join(clone, 'tests')); await writeFile(join(clone, 'src/brand-new.ts'), 'export const fresh = 1;\n'); await writeFile(join(clone, 'tests/new.test.ts'), 'test\n'); await commit(clone, 'Bad resolution');
-    const refused = await refusal();
-    assert.equal(refused.ok, false); assert.equal(refused.merged, true);
-    assert.deepEqual(refused.refused, ['src/other.ts: deleted; the base branch still holds it', 'src/shipped.ts: removes 1 line that the base branch holds and adds nothing']);
-    assert.deepEqual(refused.files.filter((f: any) => !f.refused).map((f: any) => [f.path, f.kind]), [['src/brand-new.ts', 'new'], ['src/scoped/feature.ts', 'in-scope'], ['tests/new.test.ts', 'in-scope']]);
-    assert.match(refused.next, /git checkout [0-9a-f]{12} -- PATH/);
+    const outside = JSON.parse((await sync()).stdout);
+    assert.equal(outside.ok, true); assert.equal(outside.merged, true, 'the deletion and the re-resolution are the branch\'s change to submit, not a refusal');
     await git(clone, 'checkout', mainTip, '--', 'src/shipped.ts', 'src/other.ts'); await commit(clone, 'Restore shipped files');
     assert.equal(JSON.parse((await sync()).stdout).ok, true);
     // A conflicting base change stops before any scope verdict; nothing is rebased or resolved for the worker.

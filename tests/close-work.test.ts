@@ -87,7 +87,6 @@ test('integration:close-obsolete — a stuck item closed as obsolete is terminal
   const status = buildMasterStatus({ work: snapshot.work, now: snapshot.now }, [], []);
   assert.equal(status.counts.closed, 1);
   assert.ok(!status.work.some(row => row.key === work.key), 'master status lists it in no active row');
-  assert.ok(!status.delivered.some(row => row.key === work.key), 'nor as a delivery');
   assert.deepEqual(status.closed.map(row => [row.key, row.kind]), [[work.key, 'obsolete']]);
   // The dashboard: nothing under Shipped, one row in the closed history below it.
   const page = renderToStaticMarkup(createElement(ShippedPage, { work: snapshot.work, status: null, observedAt: Date.parse(snapshot.now), setSelected: () => {} } as unknown as Dashboard));

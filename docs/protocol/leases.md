@@ -14,7 +14,7 @@ Workers never use host `gh` logins and get no GitHub credential: launches mint n
 ## How a lease ends
 
 - `submit` (CLI `complete`); later heartbeats get `Implementation lease for epoch N ended when GY-N was submitted; stop heartbeating after complete`.
-- `park` (human-only request naming every human step; widenings and deferred steps refuse: `scope-request`) or `blocked` releases.
+- `park` (human-only request naming every human step; widenings and deferred steps refuse: edit the file and submit) or `blocked` releases.
 - Coordinator `capacity` (`event: "exhausted"`) frees another account; attempt ends close scope requests.
 - Expiry, classed by epoch's ledger (`lease.expired` cause): `blocked-awaiting-operator` (unwithdrawn pre-release `blocked` report), `stopped-by-attestation` (admin `--previous-worker-stopped`), `exhausted-capacity` (`capacity.exhausted`), `control-plane-stall` (lapse inside a recorded `plane.stall`: the plane's lease-pool tick, stamped as it lands, gaps recorded once at startup before heartbeats and each pass), `no-submission-bound` (renewed to the 130-min no-submission refusal); none: `lease-loss` escalation, auto-settled on the record alone (a later stall only when covering the expiry; [settling](../delegation.md#who-may-settle-what)).
 

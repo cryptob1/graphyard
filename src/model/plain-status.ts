@@ -1,4 +1,4 @@
-import { deliveryState, observationWindowHold, type Gate, type Work } from '../model.js';
+import { observationWindowHold, type Gate, type Work } from '../model.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterPushPattern, mergeWriterTrialPattern } from './ci-refusal.js';
@@ -151,7 +151,7 @@ const stepWords: Record<string, string> = {
   dispatch: 'handing it to a builder', 'request-review': 'asking for a review',
   'request-rework': 'sending it back for changes', 'approve-scope': 'deciding which files it may touch',
   resync: 're-reading it from GitHub', reclaim: 'freeing it from its last builder', merge: 'merging it',
-  'verify-deployment': 'checking the deployment that carries it', escalate: 'getting somebody to decide it',
+  escalate: 'getting somebody to decide it',
 };
 
 /**
@@ -206,13 +206,7 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   // Closed without delivery (src/model/closure.ts): terminal, never "shipped".
   if (work.closure) return make(`Closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''}: ${work.closure.reason}`, 'shipped');
   if (phase === 'shipped') {
-    const state = deliveryState(work);
-    const merged = link ? `Shipped in ${link}` : 'Shipped';
-    if (state === 'delivered-with-failure') return make(`Deployed with a failure — the check after deploying failed${link ? ` (${link})` : ''}`, 'stuck', 'The check after deploying failed');
-    if (state === 'awaiting-deployment') return make(`${merged} — waiting to be deployed`, 'waiting', 'Waiting to be deployed');
-    if (state === 'awaiting-smoke') return make(`Deployed, awaiting verification${link ? ` — ${link}` : ''}`, 'waiting', 'Waiting for the check after deploying');
-    if (state === 'smoke-passed') return make(`Production verified${link ? ` — ${link}` : ''}`, 'shipped');
-    return make(merged, 'shipped');
+    return make(link ? `Shipped in ${link}` : 'Shipped', 'shipped');
   }
   if (work.violations.length) return make(`Stuck: ${work.violations[0]}`, 'stuck', work.violations[0]);
   const gate = work.gates.find(g => !g.passed);

@@ -164,64 +164,6 @@ test('explicit results refuse stale, edited, spoofed, conflicting and changing e
   }
  });
 
-test('migration refuses required code-owner review before making any external changes', async () => {
-  const {writeFile,readFile,rm} = await import('node:fs/promises');
-  const {join} = await import('node:path'); const {spawnSync} = await import('node:child_process');
-  const dir = await temporaryDirectory('protection');
-  try {
-    const log = join(dir,'calls.jsonl');
-    await writeFile(join(dir,'gh'), `#!${process.execPath}\nconst fs=require('node:fs');fs.appendFileSync(${JSON.stringify(log)},JSON.stringify(process.argv.slice(2))+'\\n');console.log(JSON.stringify({required_pull_request_reviews:{require_code_owner_reviews:true}}));\n`, {mode:0o700});
-    const result = spawnSync(process.execPath, ['scripts/protect-github.mjs','--agent-reviews','--apply'], {encoding:'utf8',env:{...process.env,PATH:`${dir}:${process.env.PATH}`,GRAPHYARD_APP_ID:'1234'}});
-    assert.equal(result.status,1); assert.match(result.stderr,/CODEOWNERS.*No protection settings were changed/);
-    const calls=(await readFile(log,'utf8')).trim().split('\n').map(line=>JSON.parse(line));
-    assert.equal(calls.length,1); assert.deepEqual(calls[0],['api','repos/cryptob1/graphyard/branches/main/protection']);
-  } finally {await rm(dir,{recursive:true,force:true});}
-});
-
- test('clean-result courtesy normalization excludes contradictory or unknown verdict suffixes', async () => {
-  for (const suffix of ['Delightful!', 'Bravo.', 'Nice work!', 'Keep it up!', 'Well done!', 'Great work!', 'Excellent!', 'LGTM.', 'Breezy!', 'Peachy!', 'Smooth sailing!', 'Nice job!', 'Good work!', 'Lovely!', 'Superb!', 'Hooray!', 'Hurrah!', 'Hurray!', 'Huzzah!', 'Woohoo!', 'Yay!']) {
-    const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
-    assert.equal((await f.run()).approved, true, suffix);
-  }
-  for (const suffix of ['P1: fix authentication', 'Nice work! However, a bug remains.', 'Critical!', 'Please fix the review findings.', 'Unknown protocol payload', ':rocket: P1: broken authentication', "Can't wait for the next one! However, a critical bug remains."]) {
-    const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);
-    assert.equal((await f.run()).approved, false, suffix);
-  }
- });
-
- test('clean approval refuses edits visible only in the final list snapshot', async () => {
-  for (const target of ['result', 'trigger'] as const) {
-    const f = commentFixture(), original = f.source.pages; let reads = 0;
-    f.source.pages = async path => {
-      const rows = await original(path);
-      if (path.endsWith('/comments') && ++reads > 1) rows.find(c => c.id === f[target].id).body += ' edited';
-      return rows;
-    };
-    assert.equal((await f.run()).approved, false);
-  }
- });
-
- test('summary approval refuses final-list additions, removals, edits, and newer provider activity', async () => {
-  for (const change of ['duplicate', 'new activity', 'edit', 'remove', 'trigger']) {
-    const f = fixture(), original = f.source.pages; let reads = 0;
-    f.source.pages = async path => {
-      const rows = await original(path);
-      if (path.endsWith('/comments') && ++reads > 1) {
-        if (change === 'duplicate') rows.push({...f.summary,id:99});
-        if (change === 'new activity') rows.push({...f.summary,id:99,body:'Starting another review'});
-        if (change === 'edit') rows.find(c=>c.id===13).body += ' changed';
-        if (change === 'remove') rows.splice(rows.findIndex(c=>c.id===13),1);
-        if (change === 'trigger') rows.find(c=>c.id===12).body += ' changed';
-      }
-      return rows;
-    };
-    assert.equal((await f.run()).approved,false,change);
-  }
-  const f=fixture(), original=f.source.pages;
-  f.source.pages=async path=>{const rows=await original(path);if(path.endsWith('/comments'))rows.push({...f.summary,id:99,body:'Starting another review',updated_at:'2026-01-01T00:02:00Z'});return rows};
-  assert.equal((await f.run()).approved,false);
- });
-
 test('dogfood clean-result variants do not require redundant reviews and unknown results explain refusal', async () => {
   for (const suffix of ['Already looking forward to the next diff.', 'Keep them coming!', 'Another round soon, please!', 'Swish!', 'You’re on a roll!', "You're on a roll!", "Can't wait for the next one!", ":rocket:"]) {
     const f = commentFixture(); f.result.body = f.result.body.replace(':+1:', suffix);

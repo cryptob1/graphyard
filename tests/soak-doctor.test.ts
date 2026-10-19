@@ -15,7 +15,7 @@ import type { RunOptions, RunResult, Runner } from '../src/runner/types.js';
 
 /**
  * GY-1530. The doctor's filings and the diagnosis step over a simulated day of the real loop: a cycle
- * a minute for twelve hours, the doctor every ten minutes, over the shapes GY-1516 recorded on
+ * a minute for twelve hours, the doctor every five minutes, over the shapes GY-1516 recorded on
  * 2026-10-08. The doctor files one item the create route refuses at once (its proof cites an e2e
  * scenario nothing registers), one the plane's outage queues for retry and then refuses the same
  * way once the plane answers, and one the plane accepts; the diagnostician's runs on one
@@ -34,8 +34,8 @@ const settings = diagnosticianSettings({ diagnostician: { invariantBoundMinutes:
 /** The scenarios the repository's e2e/cases register; a proof citing any other is refused by create for ever. */
 const registered = new Set(['board', 'create-work-item', 'sign-in', 'tests-page', 'work-item-detail']);
 const unregistered = { loop: 'self-upgrade-loaded-revision-clears', merge: 'merge-queue-drains-after-base-move', containment: 'lapsed-fence-settles' };
-/** The plane's outage: the doctor's create and run posts meet a 502 between these minutes; the second doctor run (minute 10) lands inside it. */
-const outage = { from: 8 * minute, to: 18 * minute };
+/** The plane's outage: the doctor's create and run posts meet a 502 between these minutes; the second doctor run (minute 5) lands inside it, the third (minute 10) does not. */
+const outage = { from: 4 * minute, to: 10 * minute };
 
 function config(): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
@@ -256,7 +256,7 @@ test('unit:soak-invariants-hold — over a simulated day the doctor drops and cl
   assert.deepEqual(state.diagnoses[stopped.key].runs.map(run => run.result), ['timeout', 'timeout']);
   assert.equal(state.diagnoses[refusedFix.key].state, 'failed');
   assert.equal(state.diagnoses[refusedFix.key].fix, null, 'no fix was filed');
-  assert.ok(doctorRuns >= 70 && doctorRuns <= 73, `one doctor run per ten minutes over twelve hours: ${doctorRuns}`);
+  assert.ok(doctorRuns >= 143 && doctorRuns <= 145, `one doctor run per five minutes over twelve hours: ${doctorRuns}`);
   assert.ok(!state.doctor.runs.some(run => run.state !== 'reported'), `every retained doctor run applied its report: ${state.doctor.runs.map(run => run.state).join(', ')}`);
   clearDoctorRuns(); clearDiagnoses();
 });
@@ -458,7 +458,7 @@ test('unit:soak-doctor-delivered-cover — over simulated hours a landed capacit
   }
 
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
-  assert.ok(doctorRuns >= 30 && doctorRuns <= 40, `doctor re-offers every ten minutes over six hours: ${doctorRuns}`);
+  assert.ok(doctorRuns >= 71 && doctorRuns <= 73, `doctor re-offers every five minutes over six hours: ${doctorRuns}`);
   assert.deepEqual(state.doctor.pendingFiles, [], 'no filing stays pending against a standing or threshold-gated cover');
   assert.equal(state.actions['doctor:prior:file:capacity']?.state, 'done', 'prior pending retry settled');
   assert.match(state.actions['doctor:prior:file:capacity']?.detail ?? '', /delivered item/, 'prior pending drop names the delivered cover');
@@ -562,7 +562,7 @@ test('unit:soak-doctor-standing-diagnosed — over simulated hours a diagnosed o
   }
 
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
-  assert.ok(doctorRuns >= 20 && doctorRuns <= 30, `doctor re-offers every ten minutes over four hours: ${doctorRuns}`);
+  assert.ok(doctorRuns >= 47 && doctorRuns <= 49, `doctor re-offers every five minutes over four hours: ${doctorRuns}`);
   assert.deepEqual(state.doctor.pendingFiles, [], 'standing diagnosed cover drops every pending retry');
   assert.equal(state.actions['doctor:prior:file:capacity']?.state, 'done');
   assert.match(state.actions['doctor:prior:file:capacity']?.detail ?? '', /diagnosed class item|open item/,

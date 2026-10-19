@@ -419,10 +419,8 @@ async function queuedCandidate() {
 /** What a delivered item must look like after any path delivered it: nothing left to retry. */
 function assertSettled(item: Work, path: string) {
   assert.equal(item.stage, 'done', `${path}: delivered`);
-  assert.ok(item.nextAction === null || item.nextAction?.kind === 'verify-deployment', `${path}: the next action is the deployment it owes or nothing, not ${item.nextAction?.kind}`);
-  // GY-1824: the verify-deployment row a delivery owes until its serving release is recorded is not
-  // a leftover; every other row is.
-  assert.deepEqual(pendingRows(item).filter(row => row.kind !== 'verify-deployment').map(row => row.kind), [], `${path}: no pending row is left to retry`);
+  assert.equal(item.nextAction ?? null, null, `${path}: a delivered item owes nothing, not ${item.nextAction?.kind}`);
+  assert.deepEqual(pendingRows(item).map(row => row.kind), [], `${path}: no pending row is left to retry`);
   assert.ok(item.actionQueue!.history.some(row => row.kind === 'dispatch' && /no longer needs this action|now needs/.test(row.resolution ?? '')), `${path}: the leftover row was retired with a reason`);
   assert.equal((item as { queue?: unknown }).queue ?? null, null, `${path}: the legacy merge-queue entry is cleared`);
 }
@@ -459,10 +457,7 @@ test('integration:done-rows-never-claimed — a done item\'s pending dispatch an
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   const done = await deliverThroughLedger(engine, queued.id, 'c'.repeat(40), mergedAt);
   assert.equal(done.stage, 'done');
-  // GY-1824: its serving release is recorded, as the executor's verify-deployment row records it, so
-  // the delivery owes nothing and only the leftovers below are left to settle.
-  const recorded = { ...done.delivery, deployment: { sha: 'd'.repeat(40), mergeSha: 'c'.repeat(40), source: 'endpoint', observedAt: mergedAt, covers: 'exact', at: mergedAt, observer: 'executor-1' } };
-  await store.pool.query("UPDATE work_items SET document=(jsonb_set(document,'{actionQueue,actions}','[]'::jsonb) || $2::jsonb) WHERE id=$1", [done.id, JSON.stringify({ delivery: recorded, nextAction: null })]);
+  // The delivery owes nothing (GY-1981: done = merged); only the leftovers below are left to settle.
   const dispatch = leftover(done, 'dispatch', 'dispatch:0'), merge = leftover(done, 'merge', 'merge:stale');
   await seed(done, [dispatch, merge], { queue: queueEntry(9001), nextAction: { kind: 'merge', work: done.id, key: done.key, gate: 'merge', refusal: null, reason: 'stale', inputs: merge.inputs, llmRole: null, binding: 'merge:stale' } });
 
@@ -592,21 +587,6 @@ function fixtureStall(key: string, kind: ActionRow['kind'], reason: string, at =
   const work = { id, key, stage: 'build', actionQueue: { actions: [row], history: [] } } as unknown as Work;
   return { work, row, at };
 }
-
-test('unit:stalled-actions-endpoint-setup-attention — a verify-deployment row on Deployment endpoint answered 4xx raises the installation-level setup line, not a stalled-action instance', () => {
-  const { work, at } = fixtureStall('GY-1963', 'verify-deployment', 'Deployment endpoint answered 404');
-  const raised = stalledActionAttention({ work: [work], now: at });
-  assert.equal(raised.length, 1);
-  assert.equal(raised[0].kind, 'setup');
-  assert.equal(raised[0].subject, 'setup');
-  assert.match(raised[0].text, /installation's configured deployment endpoint answers 4xx/);
-  assert.match(raised[0].next, /deploymentUrl/);
-  assert.doesNotMatch(raised[0].next, /Clear what that reason names/);
-  const classified = classifyAttention(raised);
-  assert.equal(classified[0].faultClass, 'configuration');
-  assert.equal(classified[0].kind, 'setup');
-  assert.notEqual(classified[0].faultClass, 'stalled-gate');
-});
 
 test('unit:stalled-actions-claim-credential-attention — a dispatch row on the refused claim credential names the credential-401 remedy, not the generic instruction', () => {
   const reason = 'Command failed: node bin/graphyard.mjs claim GY-1994\n{"error":"A valid Graphyard bearer token is required"}';

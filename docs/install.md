@@ -80,7 +80,8 @@ Price: `--confirm-price`/`--max-monthly`; `--migrate` stops loop, fences `GRAPHY
 | `Generating the merge writer's deploy key` (host) | install `openssh-client` there, rerun
 | `Cloning OWNER/REPO` (host) | `gh repo deploy-key list` shows the host's key, rerun
 | `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
-| fresh database (401) | `up` re-issues credentials, refiles onboarding/goal, archives cursor
+| fresh database (401) | `up` re-issues credentials
+| `Unknown option '--github-app'` (or `--reuse-app`, `--restore-protection`) | install takes no App or protection flag (GY-2009); drop it
 
 ## Agent execution contract
 
@@ -89,3 +90,7 @@ Run steps 1–5 (1, 2, 4 with `--observe-only`); never weaken gates.
 ## Manual fallback (unsupported platforms)
 
 [Deployment](deployment.md#manual-fallback).
+
+## Done when
+
+Plan listed the deploy key and no App or protection; apply registered the key; `/api/status.github` is false; documentation reflects this (or `--no-docs` is true).
