@@ -62,6 +62,20 @@ export const isHotfix = (item: Pick<Work, 'title'>) => /^hotfix:/i.test(item.tit
 export const isBaseRepair = (item: Pick<Work, 'title'>) => /^base branch \S+ fails .+ test: /i.test(item.title ?? '');
 const mergesFirst = (item: Pick<Work, 'title'>) => isHotfix(item) || isBaseRepair(item);
 /**
+ * The trial-failure refusal the item's own record holds for its exact candidate head, or null: the
+ * one fact that takes a head out of the queue (`mergeQueue`'s `trial failed` drop, GY-1524 AC-3)
+ * and the ground of the rework releasing the head requires. The queue and the writer's rework debt
+ * read the same record, so a head the queue drops is always a head whose rework is asked for
+ * (requestPendingReworks re-derives the debt from here, GY-2166: the settlement that first owed a
+ * refusal's rework lives only in memory, and the restart that kept the ledger lost it).
+ */
+export function trialRefusalHeld(candidate: Work['candidate'], state: MergeLedgerState | null | undefined): { reason: string } | null {
+  const head = candidate?.sha.toLowerCase();
+  return state && head && state.state === 'refused' && state.head === head
+    && state.refusal?.kind === 'merge' && state.refusal.reason.startsWith(trialFailurePrefix)
+    ? { reason: state.refusal.reason } : null;
+}
+/**
  * The control-plane candidates owed a merge, hotfixes and base-failure repairs first then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
  * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
  * and `review` gates passed as the control plane served them: its review gate fails a delta reviewed before
@@ -84,7 +98,7 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     // GY-1927: a candidate the automatic-merging hold stands over waits for the merge decision that releases it.
     if (item.mergeHold) return false;
     const state = ledger[item.key];
-    if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.kind === 'merge' && state.refusal.reason.startsWith(trialFailurePrefix)) return false;
+    if (trialRefusalHeld(candidate, state)) return false;
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;
     // GY-1834: a head held for a base failure waits `baseFailureHoldMs` before it is trialled again on whatever the tip then is.
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'refused' && state.refusal?.reason.startsWith(baseFailurePrefix) && state.intentAt && now - Date.parse(state.intentAt) < baseFailureHoldMs) return false;
