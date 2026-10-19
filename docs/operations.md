@@ -23,6 +23,8 @@ graphyard master checkout-restore "reason"
 
 Never attest a stop you have not confirmed.
 
+`master checkout-restore` serves the verified snapshot under the loop's loader; an unstartable serve dies at its startup bound, never hanging.
+
 ## Safety facts that never change
 
 - Workers never hold `admin`/`coordinator`/`producer` tokens. No AI principal can hold `admin`.

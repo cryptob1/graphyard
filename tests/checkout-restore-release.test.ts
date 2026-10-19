@@ -9,10 +9,10 @@ import { fileURLToPath } from 'node:url';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { z } from 'zod';
 import { EventEmitter } from 'node:events';
-import { type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releasePinnedRestore, releaseServes, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop } from '../src/cli/checkout-restore-release.js';
+import { checkoutRestoreCommand, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutRestoreWaitMs, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, restoreInProcess, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
+import { checkoutRestoreServeCloneMs, checkoutRestoreServeFetchMs, checkoutRestoreServeStartupMs, releasePinnedRestore, serveChildImports, serveEntry, type CheckoutRestoreGrant, type CheckoutRestoreGrantPayload, checkoutRestoreGrantKind, checkoutRestoreGrantVariable, checkoutRestoreServeFlag, commitServes, lockedLoop, releaseServes, servingReleases, signCheckoutRestoreGrant, snapshotRelease, staleServingLoop } from '../src/cli/checkout-restore-release.js';
 import { ancestorPids, restoreChildren, serveCheckoutRestoreAct, thawFrozenWritersOnStop } from '../src/cli/checkout-restore-serve.js';
 import { continueFrozenWriters, freezeCheckoutWriters, frozenWritersLedgerKind, readFrozenWritersLedger } from '../src/cli/checkout-writers.js';
-import { checkoutRestoreCommand, checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, fileCheckoutRestoreRequest, loopRestartRequestPath, readCheckoutRestoreRequest, restoreInProcess, serveCheckoutRestore } from '../src/cli/master-checkout-restore.js';
 import { atomicPrivateWrite } from '../src/master/config.js';
 import { checkoutRestoreDriftRemedy, coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { daemonStatePath, emptyDaemonState } from '../src/master-daemon.js';
@@ -20,7 +20,7 @@ import { masterConfigSchema } from '../src/master.js';
 import { readCoordinatorCheckout } from '../src/master/profiles.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// Time-bomb allowance (GY-1694): the 2030-01-01 ledger `at` is a stored string nothing dates; the 2026-10-11 grants are judged by the explicit now/clock handed to the act; Date.now() bounds waits and real-clock grants.
+// Time-bomb allowance (GY-1694): the 2030-01-01 ledger `at` is a stored string nothing dates; the 2026-10-11 grants are judged by the explicit now/clock handed to the act; Date.now() bounds waits and real-clock grants, and the GY-2437 window proofs read it only to measure that a bounded refusal and a completed restore land inside the client window.
 // GY-1680 (instance GY-1679): the loop served `master checkout-restore` from the code it had loaded,
 // so GY-1672's unreadable-cwd skip, merged and deployed, reached no installation whose loop could
 // not restart — the loop the request exists to restart — and a request that found the checkout
@@ -70,18 +70,22 @@ function threadEntry(proc: string, pid: number, tid: number, options: { state?: 
   else writeFileSync(join(directory, 'cwd'), '');
 }
 
-/** The fixture release's CLI entry: starts the serve helper the way bin/graphyard.mjs starts src/cli.ts, naming the snapshot it runs from. */
+/** The fixture release's CLI entry: starts the serve helper the way the act's serve child starts a release's own src/cli.ts (GY-2437), naming the snapshot it runs from. */
 const releaseEntry = `#!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 const here = fileURLToPath(new URL('../', import.meta.url));
-const child = spawn(process.execPath, ['--import', 'tsx', ${JSON.stringify(helper)}, ...process.argv.slice(2)], { cwd: ${JSON.stringify(worktree)}, stdio: 'inherit', env: { ...process.env, GRAPHYARD_TEST_SNAPSHOT: here } });
+const child = spawn(process.execPath, ['--import', 'tsx', ${JSON.stringify(helper)}, ...process.argv.slice(2)], { cwd: ${JSON.stringify(worktree)}, stdio: 'inherit', env: { ...process.env, GRAPHYARD_TEST_SNAPSHOT: here, GRAPHYARD_TEST_LAUNCHER: JSON.stringify({ execArgv: process.execArgv, argv: process.argv }) } });
 child.on('exit', code => process.exit(code ?? 1));
 `;
 /** The serve-capable release's marker: its checkout-restore-release.ts reads the loop's signed grant. */
 const serveMarker = `export const checkoutRestoreServeFlag = '--serve';\nexport const checkoutRestoreGrantVariable = ${JSON.stringify(checkoutRestoreGrantVariable)};\nexport const checkoutRestoreGrantKind = ${JSON.stringify(checkoutRestoreGrantKind)};\n`;
-/** The checkout's own entry at the commit the loop loaded: were the act run from the checkout's tree, it would say so and fail. */
+/** The checkout's own CLI at the commit the loop loaded: were the act run from the checkout's tree, it would say so and fail. */
 const loadedEntry = '#!/usr/bin/env node\nconsole.error("the checkout\'s own tree served the act");\nprocess.exit(3);\n';
+/** A release whose CLI dies at boot, the production shape: a loader the snapshot cannot resolve (GY-2437's 08:01Z/08:36Z records). */
+const crashingEntry = `#!/usr/bin/env node\nconsole.error("Error: Cannot find package 'tsx'");\nprocess.exit(1);\n`;
+/** A release whose CLI never boots and never exits: the silent-hang shape the startup bound ends (GY-2437's ~12:12Z record). */
+const hangingEntry = '#!/usr/bin/env node\nsetInterval(() => {}, 1_000_000);\n';
 const credentialValue = 'coordinator-credential-'.padEnd(48, 'c');
 
 /**
@@ -111,13 +115,14 @@ async function fixture(name: string) {
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   mkdirSync(join(root, 'src', 'cli'), { recursive: true }); mkdirSync(join(root, 'bin'), { recursive: true });
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
-  writeFileSync(join(root, 'bin', 'graphyard.mjs'), releaseEntry);
+  writeFileSync(join(root, 'src', 'cli.ts'), releaseEntry);
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
   writeFileSync(join(root, 'src', 'cli', 'checkout-restore-release.ts'), serveMarker);
   writeFileSync(join(root, '.gitignore'), '.graphyard/\nnode_modules/\n');
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'release');
   const release = git('rev-parse', 'HEAD');
-  writeFileSync(join(root, 'bin', 'graphyard.mjs'), loadedEntry);
+  writeFileSync(join(root, 'src', 'cli.ts'), loadedEntry);
   git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'loaded');
   const loaded = git('rev-parse', 'HEAD');
   git('checkout', '-q', '--detach');
@@ -132,7 +137,7 @@ async function fixture(name: string) {
   writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: process.pid, host: 'machine-a' } }));
   const grant = { file: grantFile, credentialFile, pid: process.pid };
   const env = { GRAPHYARD_TEST_FAKE_PROC: proc, GRAPHYARD_TEST_SERVE_RECORD: record, GRAPHYARD_TEST_DENY_PATHS: join(proc, '1372', 'cwd') };
-  return { base, root, git, release, loaded, proc, record, checkout, file, grant, env };
+  return { base, root, git, release, loaded, proc, record, checkout, file, grant, env, cursor: join(base, 'state', 'graphyard-master.daemon.json') };
 }
 /** Sets the helper's environment for the child the act spawns, returning its restoration. */
 function withEnv(env: Record<string, string>) {
@@ -140,7 +145,7 @@ function withEnv(env: Record<string, string>) {
   Object.assign(process.env, env);
   return () => { for (const [key, value] of Object.entries(before)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; } };
 }
-const serveRecord = (record: string) => JSON.parse(readFileSync(record, 'utf8')) as { entry: string; args: string[]; snapshot: string; sent: string[]; snapshotHead: string | null; snapshotBranch: string | null; snapshotShared: boolean; snapshotModules: boolean; outcome: unknown;
+const serveRecord = (record: string) => JSON.parse(readFileSync(record, 'utf8')) as { entry: string; args: string[]; snapshot: string; sent: string[]; snapshotHead: string | null; snapshotBranch: string | null; snapshotShared: boolean; snapshotModules: boolean; outcome: unknown; launcher: { execArgv: string[]; argv: string[] } | null;
   grant: { file: string | null; content: CheckoutRestoreGrant | null; consumed: boolean | null }; pid: number; ppid: number; frozenAt: number | null; thawedAt: number | null; headAtThaw: string | null; statusAtThaw: string | null };
 /** The payload a grant carries, for re-signing it under a credential. */
 const payloadOf = ({ signature: _signature, ...payload }: CheckoutRestoreGrant): CheckoutRestoreGrantPayload => payload;
@@ -175,7 +180,7 @@ test('integration:checkout-restore-release-pinned-serve — the loop serves a ch
   assert.deepEqual(record1.grant.content!.loop, { pid: process.pid }, 'one issuing pid: this process, which the cursor lock names');
   assert.equal(record1.grant.consumed, true, 'the grant was consumed by the entry before it acted');
   assert.ok(!existsSync(grant.file), 'no grant is left behind');
-  assert.notEqual(record1.ppid, process.pid, 'the entry ran as a grandchild, through the release\'s own bin');
+  assert.notEqual(record1.ppid, process.pid, 'the entry ran as a grandchild, through the snapshot\'s own CLI entry');
   // The act ran in a snapshot of the release — detached at the verified commit, sharing the checkout's
   // object store, with its dependencies linked — never in the checkout's tree or the loop's own code.
   const served = serveRecord(record);
@@ -826,12 +831,13 @@ test('integration:checkout-restore-stale-loop-handoff — a checkout-restore fil
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   mkdirSync(join(root, 'src', 'cli'), { recursive: true }); mkdirSync(join(root, 'bin'), { recursive: true });
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
-  writeFileSync(join(root, 'bin', 'graphyard.mjs'), loadedEntry);
+  writeFileSync(join(root, 'src', 'cli.ts'), loadedEntry);
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
   writeFileSync(join(root, '.gitignore'), '.graphyard/\nnode_modules/\n');
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'before the serve path');
   const before = git('rev-parse', 'HEAD');
-  writeFileSync(join(root, 'bin', 'graphyard.mjs'), releaseEntry);
+  writeFileSync(join(root, 'src', 'cli.ts'), releaseEntry);
   writeFileSync(join(root, 'src', 'cli', 'checkout-restore-release.ts'), serveMarker);
   git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'the serving release');
   const release = git('rev-parse', 'HEAD');
@@ -946,12 +952,13 @@ test('integration:checkout-restore-stale-loop-old-head-handoff — a dirty check
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   mkdirSync(join(root, 'src', 'cli'), { recursive: true }); mkdirSync(join(root, 'bin'), { recursive: true });
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
-  writeFileSync(join(root, 'bin', 'graphyard.mjs'), loadedEntry);
+  writeFileSync(join(root, 'src', 'cli.ts'), loadedEntry);
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
   writeFileSync(join(root, '.gitignore'), '.graphyard/\nnode_modules/\n');
   execFileSync('git', ['init', '-q', '-b', 'main', root]);
   git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'before the serve path');
   const before = git('rev-parse', 'HEAD');
-  writeFileSync(join(root, 'bin', 'graphyard.mjs'), releaseEntry);
+  writeFileSync(join(root, 'src', 'cli.ts'), releaseEntry);
   writeFileSync(join(root, 'src', 'cli', 'checkout-restore-release.ts'), serveMarker);
   git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'the serving release');
   const release = git('rev-parse', 'HEAD');
@@ -1120,4 +1127,140 @@ test('unit:old-head-handoff-advances-under-freeze — the restore act moves the 
   await assert.rejects(restoreInProcess(defaultChildRun, quiesce, 'f'.repeat(40))(root, 'advance test', new Date(), request), new RegExp(`1 dirty path\\(s\\) were saved under ${checkoutRestoreRefPrefix}\\S+ \\([0-9a-f]{12}\\) and returned to HEAD, but the coordinator checkout at .* could not be advanced onto ${'f'.repeat(12)} while its writers stood frozen \\(`));
   assert.equal(thaws.length, 1, 'the writers were continued'); assert.equal(thaws[0].head, before); assert.equal(thaws[0].status, '', 'the restore itself landed');
   assert.equal(git('rev-parse', 'HEAD'), before);
+});
+
+/** A single-release installation whose CLI entry is `entry`: the checkout, its verified serving release and the request paths, with a cursor the loop (this process) holds and a serving release recorded as loaded. */
+async function entryFixture(name: string, entry: string) {
+  const base = await fixtureDirectory(name);
+  const root = join(base, 'coordinator');
+  const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+  mkdirSync(join(root, 'src', 'cli'), { recursive: true }); mkdirSync(join(root, 'bin'), { recursive: true });
+  writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 1;\n');
+  writeFileSync(join(root, 'src', 'cli.ts'), entry);
+  writeFileSync(join(root, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
+  writeFileSync(join(root, 'src', 'cli', 'checkout-restore-release.ts'), serveMarker);
+  writeFileSync(join(root, '.gitignore'), '.graphyard/\nnode_modules/\n');
+  execFileSync('git', ['init', '-q', '-b', 'main', root]);
+  git('add', '-A'); git('-c', 'user.name=x', '-c', 'user.email=x@x', 'commit', '-q', '-m', 'release');
+  const release = git('rev-parse', 'HEAD');
+  git('checkout', '-q', '--detach');
+  const { credentialFile, cursor, file, grantFile } = installation(root, join(base, 'state'));
+  writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: process.pid, host: 'machine-a' }, release: { commit: release, dirty: false } }));
+  return { root, git, release, file, grant: { file: grantFile, credentialFile, pid: process.pid } };
+}
+
+test('unit:checkout-restore-serve-starts-from-held-snapshot — the serve child the act starts by default is the held snapshot\'s own src/cli.ts under the loader imports this process booted with, each one resolved here so none is left for the snapshot\'s linked node_modules to answer: a coordinator checkout whose install holds no tsx serves as it stands (GY-2437)', { timeout: 60_000 }, async () => {
+  const entry = serveEntry(join('/outside', 'snapshot'));
+  assert.equal(entry.command, process.execPath);
+  assert.equal(entry.args.at(-1), join('/outside', 'snapshot', 'src', 'cli.ts'), 'the snapshot\'s own CLI entry, never its launcher: bin/graphyard.mjs re-resolves tsx through the checkout\'s node_modules and crashed every serve where the install lacks it');
+  const inherited = entry.args.filter((_, index) => entry.args[index - 1] === '--import');
+  assert.ok(inherited.length >= 1, 'the child inherits this process\'s own loader');
+  for (const value of inherited) assert.match(value, /^(file:\/\/|\/|[A-Za-z][A-Za-z0-9+.-]*:)/, `${value}: resolved before the child runs, never a bare specifier for the snapshot to answer`);
+  const argvWas = process.execArgv;
+  try {
+    process.execArgv = ['--import', 'tsx', '--import', tsx, '--max-old-space-size', '4096'];
+    assert.deepEqual(serveEntry('/out/snap').args, ['--import', tsx, '--import', tsx, join('/out/snap', 'src', 'cli.ts')], 'bare specifiers resolve in the loop\'s own graph; the rest of the node options are not inherited');
+    assert.deepEqual(serveChildImports(['--import']), [], 'a dangling --import names nothing and is dropped');
+  } finally { process.execArgv = argvWas; }
+  // End to end: the act serves from a snapshot that holds no node_modules at all — nothing in it to resolve a loader
+  // from — and the child ran the snapshot's own entry under imports resolved before it started.
+  const heldFixture = await fixture('checkout-restore-serve-held-snapshot');
+  writeFileSync(join(heldFixture.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  await fileCheckoutRestoreRequest(heldFixture.file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  const restore = withEnv(heldFixture.env);
+  let outcome;
+  try {
+    outcome = await serveCheckoutRestore(heldFixture.file, heldFixture.root, {
+      pid: 100, restart: async () => {}, settle: async () => {}, loaded: () => heldFixture.loaded,
+      restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: heldFixture.release }, baseBranch: 'main' }), grant: heldFixture.grant }),
+    });
+  } finally { restore(); }
+  assert.equal(outcome?.state, 'restored', outcome?.detail);
+  const served = serveRecord(heldFixture.record);
+  assert.equal(served.launcher!.argv[1], join(served.snapshot, 'src', 'cli.ts'), 'the child ran the snapshot\'s own entry');
+  assert.deepEqual(served.args, ['master', 'checkout-restore', checkoutRestoreServeFlag]);
+  for (const [index, value] of served.launcher!.execArgv.entries())
+    if (value === '--import') assert.match(served.launcher!.execArgv[index + 1], /^(file:\/\/|\/|[A-Za-z][A-Za-z0-9+.-]*:)/, 'no import is left for the snapshot\'s node_modules to resolve');
+  assert.equal(served.snapshotModules, false, 'the snapshot held no node_modules: nothing in it could have answered a loader resolution');
+  assert.equal(heldFixture.git('status', '--porcelain', '--untracked-files=all'), '', 'and the restore itself landed');
+});
+
+test('unit:checkout-restore-refuses-loudly-on-serve-failure — a serve that cannot start is a failed outcome naming the serve\'s error, never a silent hang: a child that dies at boot fails with its stderr as the refusal reason, a child that never begins acting is ended at the startup bound (nothing frozen — the grant it never consumed names the act that never began), and the command side answers nonzero with that same error well inside its 120 s client window', { timeout: 60_000 }, async () => {
+  // A boot crash: the act records the failure with the serve's stderr as the reason; the dirty path stands.
+  const crashed = await entryFixture('checkout-restore-serve-crash', crashingEntry);
+  writeFileSync(join(crashed.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  await fileCheckoutRestoreRequest(crashed.file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  let outcome;
+  try {
+    outcome = await serveCheckoutRestore(crashed.file, crashed.root, { pid: process.pid, restart: async () => {}, settle: async () => {},
+      restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: crashed.release }, baseBranch: 'main' }), grant: crashed.grant }) });
+  } finally { /* no environment was handed the child: the crashing entry reads none */ }
+  assert.equal(outcome?.state, 'failed', outcome?.detail);
+  assert.match(outcome!.detail, new RegExp(`served from the verified serving release ${crashed.release.slice(0, 12)}, a detached shared-clone snapshot of it: .*Cannot find package 'tsx'`, 's'), 'the serve\'s error is the refusal reason');
+  assert.ok(!existsSync(crashed.grant.file), 'the grant does not outlive the serve');
+  assert.equal(readFileSync(join(crashed.root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 2; // hotfix\n', 'nothing was restored: the dirty path stands for the next request');
+
+  // A boot hang: the child never consumes the grant, so the act ends it at the startup bound and refuses naming that.
+  const hung = await entryFixture('checkout-restore-serve-hang', hangingEntry);
+  writeFileSync(join(hung.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  await fileCheckoutRestoreRequest(hung.file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  try {
+    outcome = await serveCheckoutRestore(hung.file, hung.root, { pid: process.pid, restart: async () => {}, settle: async () => {},
+      restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: hung.release }, baseBranch: 'main' }), grant: hung.grant, startupTimeoutMs: 400 }) });
+  } finally { /* as above */ }
+  assert.equal(outcome?.state, 'failed', outcome?.detail);
+  assert.match(outcome!.detail, /did not start within 400ms and was killed/s);
+  assert.ok(!existsSync(hung.grant.file), 'the grant is removed once the serve has ended');
+  assert.equal(readFileSync(join(hung.root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 2; // hotfix\n', 'the checkout stands untouched');
+
+  // The command side: the serve's failure is the client's nonzero answer, carrying the serve's error, inside the client window.
+  const windowed = await entryFixture('checkout-restore-serve-crash-window', crashingEntry);
+  writeFileSync(join(windowed.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  const started = Date.now();
+  const command = checkoutRestoreCommand({ credentialFile: windowed.grant.credentialFile, baseBranch: 'main', cliPath: join(windowed.root, 'bin', 'graphyard.mjs') }, ['escalation:dirty-checkout'], 'graphyard-doctor', { pollMs: 20 });
+  while (!existsSync(windowed.file)) await delay(10);
+  await serveCheckoutRestore(windowed.file, windowed.root, { pid: process.pid, restart: async () => {}, settle: async () => {},
+    restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: windowed.release }, baseBranch: 'main' }), grant: windowed.grant }) });
+  const result = await command;
+  assert.equal(result.state, 'failed', result.detail);
+  assert.match(result.detail!, /Cannot find package 'tsx'/s, 'the serve\'s error reaches the command\'s refusal reason');
+  assert.equal(process.exitCode, 1); process.exitCode = 0;
+  assert.ok(Date.now() - started < checkoutRestoreWaitMs, `the command refused in ${Date.now() - started}ms, inside its ${checkoutRestoreWaitMs}ms window, instead of hanging past it`);
+  // Every step before the child is bounded too, so the serve reaches its child inside the window: the fetch and the clone carry their bounds.
+  const bounds: { args: string[]; timeoutMs?: number }[] = [];
+  const run = async (command: string, args: string[], options?: { timeoutMs?: number }) => { if (command === 'git' && (args[2] === 'fetch' || args[0] === 'clone')) bounds.push({ args, timeoutMs: options?.timeoutMs }); return defaultChildRun(command, args, options); };
+  await servingReleases(crashed.root, { deployment: { source: 'endpoint', sha: crashed.release }, baseBranch: 'main' }, run);
+  assert.deepEqual(bounds.map(entry => entry.args[2] === 'fetch' ? 'fetch' : 'clone'), ['fetch'], 'the fetch is the one network step');
+  assert.equal(bounds[0].timeoutMs, checkoutRestoreServeFetchMs);
+  const snapshot = await snapshotRelease(crashed.root, crashed.release, run);
+  await snapshot.dispose();
+  assert.equal(bounds[1].args[0], 'clone'); assert.equal(bounds[1].timeoutMs, checkoutRestoreServeCloneMs);
+  assert.ok(checkoutRestoreServeFetchMs + 2 * (checkoutRestoreServeCloneMs + checkoutRestoreServeStartupMs) < checkoutRestoreWaitMs, 'the bounded steps cannot outlast the client window even when every sanctioned release is tried');
+});
+
+test('integration:checkout-restore-restores-dirty-tree-in-client-window — master checkout-restore on the coordinator checkout while the tree holds one modified tracked source path restores that path to HEAD — git status --porcelain reads clean afterwards — and the command completes within its 120 s client window (GY-2437 AC-1)', { timeout: 120_000 }, async () => {
+  const dirty = await fixture('checkout-restore-dirty-tree-window');
+  writeFileSync(join(dirty.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
+  // The running loop (this process) holds the cursor and loaded a commit that serves: the request is served plainly, no handoff.
+  writeFileSync(dirty.cursor, JSON.stringify({ lock: { id: 'lock', pid: process.pid, host: 'machine-a' }, release: { commit: dirty.loaded, dirty: false } }));
+  const restore = withEnv(dirty.env);
+  let result: Awaited<ReturnType<typeof checkoutRestoreCommand>>;
+  try {
+    const started = Date.now();
+    const command = checkoutRestoreCommand({ credentialFile: dirty.grant.credentialFile, baseBranch: 'main', cliPath: join(dirty.root, 'bin', 'graphyard.mjs') }, ['escalation:dirty-checkout', 'in the client window'], 'graphyard-doctor', { pollMs: 20 });
+    while (!existsSync(dirty.file)) await delay(10);
+    const served = await serveCheckoutRestore(dirty.file, dirty.root, { pid: process.pid, restart: async () => {}, settle: async () => {}, loaded: () => dirty.loaded,
+      restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: dirty.release }, baseBranch: 'main' }), grant: dirty.grant }) });
+    assert.equal(served?.state, 'restored', served?.detail);
+    result = await command;
+    const elapsed = Date.now() - started;
+    assert.equal(result.state, 'restored', result.detail);
+    assert.ok(elapsed < checkoutRestoreWaitMs, `the command completed in ${elapsed}ms, within its ${checkoutRestoreWaitMs}ms client window`);
+    assert.equal(process.exitCode ?? 0, 0);
+    assert.equal(dirty.git('status', '--porcelain', '--untracked-files=all'), '', 'the checkout reads clean afterwards');
+    assert.equal(dirty.git('rev-parse', 'HEAD'), dirty.loaded);
+    assert.equal(dirty.git('show', 'HEAD:src/loop.ts'), 'export const loop = 1;', 'the modified tracked source path is back at HEAD');
+    const stored = await readCheckoutRestoreRequest(dirty.file);
+    assert.deepEqual(stored?.outcome?.paths, ['src/loop.ts']);
+  } finally { restore(); }
 });
