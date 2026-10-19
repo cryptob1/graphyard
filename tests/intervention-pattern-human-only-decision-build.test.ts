@@ -6,7 +6,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
-import { docsHeadroom, docsTrimItem, docsTrimLatitude, docsWordBudgetOf } from '../src/model/documentation.js';
+import { docsHeadroom, docsHeadroomText, docsWordBudgetOf } from '../src/model/documentation.js';
 import { defaultChoices, hostDoableAsk, parkRefusal, parkedOnHuman } from '../src/model/human-request.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -35,11 +35,11 @@ const asked = {
   'GY-1365': 'Register or choose the revert approver GitHub App (the reviewer App serves; it must differ from the control-plane App), install it on the repository, set GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY (or _PRIVATE_KEY_FILE) on the production control plane via scripts/provision-railway.mjs operator input, and redeploy',
 } as const;
 
-test('manual:intervention-pattern-human-only-decision-build — GY-1070 and GY-1292: the docs-trim item carries the answer they parked on', () => {
+test('manual:intervention-pattern-human-only-decision-build — GY-1070 and GY-1292: the docs attention line carries the answer they parked on', () => {
   const budget = docsWordBudgetOf({ paths: ['docs/', 'README.md'], wordBudget: { total: 12_000, perPage: 1_200 } })!;
-  const item = docsTrimItem(docsHeadroom({ 'docs/master-agent.md': 959, 'README.md': 10_753 }, budget), 'origin/main');
-  assert.ok(item.criteria[0].text.endsWith(docsTrimLatitude), 'the trade-off both items asked about is the criterion\'s own');
-  assert.doesNotMatch(item.criteria[0].text, /every behaviour, command, configuration and API documented before the change is still documented/);
+  const headroom = docsHeadroom({ 'docs/master-agent.md': 959, 'README.md': 10_753 }, budget);
+  assert.ok(headroom.saturated, 'the set is saturated, and the line asks for the trim directly');
+  assert.match(docsHeadroomText(headroom, 'origin/main')!, /Trim to /, 'the line names the trim itself, so no item is filed and no human is asked (GY-2186)');
 });
 
 test('manual:intervention-pattern-human-only-decision-build — each request is judged: a scope widening and a deferred ask are refused, and (GY-1416) so are the account actions the host could do itself', () => {

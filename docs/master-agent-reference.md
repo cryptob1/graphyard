@@ -31,7 +31,7 @@ Unacted producer requests relaunch on untried profile.
 
 ## Fault classes
 
-`faultClass` (`master status` `faults`): recurring classes file one item each; a cycle over 60s is attention, never an item; an unbound [stall](operations.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing; a queue-held trial, push or `base failure` refusal is the writer's motion, never a fault. Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`.
+`faultClass` (`master status` `faults`): a class past its threshold is one attention line, never an item; a cycle over 60s is attention, never an item; an unbound [stall](operations.md#master-coordination-loop) wakes the master session once per run at three failing cycles (bound: remedy refused, unverified or failing at six); `master status` lists each stall's signature, count, remedy, owner, filing nothing; a queue-held trial, push or `base failure` refusal is the writer's motion, never a fault. Review unlaunched 15min: `concurrency-starved`/`review-settlement`/`launch-review`.
 
 ## Merge trial
 
