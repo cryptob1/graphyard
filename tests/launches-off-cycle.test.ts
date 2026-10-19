@@ -19,10 +19,12 @@ const cli = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T12:00:00Z');
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const hour = 3_600_000;
+// The ten launches are hotfixes: GY-2097's in-flight cap (4) exempts a 'Hotfix:' title, so this
+// test still measures the launcher's own concurrency rather than the pipeline's cap.
 
 function work(key: string): Work {
   return {
-    id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }],
+    id: `id-${key}`, key, title: `Hotfix: ${key}`, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }],
     policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-4 * hour), updatedAt: iso(0), stageEnteredAt: iso(-4 * hour),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
