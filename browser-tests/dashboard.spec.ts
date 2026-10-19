@@ -110,7 +110,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await page.goto('/docs/how-graphyard-works');
     await expect(page.getByRole('heading', { name: 'How Graphyard works', level: 1 })).toBeVisible();
     await diagramsLoad(3);
-    await expect(page.getByText('Text equivalent: in bootstrap the human operator supervises one worker', { exact: false })).toBeVisible();
+    await expect(page.getByText('Text equivalent: bootstrap: operator supervises one worker', { exact: false })).toBeVisible();
     await expect(page.getByRole('link', { name: 'legend', exact: true }).first()).toHaveAttribute('href', '/docs/glossary#diagram-legend');
     await fits();
 
