@@ -31,7 +31,9 @@ test('unit:setup-guide-no-operator-token — steps 3 and 10 use the master ident
   assert.match(step(3), /`--apply` records the master connection `\.graphyard\/master\.json`/);
   assert.match(step(3), /`gy doctor` reads as it/);
   assert.match(step(10), /--token-stdin < "\$\(node -p "require\('\.\/\.graphyard\/master\.json'\)\.credentialFile"\)"/);
-  assert.match(step(4), /serves `http:\/\/127\.0\.0\.1:4311` and prints it; it opens no browser/);
+  // GY-2009: install and up register no App, so step 4 serves no App page.
+  assert.match(step(4), /install and `up` register no App and write no branch protection/);
+  assert.doesNotMatch(step(4), /127\.0\.0\.1:4311/);
 });
 
 test('unit:setup-guide-no-operator-token — doctor reads with the recorded master credential and credentials-file passes with it', async () => {
