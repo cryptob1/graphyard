@@ -226,12 +226,14 @@ test('unit:launch-command-bounded — the typed launch command line is short and
 test('unit:typed-runtime-reads-a-sourced-launch — a worker launch under a long checkout path sources its runtime words from STEM.launch, and typedRuntime reads the same runtime line a short path types', async () => {
   const directory = await temporaryDirectory('launch-long');
   try {
-    const args = ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', join(directory, '.graphyard/harness/worker-claude-worker.json')];
+    const args = (checkout: string) => ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user', '--settings', join(checkout, '.graphyard/harness/worker-claude-worker.json')];
     const shape = / -- claude --permission-mode bypassPermissions --setting-sources user --settings \S+ --append-system-prompt-file "\$GY\.role" "\$\(cat "\$GY\.request"\)"$/;
-    const line = (checkout: string) => launchCommand('claude', args, writeLaunchFiles(checkout, 'engineering-claude-1', { role: 'r', request: 'Implement GY-69' }), ['node', launcher, 'watch', 'GY-69', '4', '--']);
-    const short = line(join(directory, 'assigned'));
+    const prefix = (cli: string) => ['node', cli, 'watch', 'GY-69', '4', '--'];
+    // The short line names only fixed short paths, so it stays under the bound whatever TMPDIR is; it writes no file.
+    const short = launchCommand('claude', args('/w'), { stem: '/w/.graphyard/launch/engineering-claude-1', role: '/w/r', request: '/w/q' }, prefix('/g.mjs'));
     assert.match(short, shape); assert.equal(typedRuntime(short), short.replace(/^GY=\S+; /, ''));
-    const long = line(join(directory, 'x'.repeat(200), 'assigned'));
+    const checkout = join(directory, 'x'.repeat(200), 'assigned');
+    const long = launchCommand('claude', args(checkout), writeLaunchFiles(checkout, 'engineering-claude-1', { role: 'r', request: 'Implement GY-69' }), prefix(launcher));
     assert.match(long, /; \. "\$GY\.launch"$/, 'the long line sources its runtime words');
     assert.doesNotMatch(long, shape);
     assert.match(typedRuntime(long), shape, 'the sourced runtime line has the same shape the short line types');
