@@ -3,7 +3,10 @@ import assert from 'node:assert/strict';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { emptyDaemonState, type DaemonState } from '../src/master-daemon.js';
-import { deployKey, deployLine, performSelfUpgrade, promotionReading, type DeployPorts, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
+import { performSelfUpgrade, type DeployPorts, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
+
+/** The new exports, imported in each test so a reverted source fails the case, not the file (graphyard verify's exercise). */
+const upgrade = () => import('../src/daemon/upgrade.js') as Promise<Record<string, any>>;
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import type { ExecutorRestartResult } from '../src/executor-fleet.js';
 
@@ -59,7 +62,7 @@ function deps(fake: FakeGit, clock: { now: number }, ports: DeployPorts, fleet: 
     restartSelf: async () => { fleet.self += 1; } };
 }
 
-function releasedState(): DaemonState {
+function releasedState(promotionReading: (...args: any[]) => any): DaemonState {
   const state = emptyDaemonState(master);
   state.release = { commit: released, dirty: false };
   state.deployment = null;
@@ -68,7 +71,8 @@ function releasedState(): DaemonState {
 }
 
 test('unit:continuous-deploy-advances-release — a base tip that differs from the recorded release is deployed between cycles, health and end to end pass, the release reading names it with its time, and the loop restarts onto it', async () => {
-  const state = releasedState(), fake = new FakeGit(released, tip), clock = { now: start };
+  const { deployKey, deployLine, promotionReading } = await upgrade();
+  const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
   const { ports, calls, pins } = fakePorts(), fleet = { self: 0, executors: [] as string[] };
   const guard = coordinatorCheckoutGuard({
     state: () => state, read: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
@@ -100,7 +104,8 @@ test('unit:continuous-deploy-advances-release — a base tip that differs from t
 });
 
 test('unit:continuous-deploy-rolls-back — a tip failing health or end to end is rolled back to the recorded release through the same sequence, recorded with its step and reason in one status line, and attempted at most twice until the base tip moves', async () => {
-  const state = releasedState(), fake = new FakeGit(released, tip), clock = { now: start };
+  const { deployKey, deployLine, promotionReading } = await upgrade();
+  const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
   const fails: Record<string, string> = { [tip]: 'health' };
   const { ports, calls } = fakePorts({ fails }), fleet = { self: 0, executors: [] as string[] };
   const pass = () => performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
@@ -146,7 +151,8 @@ test('unit:continuous-deploy-rolls-back — a tip failing health or end to end i
 });
 
 test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that migrated the database is kept, its line says why, and no served-release observation holds the restart', async () => {
-  const state = releasedState(), fake = new FakeGit(released, tip), clock = { now: start };
+  const { deployKey, deployLine, promotionReading } = await upgrade();
+  const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
   // Production is observed serving the recorded release, which does not contain the tip: the
   // release-lagged hold (GY-1585) would have held the restart onto it.
   state.deployment = { source: 'github', sha: released, at: iso(start), reason: null, deployed: ['GY-1'], pending: ['GY-2'] } as unknown as DaemonState['deployment'];

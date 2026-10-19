@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { deployedE2e, type e2eSuite } from '../src/e2e/runner.js';
+import type { e2eSuite } from '../src/e2e/runner.js';
 import type { CaseFile } from '../src/e2e/case.js';
 
 /**
@@ -28,6 +28,7 @@ function fakeSuite(passed: boolean) {
 }
 
 test('unit:loop-deploy-runs-e2e-cases — the deploy\'s end-to-end step selects every case under e2e/cases/ and runs each through the runner; a failing case is the end-to-end failure', async () => {
+  const { deployedE2e } = await import('../src/e2e/runner.js') as Record<string, any>;
   const everyCase = (await readdir(`${root}/e2e/cases`)).filter(name => name.endsWith('.json')).map(name => name.replace(/\.json$/, '')).sort();
   assert.ok(everyCase.length > 0);
 
