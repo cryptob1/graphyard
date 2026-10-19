@@ -14,7 +14,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1652. The loop's harness remedy over a simulated working day of the real loop: a cycle a
- * minute for eight hours over the loop's own checkout, the doctor every ten minutes. The host widens
+ * minute for eight hours over the loop's own checkout, the doctor every five minutes. The host widens
  * the plan three times (a second install's unit appears, so the installed settings lack a generated
  * deny), and once the checkout turns unwritable for half an hour while drift stands. The remedy
  * repeats every cycle, so after every cycle and at the end: drift never survives a writable cycle,

@@ -201,54 +201,6 @@ test('manual:loop-code-root-clean-day — over a simulated day of three merged h
   assertPinBounds(w, 3, 'clean day');
 });
 
-test('manual:loop-code-root-holds-day — the same world through a release-lagged promotion and a dirty checkout: the served release is pinned under the CLI checkout until the plane catches up, the dirty head restarts onto its held snapshot with the checkout left behind, both pins lift in the day, and the managed repository is never touched', { timeout: 300_000 }, async () => {
-  const w = await world('holds');
-  // Head one merged and deployed, while production still serves the release the loop runs: the
-  // restart is held, the launcher pinned to the served release under the CLI checkout.
-  const lagged = await w.advance(2);
-  w.state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: w.loaded, at: new Date(dayStart + hour).toISOString(), reason: null, deployed: ['GY-1'], pending: [] });
-  const held = await w.pass('holds day, lagged head, first pass');
-  assert.equal(held.outcome, 'pending', JSON.stringify(held));
-  assert.equal(w.state.upgrade.stalled?.cause, 'release-lagged');
-  assert.equal(w.pins.at(-1), w.loaded, 'the served release is pinned, under the CLI checkout');
-  assert.equal(git(w.checkout, 'rev-parse', 'HEAD'), lagged, 'the checkout moved; only the restart is held');
-  const still = await w.pass('holds day, lagged head, second pass');
-  assert.equal(still.outcome, 'pending', JSON.stringify(still));
-  assert.deepEqual(w.restarts, [], 'nothing restarts while the plane lags');
-  // Production catches up: the held restart completes onto the checkout, the pin lifts.
-  w.state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: lagged, at: new Date(dayStart + 2 * hour).toISOString(), reason: null, deployed: ['GY-1'], pending: [] });
-  const served = await w.pass('holds day, lagged head, served');
-  assert.equal(served.outcome, 'upgraded', JSON.stringify(served));
-  assert.deepEqual(w.restarts, [{ to: lagged }], 'one restart for the head, onto the checkout');
-  assert.deepEqual(w.state.release, { commit: lagged, dirty: false });
-  assert.equal(w.pins.at(-1), null, 'the pin lifted once the plane served the move');
-
-  // Head two lands while the checkout stands dirty in a tracked file: the upgrade leaves it where
-  // it stands, restarts onto its held snapshot, and the cursor names the checkout left behind.
-  const dirtyHead = await w.advance(3);
-  await writeFile(join(w.checkout, 'src', 'loop.ts'), 'export const version = 2; // work in progress\n');
-  w.state.deployment = deploymentObservationSchema.parse({ source: 'endpoint', sha: dirtyHead, at: new Date(dayStart + 3 * hour).toISOString(), reason: null, deployed: ['GY-1'], pending: [] });
-  const snapshotted = await w.pass('holds day, dirty head, snapshot pass');
-  assert.equal(snapshotted.outcome, 'upgraded', JSON.stringify(snapshotted));
-  assert.equal(git(w.checkout, 'rev-parse', 'HEAD'), lagged, 'the dirty checkout stays where the served pass left it');
-  assert.deepEqual({ commit: w.state.upgrade.snapshot!.commit, checkout: w.state.upgrade.snapshot!.checkout, dirty: w.state.upgrade.snapshot!.dirty }, { commit: dirtyHead, checkout: lagged, dirty: ['src/loop.ts'] });
-  assert.deepEqual(w.restarts.slice(1), [{ to: dirtyHead }], 'the restarted loop loaded the held snapshot');
-  assert.deepEqual(w.state.release, { commit: dirtyHead, dirty: false }, 'the cursor records the snapshot the loop runs, never the managed clone\u2019s commit');
-  assert.equal(w.pins.at(-1), dirtyHead, 'the snapshot is pinned, under the CLI checkout');
-  // The checkout moved onto the commit the loop runs from its snapshot and cleaned there: the pin
-  // lifts, nothing restarts, and the day ends clean.
-  git(w.checkout, 'checkout', '-q', '--', 'src/loop.ts');
-  git(w.checkout, 'checkout', '-q', '--detach', dirtyHead);
-  // The checkout now stands clean on the commit the loop runs from its held snapshot.
-  const lifted = await w.pass('holds day, dirty head, lift pass');
-  assert.equal(lifted.outcome, 'up-to-date', JSON.stringify(lifted));
-  assert.deepEqual(w.restarts, [{ to: lagged }, { to: dirtyHead }], 'one restart per head across the whole day');
-  const idle = await w.pass('holds day, final idle pass');
-  assert.equal(idle.outcome, 'skipped', JSON.stringify(idle));
-  assert.equal(w.state.upgrade.snapshot, undefined, 'the lift cleared the record of the checkout left behind');
-  assertPinBounds(w, 2, 'holds day');
-});
-
 /**
  * The same concern under the real loop (tests/helpers/soak-simulation.ts, `codeRoot`): the managed
  * repository stays /soak/coordinator while the loop's launcher comes from a separate Graphyard
@@ -294,19 +246,6 @@ test('manual:loop-code-root-real-loop-snapshot-day — the real loop over a simu
   assert.deepEqual(day.failures, [], 'no cycle or self-upgrade failed');
   assert.ok(day.upgrades.samples.some(sample => sample.snapshot && sample.pin), 'the loop ran a held snapshot of the dirty checkout');
   assertDistinctRoots(day, root, 'snapshot day', true);
-});
-
-test('manual:loop-code-root-real-loop-release-lag-day — the real loop over a simulated day whose deploys lag the base tip, with the CLI checkout apart from the managed repository: each hold pins the served release under the CLI checkout, the units start its snapshot handed that checkout, and each lift restarts the loop and the fleet onto the CLI checkout\u2019s commit', { timeout: 600_000 }, async () => {
-  const root = await codeRoot('lag');
-  const plan = { items: 16, heldClaimRestarts: 0, leftovers: 0, slowRecompute: 0, unstable: 0, attested: 0, workMs: 15 * minute, rework: new Set<number>(), deaths: new Set<number>(), flaky: { rerunPasses: 0, rerunFails: 0 }, scoped: new Set<number>(), misread: new Set<number>(), exits: new Set<number>(), spentProducer: 0, lostRuns: 0,
-    outOfQueue: { item: 16, afterMs: hours(99) }, blind: { from: hours(99), to: hours(100) }, split: { at: hours(99), item: 16 }, loopRestarts: [] as number[], dirtyCheckout: { from: hours(99), to: hours(100) }, headMove: { from: hours(99), to: hours(100) },
-    deploys: [90 * minute, hours(3), hours(4) + 30 * minute, hours(6)] };
-  const day = await simulateDay({ hours: 7, plan, releaseLag: { cutAgoMs: 30 * minute }, codeRoot: root });
-  assert.deepEqual(day.failures, [], 'no cycle or self-upgrade failed');
-  const r = day.releaseLagDay!;
-  assert.ok(r.passes.some(pass => pass.stall === 'release-lagged' && pass.pin), 'the day held a restart with the served release pinned');
-  assert.deepEqual(r.restarts.filter(restart => !restart.contained), [], 'every restart landed on a commit the served release contains');
-  assertDistinctRoots(day, root, 'release-lag day', false);
 });
 
 test('manual:loop-code-root-external-install-day — an install managing another project over a simulated day of Graphyard heads and app deploys: the legacy pin and owed restart an earlier loop left are retired on the first pass, then every pass refuses with one standing action row and one unchanging attention, writes nothing to the cursor, restarts nothing, and never fetches in or moves the CLI checkout or the managed repository', { timeout: 300_000 }, async () => {

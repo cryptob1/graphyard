@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { boundedInput, doctorBounds, doctorPrompt, type DoctorInput } from '../src/daemon/doctor.js';
+// A namespace import, so on a tree without the extension each allowlist case fails as a case.
+import * as pi from '../integrations/pi/index.js';
+import { boundedInput, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, type DoctorInput } from '../src/daemon/doctor.js';
+import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
 import { workerReclaimBoundMs, workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
 
 // GY-2004 AC-1 (unit:resolver-prompt): the doctor's prompt is the resolver's short charter. It
@@ -43,7 +46,8 @@ test('unit:resolver-prompt — the resolver\'s prompt is short and tells it to a
   // The charter's discipline: never a person, simplest action, and an item only for a code change.
   assert.match(text, /you never ask a person/);
   assert.match(text, /take the simplest action/);
-  assert.match(text, /File an item only for a code change you judge needed, saying why/);
+  assert.match(text, /File an item only for a code change you judge needed, quoting the why after the file/);
+  assert.match(text, /the guard refuses a create with no reason stated/, 'the charter names the guard that holds creation to its reason');
   // The failed actions and attention lines are named as things it acts on.
   assert.match(text, /every failed action and attention line below/);
   // The evidence marker stands once, last, so the run's evidence is exactly what follows it.
@@ -73,4 +77,47 @@ test('unit:resolver-prompt — the built prompt carries every sanctioned command
   assert.ok((bounded.failedActions?.length ?? 0) < 2, 'the bounding drops lines from the failed actions too');
   assert.match(bounded.omitted ?? '', /line\(s\) left out to fit the evidence bound/);
   assert.deepEqual(bounded.attention, ['kept'], 'the attention lines are bounded last');
+});
+
+// GY-2005 AC-2 (unit:resolver-allowlist): the resolver's powers are its allowlist grammar —
+// re-dispatch, unblock, rework, close, scope and decide run; item creation is refused with no
+// reason stated past the file — and its cadence is the five-minute interval plus the progress
+// watchdog's due mark. Every instant here derives from the test's fixed `now`.
+test('unit:resolver-allowlist — the allowlist permits re-dispatch, unblock, rework, close, scope and decide, refuses creation without a stated code-change reason, and the schedule is five minutes plus the watchdog', () => {
+  const context = { cwd: process.cwd(), cli };
+  // The six sanctioned intents, as the prompt teaches them, run under the guard.
+  for (const line of [
+    `node ${cli} master release GY-7 'unreleased backlog item idle 25 min'`,
+    `node ${cli} master unblock GY-7 'the scope refusal was granted'`,
+    `node ${cli} master decide GY-7 rework 'the candidate fails the trial merge on tests/x'`,
+    `node ${cli} master close GY-7 --obsolete 'the delivered GY-2 fixed it'`,
+    `node ${cli} master close GY-7 --duplicate-of GY-2 'same cause, one item'`,
+    `node ${cli} master scope GY-7 'adds the test the criterion names'`,
+    `node ${cli} master decide GY-7 unblock 'the ask is within the item'`,
+  ]) assert.equal(pi.doctorCommandVerdict(line, context).allow, true, `${line} is sanctioned`);
+  // A create with nothing stated past the file is refused at the gate, so a notice never files an item.
+  for (const line of [`node ${cli} master create plan.json`, `graphyard master create plan.json`, `node ${cli} master create plan.json --allow-broad-scope`]) {
+    const verdict = pi.doctorCommandVerdict(line, context);
+    assert.equal(verdict.allow, false, `${line} is refused`);
+    if (!verdict.allow) {
+      assert.match(verdict.reason, /create-reason rule/);
+      assert.match(verdict.reason, /no reason stated past the file/);
+    }
+  }
+  const stated = pi.doctorCommandVerdict(`node ${cli} master create plan.json 'the retry loop drops submissions and needs a code change'`, context);
+  assert.equal(stated.allow, true, 'a create with the why stated past the file runs');
+  // The schedule: five minutes by default, read by the due check over run.doctor.intervalMinutes.
+  const settings = doctorSettingsSchema.parse({});
+  assert.equal(settings.intervalMinutes, 5, 'the resolver runs every five minutes by default');
+  assert.equal(doctorIntervalMs(settings), 5 * minute, 'the due check reads the five-minute interval');
+  const lastRun = (offsetMinutes: number) => ({ doctor: { runs: [{ at: since(offsetMinutes), state: 'reported' as const, runs: [], findings: [], actions: [], filed: [], detail: '' }] } });
+  assert.equal(doctorDue(lastRun(4), now, settings), false, 'four minutes after a run the resolver waits');
+  assert.equal(doctorDue(lastRun(5), now, settings), true, 'five minutes after a run the resolver is due');
+  // And at once when the loop's progress watchdog fired: the mark is due inside the interval,
+  // while the guards it must not cross still hold.
+  const marked = { doctor: { ...lastRun(1).doctor, watchdogDue: true } };
+  assert.equal(doctorDue(marked, now, settings), true, 'the watchdog mark is due inside the interval');
+  const inFlight = { doctor: { ...marked.doctor, runs: [{ ...marked.doctor.runs[0], state: 'running' as const }] } };
+  assert.equal(doctorDue(inFlight, now, settings), false, 'a run in flight is never overlapped, watchdog or not');
+  assert.equal(doctorDue(marked, now, { ...settings, enabled: false }), false, 'the watchdog never starts a doctor that is off');
 });

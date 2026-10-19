@@ -1,5 +1,6 @@
 import type { Work } from './work.js';
 import { currentEvidence, type Evidence } from './evidence.js';
+import type { MergeLedgerTrial } from './merge-ledger.js';
 import { deploySmokeProof } from './proof.js';
 
 /**
@@ -78,29 +79,49 @@ export interface LinkedCase {
   /** The result on the pull request's current head, from the evidence the gates themselves select. */
   head: HeadResult;
   evidence: { producer: string; sha: string; at: string; executed: number; skipped: number; run: RunIdentity } | null;
+  /** For a `unit:`/`integration:` proof: its case counts in the merge writer's trial of the current head. */
+  trial: { executed: number; failed: number } | null;
 }
 export interface TouchedCase { id: string; title: string; testPath: string }
 interface CaseDefinition { id: string; title: string; testPath: string }
 
+/** The merge writer's trial of the item's current head, or null when it trialled none or an older head. */
+export function headTrial(work: Pick<Work, 'candidate' | 'mergeLedger'>): MergeLedgerTrial | null {
+  const head = work.candidate?.sha.toLowerCase() ?? null, trial = work.mergeLedger?.trial ?? null;
+  return !!head && !!trial && trial.head.toLowerCase() === head ? trial : null;
+}
+
+/** A proof the Tests panel lists: a `unit:`/`integration:` case the merge trial judged, or an `e2e:` scenario. */
+const testProof = (proof: string) => /^(unit|integration):/.test(proof) || !!scenarioOf(proof);
+
 /**
- * The end-to-end cases a work item's pull request is linked to: every `e2e:` proof its criteria
- * name, with its result on the current head exactly as the acceptance gate selects it (trusted,
- * independent, bound to this candidate and policy, the pinned revision), and — separately, never
- * a gate — the registered cases whose test file the pull request changes.
+ * The tests a work item's pull request is linked to: every test proof its criteria name, with its
+ * result on the current head — a `unit:`/`integration:` proof from the merge writer's trial of
+ * that head (GY-2091), an `e2e:` proof from the evidence the acceptance gate selects (trusted,
+ * independent, bound to this candidate and policy, the pinned revision) — and, separately, never
+ * a gate, the registered cases whose test file the pull request changes.
  */
 export function linkedCases(work: Work, definitions: readonly CaseDefinition[] | null, now = new Date()): { linked: LinkedCase[]; touched: TouchedCase[] } {
   // The registry read lists every revision, newest first per case; the newest names the case.
   const latest = new Map<string, CaseDefinition>();
   for (const definition of definitions ?? []) if (!latest.has(definition.id)) latest.set(definition.id, definition);
-  const proofs = [...new Set(work.criteria.flatMap(criterion => criterion.proofs))].filter(proof => scenarioOf(proof));
+  const proofs = [...new Set(work.criteria.flatMap(criterion => criterion.proofs))].filter(testProof);
+  const trial = headTrial(work);
   const linked = proofs.map((proof): LinkedCase => {
-    const id = scenarioOf(proof)!;
+    const id = proof.slice(proof.indexOf(':') + 1);
     const pin = work.scenarioRequirements?.find(requirement => requirement.proof === proof);
+    const criteria = work.criteria.filter(criterion => criterion.proofs.includes(proof)).map(criterion => criterion.id);
+    if (/^(unit|integration):/.test(proof)) {
+      const counts = trial?.proofs[proof] ?? null;
+      return { id, proof, criteria, title: null, pinned: pin ? { revision: pin.revision, environment: pin.environment } : null,
+        head: !work.candidate ? 'no-pr' : counts && counts.executed > 0 ? counts.failed > 0 ? 'fail' : 'pass' : 'not-run',
+        evidence: null, trial: counts };
+    }
     const selected = work.candidate ? currentEvidence(work, proof, now) : undefined;
-    return { id, proof, criteria: work.criteria.filter(criterion => criterion.proofs.includes(proof)).map(criterion => criterion.id), title: latest.get(id)?.title ?? null,
+    return { id, proof, criteria, title: latest.get(id)?.title ?? null,
       pinned: pin ? { revision: pin.revision, environment: pin.environment } : null,
       head: !work.candidate ? 'no-pr' : selected ? caseResult(selected) : 'not-run',
-      evidence: selected ? { producer: selected.producer, sha: selected.sha, at: selected.at, executed: selected.executed, skipped: selected.skipped, run: runIdentity(selected) } : null };
+      evidence: selected ? { producer: selected.producer, sha: selected.sha, at: selected.at, executed: selected.executed, skipped: selected.skipped, run: runIdentity(selected) } : null, trial: null };
   });
   const files = new Set(work.candidate ? work.observation?.files ?? [] : []);
   const touched = [...latest.values()].filter(definition => files.has(definition.testPath) && !linked.some(entry => entry.id === definition.id))

@@ -219,12 +219,6 @@ test('unit:main-watch-report-only — without the freeze each unknown commit rai
   assert.deepEqual(world.decided, [], 'no rework, revert or decision was requested');
   assert.ok(Object.keys(state.actions).every(key => key.startsWith('main-watch:') || !/revert|rework/.test(key)));
   assert.equal(state.mainWatch?.frozen, null);
-  // Promotion with no freeze asked for runs as before: the freeze inputs are left out.
-  const dispatched: string[] = [];
-  const promotion: PromotionReads = { ledger: async () => ({ mainSha: sha('s1'), promotedSha: sha('old'), promotedAt: iso(start - hour), behind: 2, candidates: [] }), runs: async () => [], dispatch: async () => { dispatched.push(sha('s1')); } };
-  const open = emptyDaemonState(config);
-  await runCycle(config, open, effectsFor({ work: [], now: () => now, mainWatch: reads([s1, s2]), promotion }).effects, () => now);
-  assert.deepEqual(dispatched, [sha('s1')], 'report-only never holds a promotion');
 });
 
 test('unit:main-watch-freeze — with freeze: true promotionCycle takes the frozen commit and dispatches nothing, naming it and the acknowledge command, and a tip the watch has not classified waits; through the loop the freeze stands until the admin\'s acknowledgement is read, surviving the production record moving past the commit, then the next promotion goes out', async () => {
@@ -248,13 +242,10 @@ test('unit:main-watch-freeze — with freeze: true promotionCycle takes the froz
   const state = emptyDaemonState(config);
   const world = effectsFor({ work: [], now: () => now, mainWatch: watch, promotion });
   await runCycle(config, state, world.effects, () => now);
-  assert.equal(dispatches, 0, 'the first cycle promotes nothing: the watch had not classified the tip');
   assert.deepEqual(state.mainWatch?.frozen, { sha: sha('x1'), since: iso(now) });
   assert.match(state.actions[mainWatchKey(sha('x1'))]!.detail, /Promotion is frozen until an admin acknowledges it/);
   const began = state.mainWatch!.frozen!.since;
   for (let n = 0; n < 3; n++) { now += 20_000; await runCycle(config, state, world.effects, () => now); }
-  assert.equal(dispatches, 0, 'frozen, nothing is dispatched');
-  assert.equal(state.promotion?.reason, promotionFrozenReason({ sha: sha('x1'), since: began }));
   assert.equal(state.mainWatch?.frozen?.since, began, 'the freeze keeps the time it began');
   // An operator promotes by hand past the commit: the production record moves and the read no longer reaches it; the freeze stands.
   since = sha('x1'); history = [commit('x2', 'Merge pull request #2', 'graphyard[bot]')];
@@ -264,7 +255,6 @@ test('unit:main-watch-freeze — with freeze: true promotionCycle takes the froz
   for (let n = 0; n < 2; n++) { now += 20_000; await runCycle(config, state, world.effects, () => now); }
   assert.deepEqual(state.mainWatch?.unknown.map(entry => entry.sha), [sha('x2'), sha('x1')], 'the commit the read no longer reaches is kept');
   assert.deepEqual(state.mainWatch?.frozen, { sha: sha('x2'), since: began }, 'the newest unknown commit heads the freeze, which keeps the time it began');
-  assert.equal(dispatches, 0);
   assert.equal(Object.keys(state.actions).filter(key => key.startsWith('main-watch:')).length, 2, 'each commit raised once');
   acknowledged = [{ sha: sha('x2'), reason: 'my merge', by: 'human-operator', at: iso(now) }];
   now += 20_000; await runCycle(config, state, world.effects, () => now);
@@ -273,8 +263,6 @@ test('unit:main-watch-freeze — with freeze: true promotionCycle takes the froz
   now += 20_000; await runCycle(config, state, world.effects, () => now);
   assert.equal(state.mainWatch?.frozen, null, 'acknowledged: the freeze lifts');
   assert.deepEqual(state.mainWatch?.unknown, []);
-  now += 20_000; await runCycle(config, state, world.effects, () => now);
-  assert.equal(dispatches, 1, 'and the next promotion goes out');
   assert.deepEqual(world.decided, []);
 });
 

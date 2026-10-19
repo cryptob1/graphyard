@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
-import { expandTypedCommand, roleOf, startedAtOnce } from './helpers/launch-shell.js';
+import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { dispatchSummary, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -230,12 +230,12 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.equal(tab.CLAUDE_CONFIG_DIR, homes.fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
     // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
     // GY-121: both come from the files in the worktree that the short typed line references.
-    assert.match(calls[1][3]!, / -- claude --permission-mode bypassPermissions --setting-sources user --settings \S+ --append-system-prompt-file "\$GY\.role" "\$\(cat "\$GY\.request"\)"$/, 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
+    assert.match(typedRuntime(calls[1][3]!), / -- claude --permission-mode bypassPermissions --setting-sources user --settings \S+ --append-system-prompt-file "\$GY\.role" "\$\(cat "\$GY\.request"\)"$/, 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
     const worker = expandTypedCommand(calls[1][3]!);
     assert.equal(worker.kind, 'claude'); assert.equal(worker.args[5], sessionHarnessFile(root, 'worker', 'worker-a'));
     assert.equal(roleOf(worker.args), launchAuthorization.replace(/\s+/g, ' '), 'the role file holds the launch authorization');
     assert.match(worker.args.at(-1)!, /^Implement GY-68: /, 'the request is the last argument');
-    assert.doesNotMatch(calls[1][3]! + worker.args.join(' '), /gpt-codex/);
+    assert.doesNotMatch(typedRuntime(calls[1][3]!) + worker.args.join(' '), /gpt-codex/);
     assert.equal(dispatched.account!.environment, 'claude-c'); assert.deepEqual(dispatched.account!.skipped.map(entry => entry.environment), ['codex', 'claude-a', 'claude-b']);
     let claimed = false;
     await assert.rejects(dispatchWork(root, ready(), config.workers[1], [], herdr([]), [ready()], async () => { claimed = true; return { epoch: 9, path: root, base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { probe }), /No healthy agent account for worker profile worker-spent/);
