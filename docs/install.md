@@ -3,7 +3,7 @@
 
 > install Graphyard for OWNER/REPO on PROVIDER following docs/install.md
 
-Ask only: **Which provider**; **Provider login**; **Approval of the printed plan**. Graphyard registers no GitHub App; the merge writer pushes with the install deploy key.
+Ask only: **Which provider**; **Provider login**; **Approval of the printed plan**.
 
 ## Hard rules
 
@@ -43,7 +43,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 
 ## Step 3: deploy key
 
-`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`; a host generates its own, below) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` unless already listed (title `graphyard-merge-writer-HOST`). It is the only credential Graphyard holds on GitHub: Graphyard has no GitHub API client, runs no `gh api`, mints no installation token and serves no webhook (`/api/github/webhook` is 404); what it asks of GitHub goes through `gh` subcommands (`repo deploy-key`, `workflow run`, `secret`, `pr`). Release-candidate installs leave `release/*` branches and `uat`/`production` environments pending, with commands. The merge writer trial-merges each submitted head and pushes the base with it alone over an SSH origin; the loop re-registers a missing key each setup run. A bundle rewrite drops `GITHUB_APP_*`, `GITHUB_WEBHOOK_SECRET` and `GRAPHYARD_REVERT_APPROVER_*`; an old App, its rulesets and webhook may be deleted. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
+`--apply` generates `INSTALL/deploy-key` (ed25519, `0600`; a host generates its own) when absent and registers it read-write on OWNER/REPO with `gh repo deploy-key add` unless listed (title `graphyard-merge-writer-HOST`). It is the only credential Graphyard holds on GitHub: it runs no `gh api`, mints no installation token and serves no webhook (`/api/github/webhook` is 404); what it asks of GitHub goes through `gh` subcommands (`repo deploy-key`, `workflow run`, `secret`, `pr`). Release-candidate installs leave `release/*` branches and `uat`/`production` environments pending, with commands. The merge writer trial-merges each submitted head and pushes the base with it alone over an SSH origin; the loop re-registers a missing key each setup run. A bundle rewrite drops `GITHUB_APP_*`, `GITHUB_WEBHOOK_SECRET` and `GRAPHYARD_REVERT_APPROVER_*`; an old App, its rulesets and webhook may be deleted. **Verify** `gh repo deploy-key list -R OWNER/REPO` lists it.
 
 ## Step 4: summary
 
@@ -65,7 +65,7 @@ Price: `--confirm-price`/`--max-monthly`; `--migrate` stops loop, fences `GRAPHY
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; checkout+`npm ci`/backup/recorded-roster redeploy/loop+executor restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (migrated: roll-forward). The redeploy builds the image from the checkout the upgrade checked out (`install --source-root DIR` names the build source explicitly; without it an install builds from the checkout the running CLI's own code was loaded from, which a held release pin may hold at another commit), so `/healthz?strict` reports the deployed commit. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
+`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs clean checkout+`DATABASE_URL`+`GRAPHYARD_URL`; records release; checkout+`npm ci`/backup/recorded-roster redeploy/loop+executor restart/rescan+apply/healthy `/healthz`; refuses older schemas; failures name step/rollback (migrated: roll-forward). The redeploy builds and stamps the image from the checked-out target (`install --source-root DIR`; default: the running CLI's own code root, which a held pin may hold at another commit), so `/healthz?strict` reports the deployed commit. `--apply` fixes `delegationLimits` drift (`Set GRAPHYARD_MAX_REVIEWERS=N`), undeclared `sessionKind`.
 
 ## Failure handling
 
@@ -75,7 +75,6 @@ Price: `--confirm-price`/`--max-monthly`; `--migrate` stops loop, fences `GRAPHY
 | `Railway workspace` `false` | `--workspace`
 | `did not become healthy` | `install … --logs`
 | `gh repo deploy-key` fails | `gh auth login --scopes repo` as a repository admin
-| `Unknown option '--no-github-app'` (or another App flag) | drop it: no App is registered
 | `Another install --apply` … `holds the lock` | let it finish, apply again
 | `Generating the merge writer's deploy key` (host) | install `openssh-client` there, rerun
 | `Cloning OWNER/REPO` (host) | `gh repo deploy-key list` shows the host's key, rerun
