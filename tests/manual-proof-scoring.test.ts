@@ -68,10 +68,10 @@ test('unit:manual-proof-not-title-counted — a judged manual pass proves its cr
   assert.equal(outcomeOf(judged, MANUAL), 'proven', 'the manual pass is proven, never counted from titles');
   assert.deepEqual(producerGroupDecisions(judged, [judged], now).filter(entry => entry.group === 'manual').map(entry => entry.state), ['proven']);
   assert.equal(proofOutcome(judged, binding, MANUAL), 'pass', 'the producer session settles the proof as passed');
-  // Nothing is asked for a correct candidate: GitHub merges it (GY-1235).
+  // Nothing is asked for a correct candidate: the merge writer trials and merges it (GY-2010).
   const account = actionAccount(judged, [judged], now);
   assert.equal(account.action, null, 'nothing is asked for a correct candidate');
-  assert.equal(account.wait?.on, 'github');
+  assert.equal(account.wait?.on, 'merge-writer');
 
   // The skip rule is not weakened with it: an attested pass with a skipped case proves nothing.
   assert.equal(outcomeOf(item([{ skipped: 1 }, evidence(UNIT, { executed: 3 })], {}), MANUAL), 'failed');

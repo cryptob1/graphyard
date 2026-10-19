@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFileSync } from 'node:child_process';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -12,7 +12,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import pg from 'pg';
 import { Store } from '../src/store.js';
 import { main } from '../src/server/main.js';
-import { GitHub } from '../src/github.js';
 import { invalidateFlowReports, pooledFlowDrilldown, projectFlow } from '../src/flow-analytics.js';
 import { daemonEffects, emptyDaemonState, runCycle, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -38,23 +37,21 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *     every 5 s, and the step moves (web/step-moves.ts `readStepRows`, every steps page) every
  *     minute — two of them on the Flow page (the report and its merge-time drill-downs every
  *     30 s, web/flow-analytics.tsx `mergeTime`) and one opening a drill-down every 10 s;
- *   - ten workers, each claiming an item, renewing its lease every 30 s and minting its push
- *     credential after the claim and each renewal (src/cli/workspace.ts `watch`), releasing it
- *     after a few renewals and claiming the next;
+ *   - ten workers, each claiming an item and renewing its lease every 30 s (src/cli/workspace.ts
+ *     `watch`), releasing it after a few renewals and claiming the next (since GY-2010 a worker
+ *     pushes nothing, so no push credential is minted);
  *   - the master loop cycling every 20 s (`runCycle` over the real routes, its default interval)
  *     and its dispatcher reading the coordination view every 10 s. The loop's writes are recorded,
  *     not applied: these workers have no Herdr panes for it to find, so it would otherwise end
  *     their attempts as dead sessions, which is the loop's decision and not the plane's load.
  *
- * GitHub answers from a fake with a fixed latency; the observation workers it would drive do not
- * run. No request may answer 5xx, the claim, renewal and push-credential p99 must stay under 2 s,
- * and no lease may lapse.
+ * No request may answer 5xx, the claim and renewal p99 must stay under 2 s, and no lease may lapse.
  */
 
 const ITEMS = 1_500, OPEN = 150, SETTLED = ITEMS - OPEN, EVENTS = 500_000;
 const DASHBOARDS = 3, WORKERS = 10, LOAD_MS = 10 * 60_000;
 const SNAPSHOT_POLL_MS = 5_000, STEP_MOVES_POLL_MS = 60_000, FLOW_POLL_MS = 30_000, DRILL_MS = 10_000;
-const HEARTBEAT_MS = 30_000, LOOP_MS = 20_000, DISPATCH_MS = 10_000, GITHUB_LATENCY_MS = 150;
+const HEARTBEAT_MS = 30_000, LOOP_MS = 20_000, DISPATCH_MS = 10_000;
 const P99_BUDGET_MS = 2_000;
 const SLICE = 'narrow-slice';
 const hour = 3_600_000, day = 24 * hour;
@@ -126,30 +123,8 @@ let database: EmbeddedPostgres; let databaseUrl: string;
 let instance: Awaited<ReturnType<typeof main>>; let url: string;
 let openItems: Work[] = [];
 const sliceItems: string[] = [];
-let mints = 0;
 const savedEnv: Record<string, string | undefined> = {};
 const scratch: string[] = [];
-
-/** GitHub as the push-credential mint and the status route read it, each answer after `GITHUB_LATENCY_MS`. */
-function fakeGitHub() {
-  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-  const github = new GitHub({ repository, base: 'main', appId: 1234, installationId: 5678, privateKey });
-  const permissions = { contents: 'write', pull_requests: 'write', workflows: 'write', issues: 'write', checks: 'write', metadata: 'read' };
-  const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
-  github.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    await sleep(GITHUB_LATENCY_MS);
-    const path = new URL(String(input)).pathname;
-    if (path === '/app/installations/5678/access_tokens') {
-      if (init?.body) mints++;
-      return json(201, { token: `ghs_${randomUUID().replaceAll('-', '')}`, expires_at: iso(Date.now() + hour), permissions });
-    }
-    if (path === '/app/installations/5678') return json(200, { id: 5678, account: { login: 'owner' }, permissions });
-    if (path === '/installation/repositories') return json(200, { total_count: 1, repositories: [{ id: 1, full_name: repository }] });
-    if (path === `/repos/${repository}/rules/branches/main`) return json(200, []);
-    return json(404, { message: 'Not Found' });
-  }) as typeof fetch;
-  return github;
-}
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1383;
@@ -189,8 +164,6 @@ before(async () => {
   instance = await main({ port: 0, host: '127.0.0.1' });
   url = `http://127.0.0.1:${(instance.http.address() as AddressInfo).port}`;
   for (let waited = 0; !instance.isReady(); waited += 200) { assert.ok(waited < 120_000, 'startup validation finished'); await sleep(200); }
-  // Workers mint through the control-plane App, which here answers from the fake.
-  instance.http.services.github = fakeGitHub();
 
   // 150 open items, created and released as an operator does; two of them, and the first
   // delivery, in a slice of their own for the drill-down proof.
@@ -346,7 +319,7 @@ async function dashboard(index: number, end: number, failures: string[]) {
 }
 
 /**
- * One worker: claim one of its items, mint its push credential, renew every 30 s and mint again,
+ * One worker: claim one of its items, renew every 30 s,
  * release after three to five renewals, and claim the next — until `end`, when it releases.
  */
 async function worker(index: number, end: number, samples: Sample[], renewals: { worker: string; gapMs: number }[], failures: string[]) {
@@ -365,7 +338,6 @@ async function worker(index: number, end: number, samples: Sample[], renewals: {
     if (claimed.status !== 200) { await sleep(5_000); continue; }
     const epoch = claimed.body.epoch as number;
     let renewed = performance.now();
-    await timed('push-credential', `work/${item.id}/push-credential`, { epoch });
     const renewalsHeld = 3 + Math.floor(Math.random() * 3);
     for (let held = 0; held < renewalsHeld && Date.now() < end; held++) {
       await sleep(Math.min(HEARTBEAT_MS, Math.max(0, end - Date.now())));
@@ -373,7 +345,6 @@ async function worker(index: number, end: number, samples: Sample[], renewals: {
       if (heartbeat.status !== 200) break;
       renewals.push({ worker: id, gapMs: performance.now() - renewed });
       renewed = performance.now();
-      await timed('push-credential', `work/${item.id}/push-credential`, { epoch });
     }
     await timed('release', `work/${item.id}/release`, { epoch });
   }
@@ -414,7 +385,7 @@ async function masterLoop(end: number, failures: string[]) {
   return { cycles, writes };
 }
 
-test('integration:plane-load-multi-user — for ten minutes, on 1,500 items and 500,000 events, three dashboards polling at their own intervals, ten workers claiming, renewing every 30 s and minting push credentials, and the master loop cycling: no request answers 5xx, claim, renewal and push-credential p99 stay under 2 s, and no lease lapses', async () => {
+test('integration:plane-load-multi-user — for ten minutes, on 1,500 items and 500,000 events, three dashboards polling at their own intervals, ten workers claiming and renewing every 30 s, and the master loop cycling: no request answers 5xx, claim and renewal p99 stay under 2 s, and no lease lapses', async () => {
   const store = instance.store;
   const counts = (await store.pool.query('SELECT (SELECT count(*) FROM work_items)::int AS items, (SELECT count(*) FROM events)::int AS events')).rows[0];
   assert.equal(counts.items, ITEMS);
@@ -426,7 +397,6 @@ test('integration:plane-load-multi-user — for ten minutes, on 1,500 items and 
   const startedAt = new Date(), end = Date.now() + LOAD_MS;
   const samples: Sample[] = [], renewals: { worker: string; gapMs: number }[] = [];
   const workerFailures: string[] = [], readerFailures: string[] = [], loopFailures: string[] = [];
-  const mintsBefore = mints;
   const [loop] = await Promise.all([
     masterLoop(end, loopFailures),
     ...Array.from({ length: DASHBOARDS }, (_, index) => dashboard(index, end, readerFailures)),
@@ -439,17 +409,15 @@ test('integration:plane-load-multi-user — for ten minutes, on 1,500 items and 
   assert.deepEqual(failed.map(answer => `${answer.method} ${answer.path} ${answer.status}`), [], `${failed.length} of ${answers.length} requests answered 5xx`);
   assert.ok(answers.length > 3 * LOAD_MS / 1000, `the plane answered ${answers.length} requests`);
   assert.deepEqual(readerFailures, [], 'every dashboard read answered');
-  assert.deepEqual(workerFailures, [], 'every claim, renewal, mint and release succeeded');
+  assert.deepEqual(workerFailures, [], 'every claim, renewal and release succeeded');
 
-  // Each worker kept claiming, renewing and minting throughout, and each p99 is under 2 s.
+  // Each worker kept claiming and renewing throughout, and each p99 is under 2 s.
   const of = (kind: string) => samples.filter(sample => sample.kind === kind).map(sample => sample.ms);
-  const claims = of('claim'), heartbeats = of('heartbeat'), credentials = of('push-credential');
+  const claims = of('claim'), heartbeats = of('heartbeat');
   assert.ok(claims.length >= 2 * WORKERS, `${claims.length} claims`);
   assert.ok(heartbeats.length >= WORKERS * (LOAD_MS / HEARTBEAT_MS) * 0.6, `${heartbeats.length} renewals`);
-  assert.equal(credentials.length, claims.length + heartbeats.length, 'a credential was minted after every claim and renewal');
-  assert.equal(mints - mintsBefore, credentials.length, 'each minted through the App');
   const figures = (values: number[]) => ({ n: values.length, p50: Math.round(percentile(values, 0.5)), p99: Math.round(percentile(values, 0.99)), max: Math.round(Math.max(...values)) });
-  const summary = { claim: figures(claims), heartbeat: figures(heartbeats), 'push-credential': figures(credentials) };
+  const summary = { claim: figures(claims), heartbeat: figures(heartbeats) };
   console.log(JSON.stringify({ latency: summary }));
   for (const [kind, measured] of Object.entries(summary)) assert.ok(measured.p99 < P99_BUDGET_MS, `${kind} p99 ${measured.p99} ms over ${measured.n} requests is not under ${P99_BUDGET_MS} ms: ${JSON.stringify(summary)}`);
 

@@ -756,11 +756,12 @@ export async function runBrowserSuite(env: NodeJS.ProcessEnv = process.env) {
 }
 
 /** GY-1481: the zero-touch onboarding scenario, a required suite of every candidate's UAT validation. */
-export const zeroTouchScenario = 'tests/zero-touch-onboarding.test.ts';
+export const zeroTouchScenario = 'tests/zero-touch-control-plane.test.ts';
 /**
  * The `zero-touch` suite: the scenario on this checkout of the candidate's SHA, which drives
- * `graphyard up --agent --goal FILE` against an in-process GitHub to a merged first planned item and
- * fails naming any step that needed a person but GitHub's one App approval. That step, or the run's
+ * `graphyard up --agent --goal FILE` against a bare origin and a real control plane to a first planned
+ * item the merge writer merges, and fails naming any step that needed a person (GY-2010: no GitHub
+ * App, so no approval either). That step, or the run's
  * exit, becomes the suite's detail (GRAPHYARD_SUITE_DETAIL), so the candidate's follow-up names it.
  */
 export function runZeroTouchSuite(env: NodeJS.ProcessEnv = process.env, run: typeof spawnSync = spawnSync) {
@@ -769,7 +770,7 @@ export function runZeroTouchSuite(env: NodeJS.ProcessEnv = process.env, run: typ
   process.stdout.write(output);
   const passed = child.status === 0;
   const failure = output.slice(output.indexOf('failing tests')).match(/^\s*((?:AssertionError|Error|TypeError)[^\n]*)/m)?.[1]?.trim();
-  const detail = passed ? `${zeroTouchScenario} passed: graphyard up reached a merged first planned item with no human step but GitHub's App approval`
+  const detail = passed ? `${zeroTouchScenario} passed: graphyard up reached a merged first planned item with no human step`
     : `${zeroTouchScenario} failed: ${failure ?? `the run exited ${child.status ?? child.signal}`}`.slice(0, 4000);
   if (env.GRAPHYARD_SUITE_DETAIL) writeFileSync(env.GRAPHYARD_SUITE_DETAIL, `${detail}\n`);
   if (!passed) process.exitCode = 1;

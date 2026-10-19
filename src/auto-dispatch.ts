@@ -1,4 +1,3 @@
-import { assertGhNotPaused, ghPausedUntil, GhPausedError, notePossibleGhRateLimit } from './gh-pause.js';
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, rename, writeFile } from 'node:fs/promises';
 import { basename, dirname, resolve } from 'node:path';
@@ -29,7 +28,7 @@ import { answeredByPendingSession, independentProducerProfiles, launchProducer, 
 import { currentEvidence } from './model/evidence.js';
 import { judgeHostMemory, memoryDeferral, readHostMemory, reclaimResources, type HostMemoryReading } from './master-resources.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
-import { classified, ghPausedWording, launchWaitKind, launchWaitWording } from './model/fault-classes.js';
+import { classified, launchWaitKind, launchWaitWording } from './model/fault-classes.js';
 import { planeWideFailure } from './model/blocker-class.js';
 import { planeUnavailableText } from './model/refusal.js';
 export { hostMemoryHold, loopMemoryAttention } from './master-resources.js';
@@ -398,7 +397,7 @@ export interface DispatchEffects {
   agents: () => HerdrAgent[] | null | Promise<HerdrAgent[] | null>;
   credentials: (profiles: ProducerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null }>>;
   /** `released` names the panes, with their names, of settled sessions the pass closed (GY-1072): those names are free for this tick's launches. */
-  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; threads?: string[]; released?: { pane: string; agentName: string }[] }>;
+  reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
   /**
    * The name half of the resource reclaim (GY-1196): closes finished panes on profile names on the
@@ -772,8 +771,6 @@ export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused:
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
   /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
   sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
-  /** Review threads this tick resolved on an approval's word, and the ones it named but could not resolve. */
-  threads?: string[];
   /** Items whose observation this tick woke because a reviewer had answered their request (GY-1429). */
   woken?: string[];
   /** Where the tick's time went: every step it ran and its slowest external calls (GY-377). */
@@ -845,8 +842,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const herdr = await timings.step('herdr', () => effects.agents());
   // GY-1490: the loop sleeping beside this tick is woken for what its next cycle acts on, within one tick of it appearing.
   try { effects.observeLoopSubjects?.(snapshot.work, herdr, clock); } catch { /* a wake that cannot be judged leaves the loop to its interval */ }
-  const { reviews, threads, released } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
-  if (threads?.length) tick.threads = threads;
+  const { reviews, released } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
   const { producers } = await timings.step('reconcile producers', () => effects.reconcileProducers(snapshot.work, herdr));
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
@@ -1122,12 +1118,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     if (!read) return false;
     const until = waitUntil(review);
     if (now() >= until) return false;
-    // While the gh login's reads are paused the bot-reviewer check cannot be made at all — the same
-    // as a read that fails — so the launch is not held for it: it goes ahead on this tick, and the
-    // launch record names the pause as why the wait was skipped, exactly as an exhausted bot names
-    // itself. An answer a read gathered before the pause does not hold the launch either.
-    const paused = ghPausedUntil(now());
-    if (paused) { skippedWaits.set(review.id, `awaited-reviewer wait skipped: ${ghPausedWording.paused} until ${new Date(paused).toISOString()}: ${ghPausedWording.limit}`); return false; }
     const seen = await read;
     if (!seen) return false;
     const exhausted = new Map((await botStates).filter(bot => bot.state === 'exhausted').map(bot => [bot.login.toLowerCase(), bot]));
@@ -1222,8 +1212,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
             wakeSettlement(item, answered.answered.at);
             wait('review', item, review, `reviewer session ${answered.agentName} already answered with ${answered.answered.state} (review ${answered.answered.reviewId}); ${launchWaitWording.settles}`, answered.answered.at);
           }
-          // A launch deferred by the gh rate-limit pause is a wait, never a failure: nothing is counted against the request, and it launches on the first tick after the pause.
-          else if (error instanceof GhPausedError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
           // An unknown reviewer profile is a configuration wait (GY-1850): the launch boundary spaces its own attempts and master status names the fix, so nothing is counted and the request resumes once the profiles change.
           else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
           else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
@@ -1433,7 +1421,6 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       if (tick.timings && tick.timings.totalMs > interval) log(`[graphyard-dispatch] tick took ${tick.timings.totalMs}ms against its ${interval}ms interval; ${describeTimings(tick.timings)}`);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}${launch.reason ? `; ${launch.reason}` : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
-      for (const event of tick.threads ?? []) log(`[graphyard-dispatch] ${event}`);
       for (const closure of tick.closed) log(`[graphyard-dispatch] closed ${closure.role} session ${closure.id} on ${closure.key}: ${closure.outcome}`);
       // A closure that cannot be written back is retried every tick, so it is logged when it
       // starts and when it changes rather than once per tick for as long as it lasts; `master
@@ -1471,8 +1458,6 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   // Its children and server calls are timed against the tick that made them (GY-377).
   const run = timedRun(deps.run ?? childRunner({ timeoutMs: 90_000 }));
   const current = typeof config === 'function' ? config : () => config;
-  const headReviewerReads = new Map<string, { at: number; logins: string[] }>(), headReviewerInFlight = new Map<string, Promise<string[]>>();
-  let botActivityRead: { key: string; at: number; activity: Promise<BotActivity[]> } | null = null;
   const log = deps.log ?? (line => console.error(line));
   // A repair is logged once per path: the same over-long string would otherwise be reported on
   // every tick that persists it, when one line naming the path is what a reader needs.
@@ -1529,60 +1514,6 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
       await writeProjectMemory(root, memory);
     },
     settlePostMerge: (record, outcome) => updateReviewLedger(root, ledger => { const entry = ledger.reviews.find(candidate => candidate.id === record.id); if (entry) entry.postMergeFollowUps = outcome; }),
-    // Who has reviewed the head: one read per head at most every 30 seconds, however often the
-    // dispatcher ticks, since it is asked on every tick while a launch waits on a bot reviewer.
-    // A read still in flight is shared rather than started again: a tick that gave up on it at its
-    // deadline does not leave one more hung `gh` behind on every later tick.
-    headReviewers: (_work, request) => {
-      const key = `${request.pr}:${request.sha}`, cached = headReviewerReads.get(key), at = (deps.now ?? Date.now)();
-      if (cached && at - cached.at < 30_000) return Promise.resolve(cached.logins);
-      const pending = headReviewerInFlight.get(key);
-      if (pending) return pending;
-      const read = (async () => {
-        assertGhNotPaused(at);
-        const output = String(await run('gh', ['api', '--paginate', `repos/${current().repository}/pulls/${request.pr}/reviews?per_page=100`, '--jq', '.[] | [.user.login, .commit_id] | @tsv']));
-        const logins = [...new Set(output.split('\n').map(line => line.split('\t')).filter(([login, sha]) => login && sha === request.sha).map(([login]) => login))];
-        headReviewerReads.set(key, { at, logins });
-        for (const [entry, value] of headReviewerReads) if (at - value.at > 3_600_000) headReviewerReads.delete(entry);
-        return logins;
-      })().catch(async error => { await notePossibleGhRateLimit(error, run, at); throw error; }).finally(() => headReviewerInFlight.delete(key));
-      headReviewerInFlight.set(key, read);
-      return read;
-    },
-    // The awaited bots' latest words (GY-349): the repository's newest issue comments, where a bot
-    // posts its usage-limit notice, and its reviews on any pull request since its latest notice, so
-    // a review on a head nobody is waiting on still ends the exhaustion. Those are read from the
-    // waiting pull requests and every pull request updated since that notice (a review updates
-    // it), at most `botReviewPullLimit` of the most recently updated. One read a minute at most,
-    // shared while in flight; only the awaited logins' entries are kept.
-    botActivity: (logins, requests, held = []) => {
-      const repository = current().repository, waiting = [...new Set(requests.map(request => request.pr))].sort((a, b) => a - b);
-      const at = (deps.now ?? Date.now)(), key = `${logins.join(',')}|${waiting.join(',')}|${held.map(bot => `${bot.login}:${bot.since}`).join(',')}`;
-      if (botActivityRead && botActivityRead.key === key && at - botActivityRead.at < 60_000) return botActivityRead.activity;
-      const wanted = new Set(logins.map(login => login.toLowerCase()));
-      const lines = (output: unknown) => String(output).split('\n').map(line => line.split('\t'));
-      const rows = (output: unknown) => lines(output).filter(([login, time]) => login && time && wanted.has(login.toLowerCase()));
-      const activity = (async () => {
-        assertGhNotPaused(at);
-        const comments = rows(await run('gh', ['api', `repos/${repository}/issues/comments?sort=created&direction=desc&per_page=100`, '--jq', '.[] | [.user.login, .created_at, ((.body // "") | .[0:300] | gsub("[\\t\\n\\r]"; " "))] | @tsv']))
-          .map(([login, time, body]): BotActivity => ({ login, kind: 'comment', at: time, body }));
-        // Each bot's latest notice, or the one the last judgment still holds when it aged out of the
-        // comment read; the earliest of them bounds which pull requests' reviews can end one.
-        const latest = [...wanted].map(login => Math.max(-Infinity,
-          ...comments.filter(entry => entry.login.toLowerCase() === login && botLimitNotice.test(entry.body ?? '')).map(entry => Date.parse(entry.at)),
-          ...held.filter(bot => bot.login.toLowerCase() === login && bot.state === 'exhausted' && bot.since).map(bot => Date.parse(bot.since!)))).filter(Number.isFinite);
-        const cutoff = latest.length ? Math.min(...latest) : null;
-        const updated = cutoff === null ? [] : lines(await run('gh', ['api', `repos/${repository}/pulls?state=all&sort=updated&direction=desc&per_page=${botReviewPullLimit}`, '--jq', '.[] | [.number, .updated_at] | @tsv']))
-          .filter(([pr, time]) => pr && Date.parse(time) >= cutoff).map(([pr]) => Number(pr)).filter(Number.isSafeInteger);
-        const prs = [...new Set([...waiting, ...updated])];
-        const reviews = (await Promise.all(prs.map(pr => run('gh', ['api', '--paginate', `repos/${repository}/pulls/${pr}/reviews?per_page=100`, '--jq', '.[] | [.user.login, .submitted_at] | @tsv']))))
-          .flatMap(output => rows(output).map(([login, time]): BotActivity => ({ login, kind: 'review', at: time })));
-        return [...comments, ...reviews];
-      })();
-      botActivityRead = { key, at, activity };
-      activity.catch(error => { if (botActivityRead?.activity === activity) botActivityRead = null; return notePossibleGhRateLimit(error, run, at); });
-      return activity;
-    },
     // The handle goes where every Graphyard reader already looks, so watching a reviewer or
     // producer session the loop launched never means reading this host's own ledger.
     recordSession: (work: Work, handle: SessionHandleInput) => mutate(`work/${work.id}/session`, handle, randomUUID()),

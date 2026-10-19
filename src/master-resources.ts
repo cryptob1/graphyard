@@ -36,7 +36,7 @@ import { runChild } from './child-runner.js';
 
 /** A duration as the registry and the tmp-inodes detail spell it: whole hours, else minutes. */
 const minutes = (ms: number) => ms >= 3_600_000 ? `${ms / 3_600_000} hour${ms === 3_600_000 ? '' : 's'}` : `${ms / 60_000} minutes`;
-export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'github-budget', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'] as const;
+export const resourceIds = ['review-ledger', 'producer-ledger', 'agent-names', 'session-slots', 'executor-liveness', 'loaded-revision', 'database-capacity', 'worktree-disk', 'tmp-inodes'] as const;
 export type ResourceId = typeof resourceIds[number];
 export type ResourceState = 'ok' | 'low' | 'exhausted' | 'unknown';
 
@@ -65,7 +65,7 @@ export interface ResourceReading {
 /** `advisory`: the bound is a default nobody configured, so reaching it warns but does not fail health. */
 export interface PlaneReading { used: number | null; bound: number | null; detail?: string | null; advisory?: boolean; tables?: { table: string; bytes: number }[] }
 /** What `/healthz` reports about the plane's own resources. */
-export interface PlaneResources { writable: boolean; writeError: string | null; database: PlaneReading | null; github: PlaneReading | null }
+export interface PlaneResources { writable: boolean; writeError: string | null; database: PlaneReading | null }
 
 /** Everything a reading is computed from; each field is null when it could not be read. */
 type NamedProfile = { name: string; agentName: string; concurrency?: number };
@@ -386,15 +386,6 @@ export const resourceRegistry: ResourceDefinition[] = [
     }),
   },
   {
-    id: 'github-budget', title: 'GitHub App request budget', unit: 'requests',
-    bound: 'the installation token\'s hourly core rate limit, as GitHub reports it on GET /rate_limit',
-    usage: '/healthz resources.github, read by the plane from GET /rate_limit (cached for a minute; that read costs nothing against the budget); while the client is paused after a rate-limit refusal its usage is unread (the pause is the remediation under way, counted once as an observation fault) until the pause ends, when the read resumes', owner: 'the control plane\'s GitHub client (src/github.ts) and its observation jobs',
-    reclaim: 'GitHub restores the budget at the reset time it reports; the client pauses every request until then once it is spent',
-    remedy: 'lower observation load (fewer open candidates, a longer job interval) until the reset; every merge waits on fresh observations',
-    warnBelow: tenthOf, symptoms: [/GitHub requests paused until/, /rate limited; requests paused/],
-    read: input => [{ id: '', used: input.plane?.github?.used ?? null, bound: input.plane?.github?.bound ?? null, detail: input.plane?.github?.detail ?? (input.plane ? 'the plane has no GitHub App configured' : 'the plane\'s /healthz could not be read'), reclaimable: 0 }],
-  },
-  {
     id: 'executor-liveness', title: 'Master loop liveness', unit: 'ms since last cycle',
     bound: 'two cycle intervals past the last completed cycle (plus any announced backoff): the loop\'s own stalled bound',
     usage: 'the daemon cursor (lastCycleAt, lock) the loop writes every cycle', owner: 'the master loop process (graphyard master run, supervised as graphyard-master)',
@@ -680,8 +671,8 @@ export function assertNameAvailable(role: 'reviewer' | 'producer', profile: { na
 export async function readPlaneResources(url: string, fetcher: typeof fetch = fetch): Promise<PlaneResources | null> {
   try {
     const response = await fetcher(`${url.replace(/\/$/, '')}/healthz`, { signal: AbortSignal.timeout(10_000) });
-    const body = await response.json() as { writable?: boolean; causes?: string[]; resources?: { database?: PlaneReading | null; github?: PlaneReading | null } };
-    return { writable: body.writable !== false, writeError: body.writable === false ? body.causes?.[0] ?? 'writes are refused' : null, database: body.resources?.database ?? null, github: body.resources?.github ?? null };
+    const body = await response.json() as { writable?: boolean; causes?: string[]; resources?: { database?: PlaneReading | null } };
+    return { writable: body.writable !== false, writeError: body.writable === false ? body.causes?.[0] ?? 'writes are refused' : null, database: body.resources?.database ?? null };
   } catch { return null; }
 }
 
@@ -1374,58 +1365,16 @@ export async function readDatabaseCapacity(pool: { query(sql: string): Promise<{
   } catch (error) { return { used: null, bound, advisory, detail: `pg_database_size could not be read: ${error instanceof Error ? error.message : String(error)}` }; }
 }
 
-const budgetCache = new WeakMap<object, { at: number; reading: PlaneReading }>();
-/** The installation's documented minimum hourly limit: the bound shown for a pause before any budget read succeeded. */
-const minimumInstallationLimit = 5000;
-/**
- * The App installation's core budget, read at most once a minute; `/rate_limit` costs nothing
- * against it. The client pauses every request once a rate limit refuses one (src/github.ts) until
- * the reset GitHub reported: that pause is the remediation under way, healing itself at the reset,
- * and the observation class already counts it once. No request is made while it lasts, so its
- * usage is unread rather than fabricated at the bound (GY-1278): the reading names the pause and
- * its reset, faults nothing and leaves the plane healthy. Once the pause ends the real read
- * resumes, and a budget still spent then reads exhausted as before.
- */
-export async function readGitHubBudget(github: object | null, now = Date.now()): Promise<PlaneReading | null> {
-  if (!github) return null;
-  const client = github as unknown as { blockedUntil?: number; apiRequest(path: string): Promise<any> };
-  const paused = () => {
-    const until = client.blockedUntil ?? 0;
-    if (until <= now) return null;
-    const bound = budgetCache.get(github)?.reading.bound ?? minimumInstallationLimit;
-    return { used: null, bound, detail: `the GitHub client paused every request until ${new Date(until).toISOString()} after a rate-limit refusal; the budget is read again once the pause ends at that reset` };
-  };
-  const pause = paused();
-  if (pause) return pause;
-  const cached = budgetCache.get(github);
-  if (cached && now - cached.at < 60_000) return cached.reading;
-  let reading: PlaneReading;
-  try {
-    // The client's own authenticated request path; /rate_limit is not a repository route.
-    const body = await client.apiRequest('/rate_limit');
-    const core = body?.resources?.core ?? body?.rate;
-    reading = { used: Number(core.limit) - Number(core.remaining), bound: Number(core.limit), detail: `${core.remaining} of ${core.limit} left; resets ${new Date(Number(core.reset) * 1000).toISOString()}` };
-  } catch (error) {
-    // The read itself may be the request a rate limit refused, which starts the pause.
-    const started = paused();
-    if (started) return started;
-    reading = { used: null, bound: null, detail: `GET /rate_limit failed: ${error instanceof Error ? error.message : String(error)}` };
-  }
-  budgetCache.set(github, { at: now, reading });
-  return reading;
-}
-
 /**
  * The plane's own health: unhealthy while writes are refused or a resource it owns is exhausted,
  * each cause named. A plane that cannot record results must not be dispatched into. A database
  * at an advisory (default) bound is reported by `master status`, not here.
  */
-export function planeVerdict(writeError: string | null, resources: { database: PlaneReading | null; github: PlaneReading | null }) {
+export function planeVerdict(writeError: string | null, resources: { database: PlaneReading | null }) {
   const causes: string[] = [];
   if (writeError) causes.push(`Writes are refused: ${writeError}`);
   const exhausted = (reading: PlaneReading | null) => !!reading && reading.used !== null && reading.bound !== null && reading.used >= reading.bound;
   if (exhausted(resources.database) && !resources.database!.advisory) causes.push(`Control-plane database is at its bound: ${resources.database!.used} of ${resources.database!.bound} bytes (${resources.database!.detail ?? 'pg_database_size'}); grow the volume and raise GRAPHYARD_DATABASE_MAX_BYTES`);
-  if (exhausted(resources.github)) causes.push(`GitHub App request budget is at its bound: ${resources.github!.used} of ${resources.github!.bound} requests (${resources.github!.detail ?? ''}); observations stop until the reset`);
   return { healthy: causes.length === 0, writable: !writeError, causes };
 }
 

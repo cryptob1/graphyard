@@ -108,7 +108,6 @@ test('integration:generated-files-setup — installers derive the assignment fro
 
 test('integration:generated-files-setup — init --scan --apply sets the derived line beside GRAPHYARD_PRINCIPALS', async () => {
   const dependencies = (tokens: { count: number }) => ({ url: 'https://graphyard.example',
-    githubSetup: async () => ({ appId: 1234, slug: 'graphyard-owner-repo' }),
     token: () => `secret-${++tokens.count}-`.padEnd(40, 't'), now: () => new Date('2030-01-01T00:00:00Z') });
   const declared = await fixtureRepo({ ...ordersApi, 'scripts/check-docs.mjs': manifestScript });
   try {
