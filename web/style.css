@@ -71,6 +71,7 @@ table.flow-data tbody th,.flow-table-scroll tbody th{font-weight:500;color:var(-
 .sidebar{position:relative;height:auto;align-self:stretch;padding:0}.sidebar-inner{position:sticky;top:0;height:100vh;display:flex;flex-direction:column;padding:31px 20px;overflow-y:auto}.main{margin-left:0}
 .primary-nav{display:flex;flex-direction:column;margin-top:48px}.docs-link{display:block;margin:8px 0 2px;font-size:11px}
 .top-bar{gap:16px}.top-bar-end{display:flex;align-items:center;gap:18px;margin-left:auto}.guide-link{color:var(--up-next);font-size:12px}
+.lead-time{margin:0;font-size:var(--type-small);color:var(--text-1)}
 .tabs{display:flex;gap:4px;flex-wrap:wrap}.tab{background:none;border:0;border-bottom:2px solid transparent;border-radius:0;color:var(--text-2);padding:10px 12px;font-weight:500;font-size:13px}.tab.active{color:var(--shipped);border-bottom-color:var(--up-next)}
 .page-heading h1{margin:0}
 .stage-strip{margin-bottom:26px}.stage-strip .graph{gap:6px;padding:0 0 6px}.stage-strip .node{padding:11px 10px}.stage-strip .node strong{margin:8px 0 0;font-size:24px}.stage-strip .node>span{text-transform:none;letter-spacing:0;font-size:11px}.stage-strip .node small{margin-top:6px;text-transform:none}
