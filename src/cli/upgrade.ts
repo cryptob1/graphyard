@@ -63,7 +63,7 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
     { id: 'npm-ci', title: 'Install the dependencies the target\'s lockfile names', command: `npm ci --prefix ${JSON.stringify(cliRoot)}` },
     { id: 'backup', title: `Back up the database at generation ${databaseSchema ?? 'unknown'} (DATABASE_URL) before the server migrates it`, command: `graphyard db backup ${inputs.backupFile}` },
     { id: 'redeploy', title: `Redeploy the server at ${image} through the install adapter`, command: redeploy },
-    { id: 'restart', title: 'Restart the master loop and this host\'s executors on the target code', command: `${cli(cliRoot, 'master', 'restart')} && ${cli(cliRoot, 'master', 'executors', 'restart', '--all')}` },
+    { id: 'restart', title: 'Restart the master loop on the target code', command: cli(cliRoot, 'master', 'restart') },
     { id: 'refresh', title: 'Refresh the generated workflows and the AGENTS.md managed block', command: `${cli(cliRoot, 'init', '--scan', ...url)} && ${cli(cliRoot, 'init', '--scan', '--apply', ...url)}` },
     { id: 'health', title: `Check that /healthz answers healthy at ${target.version}`, command: `GET ${inputs.url ?? 'GRAPHYARD_URL'}/healthz` },
   ];

@@ -30,7 +30,7 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   assert.match(plan.steps[0].command, /git -C "\/opt\/graphyard" checkout --detach b{40}/);
   assert.match(plan.steps[1].command, /^npm ci/);
   assert.match(plan.steps[3].command, /install --repo acme\/app --provider railway --base-branch main --server-name graphyard --review-policy github --workers 1 --image ghcr\.io\/cryptob1\/graphyard:2026\.10\.17 --plan && .*install --repo acme\/app .* --image ghcr\.io\/cryptob1\/graphyard:2026\.10\.17 --apply$/, 'the install preview runs before the apply');
-  assert.match(plan.steps[4].command, /master restart.*master executors restart --all/);
+  assert.match(plan.steps[4].command, /master restart$/);
   assert.match(plan.steps[5].command, /init --scan --url https:\/\/gy\.example && .*init --scan --apply --url https:\/\/gy\.example$/, 'the scan refreshes the stored proposal before it is applied');
   assert.equal(plan.rollback, 'graphyard upgrade --to 2026.10.16');
   assert.match(renderPlan(plan), /^upgrade 2026\.10\.16 -> 2026\.10\.17/);
