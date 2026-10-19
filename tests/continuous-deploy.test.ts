@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -50,16 +51,23 @@ class FakeGit {
   };
 }
 
-/** Fake ports: every call is recorded as `step:commit-prefix`; `fails` names the step that throws for a commit. */
-function fakePorts(options: { fails?: Record<string, string>; schemas?: { target: number | null; database: number | null } } = {}) {
+/** Fake ports: every call is recorded as `step:commit-prefix`; `fails` names the step that throws for a commit; `holds` keeps the deploy step itself in flight, before anything is recorded, until it is released. */
+function fakePorts(options: { fails?: Record<string, string>; schemas?: { target: number | null; database: number | null }; holds?: Promise<void> } = {}) {
   const calls: string[] = [], pins: string[] = [];
   const step = (name: 'deploy' | 'health' | 'e2e') => async (commit: string) => {
+    if (options.holds && name === 'deploy') await options.holds;
     calls.push(`${name}:${commit.slice(0, 12)}`);
     if (options.fails?.[commit] === name) throw new Error(`${name} refused ${commit.slice(0, 12)}`);
   };
   const ports: DeployPorts = { deploy: step('deploy'), health: step('health'), e2e: step('e2e'),
     schemas: async () => options.schemas ?? { target: 7, database: 7 }, pin: async commit => { pins.push(commit); } };
   return { ports, calls, pins };
+}
+
+/** GY-2344: the deploy started off the pass settles in the background; the cursor shows it when it does. */
+async function settled(until: () => boolean) {
+  for (let waited = 0; waited < 5_000 && !until(); waited += 5) await sleep(5);
+  assert.ok(until(), 'the off-cycle deploy never settled');
 }
 
 function deps(fake: FakeGit, clock: { now: number }, ports: DeployPorts, fleet: { self: number }): SelfUpgradeDeps {
@@ -75,54 +83,86 @@ function releasedState(promotionReading: (...args: any[]) => any): DaemonState {
   return state;
 }
 
-test('unit:continuous-deploy-advances-release — a base tip that differs from the recorded release is deployed between cycles, health and end to end pass, the release reading names it with its time, and the loop restarts onto it', async () => {
+test('unit:continuous-deploy-advances-release — a base tip that differs from the recorded release is deployed off the cycle while the loop keeps cycling, no second deploy starts meanwhile, the settled reading names it, and the pass after the settle restarts onto it', async t => {
   const { deployKey, deployLine, promotionReading } = await upgrade();
   const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
-  const { ports, calls, pins } = fakePorts(), fleet = { self: 0 };
+  let holdE2e = () => {};
+  const held = new Promise<void>(resolve => { holdE2e = resolve; });
+  t.after(async () => { holdE2e(); await sleep(20); });
+  const { ports, calls, pins } = fakePorts({ holds: held }), fleet = { self: 0 };
   const guard = coordinatorCheckoutGuard({
     state: () => state, read: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
     agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(clock.now) }), persist: async () => {}, now: () => clock.now, log: () => {}, applies: () => true,
   });
   assert.equal(await guard.start(released), null);
+  const upgradePass = () => guard.betweenCycles(current => performSelfUpgrade(master, current, deps(fake, clock, ports, fleet)));
 
-  const pass = await guard.betweenCycles(current => performSelfUpgrade(master, current, deps(fake, clock, ports, fleet)));
-  assert.equal(pass.refusal, null);
-  assert.equal(pass.upgraded?.outcome, 'upgraded');
-  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `e2e:${tip.slice(0, 12)}`], 'the tip runs the upgrade sequence, then health, then end to end');
-  assert.deepEqual(fake.checkouts, [tip], 'the checkout is aligned with the tip before it is deployed');
-  assert.equal(state.promotion?.promotedSha, tip, 'the release reading names the tip');
+  // The pass starts the deploy off the cycle and returns at once: the settled reading still names the old release, and nothing has run yet.
+  const first = await upgradePass();
+  assert.equal(first.refusal, null);
+  assert.equal(first.upgraded?.outcome, 'skipped');
+  assert.match(first.upgraded?.outcome === 'skipped' ? first.upgraded.reason : '', /deploying base tip/);
+  assert.equal(state.promotion?.promotedSha, released, 'the pass returned before the deploy settled');
+  assert.deepEqual(calls, [], 'the sequence runs off the pass');
+  // Cycles pass while the deploy is still in flight: no second deploy starts.
+  clock.now += 60_000;
+  const mid = await upgradePass();
+  assert.equal(mid.refusal, null, 'the deploy holding the checkout is never the guard\'s drift');
+  assert.equal(mid.upgraded?.outcome, 'skipped');
+  assert.match(mid.upgraded?.outcome === 'skipped' ? mid.upgraded.reason : '', /starts no second deploy/);
+  assert.deepEqual(calls, [], 'the running deploy is not started again');
+  assert.equal(state.promotion?.promotedSha, released, 'the settled reading stands until the deploy ends');
+  // The deploy ends: the settle records the release reading and its action.
+  holdE2e();
+  await settled(() => state.promotion?.promotedSha === tip);
+  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `e2e:${tip.slice(0, 12)}`], 'the tip ran the upgrade sequence, then health, then end to end');
   assert.equal(state.promotion?.mainSha, tip);
-  assert.equal(state.promotion?.promotedAt, iso(start), 'and the time it was deployed');
+  assert.equal(state.promotion?.promotedAt, iso(start + 60_000), 'stamped with the clock as it stood when the settle landed');
   assert.equal(state.promotion?.deployFailed, null);
+  assert.equal(deployLine(state.promotion?.deployFailed), null);
   assert.deepEqual(pins, [tip], 'the deployed tip is pinned known good');
-  assert.equal(fleet.self, 1, 'the loop requests its own restart onto it');
   assert.equal(state.actions[deployKey]?.state, 'done');
+  // The pass after the settle finds the checkout at the served tip and restarts onto it.
+  clock.now += 60_000;
+  const third = await upgradePass();
+  assert.equal(third.upgraded?.outcome, 'upgraded');
+  assert.equal(fleet.self, 1, 'the loop requests its own restart onto it');
   assert.equal(guard.expected(), tip, 'the loop\'s own deploy is never drift');
 
   // The process the supervisor starts runs the tip: the next pass deploys nothing.
   state.release = { commit: tip, dirty: false };
   calls.length = 0;
   clock.now += 60_000;
-  assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, ports, fleet))).outcome, 'up-to-date');
+  const settledPass = await upgradePass();
+  assert.equal(settledPass.upgraded?.outcome, 'up-to-date');
   assert.deepEqual(calls, [], 'the recorded release is not deployed again');
 
   // A tip touching no loaded code is deployed and restarted onto all the same.
   fake.originTip = next; fake.diff = 'docs/delivery.md\n';
   clock.now += 60_000;
-  assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, ports, fleet))).outcome, 'upgraded');
-  assert.equal(state.promotion?.promotedSha, next);
+  assert.equal((await upgradePass()).upgraded?.outcome, 'skipped', 'the docs-only tip\'s deploy starts off the cycle');
+  await settled(() => state.promotion?.promotedSha === next);
+  clock.now += 60_000;
+  assert.equal((await upgradePass()).upgraded?.outcome, 'upgraded');
   assert.equal(fleet.self, 2, 'a docs-only deploy still restarts the loop onto it');
 });
 
-test('unit:continuous-deploy-rolls-back — a tip failing health or end to end is rolled back to the recorded release through the same sequence, recorded with its step and reason in one status line, and attempted at most twice until the base tip moves', async () => {
+test('unit:continuous-deploy-rolls-back — a tip failing health or end to end is rolled back to the recorded release through the same sequence once the off-cycle deploy settles, recorded with its step and reason in one status line, and attempted at most twice until the base tip moves', async () => {
   const { deployKey, deployLine, promotionReading } = await upgrade();
   const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
   const fails: Record<string, string> = { [tip]: 'health' };
   const { ports, calls } = fakePorts({ fails }), fleet = { self: 0 };
-  const pass = () => performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
+  const guard = coordinatorCheckoutGuard({
+    state: () => state, read: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
+    agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(clock.now) }), persist: async () => {}, now: () => clock.now, log: () => {}, applies: () => true,
+  });
+  assert.equal(await guard.start(released), null);
+  const upgradePass = () => guard.betweenCycles(current => performSelfUpgrade(master, current, deps(fake, clock, ports, fleet)));
 
-  const first = await pass();
-  assert.equal(first.outcome, 'failed');
+  // The first attempt starts off the cycle and fails health; the settle rolls the release back.
+  const first = await upgradePass();
+  assert.equal(first.upgraded?.outcome, 'skipped');
+  await settled(() => !!state.promotion?.deployFailed);
   assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `deploy:${released.slice(0, 12)}`, `health:${released.slice(0, 12)}`],
     'the recorded release is redeployed through the same sequence');
   assert.equal(fake.head, released, 'the checkout is back on the recorded release');
@@ -130,15 +170,16 @@ test('unit:continuous-deploy-rolls-back — a tip failing health or end to end i
   assert.deepEqual({ ...state.promotion?.deployFailed, at: undefined }, { sha: tip, step: 'health', reason: `health refused ${tip.slice(0, 12)}`, rolledBackTo: released, kept: false, attempts: 1, at: undefined });
   const line = `deploy of ${tip.slice(0, 12)} failed at health: health refused ${tip.slice(0, 12)}; rolled back to ${released.slice(0, 12)}`;
   assert.equal(deployLine(state.promotion?.deployFailed), line, 'master status shows one line naming both commits');
-  assert.equal(first.outcome === 'failed' && first.reason, line);
   assert.equal(state.actions[deployKey]?.state, 'failed');
+  assert.equal(state.actions[deployKey]?.detail, line);
   assert.equal(fleet.self, 0, 'nothing restarts onto the failed tip');
 
   // The second attempt fails end to end this time; the third pass deploys nothing.
   fails[tip] = 'e2e';
   calls.length = 0;
   clock.now += 60_000;
-  assert.equal((await pass()).outcome, 'failed');
+  assert.equal((await upgradePass()).upgraded?.outcome, 'skipped', 'the second attempt starts off the cycle');
+  await settled(() => state.promotion?.deployFailed?.attempts === 2);
   assert.deepEqual(calls.slice(0, 3), [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `e2e:${tip.slice(0, 12)}`]);
   assert.deepEqual(calls.slice(3), [`deploy:${released.slice(0, 12)}`, `health:${released.slice(0, 12)}`], 'an end-to-end failure rolls back as well');
   assert.equal(state.promotion?.deployFailed?.step, 'e2e');
@@ -147,36 +188,43 @@ test('unit:continuous-deploy-rolls-back — a tip failing health or end to end i
     'the end-to-end failure reads as rolled back, never as not rolled back');
   calls.length = 0;
   clock.now += 60_000;
-  const third = await pass();
-  assert.equal(third.outcome, 'skipped');
-  assert.match(third.outcome === 'skipped' ? third.reason : '', /failed twice, so it waits for the base branch to move/);
+  const third = await upgradePass();
+  assert.equal(third.upgraded?.outcome, 'skipped');
+  assert.match(third.upgraded?.outcome === 'skipped' ? third.upgraded.reason : '', /failed twice, so it waits for the base branch to move/);
   assert.deepEqual(calls, [], 'a tip that failed twice is not attempted again');
   assert.equal(fake.head, released);
 
   // The base tip moves: the new tip is deployed.
   fake.originTip = next;
   clock.now += 60_000;
-  assert.equal((await pass()).outcome, 'upgraded');
+  assert.equal((await upgradePass()).upgraded?.outcome, 'skipped', 'the new tip\'s deploy starts off the cycle');
+  await settled(() => state.promotion?.promotedSha === next);
   assert.deepEqual(calls, [`deploy:${next.slice(0, 12)}`, `health:${next.slice(0, 12)}`, `e2e:${next.slice(0, 12)}`]);
+  clock.now += 60_000;
+  assert.equal((await upgradePass()).upgraded?.outcome, 'upgraded', 'the loop restarts onto the deployed tip');
   assert.equal(state.promotion?.promotedSha, next);
   assert.equal(deployLine(state.promotion?.deployFailed), null, 'a deploy that passes clears the failure line');
 });
 
-test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that migrated the database is kept, its line says why, and no served-release observation holds the restart', async () => {
+test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that migrated the database is kept once its off-cycle deploy settles, its line says why, and the pass after the settle restarts onto the kept release with no served-release observation holding it', async () => {
   const { deployKey, deployLine, promotionReading } = await upgrade();
   const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
   // Production is observed serving the recorded release, which does not contain the tip: the
   // release-lagged hold (GY-1585) would have held the restart onto it.
   state.deployment = { source: 'github', sha: released, at: iso(start), reason: null, deployed: ['GY-1'], pending: ['GY-2'] } as unknown as DaemonState['deployment'];
   const { ports, calls } = fakePorts({ fails: { [tip]: 'health' }, schemas: { target: 8, database: 7 } }), fleet = { self: 0 };
+  const upgradePass = () => performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
 
-  const outcome = await performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
+  assert.equal((await upgradePass()).outcome, 'skipped', 'the deploy starts off the cycle');
+  await settled(() => !!state.promotion?.deployFailed);
   assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`], 'the older release is never redeployed onto the migrated database');
   assert.equal(state.promotion?.deployFailed?.kept, true);
   assert.equal(state.promotion?.deployFailed?.rolledBackTo, null);
   assert.equal(state.promotion?.promotedSha, tip, 'the loop keeps the new release');
   assert.equal(deployLine(state.promotion?.deployFailed), `deploy of ${tip.slice(0, 12)} failed at health: health refused ${tip.slice(0, 12)}; the release was kept because the database was migrated`);
-  assert.equal(outcome.outcome, 'upgraded', 'the restart onto the kept release goes ahead');
+  clock.now += 60_000;
+  const outcome = await upgradePass();
+  assert.equal(outcome.outcome, 'upgraded', 'the restart onto the kept release goes ahead once it settles');
   assert.equal(fleet.self, 1);
   assert.notEqual(state.upgrade.stalled?.cause, 'release-lagged', 'no restart is held for a served-release observation');
   assert.equal(state.actions['upgrade:held'], undefined);

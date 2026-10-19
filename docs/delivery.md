@@ -5,6 +5,8 @@ Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `obs
 
 **The master loop deploys continuously** (compose/local installs): each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case as the install's `<installId>-e2e` identity, closing pass or fail, obsolete, naming the run, whatever its cases created; passing, the loop restarts onto it. A case whose outcome this install cannot serve pends; any other failing case (optional too) fails it, every case and step named. The redeploy stamps from the deployed commit's tree, so `/healthz` names it while the loop runs a held snapshot. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`); two tries until main moves, unless the tip migrated the database. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline. Main moves only by the merge writer's push; the report-only main watch explains every commit. Base failures file nothing.
 
+The deploy runs off the cycle: the loop cycles on, starts no second meanwhile and records the settled success or rollback.
+
 ### Release filing credential
 
 `GRAPHYARD_RELEASE_TOKEN` files holds/follow-ups; the loop's hourly `master setup --apply` keeps it. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.

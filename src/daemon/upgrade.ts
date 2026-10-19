@@ -18,7 +18,7 @@ import { checkoutState, loopCodeRoot, reconcileLoadedRelease, unquotePath, type 
 import { heldCliSnapshots, holdCliAt, sameCommit, shortCommit } from './held-cli.js';
 import { restartEndedBySupervisorStop } from './loop-supervisor.js';
 import { externalInstallPass, managesOwnCheckout } from './upgrade-ownership.js';
-import { deployTip, deployKey, promotionReading, type DeployPorts } from './continuous-deploy.js';
+import { deployTipOffCycle, deployInFlight, deployKey, promotionReading, type DeployPorts } from './continuous-deploy.js';
 
 /**
  * Code the loop loads: TypeScript modules and the package manifest. A diff that
@@ -489,10 +489,13 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   if (!checkout.commit) return unaligned(`the coordinator checkout at ${codeRoot} could not be read`);
   // GY-1982: continuous deploy, from a clean detached checkout. A tip the install does not run is
   // deployed first; only a deployed (or kept) tip goes on to the alignment and the restarts below.
-  let deployedFrom: string | null = null;
+  // GY-2344: the deploy runs off the cycle: the pass starts it (or reports the one in flight) and
+  // returns, so the loop keeps cycling — heartbeat, dispatch, the merge writer — while the deploy's
+  // end-to-end run proceeds; the result is recorded when it settles, and the pass after that
+  // restarts onto the deployed (or kept) tip.
   if (ports && typeof ports !== 'string' && checkout.dirty === false && checkout.detached === true) {
-    const deployed = await deployTip(state, to, checkout.commit, ports, { git, at, persist, note: (detail, failure) => note(detail, failure, deployKey) });
-    if (deployed === 'deployed') deployedFrom = checkout.commit; else if (deployed) return deployed;
+    const offCycle = deployTipOffCycle(state, to, checkout.commit, ports, { git, at, persist, note: (detail, failure) => note(detail, failure, deployKey) });
+    if (offCycle) return { outcome: 'skipped', reason: offCycle };
     Object.assign(checkout, await checkoutState(codeRoot, deps.run));
   }
   if (to === checkout.commit) {
@@ -507,12 +510,16 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     }
     // The tip itself is code the running loop never loaded: the restart onto it is owed, verified
     // or not (GY-1464), unless a completed pass already processed it without loaded code; a tip deployed now (GY-1982) always is.
-    if ((deployedFrom && !sameCommit(loaded, to)) || (loaded && loaded !== to && !processed(to))) {
+    // GY-2344: a tip the install serves — the off-cycle deploy recorded it — is loaded code whatever
+    // the diff says: the CLI tracks the release production runs (GY-2169), so the restart onto it
+    // re-executes the loop even when the diff touches none of what it loads.
+    const servedTip = deploying && sameCommit(state.promotion?.promotedSha, to);
+    if ((servedTip && !sameCommit(loaded, to)) || (loaded && loaded !== to && !processed(to))) {
       if (checkout.dirty === null) return unaligned(`the restart onto ${shortCommit(to)} is owed, but whether the coordinator checkout at ${shortCommit(checkout.commit)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
-      let code = !!deployedFrom;
+      let code = servedTip;
       if (!code) try { code = upgradeTouchesCode(listedPaths(await git('diff', '--name-only', `${loaded}..${to}`))); }
       catch (error) { return unaligned(`the diff from ${shortCommit(loaded)} to ${shortCommit(to)} could not be read: ${message(error)}`, 'checkout-failed'); }
-      state.upgrade.pending = { from: loaded ?? deployedFrom, to, code };
+      state.upgrade.pending = { from: loaded ?? to, to, code };
       await persist();
       return checkout.dirty === true ? finish(state.upgrade.pending, { checkout: checkout.commit, dirty: checkout.dirtyPaths }) : finish(state.upgrade.pending);
     }
@@ -526,6 +533,10 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
     return { outcome: 'up-to-date', commit: to };
   }
   if (checkout.dirty === true) {
+    // GY-2344: the checkout is the running deploy's build tree: nothing snapshots or restarts onto
+    // the tip from it until the deploy settles; the pass after that snapshots as usual.
+    const flight = deploying ? deployInFlight() : null;
+    if (flight) return { outcome: 'skipped', reason: `the coordinator checkout is dirty while a deploy of base tip ${shortCommit(flight.tip)} runs off the cycle; the snapshot waits until it settles` };
     // GY-1773: a dirty checkout is never touched — no stash, reset, checkout or clean — and holds
     // nothing back: every newer merged commit, docs only or not, is snapshotted under
     // .graphyard/held-cli and the restarts go onto the snapshot, the checkout left where it stands.
