@@ -11,6 +11,10 @@ import { installDirectory, readInstallRecord, type InstallRecord } from '../inst
 import { installIdFor } from '../install/types.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
+import type { ChildRun } from '../child-runner.js';
+import type { DeployPorts } from '../daemon/upgrade.js';
+import { pinKnownGood } from '../master/known-good.js';
+import { deployedE2e } from '../e2e/runner.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -24,6 +28,8 @@ export interface UpgradeInputs {
   cliChanges: string[];
   /** The Railway workspace the redeploy names, for an account that belongs to several (--workspace). */
   workspace: string | null;
+  /** The image the redeploy names instead of the target's published one: a compose install's own build (GY-1982). */
+  image?: string;
 }
 export interface UpgradePlan {
   from: Release; to: UpgradeTarget; databaseSchema: number | null; steps: UpgradeStep[]; rollback: string; cliChanges: string[];
@@ -47,7 +53,7 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
   const { cliRoot, target, databaseSchema } = inputs;
   if (target.schema !== null && databaseSchema !== null && target.schema < databaseSchema)
     throw new Error(`Refusing ${target.version}: its schema generation ${target.schema} is older than the database's (${databaseSchema}); that release would refuse this database. Upgrade to a release at generation ${databaseSchema} or newer`);
-  const image = `${imageRepository}:${target.version}`;
+  const image = inputs.image ?? `${imageRepository}:${target.version}`;
   // The install preview runs first, so the redeploy prints what it changes before it applies it.
   const install = inputs.install && redeployArguments(inputs.install, image, inputs.workspace);
   const redeploy = install ? `${cli(cliRoot, 'install', ...install.slice(0, -1), '--plan')} && ${cli(cliRoot, 'install', ...install)}` : `no install record for this repository: redeploy ${image} by hand`;
@@ -159,6 +165,48 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
   const body = await response.json() as { ok?: unknown; healthy?: unknown; version?: unknown; causes?: unknown };
   if (body.ok !== true || body.healthy !== true) throw new Error(`/healthz reports the server unhealthy${Array.isArray(body.causes) && body.causes.length ? `: ${body.causes.join('; ')}` : ''}`);
   if (body.version !== version) throw new Error(`/healthz reports ${String(body.version)}, not ${version}`);
+}
+
+/**
+ * GY-1982: the ports the loop's continuous deploy runs a commit through on this install, the checkout
+ * already moved onto it: the upgrade sequence's npm ci, backup (with DATABASE_URL) and redeploy as
+ * child processes, the health step until it passes or three minutes pass, and every end-to-end case;
+ * or the one line naming why an install on neither compose nor local has none. `keepAlive` feeds the
+ * loop's watchdog while a step runs.
+ */
+export async function deployPorts(input: { cliRoot: string; repoRoot: string; repository: string; url: string; token: () => Promise<string>; run: ChildRun; keepAlive?: () => Promise<void> }): Promise<DeployPorts | string> {
+  const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
+  const install = await readInstallRecord(directory).catch(() => null);
+  if (install?.provider !== 'compose' && install?.provider !== 'local') return `continuous deploy needs a compose or local install; ${install ? `this one runs on ${install.provider}` : 'no install record names this repository'}, so releases reach it only through graphyard upgrade`;
+  const run = (command: string, args: string[], cwd: string) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000 }));
+  const beating = async <T>(work: () => Promise<T>) => {
+    const timer = input.keepAlive ? setInterval(() => void input.keepAlive!().catch(() => {}), 30_000) : null;
+    try { return await work(); } finally { if (timer) clearInterval(timer); }
+  };
+  const inputsFor = (commit: string): UpgradeInputs => {
+    const current = checkoutRelease(cliRoot);
+    return { cliRoot, repoRoot, current, target: { version: current.version, revision: commit, schema: null }, databaseSchema: null, install, url, workspace: null, cliChanges: [],
+      image: install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
+  };
+  return {
+    deploy: commit => beating(async () => {
+      const inputs = inputsFor(commit), effects = liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json'));
+      for (const step of upgradePlan(inputs).steps) {
+        if (step.id === 'backup' && process.env.DATABASE_URL) await effects.run(step);
+        else if (step.id === 'npm-ci' || step.id === 'redeploy') await run('sh', ['-c', step.command], step.id === 'npm-ci' ? cliRoot : repoRoot);
+      }
+    }),
+    health: () => beating(async () => {
+      const version = checkoutRelease(cliRoot).version;
+      for (let attempt = 1; ; attempt++) {
+        try { return await healthVerdict(await fetch(`${url}/healthz?strict`, { signal: AbortSignal.timeout(10_000) }), version); }
+        catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
+      }
+    }),
+    e2e: () => beating(async () => { await deployedE2e(cliRoot, url, await input.token()); }),
+    schemas: async commit => ({ target: schemaAt(await run('git', ['show', `${commit}:src/release.ts`], cliRoot).catch(() => '')), database: await databaseSchemaOf(url) }),
+    pin: commit => pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run),
+  };
 }
 
 export const renderPlan = (plan: UpgradePlan) => [`upgrade ${plan.from.version} -> ${plan.to.version} (schema ${plan.to.schema ?? 'unknown'}; database ${plan.databaseSchema ?? 'unknown'})`,

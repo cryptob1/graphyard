@@ -199,6 +199,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // never boots from an entry the checkout holds dirty.
     alignExecutorUnits: script => alignExecutorUnitScript(root, script, { codeRoot: loopCodeRoot(current().cliPath, root) }),
     persist: persistLoop,
+    // GY-1982: continuous deploy, through the install's own adapter; imported when first used, as the CLI's upgrade module loads the installer.
+    deploy: async () => (await import('../cli/upgrade.js')).deployPorts({ cliRoot: loopCodeRoot(current().cliPath, root), repoRoot: root, repository: current().repository, url: current().url,
+      token: () => readCredentialFile(current().credentialFile), run, keepAlive }),
   });
   return Object.defineProperties({
     agents: () => listHerdrAgents(run).catch(() => []),
@@ -381,6 +384,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     ...throughputEffects(root, current, run, asCoordinator, asOperatorAgent), ...readingEffects(current, mutate, asCoordinator, { root, run }), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
+    readWork: async work => await asCoordinator(`work/${encodeURIComponent(work.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
