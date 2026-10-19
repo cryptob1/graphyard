@@ -1,6 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Engine } from '../engine.js';
-import type { GitHub } from '../github.js';
 import type { Validation } from '../validation.js';
 import type { Delivery } from '../delivery.js';
 import type { OperatorAgents } from '../operator-agent.js';
@@ -19,7 +18,7 @@ import { candidateRoutes } from './routes/candidates.js';
 
 /** Everything the assembled control plane owns, handed to every route. */
 export interface Services {
-  engine: Engine; github: GitHub | null; repository: string;
+  engine: Engine; repository: string;
   principals: { actor: Principal; hash: Buffer }[];
   limits: ReturnType<typeof delegationLimits>;
   /** The limits in force, the deployed variables, and every way they fail to cover the roster. */

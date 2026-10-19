@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { computeInterventionReport, foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
 import { interventionPolicyDefaults } from '../src/model/interventions.js';
-import { failedCheckRework, situatedInput } from '../src/daemon/decisions.js';
+import { situatedInput } from '../src/daemon/decisions.js';
 import { humanNeeded } from '../src/model/concerns.js';
 import type { NextAction } from '../src/model/action-kinds.js';
 
@@ -23,11 +23,13 @@ const item = (n: number, stage: Work['stage'] = 'build'): Work => ({ id: `000000
   gates: [{ name: 'test', passed: false, reasons: [], ciAppIds: [15368] }],
   observation: { at: at(0), candidate: { sha: H, baseSha: B, pr: n }, merged: false, prState: 'open', checks: [{ name: 'test', result: 'failure', appId: 15368, id: 5 }, { name: 'typecheck', result: 'success', appId: 15368 }] } } as unknown as Work);
 
-/** The input the loop sends for the rework a failed required check calls for: the production binding. */
+/**
+ * The input the loop sent for the rework a failed required check called for, with the binding its
+ * pull-request-era round recorded (`<sha>:ci:<checks>`). The loop requests no such round since
+ * GY-2010; ledger rows that carry one are history, and still fold as the loop's own round.
+ */
 function loopInput(work: Work) {
-  const ci = failedCheckRework(work);
-  assert.ok(ci, 'the failed required check calls for the loop\'s rework');
-  return situatedInput({ action: 'rework', binding: ci.binding, input: { previousWorkerStopped: true } as any });
+  return situatedInput({ action: 'rework', binding: `${work.candidate!.sha}:ci:test`, input: { previousWorkerStopped: true } as any });
 }
 let seq = 0;
 /** A decision requested at the test stage and, unless `open`, the rework that applied it. */
@@ -70,6 +72,6 @@ test('unit:intervention-ci-rework-owed — the owed line for a failed required c
   const action = (gate: string): NextAction => ({ kind: 'request-rework', work: 'w', key: 'GY-9', gate, refusal: null, reason: 'GY-9 needs a new head', inputs: { kind: 'request-rework' } as any, llmRole: 'approve-decision', binding: 'b' });
   const failed = humanNeeded(action('test'))!, review = humanNeeded(action('review'))!;
   assert.equal(failed.decision, review.decision, 'the owed decision the rework guard reads is unchanged');
-  assert.match(failed.resolve, /^the loop requests this rework for the failed required check itself and supervises its approver; only once it is still owed past 30 minutes: graphyard master decide GY-9 rework REASON/);
+  assert.match(failed.resolve, /^the loop requests this rework for the failed trial itself and supervises its approver; only once it is still owed past 30 minutes: graphyard master decide GY-9 rework REASON/);
   assert.match(review.resolve, /^graphyard master decide GY-9 rework REASON, then graphyard master approver GY-9 DECISION$/);
 });

@@ -16,7 +16,7 @@ Main→candidate→uat→production; `.railway/railway.ts` deploys `release/uat`
 - Failures file [holds](validation.md#release-holds), else `release follow-up ID`.
 - `release soak ID --sha SHA --result success|failure|cancelled [--run URL] [--report NAME]` (`release-candidate-soak.yml`) records `rc-soak/ID`.
 
-**The master loop deploys continuously** (compose/local installs): between cycles each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case; passing, `promotion` names it and the loop restarts onto it. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`), unless the tip migrated the database; two tries until main moves; `graphyard master config promoteEveryMinutes` no longer applies. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases.
+**The master loop deploys continuously** (compose/local installs): between cycles each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case — the cases as the install's own `<installId>-e2e` identity, an admin the installer issues with the roster, since a case's first step creates an item the loop's coordinator may not; passing, `promotion` names it and the loop restarts onto it. Failing, the recorded release is redeployed, every redeploy building the image with the deployed commit's stamp (`unreleased SHA` or its tag) so `/healthz` names it (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`), unless the tip migrated the database; two tries until main moves; `graphyard master config promoteEveryMinutes` no longer applies. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. `GRAPHYARD_UAT_STATIC` [merge-writer](delivery-redesign.md#merge-writer) trials run required/uat cases uncredentialed: failing, secret-declaring or unrunnable fail; timeouts re-queue. `release status` lists; `release GY-N EPOCH` leases.
 
 ### Release filing credential
 
@@ -32,9 +32,9 @@ Required: `typecheck`, `test`; per candidate `releaseCandidateTests`/container/c
 
 Exact-head gates merge; [candidates](#release-candidates) deploy. Only Graphyard writes main ([redesign](delivery-redesign.md)).
 
-### Main guard
+### Main
 
-Every 30s the guard reverts merges failing parent-passed checks; the [revert approver App](deployment.md#variables) approves only green exact inverses; three refusals abandon. Reverts failing the merge's named tests close `base-failure`; later merges failing only those are `coveredBy` until main passes. Failing trial files rerun (merge, base): a pass on the rerun lands, filing nothing; base failures file P0.
+No main guard runs (GY-2010): main moves only by the merge writer's push of a trialled merge commit, and the report-only main watch explains every commit. Failing trial files rerun (merge, base): a pass on the rerun lands, filing nothing; base failures file P0.
 
 ## Managed repositories
 

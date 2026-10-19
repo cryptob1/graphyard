@@ -12,6 +12,7 @@ import { server } from '../src/server.js';
 import { deliveryOutcome, deliveryLabel, shortShas } from '../src/model/format.js';
 import type { Principal, Work, Observation } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 /**
  * GY-1861: a producer records a deployment observation by the commit production serves, and
@@ -66,7 +67,8 @@ async function delivered(mergeSha: string) {
   w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   w = await engine.observe(w.id, (await reload(w)).revision, observed());
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  w = await engine.observe(w.id, (await reload(w)).revision, { ...observed(), merged: true, mergedAt, mergeSha });
+  // GY-2010: the merge writer's ledger delivers it, as production does; no GitHub merge is observed.
+  w = await deliverThroughLedger(engine, w.id, mergeSha, mergedAt);
   assert.equal(w.stage, 'done'); assert.equal(w.delivery?.mergeSha, mergeSha);
   return w;
 }

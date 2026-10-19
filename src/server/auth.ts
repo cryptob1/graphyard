@@ -5,7 +5,6 @@ import { ProofGrants } from '../proof-grants.js';
 import { proofProducer, withRecordedProofs } from '../delegation.js';
 import type { Store } from '../store.js';
 import type { Engine } from '../engine.js';
-import type { GitHub } from '../github.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { OperatorAgents } from '../operator-agent.js';
@@ -218,21 +217,16 @@ export interface ArtifactOptions { backend: ArtifactBackend | null; capacityByte
 export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null; responder?: Responder | null }
 
 /** Wire the engine, its integrations and the principals into the shared services. */
-export function assembleServices(engine: Engine, credentials: Credential[], github: GitHub | null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}): Services {
+export function assembleServices(engine: Engine, credentials: Credential[], artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}): Services {
   const env = options.env ?? process.env;
   const delegationLimits = assembleDelegationLimits(credentials, env, options.knownPrincipals);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
   // The engine is constructed with the repository this control plane coordinates; GITHUB_REPOSITORY is
   // only a process default (the CI checkout) and never overrides an explicit engine binding.
-  const repository = engine.repository || github?.config.repository || process.env.GITHUB_REPOSITORY || '';
-  demand(!engine.repository || !github || engine.repository.toLowerCase() === github.config.repository.toLowerCase(),
-    'Engine and GitHub repositories must match');
-  // Mutations authorize against the same canonical binding as authentication; some embedders pass it only via GitHub.
+  const repository = engine.repository || process.env.GITHUB_REPOSITORY || '';
+  // Mutations authorize against the same canonical binding as authentication; embedders may leave it to the process default.
   engine.repository = repository;
-  // Reviewer identities come from deployment configuration alongside the control-plane App,
-  // so a single parsed registry authorizes both policy validation and provider observation.
-  if (github) { engine.reviewerApps = github.config.reviewerApps ?? []; engine.controlPlaneAppId = github.config.appId; }
-  demand(!engine.reviewerApps.some(app => app.appId === engine.controlPlaneAppId),
+  demand(!(engine.reviewerApps ?? []).some(app => app.appId === engine.controlPlaneAppId),
     'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
@@ -246,5 +240,5 @@ export function assembleServices(engine: Engine, credentials: Credential[], gith
   engine.principals = configured;
   let services: Services;
   const proofGrants = new SlotCountedProofGrants(engine.store, configured, () => services.limits.maxReviewers, () => refreshDelegationLimits(services, credentials, env, options.knownPrincipals));
-  return services = { signinClaim: signinClaimFromEnv(env, credentials), engine, github, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  return services = { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
 }

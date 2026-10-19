@@ -38,10 +38,10 @@ const freePort = () => new Promise<number>((done, fail) => {
   server.listen(0, '127.0.0.1', () => { const { port } = server.address() as { port: number }; server.close(() => done(port)); });
 });
 
-test('unit:tests-leave-no-temp-files — landing-merge-result and github tests leave no new entry in os.tmpdir()', async () => {
+test('unit:tests-leave-no-temp-files — test files that make scratch directories (the setup guide\'s, which writes a 0600 master credential under one) leave no new entry in os.tmpdir(); the landing-merge-result and github files that leaked went with the GitHub client (GY-2010)', async () => {
   const tmp = await temporaryDirectory('leak-snapshot');
   const before = await snapshot(tmp);
-  const run = await runTestFiles(['tests/landing-merge-result.test.ts', 'tests/github.test.ts'], { TMPDIR: tmp });
+  const run = await runTestFiles(['tests/setup-guide-no-operator-token.test.ts', 'tests/merger-control-plane-setup.test.ts'], { TMPDIR: tmp });
   assert.equal(run.code, 0, `${run.stdout.slice(-2_000)}\n${run.stderr.slice(-2_000)}`);
   assert.match(run.stdout, /^ℹ pass [1-9]\d*$/m, 'the tests ran');
   assert.match(run.stdout, /^ℹ skipped 0$/m);

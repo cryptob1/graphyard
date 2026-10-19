@@ -22,6 +22,7 @@ import { controlPlaneHandlers, judgmentInExecutorLoop } from '../src/executor.js
 import { runCycle, emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // @ts-expect-error Dependency-free worker entry point.
 import { pullOnce, transportRetries } from '../scripts/graphyard-pull.mjs';
 import { agentRequestAttention, agentRequestReport, actionReport, sessionReport } from '../src/cli/master-status.js';
@@ -235,13 +236,13 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(answeredAction.llmRole, 'approve-decision', 'a new head is a judgment owed, not a step an executor runs');
   assert.match((answeredAction.inputs as any).detail, /codex requested changes on [0-9a-f]{12}; the next head is reviewed afresh/);
 
-  // Approved and green: GitHub merges it on its branch protection (GY-1235), so nothing is named —
-  // the item waits on GitHub, and the merged observation records the delivery.
+  // Approved: the merge writer trials and merges it (GY-2010), so nothing is named — the item
+  // waits on the writer, and its reconciled record delivers it.
   item = await engine.observe(item.id, item.revision, observation(item, { baseTipContained: true, baseTip: base }));
   assert.equal(item.nextAction, null, 'no executor step merges');
   const merging = actionAccount(item, [item], new Date());
-  assert.equal(merging.wait?.kind, 'session'); assert.equal(merging.wait?.on, 'github');
-  assert.match(merging.wait!.detail, new RegExp(`passed every gate on ${head.slice(0, 12)}; GitHub merges it`));
+  assert.equal(merging.wait?.kind, 'session'); assert.equal(merging.wait?.on, 'merge-writer');
+  assert.match(merging.wait!.detail, new RegExp(`queued for the merge writer, which trials and pushes it: merge writer has not trialled ${head.slice(0, 12)}`));
 
   // A live scope request outranks the gates: the worker holding the item is idle until it is answered.
   const blocked = await submitted();
@@ -288,10 +289,10 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(refusalAction(all[0], 'build', 'Pull request has not been independently observed'), 'resync');
   assert.equal(refusalAction(all[0], 'review', 'Independent approval of the current commit is required'), 'request-review');
   assert.equal(refusalAction(all[0], 'nowhere', 'A refusal nobody has written a rule for yet'), 'escalate', 'an unmapped refusal escalates rather than vanishing');
-  // A required check that reported a failure needs a new head; one still to answer needs a re-read.
+  // The merge writer's trial and push are its own merge step (GY-2010), whatever GitHub check a pull-request-era observation carries.
   const failing = { ...all[0], observation: { ...observation(item), checks: [{ name: 'test', result: 'failure', appId: 15368 }] } } as Work;
-  assert.equal(refusalAction(failing, 'test', 'Required CI check test has not passed on the current candidate'), 'request-rework');
-  assert.equal(refusalAction({ ...failing, observation: { ...failing.observation!, checks: [] } } as Work, 'test', 'Required CI check test has not passed on the current candidate'), 'resync');
+  assert.equal(refusalAction(failing, 'test', `merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}`), 'merge');
+  assert.equal(refusalAction(failing, 'merge', `merge writer has not pushed ${head.slice(0, 12)}`), 'merge');
 });
 
 test('integration:typed-next-action — an unsettled containment fence escalates instead of naming a reclaim nothing can complete, and the reclaim handler refuses to call a fenced item free', async () => {
@@ -841,13 +842,14 @@ test('integration:no-llm-in-critical-path — a full ready-to-delivered cycle ru
   assert.match(judgmentInExecutorLoop({ 'request-rework': async () => 'reworked' })!, /^request-rework is a judgment made in the step itself/);
 
   await drain([effects], log, mine);
-  // The fleet carries the item to a candidate whose every gate passed; GitHub merges it on its
-  // branch protection (GY-1235), so no executor step merges and the merged observation delivers.
+  // The fleet carries the item to a candidate whose every gate but the merge writer's passed; the
+  // writer trials and pushes it (GY-2010), so no executor step merges and its reconciled record delivers.
   const passing = await reload(item);
-  assert.equal(passing.stage, 'merge'); assert.ok(passing.gates.every(gate => gate.passed), passing.gates.flatMap(gate => gate.reasons).join('; '));
-  assert.equal(passing.nextAction, null, 'nothing is left for an executor once every gate passed');
+  assert.deepEqual(passing.gates.filter(gate => !gate.passed).map(gate => gate.name), ['test', 'merge'], passing.gates.flatMap(gate => gate.reasons).join('; '));
+  assert.ok(passing.gates.filter(gate => !gate.passed).every(gate => gate.reasons.every(reason => reason.startsWith('merge writer has not'))), 'only the merge writer stands');
+  assert.equal(passing.nextAction, null, 'nothing is left for an executor once every other gate passed');
   const mergedAt = new Date(Math.ceil((Date.now() + 1) / 1000) * 1000).toISOString().replace(/\.\d+Z$/, 'Z');
-  const delivered = await engine.observe(passing.id, passing.revision, { ...observation(passing), merged: true, mergeSha, mergedAt });
+  const delivered = await deliverThroughLedger(engine, passing.id, mergeSha, mergedAt);
   assert.equal(delivered.stage, 'done', delivered.violations.join('; '));
   assert.ok(delivered.delivery?.mergeSha);
   assert.ok(!log.executed.some(entry => entry.kind === 'escalate'), 'no escalation was needed to deliver');

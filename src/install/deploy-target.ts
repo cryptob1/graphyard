@@ -1,5 +1,4 @@
 import { mkdir } from 'node:fs/promises';
-import { ghJson, headSha, type GitHubCli } from './github.js';
 import type { Transport } from './transport.js';
 import type { PlanAction, PreflightItem } from './types.js';
 import { type DeliveryPolicy, type DeploymentAdapterName } from '../model/delivery-policy.js';
@@ -13,8 +12,8 @@ import { type DeliveryPolicy, type DeploymentAdapterName } from '../model/delive
 // nothing. A resource that costs money or opens an account is a human decision: its plan action
 // carries `human` naming the cost, and `--apply` creates it only when the operator also passed
 // --create-environments; otherwise the exact command is left in the next steps. Free wiring —
-// the release branches and the GitHub environments the workflows deploy through — happens on
-// --apply.
+// the release branches and the GitHub environments the workflows deploy through — is the
+// operator's to run once: Graphyard calls no GitHub API, so it is always left with its command.
 // ---------------------------------------------------------------------------
 
 export const releaseBranchNames = { uat: 'release/uat', production: 'release/production' } as const;
@@ -131,42 +130,20 @@ export const commandDeploymentAdapter: DeploymentAdapter = {
 
 export const deploymentAdapters: Record<DeploymentAdapterName, DeploymentAdapter> = { railway: railwayDeploymentAdapter, command: commandDeploymentAdapter };
 
-/** What GitHub already holds for the pipeline: the release branches and the deployment environments. */
-export async function observeReleaseWiring(gh: GitHubCli, repository: string) {
-  const branches: Record<ReleaseEnvironment, boolean> = { uat: false, production: false };
-  for (const environment of releaseEnvironments)
-    branches[environment] = !!await ghJson(gh, ['api', `repos/${repository}/git/ref/heads/${releaseBranchNames[environment]}`], null);
-  const listed = await ghJson(gh, ['api', `repos/${repository}/environments`], null) as any;
-  const names = new Set<string>((Array.isArray(listed?.environments) ? listed.environments : []).map((entry: any) => String(entry?.name ?? '')));
-  return { branches, environments: Object.fromEntries(releaseEnvironments.map(environment => [environment, names.has(environment)])) as Record<ReleaseEnvironment, boolean> };
-}
-
-/** The free wiring every candidate pipeline needs, whichever adapter deploys it. */
-export function wiringActions(ctx: DeploymentContext, observed: Awaited<ReturnType<typeof observeReleaseWiring>> | null): PlanAction[] {
-  const branchesThere = !!observed && releaseEnvironments.every(environment => observed.branches[environment]);
-  const environmentsThere = !!observed && releaseEnvironments.every(environment => observed.environments[environment]);
+/**
+ * The free wiring every candidate pipeline needs, whichever adapter deploys it. Graphyard calls no
+ * GitHub API, so it neither reads nor creates these: each is left pending with the command the
+ * operator runs once, and `graphyard release` moves the branches afterwards.
+ */
+export function wiringActions(ctx: DeploymentContext): PlanAction[] {
   return [
-    { id: 'release.branches', target: 'github', state: branchesThere ? 'satisfied' : 'create',
+    { id: 'release.branches', target: 'github', state: 'create',
       title: `Create ${releaseBranchNames.uat} and ${releaseBranchNames.production} at ${ctx.baseBranch}'s tip; only \`graphyard release\` moves them, to a candidate's exact SHA`,
-      command: `gh api --method POST repos/${ctx.repository}/git/refs -f ref=refs/heads/${releaseBranchNames.uat} -f sha=<${ctx.baseBranch} tip>` },
-    { id: 'release.github-environments', target: 'github', state: environmentsThere ? 'satisfied' : 'create',
+      command: `git push origin ${ctx.baseBranch}:refs/heads/${releaseBranchNames.uat} ${ctx.baseBranch}:refs/heads/${releaseBranchNames.production}`,
+      human: 'Run once from a checkout of the repository; a branch that already exists is left as it is.' },
+    { id: 'release.github-environments', target: 'github', state: 'create',
       title: 'Create the uat and production GitHub environments the generated workflows deploy through (UAT_URL and PRODUCTION_URL are stored on them)',
-      command: `gh api --method PUT repos/${ctx.repository}/environments/uat (and environments/production)` },
+      command: `gh api --method PUT repos/${ctx.repository}/environments/uat && gh api --method PUT repos/${ctx.repository}/environments/production`,
+      human: 'Run once under your own gh login; an existing environment is left as it is.' },
   ];
-}
-
-/** Applies the free wiring. Idempotent: what GitHub already holds is left alone. */
-export async function applyWiring(gh: GitHubCli, ctx: DeploymentContext) {
-  const observed = await observeReleaseWiring(gh, ctx.repository);
-  const done: string[] = [];
-  const missingBranches = releaseEnvironments.filter(environment => !observed.branches[environment]);
-  if (missingBranches.length) {
-    const sha = await headSha(gh, ctx.repository, ctx.baseBranch);
-    for (const environment of missingBranches) await gh(['api', '--method', 'POST', `repos/${ctx.repository}/git/refs`, '-f', `ref=refs/heads/${releaseBranchNames[environment]}`, '-f', `sha=${sha}`]);
-    done.push('release.branches');
-  }
-  const missingEnvironments = releaseEnvironments.filter(environment => !observed.environments[environment]);
-  for (const environment of missingEnvironments) await gh(['api', '--method', 'PUT', `repos/${ctx.repository}/environments/${environment}`]);
-  if (missingEnvironments.length) done.push('release.github-environments');
-  return done;
 }

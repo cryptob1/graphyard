@@ -69,7 +69,7 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
  */
 /** SUPERVISED (GY-1501, `up --local`): as the live loop names it in the status (`setup.supervision`); the checklist is the same either way (GY-1978). */
 export const statusSupervised = (status: any | null) => status?.setup?.supervision === 'supervised';
-/** Where the installer serves the GitHub App manifest page while it waits for the App (src/install/manifest.ts). */
+/** Where the pull-request-era installer served its GitHub App page; a status from before GY-2010 may still name it. */
 const defaultAppSetupUrl = 'http://127.0.0.1:4311';
 /**
  * CONTROL-PLANE MERGER (GY-1553): the control plane is the only merge writer, so no GitHub App opens

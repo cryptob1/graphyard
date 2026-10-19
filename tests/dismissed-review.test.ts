@@ -17,7 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-21 clock is the explicit now handed to reconcileReviews, runDispatchTick and sessionRetry; Date.now()-stamped ledger records are judged by attempt counts, not age.
 
 // Each test is named for the proof it produces: integration:dismissed-review-relaunches,
-// integration:dismissal-without-head-change, unit:unsatisfied-settled-request-visible and
+// unit:unsatisfied-settled-request-visible and
 // integration:master-review-forces-attempt.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -110,64 +110,6 @@ test('integration:dismissed-review-relaunches — a dismissed approval is record
     assert.deepEqual(log, ['review:GY-84:a2ff:claude-reviewer']);
     assert.deepEqual(tick.launched.map(entry => [entry.kind, entry.sha, entry.requestId]), [['review', H2, second.id]]);
     assert.deepEqual(tick.waiting, []); assert.deepEqual(tick.refused, []);
-  } finally { await cleanup(); }
-});
-
-test('integration:dismissal-without-head-change — an approval dismissed while the candidate is unchanged re-requests the same commit, and the relaunch is not answered by the dismissal it replaces', async () => {
-  const { root, config, cleanup } = await reviewerRoot();
-  try {
-    let reviews: unknown[] = [];
-    const { run, mint } = stubs(() => reviews);
-    const at = new Date().toISOString();
-    const item = work({}, at);
-    reconcileAutoDispatch(item, [item], new Date());
-    const request = item.autoDispatch!.review!;
-    await launchReview(root, item, 'claude-reviewer', [], at, { run, mint, requestId: request.id });
-    // The head has not moved: GitHub dismissed the approval under the same candidate.
-    const dismissal = { state: 'DISMISSED', reviewer, reviewId: 11, submittedAt: iso(0) };
-    const settled = (await reconcileReviews(root, config, { run, observe: () => dismissal, work: [item], now: () => new Date(clock) })).reviews[0];
-    assert.equal(settled.state, 'failed');
-    assert.match(settled.resolution!, /dismissed while it was still the candidate; the same commit is reviewed again/);
-    assert.doesNotMatch(settled.resolution!, /head changed/);
-    assert.equal(dismissalResolution(settled, [item]), settled.resolution);
-    // The request stands for the same commit: no new head is demanded, and none is requested.
-    assert.deepEqual(reconcileAutoDispatch(item, [item], new Date(clock + 1000)), []);
-    assert.deepEqual([item.autoDispatch!.review!.id, item.autoDispatch!.review!.sha, item.autoDispatch!.review!.state], [request.id, H, 'requested']);
-    // It is relaunched on the same widening wait every other unanswered session uses.
-    const retry = sessionRetry((await readReviewLedger(root)).reviews, request.id, clock);
-    assert.deepEqual([retry.attempts, retry.limit, retry.launch, retry.settled, retry.exhausted], [1, sessionRetryLimit, false, false, false]);
-    assert.equal(retry.nextAt, new Date(clock + sessionRetryBaseMs).toISOString());
-    const log: string[] = [], cursor = emptyDispatchCursor(config);
-    const failedLedger = (await readReviewLedger(root)).reviews as any[];
-    const effects = dispatchEffects(() => [item], () => failedLedger, log, () => new Date().toISOString());
-    const early = await runDispatchTick(config, cursor, effects, () => clock + 1000);
-    assert.deepEqual(early.launched, []);
-    assert.match(early.waiting[0].reason, /reviewer session attempt 1 failed.*attempt 2 of 4 at /s);
-    const due = await runDispatchTick(config, cursor, effects, () => clock + sessionRetryBaseMs + 1);
-    assert.deepEqual(log, ['review:GY-84:a1ff:claude-reviewer']);
-    assert.deepEqual(due.launched.map(entry => [entry.sha, entry.requestId]), [[H, request.id]]);
-    // The real relaunch: attempt 2 of the same request, with the first session kept in the ledger.
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint, requestId: request.id });
-    const relaunched = (await readReviewLedger(root)).reviews;
-    assert.deepEqual(relaunched.map(record => [record.state, record.attempt]), [['failed', 1], ['pending', 2]]);
-    // GitHub still lists the dismissed approval; the new session is not answered by a verdict its
-    // predecessor already recorded, so the attempt is not burned the moment it starts.
-    reviews = [{ id: 11, commit_id: H, user: { login: reviewer }, state: 'DISMISSED', submitted_at: iso(0) }];
-    let reconciled = (await reconcileReviews(root, config, { run, work: [item], now: () => new Date(clock + 2000) })).reviews;
-    assert.equal(reconciled[1].state, 'pending'); assert.equal(reconciled[1].verdict, undefined);
-    // Its own approval of the same commit does answer it.
-    reviews = [...reviews, { id: 12, commit_id: H, user: { login: reviewer }, state: 'APPROVED', submitted_at: iso(3000) }];
-    reconciled = (await reconcileReviews(root, config, { run, work: [item], now: () => new Date(clock + 4000) })).reviews;
-    assert.deepEqual([reconciled[1].state, reconciled[1].verdict!.state, reconciled[1].verdict!.reviewId], ['completed', 'APPROVED', 12]);
-    // A standing approval the control plane has not observed yet leaves the settled session alone.
-    assert.equal((await reconcileReviews(root, config, { run, work: [item], now: () => new Date(clock + 5000) })).reviews[1].state, 'completed');
-    // GitHub withdraws it after the session closed: the closed session is reopened unanswered too,
-    // so the request is relaunched rather than waiting on a verdict that no longer exists.
-    reviews = [reviews[0], { id: 12, commit_id: H, user: { login: reviewer }, state: 'DISMISSED', submitted_at: iso(3000) }];
-    const withdrawn = (await reconcileReviews(root, config, { run, work: [item], now: () => new Date(clock + 6000) })).reviews[1];
-    assert.deepEqual([withdrawn.state, withdrawn.verdict!.state], ['failed', 'DISMISSED']);
-    assert.match(withdrawn.resolution!, /dismissed while it was still the candidate/);
-    assert.equal(sessionRetry([withdrawn], request.id, clock + 6000).settled, false);
   } finally { await cleanup(); }
 });
 

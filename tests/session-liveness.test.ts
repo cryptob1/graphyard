@@ -21,6 +21,7 @@ import { sessionReport } from '../src/cli/master-status.js';
 import { overlongSessionAttention } from '../src/cli/overlong-sessions.js';
 import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-state.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // Time-bomb allowance (GY-1694): boundAt 2026-09-01 is config fixture and the 2026-09-21 instants are explicit past now/at arguments; the Date.now()-relative offsets (tomorrow, over) move with the wall clock.
 
 /**
@@ -138,9 +139,9 @@ async function delivered(sessionId: string) {
     pane: `pane-${sessionId}`, role: 'review', head, subject: `${item.key}: review ${head.slice(0, 12)}`, state: 'running' }, randomUUID());
   item = await engine.execute(producer, 'evidence', item.id, { proof: PROOF, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, randomUUID());
   item = await engine.observe(item.id, (await reload(item)).revision, approved());
-  const committed = { revision: (await engine.store.workItem(item.id))!.revision };
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
-  return engine.observe(item.id, committed.revision, approved({ merged: true, mergeSha: sha40('de11'), mergedAt }));
+  // GY-2010: delivered as production delivers it, by the merge writer's ledger records.
+  return deliverThroughLedger(engine, item.id, sha40('de11'), mergedAt);
 }
 
 const running = async (item: Work) => (await reload(item)).sessions!.filter(handle => handle.state === 'running');
