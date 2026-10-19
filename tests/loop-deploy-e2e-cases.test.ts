@@ -57,6 +57,6 @@ test('unit:loop-deploy-runs-e2e-cases — through the real runner and its verdic
   let clock = 0;
   const suite = ((_cases: readonly CaseFile[], token: string, options: Parameters<typeof e2eSuite>[2] = {}) =>
     realSuite([{ file: 'e2e/cases/optional-home.json', definition: optional }], token, { ...options, fetcher, now: () => clock, sleep: async (ms: number) => { clock += ms; } })) as typeof e2eSuite;
-  await assert.rejects(deployedE2e(root, 'http://127.0.0.1:4311', 'coordinator-token', suite), /1 E2E case failed: optional-home/,
+  await assert.rejects(deployedE2e(root, 'http://127.0.0.1:4311', 'coordinator-token', suite), /1 E2E case failed: case optional-home failed at step 1/,
     'the release verdict passes an optional failure, but continuous deploy rolls back on it');
 });

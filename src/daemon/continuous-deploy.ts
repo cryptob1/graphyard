@@ -49,8 +49,8 @@ export async function deployTip(state: DaemonState, tip: string, from: string, p
   const prior = state.promotion?.deployFailed, attempts = prior && sameCommit(prior.sha, tip) ? prior.attempts + 1 : 1;
   if (attempts > 2) return { outcome: 'skipped', reason: `${deployLine(prior)}; it failed twice, so it waits for the base branch to move` };
   const sequence = async (commit: string, steps: readonly ('deploy' | 'health' | 'e2e')[]) => {
-    try { await ctx.git('checkout', '--detach', '--quiet', commit); } catch (error) { return { step: 'checkout', reason: message(error).slice(0, 240) }; }
-    for (const step of steps) try { await ports[step](commit); } catch (error) { return { step, reason: message(error).slice(0, 240) }; }
+    try { await ctx.git('checkout', '--detach', '--quiet', commit); } catch (error) { return { step: 'checkout', reason: message(error) }; }
+    for (const step of steps) try { await ports[step](commit); } catch (error) { return { step, reason: message(error) }; }
     return null;
   };
   const schemas = await ports.schemas(tip).catch(() => ({ target: null, database: null }));
@@ -65,7 +65,8 @@ export async function deployTip(state: DaemonState, tip: string, from: string, p
   const kept = schemas.target !== null && schemas.database !== null && schemas.target > schemas.database;
   const back = kept || !recorded ? null : await sequence(recorded, ['deploy', 'health']);
   if (!kept) await Promise.resolve().then(() => ctx.git('checkout', '--detach', '--quiet', from)).catch(() => '');
-  const deployFailed: DeployFailure = { sha: tip, step: failure.step, reason: (back ? `${failure.reason}; redeploying ${shortCommit(recorded)} failed at ${back.step}: ${back.reason}` : failure.reason).slice(0, 500),
+  // GY-2217: the reason is never cut: an end-to-end failure names every failing case id and its failing step, and master status shows the whole list.
+  const deployFailed: DeployFailure = { sha: tip, step: failure.step, reason: back ? `${failure.reason}; redeploying ${shortCommit(recorded)} failed at ${back.step}: ${back.reason}` : failure.reason,
     rolledBackTo: kept || back ? null : recorded, kept, attempts, at: ctx.at() };
   state.promotion = promotionReading(state.promotion, ctx.at(), { mainSha: tip, ...(kept ? { promotedSha: tip, promotedAt: ctx.at() } : {}), deployFailed });
   await ctx.persist();

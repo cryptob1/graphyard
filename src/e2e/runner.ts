@@ -78,6 +78,8 @@ export interface E2eReport {
   pendingOutcomes?: RepositoryPolicy['e2e']['pendingOutcomes'];
   /** GY-1938: the required cases this run pended because the install it ran against cannot serve deliveries, with the install's own answer the probe read. A release run pends a case only on this ground, and the hold layer counts it only when its own probe agrees. */
   suspendedDeliveries?: { cases: string[]; merger: string; repositoryWired: boolean };
+  /** GY-2217: the cases this run pended because the install declares no application previews, so no case that exercises one can ever be served. */
+  suspendedPreviews?: { cases: string[] };
   /** GY-1938: set when the delivery probe could not read the install's merger, so every case ran as blocking. */
   deliveryProbe?: 'unreadable';
 }
@@ -318,8 +320,8 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     do {
       const began = now();
       const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs,
-        // A case pending on the candidate cannot block it, so it asks once and never holds the run on a wait (GY-1938).
-        maxWaitSeconds: required && pendingCases.includes(id) ? 0 : options.maxWaitSeconds, waitUntil: options.waitUntil, now, sleep, ...general });
+        // A case whose outcome nothing can serve (pending on the candidate, GY-1802, or on an install that serves neither deliveries nor previews, GY-2217) asks once and never holds the run on a wait.
+        maxWaitSeconds: pendingCases.includes(id) ? 0 : options.maxWaitSeconds, waitUntil: options.waitUntil, now, sleep, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
     } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries && !signal?.aborted);
     const last = attemptResults.at(-1)!;
@@ -499,28 +501,45 @@ export const releaseWaitUntil = (start: number) => start + releaseWaitBudgetSeco
 export const exercisesDelivery = (definition: Pick<CaseFile['definition'], 'steps'>): boolean =>
   definition.steps.some(step => step.kind === 'http' && (step.path.startsWith('/api/candidates') || step.path.startsWith('/api/delivery') || step.path.startsWith('/production/')));
 /**
- * Whether the install at `url` can deliver a change at all (GY-1938): a control-plane merger acts on
- * the plane itself, and a GitHub merger needs the repository wiring the install reports. An install
+ * Whether the install at `url` can deliver a change at all (GY-1938), and whether it serves
+ * application previews (GY-2217). A GitHub merger needs the repository wiring the install reports;
+ * a control-plane merger acts on the plane itself but promotes only through a UAT, so it serves
+ * deliveries exactly when its loop names one (`uat`: GRAPHYARD_UAT_URL or GRAPHYARD_UAT_STATIC —
+ * the deploy loop reads its own environment, the only place a missing UAT is recorded). An install
  * whose merger is github and which reports no repository, GitHub app or state can never make the
  * delivery a case's steps wait for, however long they wait. A merger the probe cannot read answers
- * `true`, so a run blocks exactly as before rather than pending on a guess.
+ * `true`, so a run blocks exactly as before rather than pending on a guess. Previews are served
+ * when the install's project delivery binds declared applications to cases under a local preview
+ * mode: without that, no item ever gains the preview a `preview` case reads, however long it waits.
  */
-export const installServesDeliveries = async (url: string, token: string, fetcher: typeof fetch = fetch): Promise<{ servesDeliveries: boolean; merger: string; repositoryWired: boolean }> => {
+export const installServesDeliveries = async (url: string, token: string, fetcher: typeof fetch = fetch, uat = true): Promise<{ servesDeliveries: boolean; merger: string; repositoryWired: boolean; previewsServed: boolean }> => {
   const read = async (path: string, authorized: boolean): Promise<any> => {
     try { const response = await fetcher(new URL(path, url), { ...(authorized ? { headers: { Authorization: `Bearer ${token}` } } : {}), signal: AbortSignal.timeout(10_000) }); return response.ok ? await response.json() : null; } catch { return null; }
   };
+  const previewsServed = (status: any) => !!status?.project?.delivery && status.project.delivery.previews === 'local'
+    && (status.project.delivery.applications?.length ?? 0) > 0 && Object.keys(status.project.delivery.cases ?? {}).length > 0;
   const merger = await read('api/merger', true);
   const mode = merger?.mode ?? merger?.merger;
-  if (!mode) return { servesDeliveries: true, merger: 'unreadable', repositoryWired: true };
-  if (mode !== 'github') return { servesDeliveries: true, merger: mode, repositoryWired: true };
+  if (!mode) return { servesDeliveries: true, merger: 'unreadable', repositoryWired: true, previewsServed: true };
+  if (mode !== 'github') return { servesDeliveries: uat, merger: mode, repositoryWired: true, previewsServed: previewsServed(await read('api/status', true)) };
   const status = await read('api/status', true);
   // `repository` is only the configured name, present with no GitHub App; wiring is the App the install reports.
   const repositoryWired = !!status && (status.github === true || status.githubRepository != null);
-  return { servesDeliveries: repositoryWired, merger: mode, repositoryWired };
+  return { servesDeliveries: repositoryWired, merger: mode, repositoryWired, previewsServed: previewsServed(status) };
 };
 /** The required cases a release run pends because the install it runs against cannot serve deliveries (GY-1938): those that exercise the delivery surface. */
 export const deliverySuspendedCases = (cases: readonly CaseFile[], servesDeliveries: boolean): string[] =>
   servesDeliveries ? [] : cases.filter(entry => entry.definition.required && exercisesDelivery(entry.definition)).map(entry => entry.definition.id);
+/**
+ * Whether a case's outcome is served by an install's project applications at all (GY-2217): the
+ * previews a project with declared applications runs for a change, and the application a project
+ * UAT serves at its root. The case files mark these with the `preview` tag — the three preview
+ * cases and the two fixture cases whose target is the fixture project's own site and app.
+ */
+export const exercisesApplications = (definition: Pick<CaseFile['definition'], 'tags'>): boolean => definition.tags.includes('preview');
+/** The cases a run pends because the install it runs against declares no application previews (GY-2217): every case that exercises the applications' surface, required or not — the deploy's end-to-end step fails on optional cases too. */
+export const applicationSuspendedCases = (cases: readonly CaseFile[], previewsServed: boolean): string[] =>
+  previewsServed ? [] : cases.filter(entry => exercisesApplications(entry.definition)).map(entry => entry.definition.id);
 /** The candidate record the checkout's ledger holds for `id`, or why it reads none (GY-1802): its pending outcomes ride the `rc/ID` tag the cut pushed, which a validation checkout carries with no plane credential. A read that fails names none, so the suite blocks exactly as before. */
 export const candidatePendingOutcomes = (root: string, id: string | undefined): readonly string[] | undefined => {
   if (!id) return undefined;
@@ -537,6 +556,8 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   contract?: ReleaseContract | null;
   /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending case blocks: by default the graphyard.json of `root`, the candidate's own checkout, never the plane's installed GRAPHYARD_REPOSITORY_POLICY; with no root, the policy in force. */
   policy?: RepositoryPolicy;
+  /** GY-2217: whether a UAT serves release-candidate outcomes (the deploy loop reads its own environment). True by default: a caller that does not say never pends a case on a guess. */
+  uat?: boolean;
   /** The run's clock and pause between asks; tests substitute a fake clock (GY-1938). */
   now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) => ({
   name: 'e2e',
@@ -544,17 +565,20 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
     const selected = cases.filter(options.select ?? (entry => entry.definition.target === 'uat'));
     if (!selected.length) return { name: 'e2e', passed: false, detail: options.select ? 'no required or uat E2E case is in the checkout, so the suite exercised nothing' : 'no E2E case targets uat, so the suite exercised nothing' };
     const policy = options.policy ?? (options.root ? checkoutRepositoryPolicy(options.root) : repositoryPolicy());
-    // GY-1938: an install that cannot serve deliveries can never satisfy the delivery cases, so the run pends them instead of failing on waits nothing can answer; `pendingUnder` keeps a blocking-mode repository judging every case. A signal marks a budgeted run (a merge preview) against an origin of its own, whose cases are the merger's choice: it probes nothing and runs exactly the cases it named.
-    const probed = options.signal ? { servesDeliveries: true, merger: 'unreadable', repositoryWired: true } : await installServesDeliveries(url, token, options.fetcher ?? fetch);
+    // GY-1938: an install that cannot serve deliveries can never satisfy the delivery cases, so the run pends them instead of failing on waits nothing can answer; GY-2217: an install that declares no application previews pends every case that exercises one, the same rule. `pendingUnder` keeps a blocking-mode repository judging every case. A signal marks a budgeted run (a merge preview) against an origin of its own, whose cases are the merger's choice: it probes nothing and runs exactly the cases it named.
+    const probed = options.signal ? { servesDeliveries: true, merger: 'unreadable', repositoryWired: true, previewsServed: true } : await installServesDeliveries(url, token, options.fetcher ?? fetch, options.uat ?? true);
     const suspended = deliverySuspendedCases(selected, probed.servesDeliveries);
-    const pendingCases = pendingUnder([...contractPendingCases(options.contract, candidate?.pendingOutcomes), ...suspended], policy);
+    const suspendedPreviews = applicationSuspendedCases(selected, probed.previewsServed);
+    const pendingCases = pendingUnder([...contractPendingCases(options.contract, candidate?.pendingOutcomes), ...suspended, ...suspendedPreviews], policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
       root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });
     if (suspended.length) report.suspendedDeliveries = { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired };
+    if (suspendedPreviews.length) report.suspendedPreviews = { cases: suspendedPreviews };
     if (!options.signal && probed.merger === 'unreadable') report.deliveryProbe = 'unreadable';
     await options.report?.(report);
     const verdict = releaseVerdict(report, [], pendingCases, policy), detail = failureDetail(report, pendingCases, policy);
-    const suspension = suspended.length ? `; the install serves no deliveries (merger ${probed.merger} without a repository wired), so its delivery cases ${suspended.join(', ')} are pending, not blocking` : '';
+    const suspension = suspended.length ? `; the install serves no deliveries (merger ${probed.merger} without ${probed.merger === 'github' ? 'a repository wired' : 'a UAT the loop promotes through'}), so its delivery cases ${suspended.join(', ')} are pending, not blocking`
+      : suspendedPreviews.length ? `; the install declares no application previews, so the cases exercising one ${suspendedPreviews.join(', ')} are pending, not blocking` : '';
     const executed = report.cases.length - verdict.unrun.length;
     return !verdict.passed
       ? { name: 'e2e', passed: false, detail: `${verdict.blocking.length} of ${executed} E2E cases ${verdict.blocking.every(outcome => outcome.verdict === 'flaky') ? 'were flaky' : 'failed'}: ${detail}${suspension}` }
@@ -565,14 +589,18 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
 /**
  * GY-1982: the loop's end-to-end step after it deploys a commit: every case under e2e/cases/ (the
  * cases release-candidate.yml ran) through the runner against the install's own URL. Every failing
- * case throws, optional and pending ones too, the end-to-end failure that rolls the deploy back.
+ * case throws, optional ones too, the end-to-end failure that rolls the deploy back — except a case
+ * the run suspended because this install cannot serve its outcome at all (no deliveries without a
+ * UAT or a repository, GY-1938; no declared application previews, GY-2217): those are pending, and
+ * the throw names every other failing case with its failing step and reason, never cut short.
  */
-export async function deployedE2e(root: string, url: string, token: string, suite: typeof e2eSuite = e2eSuite) {
+export async function deployedE2e(root: string, url: string, token: string, suite: typeof e2eSuite = e2eSuite, options: { uat?: boolean } = {}) {
   let report: E2eReport | null = null;
-  const result = await suite(await loadCases(root), token, { root, contract: await checkoutContract(root), select: () => true, runAll: true, report: value => { report = value; } }).run(url, null);
-  const failed = (report as E2eReport | null)?.cases.filter(outcome => outcome.verdict === 'failed') ?? [];
+  const result = await suite(await loadCases(root), token, { root, contract: await checkoutContract(root), select: () => true, runAll: true, uat: options.uat, report: value => { report = value; } }).run(url, null);
+  const suspended = new Set([...(report as E2eReport | null)?.suspendedDeliveries?.cases ?? [], ...(report as E2eReport | null)?.suspendedPreviews?.cases ?? []]);
+  const failed = (report as E2eReport | null)?.cases.filter(outcome => outcome.verdict === 'failed' && !suspended.has(outcome.id)) ?? [];
   if (!result.passed) throw new Error(result.detail);
-  if (failed.length) throw new Error(`${failed.length} E2E case${failed.length === 1 ? '' : 's'} failed: ${failed.map(outcome => `${outcome.id}${outcome.failingStep ? ` (${outcome.failingStep.reason})` : ''}`).join('; ')}`.slice(0, 500));
+  if (failed.length) throw new Error(`${failed.length} E2E case${failed.length === 1 ? '' : 's'} failed: ${failed.map(outcome => outcome.failingStep ? caseFailure(outcome) : `case ${outcome.id} failed at an unreported step`).join('; ')}`);
   return result;
 }
 

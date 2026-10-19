@@ -7,7 +7,7 @@ An `e2e:` proof passes from pinned candidate/bundle/separate [collector](runner-
 
 `e2e/cases/ID.json`, code-reviewed: `id` (file name)/`title`, optional `description`/`tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`:
 
-- `http`: `method`, `path`, optional `body`, `status`; `expect` checks dotted `path` (`equals`/`exists`/`type`/`includes`); `save` persists; GET `waitSeconds` (≤3600; pending 0; shared 1800 s release deadline) retries; an install delivering nothing (`github` merger, no App) pends its `candidates`/`delivery`/`production` cases (`suspendedDeliveries`; holds' post-suite probe must agree).
+- `http`: `method`, `path`, optional `body`, `status`; `expect` checks dotted `path` (`equals`/`exists`/`type`/`includes`); `save` persists; GET `waitSeconds` (≤3600; pending 0; shared 1800 s release deadline) retries; an install delivering nothing (`github` merger with no App, or a control-plane merger whose loop names no UAT) pends its `candidates`/`delivery`/`production` cases, and an install whose project delivery declares no bound applications pends every `preview`-tagged case (`suspendedDeliveries`/`suspendedPreviews`; holds' post-suite probe must agree on the first).
 - `browser` (Playwright Chromium): `open` `path`, `fill` `label` with `value`, `click`/`expectText` `text`, optionally by `role`.
 - `command`: `run` in the checkout with `TARGET_URL`, exit 0 passes, last 50 lines kept: `{"kind":"command","run":"npx playwright test"}`.
 - `agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS|FAIL - reason`, screenshot kept: `{"kind":"agent","goal":"Win tic-tac-toe","success":["Board says You win"],"path":"/games"}`.
