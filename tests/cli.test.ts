@@ -294,17 +294,9 @@ test('master-only commands ignore an unrelated unavailable worker token file', a
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('github-setup --update-permissions is a migration command that needs no deployment URL and reports what is missing locally', async () => {
-  const cwd = await temporaryDirectory('permissions');
-  try {
-    await exec('git', ['init', '-q'], { cwd }); await exec('git', ['remote', 'add', 'origin', 'git@github.com:owner/repo.git'], { cwd });
-    const env = { ...process.env, GRAPHYARD_TOKEN: undefined, GRAPHYARD_TOKEN_FILE: undefined, GRAPHYARD_URL: undefined };
-    await assert.rejects(exec(process.execPath, [launcher, 'github-setup', '--update-permissions'], { cwd, env }), (error: any) => /No saved Graphyard App; register it first with graphyard github-setup HTTPS_URL/.test(error.stderr) && error.code === 1);
-    await assert.rejects(exec(process.execPath, [launcher, 'github-setup', '--update-permissions', '--reviewer', 'claude'], { cwd, env }), (error: any) => /No saved reviewer App "claude"/.test(error.stderr));
-    await assert.rejects(exec(process.execPath, [launcher, 'github-setup', '--update-permissions', '--wait', 'soon'], { cwd, env }), (error: any) => /--wait with whole seconds/.test(error.stderr));
-    await assert.rejects(exec(process.execPath, [launcher, 'github-setup'], { cwd, env }), (error: any) => /Use github-setup HTTPS_URL to register an App, or github-setup --update-permissions/.test(error.stderr));
-    await assert.rejects(exec(process.execPath, [launcher, 'github-setup', 'https://example.com', '--wait', '5'], { cwd, env }), (error: any) => /--wait only applies to --update-permissions/.test(error.stderr));
-  } finally { await rm(cwd, { recursive: true, force: true }); }
+test('github-setup is gone: the CLI registers no GitHub App command, and its help names none (GY-2010)', async () => {
+  const { stdout } = await exec(process.execPath, [launcher, '--help']);
+  assert.doesNotMatch(stdout, /github-setup|update-permissions/, 'no App registration or permission migration command is offered');
 });
 
 test('installed CLI resolves its runtime from another repository and includes submitted rework in next using the work snapshot clock', async () => {

@@ -33,7 +33,7 @@ The control plane is every install's only merge writer: nothing sets another, an
 1. **Shadow mode**: trials beside the GitHub gate, nothing written; done, and deleted (GY-2087).
 2. **Switch** `control-plane`: done, for every install.
 3. **Run the Snake pilot.**
-4. **After a week**, delete the github-mode gate code.
+4. **Done (GY-2010):** the github-mode API client, App credentials, webhooks, caches, request budget and main guard are deleted; gates read the merge ledger alone, and base failures and flakes come from the writer's trials, never a CI log.
 
 ## Measures
 

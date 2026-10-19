@@ -65,11 +65,6 @@ export interface InstallPlan {
    * the discovered checks until `graphyard init --scan --apply` records the split.
    */
   delivery: { mode: 'local' | 'release-candidate' | 'per-pr'; committed: boolean; preMerge: string[]; perCandidate: string[]; adapter: 'railway' | 'command' };
-  /**
-   * The Apps --apply would create in a browser (GY-1442): neither bound, saved for this repository,
-   * nor reused with --reuse-app. `graphyard up --agent` without a browser profile stops when any remain.
-   */
-  browserApps?: ('control-plane' | 'reviewer')[];
   /** `--observe-only` (GY-1846): only the control plane is deployed; every `held` action is left to a later full install. */
   observeOnly?: boolean;
 }
@@ -81,7 +76,6 @@ export interface InstallInputs {
   domain?: string;
   workers?: number;
   producerProofs?: string[];
-  reviewer?: string;
   reviewPolicy?: 'github' | 'agent';
   requiredChecks?: string[];
   reviewCount?: number;
@@ -111,12 +105,6 @@ export interface InstallInputs {
   maxMonthly?: number;
   /** Spend consent for a created server: the exact monthly price the plan showed (`--confirm-price`). */
   confirmPrice?: number;
-  /**
-   * An App registration the operator already holds for this repository (`--github-app FILE`, the
-   * JSON the manifest flow saves). Without it the installer still reuses this installation's own
-   * saved registration or the checkout's `.graphyard/github-app.json` before asking for a browser click.
-   */
-  githubAppFile?: string;
   /** Create the cost-bearing UAT and production resources the plan marks as human decisions (GY-1102). */
   createEnvironments?: boolean;
 }

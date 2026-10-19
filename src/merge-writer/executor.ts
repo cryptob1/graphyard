@@ -12,19 +12,6 @@ import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
 /**
- * When the item's current head was handed in. The pipeline timeline's resubmission or submission
- * when the snapshot carries it; the loop's coordination view drops that timeline, so there the
- * moment this very head was first observed (`headObserved`, set when the candidate changed) stands
- * in, then the pull request's creation, then the stage entry.
- */
-export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 'headObserved'>): number {
-  const pipeline = (item as { pipeline?: { submittedAt?: string | null; resubmittedAt?: string | null } }).pipeline;
-  const observed = item.headObserved && item.candidate && item.headObserved.sha.toLowerCase() === item.candidate.sha.toLowerCase() ? item.headObserved.at : null;
-  for (const at of [pipeline?.resubmittedAt, pipeline?.submittedAt, observed, item.candidate?.createdAt, item.stageEnteredAt]) if (at && Number.isFinite(Date.parse(at))) return Date.parse(at);
-  return 0;
-}
-
-/**
  * A proof's cases in a TAP stream, attributed by title prefix, as `graphyard verify` counts them
  * (cli/verify.ts `countProofCases`, which this mirrors: the CLI module is not imported into the loop).
  */
@@ -40,6 +27,19 @@ export function countProofCases(tap: string, proof: string) {
 }
 
 // ---- The queue -----------------------------------------------------------------------------------
+
+/**
+ * When the item's current head was handed in. The pipeline timeline's resubmission or submission
+ * when the snapshot carries it; the loop's coordination view drops that timeline, so there the
+ * moment this very head was first observed (`headObserved`, set when the candidate changed) stands
+ * in, then the candidate's creation, then the stage entry.
+ */
+export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 'headObserved'>): number {
+  const pipeline = (item as { pipeline?: { submittedAt?: string | null; resubmittedAt?: string | null } }).pipeline;
+  const observed = item.headObserved && item.candidate && item.headObserved.sha.toLowerCase() === item.candidate.sha.toLowerCase() ? item.headObserved.at : null;
+  for (const at of [pipeline?.resubmittedAt, pipeline?.submittedAt, observed, item.candidate?.createdAt, item.stageEnteredAt]) if (at && Number.isFinite(Date.parse(at))) return Date.parse(at);
+  return 0;
+}
 
 /** One queued control-plane candidate, oldest submission first. */
 export interface QueuedMerge { key: string; id: string; head: string; submittedAt: string; waitingMs: number }

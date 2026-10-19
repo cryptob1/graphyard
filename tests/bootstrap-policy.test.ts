@@ -10,6 +10,7 @@ import { Engine } from '../src/engine.js';
 import { bootstrapObligations, criterionSchema, deliveredProof, evaluate, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, type Observation, type Principal, type Work } from '../src/model.js';
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // Time-bomb allowance (GY-1694): the 2026-09-18 declaredAt is a past fixture field of an operator declaration that evaluate and diagnose carry through unchanged; new Date()/Date.now() are the explicit now they are handed.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -74,6 +75,8 @@ function fixture(overrides: Partial<Work> = {}): Work {
     observation: { candidate: { sha: head, baseSha: base, pr: 7, branch: 'graphyard/gy-2-1', author: 'implementer' },
       checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }],
       merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], at, prState: 'open', draft: false },
+    // The merge writer's passing trial of the head (GY-2010: the test gate reads the merge ledger).
+    mergeLedger: { key: 'GY-2', state: 'intent', head, baseTip: base, mergeSha: null, risk: null, intentAt: at, pushedAt: null, observedTip: null, refusal: null, events: 2 },
     ...overrides } as Work;
 }
 const trusted = (proof: string, extra: Record<string, unknown> = {}) => ({ id: randomUUID(), proof, sha: head, baseSha: base, policyRevision: 2,
@@ -86,8 +89,9 @@ test('unit:bootstrap-policy-model defers only the marked criterion and keeps eve
   assert.equal(deferred.gates.find(gate => gate.name === 'review')!.passed, true);
   assert.equal(deferred.gates.find(gate => gate.name === 'test')!.passed, true);
 
-  // Review and CI are not weakened by the deferral.
-  const unreviewed = fixture({ evidence: [trusted('unit:supervisor-stop')], observation: { ...fixture().observation!, reviews: [], checks: [{ name: 'test', result: 'failure', appId: 15368 }] } });
+  // Review and the merge writer's trial are not weakened by the deferral.
+  const unreviewed = fixture({ evidence: [trusted('unit:supervisor-stop')], observation: { ...fixture().observation!, reviews: [] },
+    mergeLedger: { ...fixture().mergeLedger!, state: 'refused', refusal: { kind: 'merge', reason: 'trial failed: tests/supervisor.test.ts' } } });
   const gates = evaluate(unreviewed, [unreviewed], new Date(), [15368]).gates;
   assert.equal(gates.find(gate => gate.name === 'review')!.passed, false);
   assert.equal(gates.find(gate => gate.name === 'test')!.passed, false);
@@ -171,7 +175,9 @@ test('integration:bootstrap-policy-gate lands a bootstrap candidate on review an
   assert.deepEqual(stamped.contractPaths, [contract]);
 
   assert.deepEqual(requiredProofs(work, await all()), ['unit:supervisor-stop'], 'the deferred proof is not demanded of this candidate; the remaining criterion still is');
-  assert.deepEqual(work.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'review and CI are enough for a bootstrap candidate');
+  // GY-2010: review passes, and only the merge writer's own trial and push stand: nothing else is asked of a bootstrap candidate.
+  assert.deepEqual(work.gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons.map(reason => `${gate.name}: ${reason.replace(/ [0-9a-f]{12}/g, '')}`)),
+    ['test: merge writer has not trialled on', 'merge: merge writer has not pushed'], 'review and the merge writer are enough for a bootstrap candidate');
 
   const proven = await prove(work, 'unit:supervisor-stop');
 
@@ -285,19 +291,19 @@ test('integration:bootstrap-policy-inheritance clears the obligation once a deli
 });
 
 // ---------------------------------------------------------------------------
-// Delivery. GitHub merges a candidate once its gates pass; the observed merge is delivered
+// Delivery. The merge writer merges a candidate once its gates pass; its reconciled record delivers it
 // iff the record before the merge cutoff passed every gate. A deferred proof has no evidence
 // by design and must not read as an unauthorized merge.
 // ---------------------------------------------------------------------------
 
-/** Report the merge of a gate-passing candidate, cut off after its current record. */
+/** The merge writer's trial, push and reconcile of a candidate every other gate passed (GY-2010). */
 async function deliver(work: Work) {
   const ready = await current(work.id);
-  assert.deepEqual(ready.gates.filter(gate => !gate.passed).map(gate => gate.name), [], 'the candidate must pass every gate before delivery');
+  assert.deepEqual(ready.gates.filter(gate => !gate.passed && gate.reasons.some(reason => !reason.startsWith('merge writer has not'))).map(gate => gate.name), [], 'the candidate must pass every other gate before delivery');
   await delay(5);
   const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString();
   await delay(5);
-  return engine.observe(work.id, ready.revision, { ...observation(ready), merged: true, mergedAt, mergeSha: 'e'.repeat(40) });
+  return deliverThroughLedger(engine, work.id, 'e'.repeat(40), mergedAt);
 }
 
 test('integration:bootstrap-policy-gate delivers a bootstrap candidate whose deferred proof has no evidence', async () => {

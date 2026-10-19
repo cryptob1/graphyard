@@ -10,10 +10,8 @@ import { attributeConflicts, hasConflictMarkers, managedServerUrl, parseLocalSco
 import { resolveTimingBaseline, timedTestFile, timingBaselinePath } from '../model/timing-companion.js';
 import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
-import { superviseSessionCredential, type MintedPushCredential } from '../worker-credential.js';
 import { resolveWork, type CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
-import { pushViaControlPlane } from './sync-push.js';
 import { defineCommands, workMutation } from './registry.js';
 import { keepBlockedWork } from './lease.js';
 import { agentsRenderers, agentsTemplateSources, localGeneratedManifest, regenerateGenerated } from './workspace-generated.js';
@@ -127,12 +125,11 @@ export const workspaceCommands = defineCommands([
       '                                remaining conflict; run before complete --head. Only merge',
       '                                conflicts are judged: plannedFiles is a plan, not a lock. It',
       "                                fetches nothing: the shared origin/BASE is the merge writer's tip",
-      '  sync GY-N --push-via-control-plane COMMIT  Control plane pushes a refused workflow base sync',
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,
       // so the item never presents as a ready-gate refusal or an unexplained lapse (GY-134).
-      try { await (context.args.includes('--push-via-control-plane') ? pushViaControlPlane : syncWork)(context, work); } catch (error) {
+      try { await syncWork(context, work); } catch (error) {
         const failure = environmentFailure(error); const epoch = work.workspaces.find((w: any) => w.branch === quietBranch())?.epoch ?? work.lease?.epoch;
         if (!failure || epoch === undefined) throw error;
         const reason = environmentBlocker(`sync ${work.key}`, process.env.GRAPHYARD_HERDR_AGENT_KIND, failure);
@@ -202,11 +199,7 @@ export const workspaceCommands = defineCommands([
       // Settlement comes at shutdown, long after setup: its window opens at its first call.
       let settleUntil = 0;
       const settleApi = restartTolerantApi(api, () => settleUntil ||= performance.now() + controlPlaneRestartWindowMs);
-      // The session's own push credential (GY-999), when the launcher minted one for this attempt:
-      // refreshed after each renewal before GitHub's expiry, and withdrawn when the session ends.
-      const mintPush = () => api(`work/${work.id}/push-credential`, { epoch }, randomUUID()) as Promise<MintedPushCredential>;
-      process.exitCode = await superviseSessionCredential(process.env.GH_CONFIG_DIR, work.key, epoch, mintPush, refresh =>
-        supervise(args[separator + 1], args.slice(separator + 2), epoch, async () => { const renewed = await renew(); await refresh(); return renewed; }, {
+      process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
           detached: !foreground,
           ...(scoped ? { containment: scoped } : {}),
           quarantine: foreground ? {
@@ -229,7 +222,7 @@ export const workspaceCommands = defineCommands([
               { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
             ), report: failure => api(`work/${work.id}/request`, containmentFailureNote(epoch, failure), randomUUID()), // a fence it cannot lower goes on the record
           } : undefined,
-        }));
+        });
     },
   },
 ]);

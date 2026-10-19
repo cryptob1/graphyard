@@ -236,3 +236,22 @@ test('integration:control-plane-rework-ownership — the server\u2019s reservati
     assert.deepEqual(state.calls, [], 'the claim was never released');
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('integration:control-plane-rework-workspace — an item a stored pull-request adoption names starts its attempt from the adopted head in the shared object store, with no fetch of the adopted branch', async () => {
+  const { work: root, pushes, head } = await repository();
+  try {
+    // The adopted branch lives only in the shared object store: origin hides and refuses every worker ref.
+    const adopted = 'feature/adopted';
+    git(root, 'branch', adopted, head);
+    const subject = { ...item(root, null, head), submission: null, workspaces: [], epoch: 3, lease: { owner: 'worker-a', epoch: 3, expiresAt: new Date(Date.now() + 600_000).toISOString() },
+      prAdoption: { pr: 9, head, branch: adopted, repository: 'owner/project', adoptedBy: 'graphyard-master', adoptedAt: new Date().toISOString() } } as unknown as ReturnType<typeof item>;
+    const state = await runWorktree(root, subject, 3);
+    assert.equal(state.failure, undefined, `the workspace was created: ${state.failure}`);
+    const printed = state.printed[0] as { path: string; branch: string };
+    assert.equal(printed.branch, adopted, 'the attempt works on the adopted branch');
+    assert.equal(git(printed.path, 'rev-parse', 'HEAD'), head, 'and starts from the adopted head');
+    assert.equal(spawnSync('git', ['-C', root, 'rev-parse', '--verify', '-q', `refs/remotes/origin/${adopted}`]).status === 0, false, 'the adopted branch was not fetched');
+    assert.equal(existsSync(pushes), false, 'nothing was pushed');
+    assert.deepEqual(released(state), [], 'the claim was never released');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
