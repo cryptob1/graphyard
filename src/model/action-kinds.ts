@@ -14,7 +14,7 @@ import { dispatchHumanWait } from './human-request.js';
  * whether an executor may run it at all.
  */
 
-export const nextActionKinds = ['dispatch', 'request-review', 'request-rework', 'approve-scope', 'resync', 'reclaim', 'merge', 'verify-deployment', 'escalate'] as const;
+export const nextActionKinds = ['dispatch', 'request-review', 'request-rework', 'approve-scope', 'resync', 'reclaim', 'merge', 'escalate'] as const;
 export type NextActionKind = typeof nextActionKinds[number];
 
 /**
@@ -29,7 +29,7 @@ export type NextActionKind = typeof nextActionKinds[number];
 export type LlmRole = 'implement' | 'review' | 'produce-evidence' | 'approve-decision' | 'resolve-escalation';
 export const nextActionLlmRoles: Record<NextActionKind, LlmRole | null> = {
   dispatch: 'implement', 'request-review': 'review', 'request-rework': 'approve-decision',
-  'approve-scope': null, resync: null, reclaim: null, merge: null, 'verify-deployment': null,
+  'approve-scope': null, resync: null, reclaim: null, merge: null,
   escalate: 'resolve-escalation',
 };
 export const llmRoles: readonly LlmRole[] = ['implement', 'review', 'produce-evidence', 'approve-decision', 'resolve-escalation'];
@@ -52,7 +52,7 @@ export const mechanicalActionKinds = nextActionKinds.filter(kind => nextActionLl
 export const actionJudgment: Record<NextActionKind, 'none' | 'in-session' | 'in-step'> = {
   dispatch: 'in-session', 'request-review': 'in-session',
   'request-rework': 'in-step', escalate: 'in-step',
-  'approve-scope': 'none', resync: 'none', reclaim: 'none', merge: 'none', 'verify-deployment': 'none',
+  'approve-scope': 'none', resync: 'none', reclaim: 'none', merge: 'none',
 };
 /** Every kind an executor may hold a handler for: everything but the judgments made in the step itself. */
 export const executorRunnableKinds = nextActionKinds.filter(kind => actionJudgment[kind] !== 'in-step');
@@ -66,7 +66,6 @@ export type NextActionInputs =
   | { kind: 'resync'; pr: number | null; sha: string | null; baseSha: string | null; baseTip: string | null; observedAt: string | null }
   | { kind: 'reclaim'; epoch: number; owner: string | null; leaseExpiresAt: string | null }
   | { kind: 'merge'; pr: number; sha: string; baseSha: string; policyRevision: number }
-  | { kind: 'verify-deployment'; mergeSha: string; mergedAt: string; state: string }
   | { kind: 'escalate'; trigger: string; detail: string };
 
 export interface NextAction {
@@ -141,32 +140,8 @@ export const observationWaitBoundMs = 30 * 60_000;
  */
 export const workerSlotWaitBoundMs = 30 * 60_000;
 
-/**
- * GY-1831: the clause a `verify-deployment` attempt appends when the only reason it failed is that
- * the running release does not carry the merge yet while the promotion pipeline has the merge in
- * flight — a release candidate carrying it is being built or promoted, or the dispatch that will
- * carry it is due. The clause is constant, with no candidate id, run or count in it, so the
- * unchanged run accumulates across attempts and the wait below can bound it: a run that outlasts
- * the bound is a stall again, and one that never names the clause stalls as before.
- */
 /** What a deployment observation's reason starts with when its containment was derived without a fresh base branch, the one reason that leaves its pending deliveries unreliable (GY-1831). */
 export const staleContainmentReasonPrefix = 'Containment was derived without a fresh base branch: ';
-export const promotionWaitClause = 'a release candidate carrying the merge is in the promotion pipeline, so the deployment observation waits for the promotion to land';
-/**
- * How long a `verify-deployment` row may wait for the promotion pipeline to land the release that
- * serves its merge between two of the pipeline's demonstrated movements before it is stalled
- * rather than waiting (GY-1831, GY-1966).
- *
- * The wait the executor names carries the pipeline's newest demonstrated movement (its cursor's
- * newest candidate, dispatch or promotion), so the row's unchanged run measures the stretch since
- * the pipeline last moved, not since the merge: a failed candidate is re-cut behind the moving
- * main, and a candidate's validation may run this long before anything else moves. The bound is
- * that window — `soakAwaitedMs`, the one the loop itself grants a candidate's soak — because a
- * shorter one (the 60 minutes GY-1966 replaced) filed rows a re-cut cycle longer than an hour was
- * still carrying. A stretch this long without a movement is a pipeline that has stopped moving,
- * and the row stalls.
- */
-export const promotionWaitBoundMs = 90 * 60_000;
 
 /**
  * Whether a dispatch refusal names a wait for a worker profile to free (GY-1108).
@@ -200,16 +175,6 @@ export function workerSlotWait(reason: string): boolean {
 }
 
 /**
- * GY-1966: whether a stalled row's reason names the release machinery — a running release that
- * does not carry the row's merge yet, with or without the promotion wait beside it. A row a
- * pipeline that has stopped moving holds is the machinery's fault, not the item's: the attention
- * it raises names the release machinery and counts under the deployment class, rather than filing
- * a per-item stalled-action instance over a wait only the pipeline can end.
- */
-export const namesReleaseMachinery = (reason: string): boolean =>
-  reason.includes(promotionWaitClause) || /the running release \S+ does not carry \S+'s merge \S+ yet/.test(reason);
-
-/**
  * The bound of a failure reason that names a handoff still in progress — the attempt did its part
  * and waits for the effect another component is bound to deliver — or null for any other reason.
  * A run of such failures is a stall only once it outlasts the bound (`actionStall`); a held job, a
@@ -218,7 +183,6 @@ export const namesReleaseMachinery = (reason: string): boolean =>
 export function handoffWaitBound(reason: string): number | null {
   if (reason.includes(`${resyncUnobservedPrefix}; ${observationJobScheduled};`)) return observationWaitBoundMs;
   if (workerSlotWait(reason)) return workerSlotWaitBoundMs;
-  if (reason.includes(promotionWaitClause)) return promotionWaitBoundMs;
   return null;
 }
 

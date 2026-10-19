@@ -236,62 +236,6 @@ test('unit:violations-get-successor-actions — one reconciliation tick opens ex
   assert.equal(actionId('escalate', item.id, rows(current)[0].binding), escalationId);
 });
 
-test('unit:violations-get-successor-actions — a stalled action is escalated, never abandoned: after N identical verify-deployment failures the row is retried once the widest stall backoff has passed, re-escalated at once on the same failure, and a deployment observed on a later attempt verifies the delivery', () => {
-  const t0 = Date.parse('2026-09-20T10:00:00.000Z');
-  let clock = t0;
-  const now = () => new Date(clock);
-  const at = new Date(t0).toISOString(), mergeSha = 'e'.repeat(40);
-  const work = { id: 'id-GY-DEPLOY', key: 'GY-DEPLOY', title: 'Deploy', type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'done', ready: true,
-    createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], plannedFiles: ['src/'], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
-    submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true, deploySmoke: true }, gates: [],
-    delivery: { mergedAt: at, mergeSha, authorizationRevision: 1 } } as unknown as Work;
-  const executor = { id: 'executor-1', host: 'host-1', principal: 'coordinator' };
-  const reason = 'the deployment endpoint answered 503 Service Unavailable';
-  settleDelivered(work, [work], now());
-  assert.equal(work.nextAction?.kind, 'verify-deployment');
-  const verifyId = work.actionQueue!.actions[0].id;
-  /** One failed attempt, settled and reconciled at the instant it failed; the row's backoff is returned, not waited out. */
-  const attempt = () => {
-    const taken = claimAction([work], executor, now());
-    assert.equal(taken?.row.id, verifyId, `the verify-deployment row is offered at ${now().toISOString()}`);
-    clock += 1000;
-    const settled = settleAction(work, verifyId, { executor: executor.id, principal: executor.principal }, 'failed', reason, now());
-    settleDelivered(work, [work], now());
-    return Date.parse(settled.action.retryAt!);
-  };
-  for (let failure = 1; failure < livenessRetryLimit; failure++) {
-    const retryAt = attempt();
-    assert.equal(work.nextAction?.kind, 'verify-deployment', `failure ${failure} is retried`);
-    clock = retryAt;
-  }
-  attempt();
-  const lastFailure = clock;
-  assert.equal(work.nextAction?.kind, 'escalate', `the ${livenessRetryLimit}th identical failure escalates`);
-  assert.ok(work.nextAction!.inputs.kind === 'escalate' && work.nextAction!.inputs.trigger === 'stalled-action');
-  assert.equal(claimAction([work], executor, now()), null, 'nothing is offered while the escalation is fresh');
-  clock = lastFailure + actionStallMaxMs - 60_000;
-  settleDelivered(work, [work], now());
-  assert.equal(work.nextAction?.kind, 'escalate', 'the escalation holds inside the widest stall backoff');
-  clock = lastFailure + actionStallMaxMs;
-  settleDelivered(work, [work], now());
-  assert.equal(work.nextAction?.kind, 'verify-deployment', 'once it has passed, the action is owed again rather than abandoned');
-  assert.deepEqual(work.actionQueue!.actions.map(row => row.kind), ['verify-deployment'], 'the escalation row makes way for the retry');
-  attempt();
-  assert.equal(work.nextAction?.kind, 'escalate', 'the same failure on the retry escalates again at once');
-  clock += actionStallMaxMs;
-  settleDelivered(work, [work], now());
-  assert.equal(work.nextAction?.kind, 'verify-deployment', 'and is retried again after the next backoff');
-  // The incident ends: this attempt observes the deployment.
-  const taken = claimAction([work], executor, now());
-  assert.equal(taken?.row.id, verifyId);
-  work.delivery!.deployment = { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: now().toISOString() } as NonNullable<Work['delivery']>['deployment'];
-  settleAction(work, verifyId, { executor: executor.id, principal: executor.principal }, 'done', 'deployment observed', now());
-  settleDelivered(work, [work], now());
-  assert.notEqual(work.nextAction?.kind, 'verify-deployment', 'the delivery is verified');
-  assert.notEqual(work.nextAction?.kind, 'escalate');
-  assert.deepEqual(work.actionQueue!.actions.filter(row => row.state !== 'done').map(row => row.kind), [], 'nothing is left owed');
-});
-
 test('unit:violations-get-successor-actions — resync and request-review rows refused for one stable reason keep being retried on the widest backoff after they escalate', () => {
   for (const kind of ['resync', 'request-review'] as const) {
     const t0 = Date.parse('2026-09-20T10:00:00.000Z');

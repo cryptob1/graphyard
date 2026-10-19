@@ -731,8 +731,8 @@ export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?:
 export type ReviewCriterion = { id: string; text: string; proofs?: readonly string[] };
 /**
  * How the reviewer judges declared post-deploy verifications (GY-1660): on the head's pre-merge
- * evidence, never holding the merge for the live observation, which `master verify-deployment`
- * checks on the serving release after delivery. Empty when no criterion is declared, so every
+ * evidence, never holding the merge for the live observation, which is read on the serving
+ * release after delivery. Empty when no criterion is declared, so every
  * other review request stays byte-identical.
  */
 /**
@@ -748,7 +748,7 @@ export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
   if (!declared.length) return '';
   return `${declared.join(', ')} ${declared.length === 1 ? 'is a declared post-deploy verification' : 'are declared post-deploy verifications'}: the live install can only show ${declared.length === 1 ? 'its' : 'their'} outcome after this change is merged and deployed. `
     + 'Judge each on this head\'s pre-merge evidence — the change that should produce the outcome, and what the head shows before merge — and never request changes or hold the merge because the live install or deployed release has not shown it yet; '
-    + 'master verify-deployment checks it on the serving release after delivery and files a follow-up naming the delivered item when it fails. ';
+    + 'it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. ';
 }
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification);

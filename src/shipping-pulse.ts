@@ -29,7 +29,7 @@ export interface ShippingPulse {
     /**
      * False when nothing has ever recorded a production observation for this repository: no
      * deployment provider has reported through `POST /api/production-observations`, and no
-     * delivery in the window carries a `master verify-deployment` record. A metric with no
+     * delivery in the window carries a recorded deployment. A metric with no
      * inputs is unconfigured, not sparse - the fix is configuration, not waiting for more
      * deliveries - and `unconfiguredReason` says so, naming the endpoint and the credential.
      */
@@ -69,7 +69,7 @@ export const FLOW_DEPLOYMENT_ENDPOINT = 'POST /api/deployments';
  * about the sample: no delivery can be measured until an observation source exists, so
  * it names the two ways one comes to exist and the endpoint that looks like one but is not.
  */
-export const PRODUCTION_UNCONFIGURED_REASON = `The production endpoint is not configured: no deployment-provider observation has ever been recorded for this repository, so no deliveries can be measured until it is. This metric ends at observations recorded through ${PRODUCTION_OBSERVATION_ENDPOINT}, which needs a producer credential whose deploymentProviders scope names the provider; ${FLOW_DEPLOYMENT_ENDPOINT} records deployments for flow analytics and does not feed this metric. A delivery verified with graphyard master verify-deployment also counts as a production observation.`;
+export const PRODUCTION_UNCONFIGURED_REASON = `The production endpoint is not configured: no deployment-provider observation has ever been recorded for this repository, so no deliveries can be measured until it is. This metric ends at observations recorded through ${PRODUCTION_OBSERVATION_ENDPOINT}, which needs a producer credential whose deploymentProviders scope names the provider; ${FLOW_DEPLOYMENT_ENDPOINT} records deployments for flow analytics and does not feed this metric. A deployment an older delivery recorded also counts as a production observation.`;
 
 function startOfUtcWeek(date: Date) {
   const result = new Date(date);
@@ -243,7 +243,7 @@ export async function shippingPulse(pool: pg.Pool): Promise<ShippingPulse> {
         ORDER BY pom.deployed_at_repository ASC, pom.observation_id ASC LIMIT $4
       ) o
     ) production ON true
-    -- The release the master verified serving this merge with \`master verify-deployment\`,
+    -- The release recorded serving this merge on older deliveries (GY-1981 removed the per-item record),
     -- read from the append-only \`deployment\` event that recorded it against the delivery.
     -- Its instant is the repository-clock time the verification was written: the release was
     -- serving then, so it is the latest instant production can have begun, and a duration

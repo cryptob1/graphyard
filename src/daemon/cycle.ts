@@ -301,7 +301,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
   // not a recomputation beside it, so what reclasses a subject is what the step decided.
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
-  const { stages, lead, production, postDeploy, postDeployFailures } = stageMetrics(snapshot.work, clock);
+  const { stages, lead } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
   timings.add('measure', now() - measuredFrom);
@@ -310,7 +310,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // GY-1344: time spent on requests the control plane never answered is the plane's outage, not the loop's work.
   const report = timings.report(), planeWaitMs = Math.min(durationMs - childWaitMs, report.planeWaitMs ?? 0);
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs - planeWaitMs, ...(planeWaitMs ? { planeWaitMs } : {}), steps, timings: report, open: open.length, actions: performed.length,
-    actionable: actionable.length, stages, lead, production, postDeploy, postDeployFailures,
+    actionable: actionable.length, stages, lead,
     scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
   state.metrics.push(metrics);
   state.cycle += 1;
