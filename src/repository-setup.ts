@@ -13,7 +13,7 @@ import { documentationAssignment, documentationPolicySchema, parseRepositoryConf
 import { executorRunnableKinds, type NextActionKind } from './model/action-kinds.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { assertUnitOwned, ForeignUnitRefusal, executorGlob, executorInstance, executorInstancePattern, legacyExecutorTemplate, legacyInstallUnits, readInstallUnits, resolveInstallUnits, systemdCommandLineWords, unitCheckout, type InstallUnits } from './install/units.js';
-import { coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
+import { checkoutLauncherOf, coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
 import { herdrSync } from './herdr-host.js';
@@ -196,6 +196,7 @@ export function herdrRebindRefusal(bound: string, target: string, flag = '--herd
 
 export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; herdrRebind?: boolean; herdrInstance?: HerdrInstance | null; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch; executors?: false | { run?: SystemctlRunner; unitDirectory?: string; node?: string } } = {}) {
   const connection = connectionSchema.parse(input); connection.url = serverOrigin(connection.url);
+  connection.cliPath = checkoutLauncherOf(connection.cliPath);
   delete connection.principal; // Identity is established only by the authenticated server response.
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
   if (options.herdr && !connection.token) throw new Error('Herdr setup requires an individual worker credential via GRAPHYARD_TOKEN or --token-stdin');
