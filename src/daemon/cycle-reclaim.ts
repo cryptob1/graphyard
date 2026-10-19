@@ -13,8 +13,9 @@ import type { SessionHandle } from '../model/sessions.js';
 import type { ContainmentAssessment } from '../master.js';
 import { containmentQuarantines } from '../master.js';
 import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
-import { closablePane, endedScopeStates, leaseLapsedEnding, loopEndedAttempt } from '../quarantine.js';
+import { closablePane, endedScopeStates, leaseLapsedEnding, loopEndedAttempt, containmentSettlementRefusals } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
+import { planeUnavailable } from '../model/refusal.js';
 import { unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs } from '../model/attempt-bound.js';
 import { checkPaneStillBelongs, endWorkerAttempt } from './cycle-resume.js';
 import type { DaemonAction, DaemonState } from './state.js';
@@ -98,7 +99,9 @@ export function containmentEscalationDetail(detail: string) {
 const transientRetry = 'retried next cycle with a fresh probe';
 /**
  * Why a settlement POST was refused only transiently, or null when the refusal is the host's: the
- * plane answering 5xx — Railway's 502 "Application failed to respond" among them — or refusing
+ * plane answering 5xx — Railway's 502 "Application failed to respond" among them — the plane not
+ * answering at all (a refused or reset connection, `fetch failed`, the request's own timeout —
+ * GY-2151: the plane-silence classes every other control-plane client reads), or refusing
  * nothing but a verification that went stale on its way there. A pid or epoch that happens to
  * read 5xx is no status, and a stale verification refused beside any other cause is not transient.
  */
@@ -106,6 +109,7 @@ export function transientSettlementRefusal(error: unknown) {
   const text = message(error);
   if ((error as { confirmedRefusal?: unknown })?.confirmedRefusal === false || /Application failed to respond/.test(text)
     || /(?:\bHTTP\/?[\d.]*\s+|"(?:status|code|statusCode)"\s*:\s*)5\d\d\b|\(5\d\d\):|^5\d\d [A-Z]/.test(text)) return 'the control plane answered 5xx';
+  if (planeUnavailable(error)) return 'the control plane did not answer';
   const refused = /Automatic containment settlement refused: (.*?)\. Confirm the previous worker is stopped/s.exec(text)?.[1];
   const stale = /Host verification is older than \d+s; verify the host again/g;
   return refused && stale.test(refused) && !refused.replace(stale, '').replace(/[;\s]/g, '') ? 'the host verification went stale before the plane judged it' : null;
@@ -130,6 +134,24 @@ const measuredClock = (cycle: Pick<Cycle, 'state' | 'now' | 'performed' | 'effec
 export async function settleQuarantine(cycle: Cycle, item: Work, assessment: ContainmentAssessment, judged: Work = item) {
   const { state, effects, now, performed } = cycle;
   const epoch = assessment.epoch, key = `settle:${item.id}:${epoch}`, attempts = (state.actions[key]?.attempts ?? 0) + 1;
+  // GY-2151: the plane lowers the fence against its own record, not the record this settlement was
+  // judged on. A POST the loop's snapshot or ending record called settleable has been refused on a
+  // deadline the plane's live record still held — the worker's last heartbeat renewed the lease the
+  // quarantine retained (GY-2085, GY-2113), and the session observation written after the close
+  // replaced the close outcome the record the loop judged waived the windows on. Judged on the
+  // record the plane holds now, at the latest control-plane time the verification's measured clock
+  // bound allows, a POST only leaves when the plane's own referee would lower the fence; anything
+  // else waits, recorded as still in motion, for a cycle whose fresh probe and fresh record agree.
+  const live = effects.readWork ? await effects.readWork(judged).catch(() => null) : null;
+  if (live?.containmentQuarantine && assessment.verification) {
+    const observed = Date.parse(cycle.snapshot.now);
+    const at = Math.max(Number.isFinite(observed) ? observed : -Infinity, now() - assessment.verification.clockOffset.min);
+    const refusals = containmentSettlementRefusals(live, assessment.verification, { now: at });
+    if (refusals.length) {
+      performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'waiting', detail: `The settlement of ${item.key} epoch ${epoch} waits: the control plane's own record still fences it (${refusals.join('; ')}), so posting would be refused; the fence is re-probed and settled once its windows pass`, attempts, epoch, cycle: state.cycle }, now(), effects.persist));
+      return false;
+    }
+  }
   await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'started', detail: `Settling the verified-dead containment quarantine of ${item.key} epoch ${epoch}`, attempts, epoch, cycle: state.cycle }, now(), effects.persist);
   const settled = (detail: string) => record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'done', detail, attempts, epoch, cycle: state.cycle }, now(), effects.persist);
   try {
