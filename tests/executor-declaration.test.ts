@@ -97,7 +97,7 @@ test('unit:executor-declaration-drops-removed-kind — readExecutorDeclaration k
     await until(() => log.join('').includes('serving resync every 1s as slot 1'), `the slot to start on a declaration naming a removed kind\n${log.join('')}`);
     await until(() => plane.claims.length > 0, `the slot to claim\n${log.join('')}`);
     assert.deepEqual(plane.claims[0].serves, ['resync'], `the slot serves only what the code runs; the removed name reached nothing\n${log.join('')}`);
-    assert.ok(plane.settled.includes('done'), `the claimed resync runs to a settlement\n${log.join('')}`);
+    await until(() => plane.settled.includes('done'), `the claimed resync to run to a settlement\n${log.join('')}`);
     assert.equal(slot.exitCode, null, `the slot is running, not exited\n${log.join('')}`);
   } finally {
     slot.kill('SIGTERM');
