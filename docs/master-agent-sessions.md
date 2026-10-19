@@ -23,7 +23,7 @@ Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs
 
 Profile `accounts` lists [agent environments](onboarding.md#agent-environments) (`master environments`) absent registry roles. Launches take first account under `run.quotaCeilingPercent`, else (or failed start) **fail over** (`dispatch.accounts`). Runtime limit notices (never agent text: agy `Individual quota reached`, pi 429 `Weekly/Monthly Limit Exhausted`, Claude's unanswered usage-limit menu or `/usage-credits`) or silent done with unpushed `WIP:` hold the launch account (`capacity.exhausted`, until reset/`account set`), relaunch elsewhere. An item's two latest epochs' account (within 2h, reset unpassed) is re-held first; unwritable holds refuse dispatch. Reviewers/producers: profile `kind` only (else `cross-runtime`).
 
-A rework worktree starts from the submission head Graphyard registered in the shared object store — the branch's tip once a requirements revision cleared the candidate — and fetches and pushes no worker branch: a stale or absent PR branch cannot refuse a dispatch.
+A rework worktree starts from the submission head registered in the shared object store, fetching and pushing no worker branch.
 
 ## The loop's own master session
 
@@ -45,7 +45,7 @@ GY=…/.graphyard/launch/NAME; claude … --settings …/.graphyard/harness/prod
 
 **Ready**: Herdr active without prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`; [fixture](../tests/fixtures/opencode-1.18-start-screen.txt)). Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line (`the claude runtime never started within 60 s (command still echoing)`, `… was still starting after 120 s`, `… is blocked before it is ready`), never Herdr's own `agent_not_found`; retrying `Automatic producer launch for GY-N refused 1 time(s)`.
 
-**Approvers**: replaced panes' bounds run from first sight; failed relaunches adopt a started same-name approver, or on `agent_name_taken` a listed holder, else end its session and pane, retry once.
+**Approvers**: replaced panes' bounds run from first sight; failed relaunches adopt a started same-name approver or listed holder, else end session and pane, retrying once.
 
 #### First-run consent prompts
 

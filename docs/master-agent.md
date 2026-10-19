@@ -15,7 +15,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### Session liveness is reconciled, not trusted
 
-**The control plane reconciles session liveness; closing sessions is not the master's manual duty.** Sweeps run every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most); a handle closes at the second consecutive sweep that misses it; one a lease or request names is held until it ends; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to that host's loop. Closures: **Vanished** (unnamed by attempt or request, missing twice; request-less reviews relaunch), **Ended** (agentless pane, terminal state; `idle`, `done` and `blocked` are deliberately not terminal; unlisted after its attempt or request ended), **Superseded** (review/proof session for a head the item moved past, delivered items too; implementation follows lease), **Duplicate** (older per role/head). A closure decides no gate, ends no lease, stops no process; concurrency and busy names count live sessions only. Past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) a session is flagged, not closed.
+The control plane reconciles session liveness, not the master's manual duty. Sweeps run every automatic-dispatch tick (`run.dispatchIntervalSeconds`, default 10, 30 at most); a handle closes at the second consecutive sweep that misses it; one a lease or request names is held until it ends; an unobserved one is left alone for its first 3 minutes. A handle another host launched is left to that host's loop. Closures: **Vanished** (unnamed by attempt or request, missing twice; request-less reviews relaunch), **Ended** (agentless pane, terminal state; `idle`, `done` and `blocked` are deliberately not terminal; unlisted after its attempt or request ended), **Superseded** (review/proof session for a head the item moved past, delivered items too; implementation follows lease), **Duplicate** (older per role/head). A closure decides no gate, ends no lease, stops no process; concurrency and busy names count live sessions only. Past its role's maximum (4h implementation, 1h review, `run.producerTimeoutMinutes` for a producer, 12h coordination) a session is flagged, not closed.
 
 **Instead of closing sessions by hand:** do nothing for a finished or dead session (`graphyard master run --once` sweeps); attach to an overlong one with its handle's command. Never mark another session's handle finished to free a slot. The loop and `master approver` relaunch never-started approvers (`done`, `idle`) past the start bound.
 
@@ -41,7 +41,7 @@ Past the build gate (`autoDispatch`): a producer request per proof group (`unit`
 - `pane_not_found` panes close. No request outlives its own token: one expired and unreported by Herdr settles `expired` (`dispatch.sessionReconcile.stuck` counts pending). Unanswered sessions relaunch, then `dispatch.abandoned`; exhausted producers raise `escalation:proof-exhausted`, then rework.
 - **Every role fails over on spent quota** or waits as one `capacity` line.
 
-The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops; a stranded post-merge request is probed hourly and launches once its cause is gone.
+The master never launches reviews or producers by hand, except `master review GY-N [PROFILE]` once relaunching stops.
 
 ### Proofs must exercise their criterion
 
