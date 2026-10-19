@@ -471,22 +471,21 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.ok(tmp.reports.length <= 50, `the reclaim record stays bounded (${tmp.reports.length})`);
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('reclaim:resources:')).length <= tmp.passes.filter(pass => pass.removed.length).length, 'the loop records a reclaim only for a pass that freed something');
   // GY-437: the between-cycles self-upgrade ran after every cycle of the day. The first deploy moved
-  // the clean checkout once and restarted the fleet and the loop once (every merge touches src/);
-  // the second deploy was verified while the checkout stood dirty, so its alignment went onto a held
-  // snapshot instead — the launcher pinned, the fleet restarted onto the snapshot tip, the loop
-  // re-executed onto it — with the checkout left where it stood; once the operator was done with it,
-  // the checkout moved onto the commit the loop already ran, which lifted the pin, re-grounded the
-  // fleet and owed no re-execution (the loop already ran that commit from the snapshot).
+  // the clean checkout once and restarted the loop once (every merge touches src/); the second
+  // deploy was verified while the checkout stood dirty, so its alignment went onto a held snapshot
+  // instead — the launcher pinned, the loop re-executed onto the snapshot tip — with the checkout
+  // left where it stood; once the operator was done with it, the checkout moved onto the commit the
+  // loop already ran, which lifted the pin and owed no re-execution (the loop already ran that
+  // commit from the snapshot).
   const summary = `${upgrades.checkouts.map(entry => `+${Math.round((entry.at - dayStart) / minute)} min ${entry.from.slice(0, 7)}..${entry.to.slice(0, 7)}`).join(', ')}`;
   const dirtySamples = refusalSamples.filter(sample => !sample.head), headSamples = refusalSamples.filter(sample => sample.head);
   assert.equal(upgrades.outcomes.length + headSamples.length, cycles, 'the checkout guard ran after every cycle, and the self-upgrade after every one it did not refuse for a moved HEAD — a dirty checkout holds it back no longer');
   assert.equal(upgrades.checkouts.length, production.deploys.length, `one checkout move per deploy: ${summary}`);
-  const snapshotTip = upgrades.executors[1];
+  const snapshotTip = upgrades.pins.find(entry => entry.commit)!.commit!;
   assert.equal(upgrades.checkouts[1].to, snapshotTip, `the checkout finished on the commit the loop had been running from the snapshot: ${summary}`);
-  assert.deepEqual(upgrades.executors, [upgrades.checkouts[0].to, snapshotTip, snapshotTip], 'one fleet restart per deploy plus one for the move back onto the checkout');
   assert.equal(upgrades.self, production.deploys.length, 'one re-execution of the loop per deploy; the move back owes none, the loop already ran that commit');
   assert.ok(upgrades.checkouts[1].at >= dayStart + basePlan.dirtyCheckout.to, `the checkout moved only once the operator was done with it: ${summary}`);
-  assert.deepEqual(upgrades.pins.map(entry => entry.commit), [...Array(basePlan.heldClaimRestarts + 1).fill(null), snapshotTip, null], 'the launcher stood unpinned through the clean deploy (its refused passes included), was pinned to the snapshot across the dirty window, and the move back onto the checkout unpinned it');
+  assert.deepEqual(upgrades.pins.map(entry => entry.commit), [null, snapshotTip, null], 'the launcher stood unpinned through the clean deploy, was pinned to the snapshot across the dirty window, and the move back onto the checkout unpinned it');
   const snapshotSamples = upgrades.samples.filter(sample => sample.snapshot);
   assert.ok(snapshotSamples.length >= 3, `the cursor named the checkout left behind across the dirty window (${snapshotSamples.length} cycles)`);
   assert.ok(snapshotSamples.every(sample => sample.snapshot!.commit === snapshotTip && sample.snapshot!.checkout === upgrades.checkouts[0].to && sample.snapshot!.dirty.includes('src/master.ts')),
@@ -517,17 +516,10 @@ test('unit:soak-invariants-hold — a simulated day of the real loop: fifteen it
   assert.equal(state.upgrade.alignedRelease, production.deploys[1].sha, 'the loop stands aligned with the last deployed release');
   assert.equal(state.release?.commit, checkout.head, 'the re-executed loop reports the release the checkout holds');
   assert.ok(Object.keys(state.actions).filter(key => key.startsWith('upgrade:') && key !== 'upgrade:unit').length <= production.deploys.length + 1, `the cursor holds one upgrade action per deploy and one refusal: ${Object.keys(state.actions).filter(key => key.startsWith('upgrade:')).join(', ')}`);
-  // GY-916: the first deploy's executor restart met a held claim. Each refused pass left the owed
-  // restart pending on the cursor and its action waiting — never a failed action:config, so no
-  // cycle failed — one attempt per pass, and the next pass after the claim settled completed it.
-  assert.deepEqual(upgrades.held, Array(basePlan.heldClaimRestarts).fill(upgrades.checkouts[0].to), 'the restart was refused only on the first deploy, against its tip');
-  assert.equal(upgrades.outcomes.filter(outcome => outcome === 'pending').length, basePlan.heldClaimRestarts, 'one pending pass per refusal');
-  assert.deepEqual(upgrades.owed.map(sample => sample.to), upgrades.held, 'the owed restart stood on the cursor against the moved tip');
-  assert.ok(upgrades.owed.every(sample => sample.state === 'waiting'), `the owed restart is waiting, not failed: ${JSON.stringify(upgrades.owed)}`);
-  assert.deepEqual(upgrades.owed.map((sample, index) => sample.attempts - upgrades.owed[0].attempts), upgrades.owed.map((_, index) => index), 'one attempt per refused pass, never more');
+  // GY-1984: the first deploy's restart is the loop's alone, so nothing holds it: one pass completes it.
   const firstRelease = production.deploys[0].sha;
-  assert.equal(state.actions[`upgrade:${firstRelease}`]?.state, 'done', 'the owed restart converged: the first deploy\'s action ends done');
-  assert.equal(state.actions[`upgrade:${firstRelease}`]?.attempts, upgrades.owed.at(-1)!.attempts + 1, 'and the pass that completed it is its last attempt');
+  assert.equal(state.actions[`upgrade:${firstRelease}`]?.state, 'done', 'the first deploy\'s action ends done');
+  assert.equal(state.actions[`upgrade:${firstRelease}`]?.attempts, 2, 'completed on its first pass: the checkout move and the restart are its two records');
   // (The dirty checkout's standing refusal, `upgrade:refused`, is its own record and is not one of these.)
   const restartFaults = Object.entries(state.actions).filter(([key, action]) => (/^upgrade:[0-9a-f]{40}$/.test(key) || key === 'upgrade:unit' || key.startsWith('escalation:watchdog:')) && action.state === 'failed');
   assert.deepEqual(restartFaults.map(([key]) => key), [], 'no restart, unit or watchdog fault stands at the end of the day');
@@ -751,7 +743,7 @@ test('unit:soak-invariants-hold — a coordinator checkout dirty across several 
   // is held as anywhere else, so a restart never runs ahead of production. The last deploy serves a
   // docs-only head: a docs page lands on the base branch after the day's merges are done and after
   // the loop restarted onto the third head, so its diff from the snapshot the loop runs touches no
-  // loaded code, and the snapshot restart is the loop's alone, the executors kept running.
+  // loaded code.
   const deploys = [2 * hour, 4 * hour, 6 * hour, 6 * hour + 45 * minute];
   const day = await simulateDay({ hours: 8, dirtyLift: true, dirtyTipHold: { from: 3 * hour, to: 5 * hour }, docsOnlyCommit: 6 * hour + 30 * minute, plan: { deploys, dirtyCheckout: { from: hour, to: 7 * hour }, headMove: { from: 5 * hour, to: 5 * hour + 30 * minute }, heldClaimRestarts: 0, deaths: new Set() } });
   assertLaunchesConfined(day, coordinatorRoot!);
@@ -784,16 +776,17 @@ test('unit:soak-invariants-hold — a coordinator checkout dirty across several 
   assert.deepEqual(upgrades.checkouts, [], 'the loop never moved the checkout: a dirty tree is never touched');
   assert.equal(upgrades.outcomes.length, cycles, 'the self-upgrade ran after every cycle of the day, refused nowhere');
   assert.ok(guardReads.refused >= 10, `the dirty tree stood escalated (${guardReads.refused} refused cycles) while the upgrade kept running`);
-  // One snapshot restart per eligible head: the fleet restarted once against each verified head the
+  // One snapshot restart per eligible head: the loop restarted once against each verified head the
   // served release contained, the launcher was pinned once per restart, and the loop re-executed
   // onto each snapshot. A head merged into a gap the served release does not cover yet is held as
   // anywhere else, so every restart ran against a commit production serves.
-  const restarts = upgrades.executors.length, codeHeads = heads.length - 1;
-  assert.ok(restarts >= 2 && restarts <= codeHeads, `one fleet restart per eligible head touching loaded code (${restarts} of ${codeHeads} heads${restarts < codeHeads ? '; a head past the last deploy waits for a release that serves it' : ''})`);
-  assert.equal(new Set(upgrades.executors).size, restarts, 'no head was snapshotted or restarted twice');
-  assert.ok(upgrades.executors.every(to => production.deploys.some(entry => github.contains(entry.sha, to))), 'every restart ran against a commit the served release contains');
-  assert.ok(!upgrades.executors.includes(upgrades.docsOnly!), 'the docs-only head restarted no executor: nothing they run changed');
-  // The docs-only head: the same snapshot restart minus the executors — the snapshot made and
+  const codeRestarts = upgrades.samples.filter(sample => sample.outcome === 'upgraded' && sample.last?.code).map(sample => sample.last!.to);
+  const restarts = codeRestarts.length, codeHeads = heads.length - 1;
+  assert.ok(restarts >= 2 && restarts <= codeHeads, `one restart per eligible head touching loaded code (${restarts} of ${codeHeads} heads${restarts < codeHeads ? '; a head past the last deploy waits for a release that serves it' : ''})`);
+  assert.equal(new Set(codeRestarts).size, restarts, 'no head was snapshotted or restarted twice');
+  assert.ok(codeRestarts.every(to => production.deploys.some(entry => github.contains(entry.sha, to))), 'every restart ran against a commit the served release contains');
+  assert.ok(!codeRestarts.includes(upgrades.docsOnly!), 'the docs-only head is no loaded-code restart');
+  // The docs-only head: the same snapshot restart — the snapshot made and
   // pinned, the loop re-executed onto it and recording it as the release it runs, one more upgrade
   // row — exercised here over the heads before it, which touched loaded code.
   const docsOnly = upgrades.samples.find(sample => sample.outcome === 'upgraded' && sample.last?.to === upgrades.docsOnly);

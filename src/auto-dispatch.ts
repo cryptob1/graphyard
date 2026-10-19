@@ -11,8 +11,6 @@ import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEn
 import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
-import { actionRenewIntervalMs, type ActionRow } from './model/actions.js';
-import { nextActionKinds, type NextActionKind } from './model/next-action.js';
 import { agentOwner, assertOutsideWorktrees, closeHerdrPane, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
@@ -1738,52 +1736,6 @@ function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSucc
 }
 
 /**
- * The stateless executor.
- *
- * Automatic dispatch above launches sessions for the requests one candidate raises. This runs the
- * whole inverted loop: the control plane computes a typed action per item and keeps a durable,
- * leased row for it (model/next-action.ts, model/actions.ts); an executor claims one row, runs it,
- * and reports the result. It holds nothing between claims — no cursor, no snapshot, no idea that
- * other executors exist — so any number of them on any number of hosts drive the same queue
- * without coordinating, and one that dies loses only its claim.
- *
- * An executor claims only the kinds it has a handler for. That is what makes AGENTS.md's rule
- * mechanical rather than aspirational: configure no `escalate` handler and the loop still runs a
- * full ready-to-delivered cycle, with every language model invoked inside the sessions the
- * mechanical actions start rather than anywhere in the loop itself.
- */
-export interface ExecutorIdentity { id: string; host: string }
-export type ExecutorHandler = (action: ActionRow, identity: ExecutorIdentity) => Promise<string> | string;
-export interface ExecutorEffects {
-  /** Ask the control plane for one row this executor can run; null when the queue has nothing for it. */
-  claim: (request: { host: string; executor: string; kinds: NextActionKind[]; serves?: NextActionKind[]; leaseSeconds?: number }) => Promise<{ action: ActionRow | null; open?: number }>;
-  settle: (action: ActionRow, result: 'done' | 'failed', reason: string) => Promise<unknown>;
-  /**
-   * Say the handler is still running, so the claim holds for another lease. An executor wired
-   * without it can still run every kind — it is simply bounded by one claim lease, and a handler
-   * that outlives that is taken from it by the next executor.
-   */
-  renew?: (action: ActionRow) => Promise<unknown>;
-  /**
-   * Say this executor is alive without claiming (GY-1288): a claim poll is how the control plane
-   * hears from an executor, so one that may not claim for a while — behind a fleet restart's
-   * fence — says so here instead of falling silent and reading as a dead fleet.
-   */
-  present?: (request: { host: string; executor: string; kinds: NextActionKind[]; serves?: NextActionKind[] }) => Promise<unknown>;
-  /** One handler per action kind this executor can run. A kind with no handler is never claimed. */
-  handlers: Partial<Record<NextActionKind, ExecutorHandler>>;
-  /**
-   * Why no session may be launched on this host now (GY-612: its memory is below the floor), or
-   * null. While it names a reason the executor claims no launching kind, so the row waits in the
-   * queue without a failure or a backoff and is claimed on the first poll after memory recovers.
-   */
-  launchHold?: () => Promise<string | null>;
-}
-/** The kinds whose handler starts a session on this host. */
-export const launchingKinds: readonly NextActionKind[] = ['dispatch', 'request-review'];
-export interface ExecutorStep { at: string; executor: string; host: string; action: ActionRow | null; result: 'done' | 'failed' | 'idle'; kind: NextActionKind | null; work: string | null; reason: string }
-
-/**
  * How often a free worker session asks the control plane for its next assignment.
  *
  * The pull model's latency is the wait for the next poll plus the time the pull itself takes, so
@@ -1818,98 +1770,4 @@ export async function runWorkerPull(pull: () => Promise<{ assigned: Work | null;
     try { await delay(intervalMs, undefined, { signal: options.signal }); } catch { /* woken to stop */ }
   }
   return done();
-}
-
-/** The kinds an executor can claim: exactly the ones it has a handler for, in a stable order. */
-export const executorKinds = (handlers: ExecutorEffects['handlers']): NextActionKind[] => nextActionKinds.filter(kind => !!handlers[kind]);
-
-/**
- * One claim-run-settle step. A handler that throws settles the row as failed with the reason, so
- * the next executor sees what this one could not do rather than an action that silently stalls;
- * the row backs off and is offered again.
- */
-export async function runExecutorTick(identity: ExecutorIdentity, effects: ExecutorEffects, now: () => number = Date.now, options: { renewIntervalMs?: number } = {}): Promise<ExecutorStep> {
-  const kinds = executorKinds(effects.handlers);
-  const step = (action: ActionRow | null, result: ExecutorStep['result'], reason: string): ExecutorStep =>
-    ({ at: new Date(now()).toISOString(), executor: identity.id, host: identity.host, action, result, kind: action?.kind ?? null, work: action?.key ?? null, reason });
-  if (!kinds.length) return step(null, 'idle', 'this executor has no handler for any action kind');
-  const hold = kinds.some(kind => launchingKinds.includes(kind)) && effects.launchHold ? await effects.launchHold().catch(() => null) : null;
-  const claimable = hold ? kinds.filter(kind => !launchingKinds.includes(kind)) : kinds;
-  // A launch hold defers rows; it does not change what this executor serves. The claim names only
-  // the kinds it may take now, and a claim is also presence, so the control plane would read the
-  // held launching kinds as served by nobody and file the wait as a configuration fault (GY-1538).
-  // The claim carries every kind this executor runs as serves, which the claim route records as presence; only a tick that sends no claim sends presence alone.
-  const declarePresence = async () => { if (hold) await Promise.resolve(effects.present?.({ host: identity.host, executor: identity.id, kinds, serves: kinds })).catch(() => {}); };
-  if (!claimable.length) { await declarePresence(); return step(null, 'idle', `claims nothing: ${hold}`); }
-  const claimed = await effects.claim({ host: identity.host, executor: identity.id, kinds: claimable, serves: kinds });
-  const action = claimed.action;
-  if (!action) return step(null, 'idle', hold ? `the queue has no action this executor can run without launching a session, and it launches none: ${hold}` : 'the queue has no action this executor can run');
-  // The handlers are not bounded by the claim lease: a dispatch prepares a worktree and waits on
-  // a runtime, and a guarded merge chains provider calls that each have their own timeout. While
-  // one runs, this says so at the renewal interval, so the row is never offered to a second
-  // executor mid-flight. A renewal that fails is not a failure of the action — if the claim is
-  // really gone the settlement refuses, which is where that is decided.
-  const holding = effects.renew ? setInterval(() => { void effects.renew!(action).catch(() => {}); }, options.renewIntervalMs ?? actionRenewIntervalMs) : null;
-  holding?.unref?.();
-  try {
-    const reason = (await effects.handlers[action.kind]!(action, identity)) || `${action.kind} completed`;
-    if (holding) clearInterval(holding);
-    await effects.settle(action, 'done', reason.slice(0, 2000));
-    return step(action, 'done', reason);
-  } catch (error) {
-    const reason = message(error).slice(0, 2000);
-    await effects.settle(action, 'failed', reason).catch(() => {});
-    return step(action, 'failed', reason);
-  } finally { if (holding) clearInterval(holding); }
-}
-
-/**
- * Claim and run until stopped. An executor that finds nothing waits the idle interval; one that
- * ran an action tries again immediately, so a queue that fills up is drained as fast as the
- * handlers allow rather than one row per interval.
- */
-export async function runExecutor(identity: ExecutorIdentity, effects: ExecutorEffects, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; now?: () => number; log?: (line: string) => void; maxSteps?: number; renewIntervalMs?: number }) {
-  const now = options.now ?? Date.now, log = options.log ?? (() => {});
-  const steps: ExecutorStep[] = [];
-  do {
-    if (options.signal?.aborted) break;
-    let step: ExecutorStep;
-    try { step = await runExecutorTick(identity, effects, now, { renewIntervalMs: options.renewIntervalMs }); }
-    catch (error) {
-      step = { at: new Date(now()).toISOString(), executor: identity.id, host: identity.host, action: null, result: 'failed', kind: null, work: null, reason: message(error).slice(0, 2000) };
-    }
-    steps.push(step);
-    if (step.action) log(`[graphyard-executor] ${identity.id} ${step.result} ${step.kind} for ${step.work}: ${step.reason}`);
-    if (options.once || options.signal?.aborted || (options.maxSteps !== undefined && steps.length >= options.maxSteps)) break;
-    // Only a completed action earns an immediate retry. An empty queue and a step that failed —
-    // including a claim the control plane could not answer — both wait, so a broken executor
-    // polls at its interval rather than spinning against the error.
-    if (step.result !== 'done') { try { await delay(options.intervalMs, undefined, { signal: options.signal }); } catch { /* woken to stop */ } }
-  } while (!options.signal?.aborted);
-  return { steps };
-}
-
-/** Executor effects bound to a control plane over HTTP; the only state is the credential. */
-export function executorEffects(config: { url: string; token: string; fetcher?: typeof fetch; requestId?: () => string }, handlers: ExecutorEffects['handlers']): ExecutorEffects {
-  const fetcher = config.fetcher ?? fetch;
-  const requestId = config.requestId ?? (() => randomUUID());
-  const post = async (path: string, body: unknown) => {
-    const response = await fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${config.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId() }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
-    const result = await response.json();
-    if (!response.ok) throw new Error(typeof result?.error === 'string' ? result.error : JSON.stringify(result));
-    return result;
-  };
-  return {
-    claim: request => post('actions/claim', request),
-    // The settlement names the executor the claim was recorded under, not the credential's own
-    // principal: several executors may run behind one coordinator credential, and a settlement
-    // under the wrong identity is refused after the handler has already run — which is the one
-    // way a leased queue can still execute an action twice.
-    settle: (action, result, reason) => post(`actions/${action.id}/settle`, { result, reason, ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
-    // The same claim, named the same way: a renewal from any other executor or credential is
-    // refused, so holding a row is as bounded as claiming one.
-    renew: action => post(`actions/${action.id}/renew`, { ...(action.claim?.executor ? { executor: action.claim.executor } : {}) }),
-    present: request => post('actions/presence', request),
-    handlers,
-  };
 }

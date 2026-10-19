@@ -8,7 +8,6 @@ import { performSelfUpgrade, type DeployPorts, type SelfUpgradeDeps } from '../s
 /** The new exports, imported in each test so a reverted source fails the case, not the file (graphyard verify's exercise). */
 const upgrade = () => import('../src/daemon/upgrade.js') as Promise<Record<string, any>>;
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
-import type { ExecutorRestartResult } from '../src/executor-fleet.js';
 
 /**
  * GY-1982: the loop deploys each new base tip between cycles through fake deploy, health and
@@ -55,11 +54,8 @@ function fakePorts(options: { fails?: Record<string, string>; schemas?: { target
   return { ports, calls, pins };
 }
 
-const restarted = (to: string): ExecutorRestartResult => ({ result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] });
-
-function deps(fake: FakeGit, clock: { now: number }, ports: DeployPorts, fleet: { self: number; executors: string[] }): SelfUpgradeDeps {
+function deps(fake: FakeGit, clock: { now: number }, ports: DeployPorts, fleet: { self: number }): SelfUpgradeDeps {
   return { root: '/coordinator', run: fake.run, now: () => clock.now, deploy: async () => ports,
-    restartExecutors: async to => { fleet.executors.push(to); return restarted(to); },
     restartSelf: async () => { fleet.self += 1; } };
 }
 
@@ -74,7 +70,7 @@ function releasedState(promotionReading: (...args: any[]) => any): DaemonState {
 test('unit:continuous-deploy-advances-release — a base tip that differs from the recorded release is deployed between cycles, health and end to end pass, the release reading names it with its time, and the loop restarts onto it', async () => {
   const { deployKey, deployLine, promotionReading } = await upgrade();
   const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
-  const { ports, calls, pins } = fakePorts(), fleet = { self: 0, executors: [] as string[] };
+  const { ports, calls, pins } = fakePorts(), fleet = { self: 0 };
   const guard = coordinatorCheckoutGuard({
     state: () => state, read: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
     agents: async () => [], snapshot: async () => ({ work: [] as Work[], now: iso(clock.now) }), persist: async () => {}, now: () => clock.now, log: () => {}, applies: () => true,
@@ -91,7 +87,6 @@ test('unit:continuous-deploy-advances-release — a base tip that differs from t
   assert.equal(state.promotion?.promotedAt, iso(start), 'and the time it was deployed');
   assert.equal(state.promotion?.deployFailed, null);
   assert.deepEqual(pins, [tip], 'the deployed tip is pinned known good');
-  assert.deepEqual(fleet.executors, [tip], 'the executors restart onto it');
   assert.equal(fleet.self, 1, 'the loop requests its own restart onto it');
   assert.equal(state.actions[deployKey]?.state, 'done');
   assert.equal(guard.expected(), tip, 'the loop\'s own deploy is never drift');
@@ -115,7 +110,7 @@ test('unit:continuous-deploy-rolls-back — a tip failing health or end to end i
   const { deployKey, deployLine, promotionReading } = await upgrade();
   const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
   const fails: Record<string, string> = { [tip]: 'health' };
-  const { ports, calls } = fakePorts({ fails }), fleet = { self: 0, executors: [] as string[] };
+  const { ports, calls } = fakePorts({ fails }), fleet = { self: 0 };
   const pass = () => performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
 
   const first = await pass();
@@ -130,7 +125,6 @@ test('unit:continuous-deploy-rolls-back — a tip failing health or end to end i
   assert.equal(first.outcome === 'failed' && first.reason, line);
   assert.equal(state.actions[deployKey]?.state, 'failed');
   assert.equal(fleet.self, 0, 'nothing restarts onto the failed tip');
-  assert.deepEqual(fleet.executors, []);
 
   // The second attempt fails end to end this time; the third pass deploys nothing.
   fails[tip] = 'e2e';
@@ -164,7 +158,7 @@ test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that 
   // Production is observed serving the recorded release, which does not contain the tip: the
   // release-lagged hold (GY-1585) would have held the restart onto it.
   state.deployment = { source: 'github', sha: released, at: iso(start), reason: null, deployed: ['GY-1'], pending: ['GY-2'] } as unknown as DaemonState['deployment'];
-  const { ports, calls } = fakePorts({ fails: { [tip]: 'health' }, schemas: { target: 8, database: 7 } }), fleet = { self: 0, executors: [] as string[] };
+  const { ports, calls } = fakePorts({ fails: { [tip]: 'health' }, schemas: { target: 8, database: 7 } }), fleet = { self: 0 };
 
   const outcome = await performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
   assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`], 'the older release is never redeployed onto the migrated database');

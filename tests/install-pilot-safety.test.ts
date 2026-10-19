@@ -157,21 +157,21 @@ test('unit:install-herdr-plugin-guard — the plan shows a Herdr relink and a pl
     const run = (args: string[]) => { calls.push(args); return args[1] === 'config-dir' ? config : ''; };
     const fetcher = (async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, repository: REPOSITORY }))) as unknown as typeof fetch;
     const connection = { url: 'https://new.example', cliPath: launcher, hostId: 'host', token: 'worker-token-0123456789abcdef0123456789' };
-    await assert.rejects(setupRepository(root, connection, { herdr: true, fetcher, runHerdr: run, executors: false }), /bound to https:\/\/production\.example; linking it for https:\/\/new\.example would repoint.*--herdr-rebind/);
+    await assert.rejects(setupRepository(root, connection, { herdr: true, fetcher, runHerdr: run }), /bound to https:\/\/production\.example; linking it for https:\/\/new\.example would repoint.*--herdr-rebind/);
     assert.ok(!calls.some(args => args[1] === 'link' || args[1] === 'enable'), 'nothing was linked or enabled');
     assert.equal(await exists(join(root, 'AGENTS.md')), false); assert.equal(await exists(join(root, '.graphyard/connection.json')), false);
-    const result = await setupRepository(root, connection, { herdr: true, herdrRebind: true, fetcher, runHerdr: run, executors: false });
+    const result = await setupRepository(root, connection, { herdr: true, herdrRebind: true, fetcher, runHerdr: run });
     assert.deepEqual(result.herdr, { previous: 'https://production.example', bound: 'https://new.example', relinked: true });
     assert.equal(JSON.parse(await readFile(join(config, 'config.json'), 'utf8')).url, 'https://new.example');
     // An uninspectable config.json is refused the same way, before any write.
     await writeFile(join(config, 'config.json'), '{not json', { mode: 0o600 });
     calls.length = 0;
-    await assert.rejects(setupRepository(root, { ...connection, url: 'https://third.example' }, { herdr: true, fetcher, runHerdr: run, executors: false }), /bound to a configuration that cannot be inspected \(.*config\.json: not valid JSON\); linking it for https:\/\/third\.example would repoint/);
+    await assert.rejects(setupRepository(root, { ...connection, url: 'https://third.example' }, { herdr: true, fetcher, runHerdr: run }), /bound to a configuration that cannot be inspected \(.*config\.json: not valid JSON\); linking it for https:\/\/third\.example would repoint/);
     assert.ok(!calls.some(args => args[1] === 'link' || args[1] === 'enable'), 'nothing was linked or enabled over an uninspectable binding');
     assert.equal(await readFile(join(config, 'config.json'), 'utf8'), '{not json');
     await writeFile(join(config, 'config.json'), JSON.stringify({ url: 'https://new.example', token: 'x' }), { mode: 0o600 });
     // Rebinding the same server again is no relink.
-    assert.deepEqual((await setupRepository(root, connection, { herdr: true, fetcher, runHerdr: run, executors: false })).herdr, { previous: 'https://new.example', bound: 'https://new.example', relinked: false });
+    assert.deepEqual((await setupRepository(root, connection, { herdr: true, fetcher, runHerdr: run })).herdr, { previous: 'https://new.example', bound: 'https://new.example', relinked: false });
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

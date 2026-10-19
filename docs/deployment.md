@@ -31,7 +31,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider rai
 
 A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; earlier or mid-deploy `production` shows no attention. Deployments: Railway's API, else GitHub's ([environment name](#production-environment-name)). Probe: `master init --deployment-url https://YOUR-DOMAIN/healthz --deployment-sha-field commit`. Idle, the loop reuses observations `run.deploymentReuseMinutes` (15; `0` every cycle).
 
-Self-upgrades [deploy](delivery.md#release-candidates) the tip first; `.graphyard/held-cli.json` pins `bin/graphyard.mjs`, executors, loops to a dirty checkout's snapshot; held executors' owed restarts aren't faults.
+Self-upgrades [deploy](delivery.md#release-candidates) the tip first; `.graphyard/held-cli.json` pins `bin/graphyard.mjs` and loops to a dirty checkout's snapshot.
 
 Observing a release reports post-deploy checks it does not yet see; nothing is filed. The loop records throughput, judging the serving release over trailing 72h merges less operator-touched and grant-refused superseded idle charged from window start; ≥20 all excluded, or ≥10 missing 48h+, escalates once/release on an owner item, requesting its unchanged-budget decision.
 

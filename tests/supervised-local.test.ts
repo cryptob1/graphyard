@@ -96,7 +96,7 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
 
   // The dashboard's caller: /api/status names the live loop's supervision (`setup.supervision`, from
   // the header on its coordination read), and the Setup page judges the same checklist from it.
-  const { LoopRegistry, loopSupervision } = await import('../src/model/executor-presence.js');
+  const { LoopRegistry, loopSupervision } = await import('../src/model/loop-presence.js');
   assert.equal(loopSupervision('supervised'), 'supervised'); assert.equal(loopSupervision('autonomous'), 'autonomous');
   assert.equal(loopSupervision(undefined), null); assert.equal(loopSupervision('unattended'), null);
   const registry = new LoopRegistry(), seen = new Date('2026-10-08T00:00:00.000Z');

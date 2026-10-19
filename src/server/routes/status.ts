@@ -4,7 +4,7 @@ import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
-import { describeUnserved, durablePresence, executorRegistry, executorReport, loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, loopSupervision, loopSupervisionHeader, presenceQuery, reportedLoopMerger } from '../../model/executor-presence.js';
+import { loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, loopSupervision, loopSupervisionHeader, reportedLoopMerger } from '../../model/loop-presence.js';
 import { installationSettingsUrl, mainGuardStatus, webhookCorroboration, webhookState } from '../../github.js';
 import { controlPlanePermissions, requiredPermissions } from '../../github-permissions.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
@@ -66,13 +66,9 @@ export const statusRoutes = defineRoutes('status', [
       const webhooks = { ...liveness, configured: !!process.env.GITHUB_WEBHOOK_SECRET, settingsUrl: github?.webhookSettingsUrl?.() ?? null, ...corroboration,
         openPullRequests: work.filter(item => item.stage !== 'done' && !!item.submission && !!item.observation && !item.observation.merged && item.observation.prState !== 'closed').length,
         state: webhookState({ ...liveness, ...corroboration }, observedAt.getTime()) };
-      // The fleet as the dashboard needs it (GY-105): how many executors are alive, and each kind
-      // of pending action none of them serves, with its wait and what to start.
-      // A pending merge row waits on a loop that merges, never on an executor (GY-916).
-      // Presence recorded durably by any process counts, so a restart or deploy reads the fleet live (GY-1289).
-      const executors = executorReport(visibleWork, executorRegistry(engine), observedAt, undefined, await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt), await durablePresence(presenceQuery(engine)));
+      const loop = await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        executors: { live: executors.live.length, liveMs: executors.liveMs, served: executors.served, unserved: executors.unserved, attention: describeUnserved(executors) }, baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, starvedJobs, jobs, githubBudget, webhooks,
+        baseBranch: github?.config.base ?? process.env.GITHUB_BASE_BRANCH ?? 'main', github: !!github, check: 'Graphyard / merge', reviewProviders: ['github', ...(dispatchAvailable ? ['codex'] : []), ...(dispatchAvailable && engine.reviewerApps.length ? ['agent'] : [])], reviewerApps: engine.reviewerApps, githubPermissions, githubRepository, githubAppId: github?.config.appId ?? null, githubInstallationId: github?.config.installationId ?? null, appPermissions, heldJobs, starvedJobs, jobs, githubBudget, webhooks,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
@@ -106,7 +102,7 @@ export const statusRoutes = defineRoutes('status', [
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):
         // whether a master loop is live, and who reviews and merges as the live loop names it (GY-1501):
         // `supervised` drops the reviewer App and reviewing account from the Setup checklist.
-        setup: { loop: !!executors.loop?.live, supervision: loopRegistry(engine).live(observedAt)?.supervision ?? null,
+        setup: { loop: !!loop?.live, supervision: loopRegistry(engine).live(observedAt)?.supervision ?? null,
           // and the pane server its agents run in as that loop last named it (GY-1511).
           panes: loopRegistry(engine).live(observedAt) ? loopPanesRegistry(engine).latest : null },
         now: observedAt.toISOString(), release: releaseInfo(), schema: schemaVersion };
@@ -176,9 +172,8 @@ export const statusRoutes = defineRoutes('status', [
       //
       // It rides the default and full reads, which are the reads its output is for: master status
       // derives every speed report from their timelines. The coordination view is the inverted loop's
-      // poll — the cycle, the dispatcher and every stateless executor ask for it every few
-      // seconds — and a ledger reconstruction in front of those reads would sit in the path of
-      // every claim, so a fleet that polls harder would pay reconstruction latency to act.
+      // poll — the cycle and the dispatcher ask for it every few seconds — and a ledger
+      // reconstruction in front of those reads would sit in the path of every step.
       if (view !== 'coordination') await catchUpPipelineTimelines(services.engine.store);
       const scope = <T extends { work: Work[]; jobs: IntegrationJob[] }>(snapshot: T) => {
         const visibleWork = operatorVisible(snapshot.work);

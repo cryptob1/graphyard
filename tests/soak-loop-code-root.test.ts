@@ -145,8 +145,6 @@ async function world(label: string, options: { external?: boolean } = {}): Promi
         root: managed.root, run, now: () => clock,
         persist: async written => writeDaemonState(master, written),
         alignUnit: async () => alignRunningLoopUnit(managed.root, master, unitName, input => alignLoopUnit(input, host)),
-        alignExecutorUnits: async () => ({ wrote: 'updated', reason: null }),
-        restartExecutors: async to => ({ result: 'restarted' as const, reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }),
         restartSelf: async () => { state.release = await startupRelease(); w.restarts.push({ to: state.release?.commit ?? null }); },
       } satisfies SelfUpgradeDeps);
       w.outcomes.push(outcome.outcome);
@@ -207,14 +205,10 @@ test('manual:loop-code-root-clean-day — over a simulated day of three merged h
  * checkout, and every cycle runs the real loop with its system invariants. The day's own invariants
  * add, after every cycle: every git command the self-upgrade issues targets the CLI checkout; at each
  * loop restart the unit the production alignment renders starts the launcher the pin requires and
- * hands it the CLI checkout while a pin stands; at each fleet restart the executor unit the real
- * renderer wrote starts the snapshot's entry handed the CLI checkout, or the CLI checkout's own
- * entry once the pin lifts — both always working in the managed repository.
+ * hands it the CLI checkout while a pin stands, always working in the managed repository.
  */
 async function codeRoot(label: string) {
   const root = await temporaryDirectory(`soak-code-root-${label}-day`);
-  await mkdir(join(root, 'scripts'), { recursive: true });
-  await writeFile(join(root, 'scripts', 'graphyard-executor.mjs'), '// entry\n');
   return root;
 }
 const hours = (count: number) => count * 6 * cycle;
@@ -231,7 +225,6 @@ function assertDistinctRoots(day: Day, root: string, label: string, snapshots: b
   assert.ok(held.every(unit => unit.handed === root && unit.launcher === join(root, '.graphyard', 'held-cli', unit.pin!.slice(0, 12), 'bin', 'graphyard.mjs')), `${label}: a held loop unit starts the snapshot under the CLI checkout and hands that checkout: ${JSON.stringify(held.find(unit => unit.handed !== root))}`);
   assert.ok(free.every(unit => unit.handed === null && unit.launcher === join(root, 'bin', 'graphyard.mjs')), `${label}: an unpinned loop unit starts the CLI checkout's launcher, handed nothing`);
   assert.ok(c.loopUnits.every(unit => unit.working === '/soak/coordinator'), `${label}: the loop always works in the managed repository`);
-  assert.ok(c.executorUnits.some(unit => unit.pin) === snapshots && c.executorUnits.every(unit => unit.working === '/soak/coordinator' && (unit.entry === join(root, 'scripts', 'graphyard-executor.mjs') ? unit.handed === null : unit.handed === root)), `${label}: executor units start the CLI checkout's entry, or a snapshot's handed the CLI checkout: ${JSON.stringify(c.executorUnits)}`);
   assert.ok(day.upgrades.self >= 2, `${label}: the loop restarted onto more than one head (${day.upgrades.self})`);
   assert.equal(day.state.release?.commit, day.checkout.head, `${label}: the day ends with the loop reporting the CLI checkout's commit`);
   assert.ok(day.upgrades.pins.some(pin => pin.commit), `${label}: the day pinned a release under the CLI checkout`);
@@ -239,7 +232,7 @@ function assertDistinctRoots(day: Day, root: string, label: string, snapshots: b
   assert.equal(readHeldCli(root), null, `${label}: the pin's pointer under the CLI checkout is lifted`);
 }
 
-test('manual:loop-code-root-real-loop-snapshot-day — the real loop over a simulated day with the CLI checkout apart from the managed repository: two deploys restart it onto held snapshots of a dirty checkout and the lift returns it, with every git command on the CLI checkout and every loop and executor unit binding the CLI checkout\u2019s launcher or its snapshot', { timeout: 600_000 }, async () => {
+test('manual:loop-code-root-real-loop-snapshot-day — the real loop over a simulated day with the CLI checkout apart from the managed repository: two deploys restart it onto held snapshots of a dirty checkout and the lift returns it, with every git command on the CLI checkout and every loop unit binding the CLI checkout\u2019s launcher or its snapshot', { timeout: 600_000 }, async () => {
   const root = await codeRoot('snapshot');
   const day = await simulateDay({ hours: 8, dirtyLift: true, codeRoot: root,
     plan: { deploys: [hours(2), hours(4)], dirtyCheckout: { from: hours(1), to: hours(6) }, headMove: { from: hours(99), to: hours(100) }, heldClaimRestarts: 0, deaths: new Set() } });
@@ -299,7 +292,6 @@ test('manual:loop-code-root-real-loop-external-install-day — the real loop ove
   assert.ok(samples.every(sample => sample.head === samples[0]!.head), 'the CLI checkout’s HEAD never changes');
   assert.deepEqual([...c.gitRoots], [root], 'git ran only in the CLI checkout, beside the identification reads');
   assert.equal(day.upgrades.self, 0, 'the loop never restarts itself onto Graphyard code');
-  assert.deepEqual(day.upgrades.executors, [], 'the fleet is never restarted');
   // The legacy obligations are retired on the first pass and never return.
   const refusing = samples.filter(sample => sample.outcome === 'refused');
   assert.ok(refusing.length >= 10, `the upgrade ran on many cycles (${refusing.length})`);
@@ -308,7 +300,6 @@ test('manual:loop-code-root-real-loop-external-install-day — the real loop ove
   assert.deepEqual(day.upgrades.pins.map(pin => pin.commit), [null], 'the legacy pin is lifted once and no pin is placed');
   assert.equal(readHeldCli(root), null, 'the pointer under the CLI checkout is gone');
   assert.equal(day.upgrades.unit.launcher, 'checkout', 'the loop unit is returned to the checkout’s launcher');
-  assert.equal(day.upgrades.executorEntry, 'checkout', 'the executor units are returned to the checkout’s entry');
   assert.equal(day.state.actions['upgrade:align']?.state, 'done', 'the retirement is recorded once');
   // One standing refusal: one row, one attention, written once.
   assert.equal(new Set(refusing.map(sample => `${sample.refused?.reason}@${sample.refused?.commit}`)).size, 1, 'one standing refusal');
@@ -334,16 +325,15 @@ test('manual:loop-code-root-real-loop-external-install-dirty-day — the real lo
   assert.deepEqual(day.upgrades.checkouts, [], 'the CLI checkout is never moved');
   assert.deepEqual([...c.gitRoots], [root], 'git ran only in the CLI checkout, beside the identification reads');
   assert.equal(day.upgrades.self, 0, 'the loop never restarts itself onto Graphyard code');
-  assert.deepEqual(day.upgrades.executors, [], 'the fleet is never restarted');
   const dirty = samples.filter(sample => sample.dirty && sample.outcome), cleaned = samples.filter(sample => !sample.dirty && sample.outcome);
   assert.ok(dirty.length >= 10 && cleaned.length >= 10, `the upgrade ran on many dirty (${dirty.length}) and clean (${cleaned.length}) cycles`);
   assert.ok(samples.every(sample => sample.outcome === null || sample.outcome === 'refused'), `every pass refuses: ${[...new Set(samples.map(sample => sample.outcome))]}`);
   // While dirty: the owed restart and the stall are retired, the snapshot, its pin and the unit bindings stand.
   assert.ok(dirty.every(sample => sample.pending === null && sample.stall === null), 'the owed restart and the stall are retired on the first pass');
   assert.ok(dirty.every(sample => sample.snapshot?.commit === pinned && sample.pin === pinned), 'the held snapshot and its pin stand across every dirty cycle and deploy');
-  assert.ok(dirty.every(sample => sample.unit === `snapshot:${pinned}` && sample.executorEntry !== 'checkout'), 'the loop and executor units keep naming the snapshot while the checkout is dirty');
+  assert.ok(dirty.every(sample => sample.unit === `snapshot:${pinned}`), 'the loop unit keeps naming the snapshot while the checkout is dirty');
   // Once clean: retired once, never to return.
-  assert.ok(cleaned.every(sample => sample.snapshot === null && sample.pin === null && sample.unit === 'checkout' && sample.executorEntry === 'checkout'), 'once clean the snapshot, its pin and the unit bindings are retired');
+  assert.ok(cleaned.every(sample => sample.snapshot === null && sample.pin === null && sample.unit === 'checkout'), 'once clean the snapshot, its pin and the unit bindings are retired');
   assert.deepEqual(day.upgrades.pins.map(pin => pin.commit), [null], 'the pin is lifted once, after the checkout is clean, and no pin is placed');
   assert.equal(readHeldCli(root), null, 'the pointer under the CLI checkout is gone');
   assert.equal(day.state.actions['upgrade:align']?.attempts, 2, 'two retirements recorded: the owed restart and stall, then the snapshot once clean');

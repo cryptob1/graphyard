@@ -19,7 +19,7 @@ Start with the numbered path; the other pages are references to open when a task
 - [Master-agent operating mode](master-agent.md) — loop, merges.
 - [Delivery redesign](delivery-redesign.md) — merge writer, rollout.
 - [Master-agent sessions](master-agent-sessions.md) — profiles, launches.
-- [Master-agent reference](master-agent-reference.md) — executors, GitHub.
+- [Master-agent reference](master-agent-reference.md) — typed actions, GitHub.
 - [Operations and recovery](operations.md) — checklist, incidents.
 - [Operations reference](operations-reference.md) — procedures, limits.
 - [Coordination](coordination.md) — criteria, scope.

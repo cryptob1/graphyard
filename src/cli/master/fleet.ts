@@ -1,4 +1,4 @@
-// Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, executors, review, protection, withdraw, tip-cleanup, browser, harness.
+// Concern: `graphyard master` fleet subcommands — start, worker, producer, config, registry, reviewer, review, protection, withdraw, tip-cleanup, browser, harness.
 import { constants } from 'node:fs';
 import { access, readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -14,7 +14,6 @@ import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
 import { browserFlows, listConfirmAccessFixtures, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
 import { registryCommand } from '../master-registry.js';
-import { executorsCommand } from '../master-executors.js';
 import { assertHandReview } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
 import { readSecretFromStdin } from '../context.js';
@@ -130,7 +129,6 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
   if (id === 'reviewer') return reviewerCommand(root, master, args, print);
   // The fleet on this host against the CLI checkout's commit: the release a restart would load.
-  if (id === 'executors') return print(await executorsCommand(master, args, { actions: () => masterApi('actions'), coordinatorCommit: cli.commit }));
   // A system-driven item's reviewer is the loop's to launch, save the recovery it sends the master to (GY-175),
   // judged on the same snapshot the launch reads its review request from.
   if (id === 'review') {

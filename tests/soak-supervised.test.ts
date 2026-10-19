@@ -10,7 +10,7 @@ import { type DispatchEffects, emptyDispatchCursor, runDispatchTick, selectRevie
 import { fleet, requested } from './helpers/review-fleet.js';
 import { daemonEffects } from '../src/master-daemon.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
-import { loopPresenceHeader, loopSupervisionHeader } from '../src/model/executor-presence.js';
+import { loopPresenceHeader, loopSupervisionHeader } from '../src/model/loop-presence.js';
 import { setupChecklist } from '../src/model/setup-checklist.js';
 import { masterConfigSchema, withRoleDefaults } from '../src/master/profiles.js';
 import { clock, hour, minute, staleSha } from './helpers/soak-world.js';

@@ -4,7 +4,7 @@
 import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
-import { shortCommit } from '../executor-fleet.js';
+import { shortCommit } from './held-cli.js';
 import type { DaemonState } from './state.js';
 import { touchStanding } from './state-cursor.js';
 import { detailChanged } from './decisions.js';

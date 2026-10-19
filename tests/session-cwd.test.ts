@@ -3,7 +3,7 @@
 // the pane's `--cwd`, the launch files' checkout and the runtime's recorded working folder must be
 // the session's own managed checkout (or its assigned worktree, or the loop's scratch checkout for
 // the sessions that have none), never the coordinator checkout. The coordinator checkout's own
-// guard is exercised the way the loop and an executor run it: a dirty tree or a moved HEAD is
+// guard is exercised the way the loop runs it: a dirty tree or a moved HEAD is
 // attention naming the paths, the HEAD and the sessions whose panes point at the checkout, and
 // nothing self-upgrades or claims from it until it is clean and back at the commit the loop runs.
 import { test } from 'node:test';
@@ -16,7 +16,6 @@ import { basename, dirname, join, resolve, sep } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import type { ActionRow } from '../src/model/actions.js';
 import { bwrapOnPath, coordinatorCheckoutRefusal, readCoordinatorCheckout, readOnlyMountWrapper } from '../src/master/profiles.js';
 import { readApproverLaunches } from '../src/master/autonomy.js';
 import { dataDirectory, orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
@@ -28,7 +27,6 @@ import { faultClassItem, type FaultInstance } from '../src/model/fault-classes.j
 import { diagnosticianSettings } from '../src/runner/payloads.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { docsSyncMaxMs, launchDocsSync, type DocsSyncPlan } from '../src/docs-sync.js';
-import { controlPlaneHandlers, type ControlPlaneEffects } from '../src/executor.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
 import type { Runner } from '../src/runner/types.js';
@@ -162,7 +160,7 @@ async function survivesReclaim(root: string, config: MasterConfig, directory: st
 }
 
 /** Effects both the loop's guard and the steps read: a snapshot over `work`, and stubs for everything else. */
-function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects & ControlPlaneEffects {
+function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects {
   const base = {
     agents: () => [] as never[],
     credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
@@ -173,7 +171,7 @@ function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): 
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
   };
-  return { ...base, ...overrides } as DaemonEffects & ControlPlaneEffects;
+  return { ...base, ...overrides } as DaemonEffects;
 }
 const loopOptions = (fixture: { root: string }, extra: Partial<Parameters<typeof runDaemon>[3]> = {}) => ({
   once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: [] as NodeJS.Signals[], log: () => {}, ...extra,
@@ -499,20 +497,6 @@ test('unit:session-cwd-own-checkout — a restarted loop finds the research run 
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:snapshot-executor-ignores-dirty-checkout — an executor loaded from a held snapshot runs its claims beside the dirty checkout it was left behind by (GY-1773)', async () => {
-  const fixture = await installed();
-  try {
-    const { root, config } = fixture;
-    await writeFile(join(root, 'src', 'loop.ts'), `${await readFile(join(root, 'src', 'loop.ts'), 'utf8')}\nexport const halfFinished = true;\n`);
-    const row = { id: 'a1', key: 'GY-852', work: 'w1', kind: 'dispatch', inputs: { kind: 'dispatch', target: 'implementation', epoch: 3 } } as unknown as ActionRow;
-    const run = (handler: unknown) => (handler as (action: unknown, identity: unknown) => Promise<unknown>)(row, { id: 'exec', host: 'machine-a' });
-    const snapshotted = controlPlaneHandlers(() => ({ ...config, url: '' }), loopEffects([{ key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) }, plannedFiles: ['src/loop.ts'] }], { loadedSnapshot: () => 'a'.repeat(40) }));
-    await assert.rejects(run(snapshotted.dispatch!), (error: Error) => !/holds uncommitted work/.test(error.message), 'the dirty checkout refuses nothing');
-    const beside = controlPlaneHandlers(() => config, loopEffects([], { loadedSnapshot: () => null }));
-    await assert.rejects(run(beside.dispatch!), /holds uncommitted work/, 'an executor loaded from the checkout is still refused');
-  } finally { await fixture.cleanup(); }
-});
-
 test('unit:coordinator-checkout-drift-detected — the loop cycles nothing from a dirty coordinator checkout and raises attention naming the paths', async () => {
   const fixture = await installed();
   try {
@@ -564,7 +548,7 @@ test('unit:coordinator-checkout-drift-detected — the loop checks the checkout 
     const escalation = state.actions['escalation:dirty-checkout'];
     assert.ok(escalation, 'the turned-dirty tree is raised as attention');
     assert.match(escalation.detail, /src\/loop\.ts/);
-    assert.match(escalation.detail, /The self-upgrade is not held by it: a merged release restarts the loop and the executors onto a held snapshot of it, the checkout left where it stands/, 'and says the upgrade is not held by it');
+    assert.match(escalation.detail, /The self-upgrade is not held by it: a merged release restarts the loop onto a held snapshot of it, the checkout left where it stands/, 'and says the upgrade is not held by it');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });
@@ -643,7 +627,7 @@ test('unit:coordinator-checkout-drift-detected — the loop\u2019s own alignment
     const state = emptyDaemonState(config);
     const effects = loopEffects([], { selfUpgrade: async () => {
       alignments++;
-      if (alignments === 1 && phase === 2) { upgrades.push(phase); return { outcome: 'upgraded' as const, from: C1, to: C2, code: false, executors: null, self: false }; }
+      if (alignments === 1 && phase === 2) { upgrades.push(phase); return { outcome: 'upgraded' as const, from: C1, to: C2, code: false, self: false }; }
       return { outcome: 'skipped' as const, reason: 'already aligned' };
     } });
     const stopTimer = setTimeout(() => stop.fire(), 40);
@@ -675,7 +659,7 @@ for (const ending of ['failed', 'threw', 'foreign'] as const) {
         alignments++;
         if (alignments === 1) {
           // performSelfUpgrade records the cursor and checks out before the restarts it can fail.
-          if (ending !== 'foreign') current.upgrade.last = { at: new Date().toISOString(), from: C1, to: C2, code: true, executors: 'restarted', self: false };
+          if (ending !== 'foreign') current.upgrade.last = { at: new Date().toISOString(), from: C1, to: C2, code: true, self: false };
           if (ending === 'threw') throw new Error('the self restart could not be made');
           return { outcome: 'failed' as const, reason: 'the loop restart is unavailable outside the graphyard-master unit' };
         }
@@ -698,24 +682,3 @@ for (const ending of ['failed', 'threw', 'foreign'] as const) {
   });
 }
 
-test('unit:coordinator-checkout-drift-detected — an executor refuses every claim on a dirty coordinator checkout, and runs once it is clean', async () => {
-  const fixture = await installed();
-  try {
-    const { root, config, cleanup } = fixture;
-    const original = await readFile(join(root, 'src', 'loop.ts'), 'utf8');
-    await writeFile(join(root, 'src', 'loop.ts'), `${original}\nexport const halfFinished = true;\n`);
-    await writeFile(join(root, 'tests', 'scratch.test.ts'), 'import { test } from "node:test";\n');
-    const row = { id: 'a1', key: 'GY-852', work: 'w1', kind: 'dispatch', inputs: { kind: 'dispatch', target: 'implementation', epoch: 3 } } as unknown as ActionRow;
-    let snapshotReads = 0;
-    const dirtyHandlers = controlPlaneHandlers(() => config, loopEffects([], { snapshot: async () => { snapshotReads++; return { work: [] as Work[], now: iso(0) }; } }));
-    const run = (handler: unknown, action: unknown) => (handler as (action: unknown, identity: unknown) => Promise<unknown>)(action, { id: 'exec', host: 'machine-a' });
-    await assert.rejects(run(dirtyHandlers.dispatch!, row), (error: Error) => /holds uncommitted work/.test(error.message) && /src\/loop\.ts/.test(error.message));
-    assert.equal(snapshotReads, 0, 'a refused executor reads nothing and runs nothing');
-    await writeFile(join(root, 'src', 'loop.ts'), original);
-    await rm(join(root, 'tests', 'scratch.test.ts'));
-    const claimed = { key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) }, plannedFiles: ['src/loop.ts'] };
-    const cleanHandlers = controlPlaneHandlers(() => ({ ...config, url: '' }), loopEffects([claimed]));
-    await assert.rejects(run(cleanHandlers.dispatch!, row), /no worker profile can take GY-852/, 'with a clean checkout the executor handler runs');
-    await cleanup();
-  } finally { await fixture.cleanup(); }
-});

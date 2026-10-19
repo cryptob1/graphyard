@@ -409,7 +409,7 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
 }
 
 /** Step 3: reclaim disk, the loop's own bounded resources, and the items whose sessions died. */
-export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'], reclaimStepWithin); // GY-1774: every call the step makes — the disk and resource reclaims, the inventories, the clock read, each fence assessment, preservation and settlement, every pane close — is bounded
+export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'], reclaimStepWithin); // GY-1774: every call the step makes — the disk and resource reclaims, the inventories, the clock read, each fence assessment, preservation and settlement, every pane close — is bounded
 async function reclaimStepWithin(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
   // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
@@ -491,6 +491,17 @@ async function reclaimStepWithin(cycle: Cycle) {
 
   // 3a'. Stop renewing an attempt past its no-submission bound (GY-1460), before the fences are read.
   await stopUnboundedAttempts(cycle);
+  // 3a''. A lease that lapsed with nothing submitted and no fence is cleared by the control plane's
+  //      own reconciliation (GY-1984): the loop asks for it with one resync, this cycle.
+  if (effects.reclaimLease) for (const item of open) {
+    const lease = item.lease;
+    if (!lease || item.submission || item.containmentQuarantine || Date.parse(lease.expiresAt) > clock) continue;
+    await isolate('reclaim', item, item.key, async () => {
+      await effects.reclaimLease!(item);
+      performed.push(await record(state, `reclaim:lease:${item.id}:${lease.epoch}`, { kind: 'reclaim', work: item.key, principal: lease.owner, state: 'done',
+        detail: `${item.key}: the lease ${lease.owner} held under epoch ${lease.epoch} lapsed at ${lease.expiresAt} with nothing submitted; the loop asked the control plane to reconcile it`, attempts: 1, epoch: lease.epoch, cycle: state.cycle }, now(), effects.persist));
+    });
+  }
 
   // 3b. Reclaim the items whose sessions died. A supervised launch fences its worker in a scope
   //     unit; when that session dies the fence outlives it and the item cannot be claimed again

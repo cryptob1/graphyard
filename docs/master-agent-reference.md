@@ -1,4 +1,4 @@
-<!-- page: Operate Graphyard | 7 | executors, GitHub. -->
+<!-- page: Operate Graphyard | 7 | typed actions, GitHub. -->
 # Master-agent reference
 
 ## Items, scope and human waits
@@ -24,11 +24,9 @@ Flows (`master browser app-permissions`, `master browser installation-accept`) d
 
 Flows read `GET /api/github/installation`, recording `.graphyard/master-actions/` (`record.json`, `ledger.json`, redacted Confirm-access markup (`master browser fixtures`)); a criterion needing a live one runs `master browser capture [--dry-run]` on the sudo-protected App permissions page, submitting nothing, never a human, following each offered method's control as a button or a link; a refused capture's record names the controls it saw. Approving *Confirm access* GitHub Mobile on device: human-only; master never stores cookies, uses merge bypass, pushes code, reads worker credentials. On classifier refusals `master harness claude|codex --apply` writes `.claude/settings.local.json` rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`; missing/retired rules: `harness` drift, reapplied each cycle.
 
-## Typed actions and executors
+## Typed actions
 
-`nextAction` (one per item): `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`escalate`; judgements: `actions.needsHuman`. `init` starts executors; `master executors restart` refreshes slots; verified deployments advance clean checkouts, restarting executors and loop. `resync` needs newer observation. `dispatch`/`request-review` complete if a session answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle; plane-wide failures, human-only parks never stall); in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Permanent reasons the registry binds — `Deployment endpoint answered 4xx`, claim `A valid Graphyard bearer token is required`, refused reviewer launch `(4xx)` — raise installation `setup` attention (not per-item `stalled-action` / stalled-gate). Ticks requeue ownerless items (`liveness.violations`). One origin fetch per dispatch cycle builds worktrees; preparation times: `master status` `launches.prepare` (daily p50/p90).
-
-Declared slot not `active`: `resources` fault naming `journalctl --user -u graphyard-executor@N.service` unless stopped <2min; `--install` needs `Restart=always`, `RestartSec` ≤60s. Worker starts fenced <2min retry after lapse.
+`nextAction` (one per item): `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`escalate`; judgements: `actions.needsHuman`. Rows are read-only; the loop's own steps run them, its reclaim step resyncing a lapsed lease. Verified deployments advance clean checkouts and restart the loop. `resync` needs newer observation. `dispatch`/`request-review` complete if a session answers the head; busy profiles stall after 30min. Three failures, unchanged reason: stalled rather than retrying (fleet looks idle; plane-wide failures, human-only parks never stall); in no count and no list, but in `actions.stalled` and on the item's own card; backoff never outlives it; eight escalate. Permanent reasons the registry binds — `Deployment endpoint answered 4xx`, claim `A valid Graphyard bearer token is required`, refused reviewer launch `(4xx)` — raise installation `setup` attention (not per-item `stalled-action` / stalled-gate). Ticks requeue ownerless items (`liveness.violations`). One origin fetch per dispatch cycle builds worktrees; preparation times: `master status` `launches.prepare` (daily p50/p90).
 
 ## Recovery
 

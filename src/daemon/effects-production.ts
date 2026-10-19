@@ -14,7 +14,6 @@ import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, disposableWorktrees, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
-import { healUserSupervision, type UserSupervisionAllowance, type UserSupervisionHeal } from '../user-manager.js';
 import { servingStage } from '../release-pending.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
@@ -40,7 +39,7 @@ import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from 
 import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind, faultClassItem } from '../model/fault-classes.js';
 import { derivePlannedFiles, plannedFilesRefusal } from '../model/planned-files.js';
-import { baseTree } from '../cli/planned-files-intent.js'; import { currentBaseTree } from '../executor.js';
+import { baseTree } from '../cli/planned-files-intent.js';
 import { onceAnnotations, timingFaultAttention, type ReportedAttention } from './faults.js';
 import { type BaseFailureEffects, baseFailureEffects } from './base-failure-effects.js';
 import type { daemonSummary } from './run.js';
@@ -54,8 +53,7 @@ import { throughputEffects, type ThroughputEffects } from './throughput-effect.j
 import { readingEffects } from './reading-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { loopCodeRoot } from './checkout-state.js';
-import { alignExecutorUnitScript } from '../repository-setup.js';
-import { readRelease, restartExecutors } from '../executor-fleet.js';
+import { readRelease } from '../protocol-version.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
@@ -185,7 +183,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return writeDaemonState(current(), state);
   };
   const upgradeDeps = (keepAlive?: () => Promise<void>): SelfUpgradeDeps => ({ root, run, // shared with the moved-HEAD recovery (GY-1356)
-    restartExecutors: to => restartExecutors(current(), { actions: () => asCoordinator('actions'), coordinatorCommit: to, onWait: keepAlive, skipCurrent: true }), // a slot already on the tip is left running (GY-1432)
     restartSelf: async () => {
       const unit = detectLoopSupervisorUnit();
       if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot re-execute itself; run it under the packaged unit (examples/master/graphyard-master.service), or restart it by hand with systemctl --user restart graphyard-master');
@@ -193,10 +190,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await awaitSupervisorRestart(() => run('systemctl', ['--user', '--no-block', 'restart', unit]));
     },
     alignUnit: () => alignRunningLoopUnit(root, current()),
-    // GY-1790: the executor units' entry follows the pin — the held snapshot's scripts/graphyard-executor.mjs
-    // while a snapshot restart's pin stands, the checkout's when it lifts — so a slot its unit starts
-    // never boots from an entry the checkout holds dirty.
-    alignExecutorUnits: script => alignExecutorUnitScript(root, script, { codeRoot: loopCodeRoot(current().cliPath, root) }),
     persist: persistLoop,
     // GY-1982: continuous deploy, through the install's own adapter; imported when first used, as the CLI's upgrade module loads the installer.
     deploy: async () => (await import('../cli/upgrade.js')).deployPorts({ cliRoot: loopCodeRoot(current().cliPath, root), repoRoot: root, repository: current().repository, url: current().url,
@@ -301,12 +294,18 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     worktreeReclaimable: (work, at) => disposableWorktrees(root, current(), { work, now: at }),
     reclaimResources: (work, agents) => reclaimResources(root, withRoleDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
-    hostMemory: readHostMemory, healHostSupervision: allow => healUserSupervision(root, {}, allow),
+    hostMemory: readHostMemory,
     probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
     deferWindow: (work, body) => mutate(`work/${work.id}/window`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await currentBaseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
+    decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => {
+      // GY-1764: the base tree read after a fetch that succeeded; a failed fetch leaves a tree that can lag the base, so no terminal refusal may rest on it.
+      try { await run('git', ['fetch', '--quiet', 'origin', current().baseBranch], { cwd: root, timeoutMs: 30_000 }); }
+      catch (error) { throw new Error(`the base tree of ${current().baseBranch} could not be refreshed (${message(error)}); a terminal scope refusal waits for a current read`); }
+      return (await baseTree(root, current().baseBranch, run)).files;
+    }, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
+    reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
     // No pull request yet means no review finding: the first attempt's scope is the criteria's alone.
     // Only the configured reviewer's and the awaited bot reviewers' words are findings the loop acts on.
@@ -447,7 +446,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       () => herdrJson(['status', 'server', '--json'], run)) }),
     settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
       reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification, origin: 'loop' }),
-    // systemd-notify keep-alive (NOTIFY_SOCKET; NotifyAccess=all; bounded child via `run`). GY-437: upgrade between cycles — executors first, then re-exec under the cgroup unit.
+    // systemd-notify keep-alive (NOTIFY_SOCKET; NotifyAccess=all; bounded child via `run`). GY-437: upgrade between cycles, re-exec under the cgroup unit.
     // GY-1899: the release the loop records is the checkout its loaded code comes from — the one
     // the running CLI starts from, read once at process startup — never the managed repository's
     // root, whose HEAD names the managed project. A later move of that checkout is a moved head

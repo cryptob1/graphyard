@@ -38,11 +38,11 @@ const superseded = (kind: string, from: number) => row(kind, [
   { at: at(from), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
   { at: at(from + 1), event: 'cancelled', requester: 'graphyard', executor: null, result: null, reason: 'now needs another action' },
 ]);
-function delivery(key: string, shape: { history?: ActionRow[]; blocked?: number } = {}): Work {
+function delivery(key: string, shape: { history?: ActionRow[]; blocked?: number; mergedAt?: number } = {}): Work {
   return {
     id: key.toLowerCase(), key, title: `Delivery ${key}`, stage: 'done', gates: [], violations: [], policy: { checks: [], review: true }, implementers: ['worker-1'], workspaces: [], sessions: [],
-    submission: { pr: Number(key.split('-')[1]) }, candidate: null, updatedAt: at(40),
-    delivery: { mergeSha: sha('a'), mergedAt: at(30) },
+    submission: { pr: Number(key.split('-')[1]) }, candidate: null, updatedAt: at(Math.max(40, (shape.mergedAt ?? 30) + 10)),
+    delivery: { mergeSha: sha('a'), mergedAt: at(shape.mergedAt ?? 30) },
     pipeline: { attempts: [{ epoch: 1, owner: 'worker-1', claimedAt: at(0), endedAt: at(10), end: 'submitted' }], submittedAt: at(10), reworkRounds: 0,
       interventions: { blocked: shape.blocked ?? 0, requirements: 0 }, backfill: null },
     actionQueue: { actions: [], history: shape.history ?? [executed('request-review', 11)] },
@@ -310,9 +310,13 @@ const staleRework = (waited: number, cause: string | null) => ({ ...row('request
   { at: at(12), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: '' },
   { at: at(12 + waited), event: 'cancelled', requester: 'graphyard', executor: null, result: null, reason: 'now needs dispatch instead' },
 ]), id: `rework-${cause ? 'refused' : 'runnable'}`, refusal: cause, attempts: 0 }) as unknown as ActionRow;
-/** Ten admitted deliveries, the last carrying `rework`: the claim's minimum, accumulated. */
-const accumulated = (rework: ActionRow) => [claimItem, ...Array.from({ length: 9 }, (_, index) => delivery(`GY-${600 + index}`)),
-  delivery('GY-468', { history: [executed('request-review', 11), rework] })];
+/**
+ * Ten admitted deliveries, the last carrying `rework`: the claim's minimum, accumulated. `slow` merges
+ * each 40 min after its submission, past the 30 min p50 budget: the miss the owner's decisions answer
+ * (GY-1984: an unclaimed row's wait is reported, never a miss, now nothing claims rows).
+ */
+const accumulated = (rework: ActionRow, slow = true) => [claimItem, ...Array.from({ length: 9 }, (_, index) => delivery(`GY-${600 + index}`, slow ? { mergedAt: 50 } : {})),
+  delivery('GY-468', { history: [executed('request-review', 11), rework], ...(slow ? { mergedAt: 50 } : {}) })];
 const openOwner = (key: string, policyRevision = 1) => ({ ...delivery(key), id: key.toLowerCase(), title: ownerTitle(), stage: 'backlog', criteria: [], ready: false, epoch: 0, lease: null, blocker: null, submission: null, reworkRequested: false, dependencies: [], evidence: [], delivery: undefined, closure: undefined, policyRevision, revision: 1 } as unknown as Work);
 
 async function convergenceLoop(directory: string, work: Work[], clock: { now: number }) {
@@ -367,7 +371,7 @@ test('integration:throughput-escalation-answerable — an escalated claim-missed
     const report = (await measured(directory))!.report;
     assert.equal(report.population.admitted, 10, 'the population accumulated to the claim\'s minimum');
     assert.equal(report.verdict, 'unverified');
-    assert.deepEqual(report.shortfall!.missed.map(entry => entry.metric), ['idle-actionable'], 'the runnable superseded row still counts in full');
+    assert.deepEqual(report.shortfall!.missed.map(entry => entry.metric), ['submit-to-merge-p50'], 'the slow merges miss the p50 budget');
     const key = throughputEscalationKey('GY-1471', 1);
     assert.equal(state.actions[key]?.state, 'waiting', 'the needs-decision is recorded on the open owner, and waits there until it is answered');
     assert.equal(state.actions[key]!.work, 'GY-1471');
@@ -502,12 +506,12 @@ test('integration:throughput-owner-converges — after the fix the open owner re
   try {
     const clock = { now: base + 3 * 24 * 60 * minute };
     const owner = openOwner('GY-1471');
-    const work: Work[] = [...accumulated(staleRework(5585.6, refusal)), owner];
+    const work: Work[] = [...accumulated(staleRework(5585.6, refusal), false), owner];
     const { master, state, effects, filed, closed } = await convergenceLoop(directory, work, clock);
-    // The release's newest record before the fix: the same window, the unrunnable span counted.
+    // The release's newest record before the fix: a measurement that missed its budgets.
     const takenAt = clock.now - throughputRemeasureMs;
     const before = verifyThroughput(accumulated(staleRework(5585.6, null)), takenAt, { deployed });
-    assert.match(before.reason, /GY-468 left its request-rework actionable and unclaimed for 5585\.6 min/);
+    assert.equal(before.verdict, 'unverified', before.reason);
     await recordThroughputMeasurement(directory, before);
 
     await runCycle(master, state, effects, () => clock.now);

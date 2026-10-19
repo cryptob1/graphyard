@@ -11,12 +11,10 @@ import { prSteps } from '../src/model/pr-steps.js';
 import { leftFlowAt, noRelease, type ReleaseView } from '../src/model/release.js';
 import { flowExitAt } from '../src/flow-analytics.js';
 import { mergedItem } from '../src/model/goal-plan.js';
-import { controlPlaneHandlers } from '../src/executor.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import { unhandled, type MasterSession } from '../src/cli/master/session.js';
 import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
-import type { MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1981: done = merged. An item reaches stage done in the transaction that records its merge, and
@@ -94,10 +92,8 @@ before(async () => {
 });
 after(async () => { await store?.close(); await database?.stop(); });
 
-test('unit:verify-deployment-removed-history-loads — the kind, handler, deployment command and master verify-deployment are gone, and a verify-deployment row, action or deployment event written earlier loads and settles', { timeout: 120_000 }, async () => {
+test('unit:verify-deployment-removed-history-loads — the kind, deployment command and master verify-deployment are gone, and a verify-deployment row, action or deployment event written earlier loads and settles', { timeout: 120_000 }, async () => {
   assert.ok(!(nextActionKinds as readonly string[]).includes('verify-deployment'), 'no verify-deployment action kind');
-  const handlers = controlPlaneHandlers(() => ({}) as MasterConfig, {} as never);
-  assert.ok(!('verify-deployment' in handlers), 'the executor has no verify-deployment handler');
   assert.equal(await operationsCommand({ id: 'verify-deployment', args: ['GY-1'] } as unknown as MasterSession), unhandled, 'master verify-deployment is no subcommand');
 
   const created = await engine.execute(operator, 'create', null, { title: 'Delivered before GY-1981', plannedFiles: ['src/done/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:verify-deployment-removed-history-loads'] }] }, randomUUID()) as Work;

@@ -16,7 +16,6 @@ import { agentRequestReport } from './loop-report.js';
 import { timedStep } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
 import { interventionSummary, interventionSummaryRoute } from './intervention-status.js';
-import { executorFleetReport, readCommit, readExecutorRegistrations } from '../executor-fleet.js';
 import { terminalDecisions } from './decision-report.js';
 import { openThroughputOwner, throughputStatus } from '../throughput.js';
 import { throughputEscalatedAt } from '../daemon/cycle-delivery.js';
@@ -25,13 +24,9 @@ import { attributeAttention, derivedAttention, ledgerRefusalAttention, resourceS
 import { workerLaunchStatus } from '../master/dispatch.js';
 import type { ReportSections } from '../master/sections.js';
 import type { releaseLagStatus } from '../master/release-lag.js';
-import { upgradeBoundMs } from '../master-resources.js';
-import { readHeldCli } from '../daemon/upgrade.js';
-import { loopCodeRoot } from '../daemon/checkout-state.js';
 
 export async function assembleStatusSections<
   TStatus extends { work: any[] },
-  TExecutors extends { attention: AttentionItem[] },
   TDisk extends Record<string, any>,
   TManagedRoot extends { health: any },
 >(inputs: {
@@ -43,7 +38,6 @@ export async function assembleStatusSections<
   observation: any;
   health: any;
   hs: { report: unknown };
-  merger: any;
   setup: any;
   administration: any;
   daemon: any;
@@ -51,8 +45,6 @@ export async function assembleStatusSections<
   reviewRecords: any[];
   producerRecords: any[];
   owed: { rows: any[] };
-  executors: TExecutors;
-  releases: ReturnType<typeof executorFleetReport>;
   lag: Awaited<ReturnType<typeof releaseLagStatus>>;
   status: TStatus;
   disk: TDisk;
@@ -68,8 +60,8 @@ export async function assembleStatusSections<
 }) {
   const {
     master, snapshot, coordinator, cli, probe, observation, health, hs,
-    merger, setup, administration, daemon, dispatch, reviewRecords, producerRecords,
-    owed, executors, releases, lag, status, disk, managedRoot, inventory, reclaimPlan,
+    setup, administration, daemon, dispatch, reviewRecords, producerRecords,
+    owed, lag, status, disk, managedRoot, inventory, reclaimPlan,
     runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals,
   } = inputs;
 
@@ -79,7 +71,6 @@ export async function assembleStatusSections<
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     conflictHotspots: hs.report,
-    merger: { merger: merger.merger, detail: merger.detail },
     // GY-1927: what the plane enforces, from its recorded setting; a plane that records none merges on gates alone.
     autoMerge: coordinator?.autoMerge?.autoMerge !== false,
     mergeApproval: coordinator?.autoMerge?.line ?? 'routine merges permitted after gates pass',
@@ -113,7 +104,6 @@ export async function assembleStatusSections<
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
     // Decisions the loop requests itself, never a person (GY-521).
     loopDecisions: { attestations: loopAttestations(snapshot, approvals) },
-    executors: { ...executors, ...releases, attention: [...executors.attention, ...releases.attention] },
     sessions: sessionReport(snapshot),
     releaseLag: lag.report,
     branches: branchReport(status.work),
@@ -167,17 +157,10 @@ export async function assembleReportedAttention(
   // start read against the wall clock then is a live worker misread as gone.
   const at = Date.parse(snapshot.now);
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }, Number.isFinite(at) ? { now: at } : {}));
-  // GY-1619: the fleet beside the checkout, read with what the loop's own self-upgrade is doing about a split: the pin a held
-  // restart places, and the restart the cursor owes, so an advance under way is in motion rather than a configuration fault.
-  // GY-1899: the pin and the fallback commit are read under the running CLI's checkout, where the loop's holdCliAt wrote it.
-  const codeRoot = loopCodeRoot(master.cliPath, root);
-  const releases = executorFleetReport(await readExecutorRegistrations(master).catch(() => []), { commit: observed.commit ?? readCommit(codeRoot) },
-    { hostId: master.hostId, ...(Number.isFinite(at) ? { now: at } : {}), held: readHeldCli(codeRoot), upgrade: resources.upgrade, boundMs: upgradeBoundMs(observed.loop) });
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
-  if (!derived.executors.presence.available && /^GET \/api\/actions failed/.test(derived.executors.presence.reason)) sections.mark('executors', 'GET /api/actions', derived.executors.presence.reason);
   const docs = await timedStep('docs budget', () => docsBudgetAttention(root, master.baseBranch, generatedFiles));
   const launches = await timedStep('attention: launches', () => workerLaunchStatus(root, master));
-  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...releases.attention, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items, ...launches.items];
+  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items, ...launches.items];
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
-  return { generatedFiles, docs, overflow, interventions, releases, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
+  return { generatedFiles, docs, overflow, interventions, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }

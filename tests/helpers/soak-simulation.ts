@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { type FileHandle, mkdir, open, readFile, rm, utimes, writeFile } from 'node:fs/promises';
+import { type FileHandle, mkdir, open, rm, utimes, writeFile } from 'node:fs/promises';
 import { existsSync, readdirSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { wakeFromWebhook } from '../../src/store.js';
 import { GitHub, idleObservationSeconds, processJob } from '../../src/github.js';
@@ -25,7 +24,7 @@ import { coordinatorConfinementRefusal, rerunFailedChecks } from '../../src/mast
 import { doctorSettingsSchema } from '../../src/master/doctor-settings.js';
 import { headlessConfinementWrapper, sessionConfinement } from '../../src/master/launch.js';
 import { type DaemonEffects, type DaemonState, answeringWidening, emptyDaemonState, runCycle } from '../../src/master-daemon.js';
-import { type HostMemoryReading, owedUpgrade, readReclaimReports, selfUpgradeBoundMs, readResources, reclaimResources, resourceAttention, settleTmpReclaim } from '../../src/master-resources.js';
+import { type HostMemoryReading, owedUpgrade, readReclaimReports, readResources, reclaimResources, resourceAttention, settleTmpReclaim } from '../../src/master-resources.js';
 import { type DoctorFile } from '../../src/daemon/doctor.js';
 import { approvalWatchSchema, daemonStateSchema, retainedActions } from '../../src/daemon/state.js';
 import { adoptHeadlessRuns, coordinatorCheckoutGuard, noteWatchdog } from '../../src/daemon/run.js';
@@ -65,18 +64,14 @@ import { type DocsSyncPlan, docsSyncHarness, docsSyncSessionName, releaseDocsSyn
 import { type TmpReclaimReport, heldOpenPaths, reclaimTmpDirectories, tmpReclaimLimitPerCycle, tmpReclaimMinAgeMs, writeTempOwner } from '../../src/tmp-reclaim.js';
 import { temporaryDirectory } from './temp-dirs.js';
 import { lostRunReason, sessionRetry } from '../../src/producer.js';
-import { type SelfUpgradeOutcome, alignRunningLoopUnit, heldCliPointer, heldCliSnapshotAt, heldExecutorEntryOf, heldLauncherOf, performSelfUpgrade } from '../../src/daemon/upgrade.js';
+import { type SelfUpgradeOutcome, alignRunningLoopUnit, heldCliPointer, heldCliSnapshotAt, heldLauncherOf, performSelfUpgrade } from '../../src/daemon/upgrade.js';
 import { loopCodeRoot } from '../../src/daemon/checkout-state.js';
-import { type ExecutorRegistration, executorFleetReport } from '../../src/executor-fleet.js';
 import { cycleDelay, watchdogPlan } from '../../src/daemon/liveness.js';
 import { LoopWake, loopWakeSubjects } from '../../src/daemon/loop-wake.js';
 import { loopSelfProvision, masterSetup } from '../../src/cli/master-setup.js';
 import { deploymentTarget } from '../../src/install/index.js';
 import { type Transport } from '../../src/install/transport.js';
-import { loopUnitName, loopUnitOf, loopUnitText, loopWatchdogSeconds } from '../../src/supervisor.js';
-import { executorEntryBinding, executorUnit, renderExecutorUnit, writeExecutorDeclaration } from '../../src/repository-setup.js';
-import { healUserSupervision } from '../../src/user-manager.js';
-import { hostSupervisionKey } from '../../src/daemon/cycle-host.js';
+import { loopUnitOf, loopUnitText, loopWatchdogSeconds } from '../../src/supervisor.js';
 import { ChildProcessError } from '../../src/child-runner.js';
 import { probeBlocker, sharedGithubStatus } from '../../src/daemon/blocker-probes.js';
 import { type BlockerClass } from '../../src/model/blocker-class.js';
@@ -184,8 +179,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * GY-1899: the Graphyard checkout the loop runs from stands apart from the managed repository
    * (/soak/coordinator) — a temporary directory, so the production `loopCodeRoot` reads it. The
    * configured launcher is this checkout's, every git command the self-upgrade runs must target it,
-   * the pin is written under it, and the loop and executor units the day renders through the real
-   * renderers must start and hand it, never the managed root.
+   * the pin is written under it, and the loop unit the day renders through the real
+   * renderer must start and hand it, never the managed root.
    */
   codeRoot?: string;
   /**
@@ -245,13 +240,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * GY-1810: once a head of `asked` stands escalated, the loop requests the capped rework again on the same binding, as it does on a low or medium lane (no master answer exists there), and the approver refuses it.
    */
   reviewCap?: { cap: number; items: number[]; refused: number[]; again?: number[]; unmatched?: number[]; legacy?: number[]; undated?: number[]; answered?: number[]; third?: number[]; asked?: number[] };
-  /**
-   * GY-1428: the loop's host-supervision step runs the real repair over a simulated host declaring
-   * two executor slots. Its user manager stops answering at `managerDown.from`, taking both slots
-   * with it, and logind refuses to start it until `managerDown.to`; a revival's waits move the
-   * day's clock. From `crashLoop.from` to `.to` slot 1 crashes half a minute after each start.
-   */
-  hostSupervision?: { managerDown: { from: number; to: number }; crashLoop: { from: number; to: number } };
   /** GY-1417: record three goals and wire the acceptance role (acceptanceWorld below); `control-plane` lands them through the merge writer (GY-1535, soak-acceptance-writer.ts); `protected` lands each approved pull request through the real land route function under GitHub's last-pusher rule (GY-1795, soak-acceptance-landing.ts). */
   acceptance?: boolean | 'control-plane' | 'protected';
   /** GY-1795: with `acceptance: 'protected'`, how the independent approver App and GitHub Actions answer each landing (tests/helpers/soak-acceptance-landing.ts). */
@@ -324,15 +312,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
    * deploy thus finds a tip with loaded code the served release does not contain, and holds its
    * restart until a later deploy serves it. Every restart is sampled with the release production
    * served when it ran, and every pass with its outcome, its owed target and the upgrade rows.
-   * `fleet` (GY-1619) runs two executors on the release their last restart loaded, and feeds the
-   * fleet report master status builds (executorFleetReport, read with the held-CLI pin and the
-   * restart the cursor owes) into the loop's fault step every cycle: a restart attempted inside
-   * `refuse` is refused (a claim held), and from `strandAt` a restart reported done leaves the fleet
-   * on its release (a restart that never reached it), a split nothing owes. From `stalePinAt` the
-   * pin's lift fails (performSelfUpgrade swallows it), so the pointer outlives the hold and the
-   * executors restart through the stale launcher onto the pinned release.
    */
-  releaseLag?: { cutAgoMs: number; fleet?: { refuse?: { from: number; to: number }; strandAt?: number; stalePinAt?: number } };
+  releaseLag?: { cutAgoMs: number };
   /**
    * GY-1740: one post-deploy follow-up per entry of `hours`, seeded as earlier releases filed them and
    * blocked by its first worker on a reading that cannot exist before the day's start plus that many
@@ -1865,26 +1846,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     throughput.asks.push({ sha: observedSha, outcome: outcome.outcome, revision: outcome.revision, elapsed: clock.now() - dayStart, read: outcome.read?.length ?? 0, cycle: cycles, verdict: outcome.report?.verdict ?? null });
     return outcome;
   };
-  // GY-1428: the simulated host the host-supervision day's loop repairs, and what it asked of it.
-  const hostDay = options.hostSupervision && { ...options.hostSupervision, root: await temporaryDirectory('soak-host'), manager: true, revived: false,
-    slots: new Map<string, { state: string; startedAt: number }>([1, 2].map(slot => [executorUnit(slot), { state: 'active', startedAt: clock.now() }])),
-    revivals: [] as number[], starts: [] as { elapsed: number; units: string[] }[], peakRows: 0 };
-  if (hostDay) { execFileSync('git', ['init', '-q'], { cwd: hostDay.root }); await writeExecutorDeclaration(hostDay.root, { version: 1, count: 2, kinds: null, intervalSeconds: 5 }); }
-  const hostSystemctl = (args: string[]) => {
-    const day = hostDay!, down = elapsed >= day.managerDown.from && !day.revived;
-    if (down) { for (const slot of day.slots.values()) slot.state = 'inactive'; throw Object.assign(new Error('Command failed: systemctl --user'), { stderr: 'Failed to connect to user scope bus via local transport: Connection refused\n', stdout: '' }); }
-    const unit = args.at(-1)!, slot = day.slots.get(unit);
-    if (slot && unit === executorUnit(1) && elapsed >= day.crashLoop.from && elapsed < day.crashLoop.to && slot.state === 'active' && clock.now() - slot.startedAt >= 30_000) slot.state = 'failed';
-    if (args[0] === 'is-active') { const state = unit === loopUnitName ? 'active' : slot?.state ?? 'inactive'; if (state === 'active') return state; throw Object.assign(new Error(`Command failed: systemctl --user is-active ${unit}`), { stdout: `${state}\n`, stderr: '' }); }
-    if (args[0] === 'is-enabled') return 'enabled';
-    if (args[0] === 'enable') { const units = args.slice(2); day.starts.push({ elapsed, units }); for (const name of units) day.slots.set(name, { state: 'active', startedAt: clock.now() }); }
-    return '';
-  };
-  const hostLoginctl = () => {
-    hostDay!.revivals.push(elapsed);
-    if (elapsed < hostDay!.managerDown.to) throw Object.assign(new Error('Command failed: loginctl enable-linger'), { stderr: 'Could not enable linger: Access denied\n' });
-    hostDay!.revived = true; return '';
-  };
   // GY-1577: the refused capped rework of a legacy item, as the loop reads it, is one the loop requested before the revision mark existed.
   const legacyRefusals = <R extends { decisions: { action: string; state: string; input?: { binding?: string }; reason?: string; requestedAt?: string; refusal?: { at?: string } | null }[] }>(work: Work, read: R): R => {
     const n = numberOf(work), undated = !!cappedDay?.undated?.includes(n);
@@ -1896,8 +1857,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   const effects: DaemonEffects = {
     ...(promotionEffect ? { promotion: promotionEffect } : {}),
     ...(mainWatchEffect ? { mainWatch: mainWatchEffect } : {}),
-    ...(hostDay ? { healHostSupervision: allow => healUserSupervision(hostDay.root, { systemctl: hostSystemctl, loginctl: hostLoginctl, masked: () => false, platform: 'linux',
-      wait: async ms => { fenced.drift += ms; await moveClock(ms); } }, allow) } : {}),
     measureThroughput,
     agents: () => { finishDuringCycle(); return headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(); },
     herdr: () => ({ agents: headless ? withRunnerAgents(herdr.list()) as ReturnType<SimulatedHerdr['list']> : herdr.list(), available: true }),
@@ -2504,20 +2463,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       return { items: report.attentionItems } as ReportedAttention;
     };
   }
-  if (options.releaseLag?.fleet) {
-    // GY-1619: what master status reports of the fleet (assembleReportedAttention), beside whatever else this day reports.
-    const attention = effects.reportedAttention ?? (async () => ({ items: [] }) as ReportedAttention);
-    const registration = (slot: number): ExecutorRegistration => ({ version: 1, name: `soak-executor/${slot}`, host: config.hostId, pid: 4000 + slot, principal: principals.coordinator.id, kinds: ['dispatch'], intervalSeconds: 15,
-      root: '/soak/coordinator', release: { commit: fleetDay.loaded, dirty: false }, supervisor: { unit: `graphyard-executor@${slot}.service`, restart: `systemctl --user restart graphyard-executor@${slot}.service` },
-      state: 'running', standDown: null, startedAt: new Date(dayStart).toISOString(), updatedAt: new Date(clock.now()).toISOString(), stoppedAt: null, claims: 0, lastClaim: null, inFlight: null, claiming: null });
-    effects.reportedAttention = async (...args) => {
-      const reported = await attention(...args), now = clock.now();
-      const report = executorFleetReport([1, 2].map(registration), { commit: checkout.head }, { hostId: config.hostId, now, alive: () => true, held: releaseLagDay.pin, upgrade: owedUpgrade(state), boundMs: selfUpgradeBoundMs });
-      fleetDay.samples.push({ elapsed: now - dayStart, loaded: fleetDay.loaded, coordinator: checkout.head, pin: releaseLagDay.pin, split: report.split, inMotionUntil: report.attention.find(item => item.subject === 'executors')?.inMotionUntil ?? null,
-        stall: state.upgrade.stalled?.cause ?? null, pending: state.upgrade.pending?.to ?? null });
-      return { ...reported, items: [...reported.items, ...report.attention] } as ReportedAttention;
-    };
-  }
   let publishedMergeQueue: string | null = null;
   const mergeQueuePosts: { at: number; settings: Record<string, number> }[] = [];
   effects.publishMergeSettings = async () => {
@@ -2563,19 +2508,14 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // GY-1585: the base tip as each cycle found it, which a lagging promotion cuts its release from;
   // every restart the self-upgrade ran with the release production served then; every pass's sample.
   // `pin` is the release the checkout's launcher runs spawned CLI processes on, null while unpinned.
-  // GY-1619: the executors the self-upgrade restarts, on the release their last restart loaded, and every cycle's fleet report.
-  const fleetDay = { loaded: github.tip, refused: [] as { elapsed: number; to: string }[],
-    samples: [] as { elapsed: number; loaded: string; coordinator: string; pin: string | null; split: boolean; inMotionUntil: string | null; stall: string | null; pending: string | null }[] };
-  const releaseLagDay = { tips: [] as { at: number; tip: string }[], pin: null as string | null, restarts: [] as { elapsed: number; kind: 'executors' | 'self'; to: string; served: string; contained: boolean; pin: string | null }[],
+  const releaseLagDay = { tips: [] as { at: number; tip: string }[], pin: null as string | null, restarts: [] as { elapsed: number; kind: 'self'; to: string; served: string; contained: boolean; pin: string | null }[],
     passes: [] as { elapsed: number; outcome: SelfUpgradeOutcome['outcome'] | null; pending: string | null; stall: string | null; held: { state: string; attempts: number } | null; waiting: number; upgradeRows: number; head: string; served: string; fetches: number; pin: string | null }[] };
-  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], executors: [] as string[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
-    /** GY-916: the restarts refused on a held claim, the owed restart sampled each cycle it stood, and the unit the supervisor runs. */
-    held: [] as string[], owed: [] as { to: string; state: string; attempts: number }[],
-    /** GY-1790: the loop unit as installed — its watchdog window and the launcher its ExecStart starts (`checkout`, or `snapshot:<commit>` while a pin stands) — `rewrites` counting the window's, `launcherRewrites` the launcher's, `refusals` the rewrites refused; and the entry the executor units start. */
-    unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0, launcher: 'checkout', launcherRewrites: 0, refusals: 0 }, executorEntry: 'checkout', executorRewrites: 0,
+  const upgrades = { fetches: 0, checkouts: [] as { at: number; from: string; to: string }[], self: 0, outcomes: [] as SelfUpgradeOutcome['outcome'][],
+    /** GY-1790: the loop unit as installed — its watchdog window and the launcher its ExecStart starts (`checkout`, or `snapshot:<commit>` while a pin stands) — `rewrites` counting the window's, `launcherRewrites` the launcher's, `refusals` the rewrites refused. */
+    unit: { watchdogSec: plan.driftedWatchdogSec, rewrites: 0, launcher: 'checkout', launcherRewrites: 0, refusals: 0 },
     starts: 0, watchdog: [] as { failed: number; attempts: number; windowSec: number }[],
     /** GY-1773: every pin the launcher received or lost, and each cycle's view of the checkout, the pin and the checkout the cursor names left behind. */
-    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null; last: { to: string; code: boolean; self: boolean } | null; unit: string; executorEntry: string; pending: string | null; stall: string | null; unitRow: { state: string; attempts: number } | null; self: number; refused?: { at: string; reason: string; commit: string | null } | null; refusedRow?: { state: string; attempts: number } | null }[],
+    pins: [] as { at: number; commit: string | null }[], samples: [] as { elapsed: number; head: string; dirty: boolean; pin: string | null; snapshot: { at: string; commit: string; checkout: string | null; dirty: string[] } | null; outcome: SelfUpgradeOutcome['outcome'] | null; last: { to: string; code: boolean; self: boolean } | null; unit: string; pending: string | null; stall: string | null; unitRow: { state: string; attempts: number } | null; self: number; refused?: { at: string; reason: string; commit: string | null } | null; refusedRow?: { state: string; attempts: number } | null }[],
     /** GY-1773: the docs-only commit `docsOnlyCommit` landed, once it has. */
     docsOnly: null as string | null };
   /** The paths the base branch changed between two commits: every merged pull request's files, and what any other commit added or removed. */
@@ -2599,16 +2539,10 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
   // GY-1899: the checkout the loop's code comes from, as the production wiring derives it from the configured launcher.
   const managedRoot = '/soak/coordinator', codeRoot = loopCodeRoot(config.cliPath, managedRoot);
   if (options.codeRoot) assert.equal(codeRoot, options.codeRoot, 'the day\'s CLI checkout is the loop\'s code root');
-  const codeRootDay = { gitRoots: new Set<string>(), loopUnits: [] as { elapsed: number; pin: string | null; launcher: string | null; handed: string | null; working: string | null }[],
-    executorUnits: [] as { elapsed: number; pin: string | null; entry: string | null; handed: string | null; working: string | null }[], executorUnit: '', persists: [] as number[] };
+  const codeRootDay = { gitRoots: new Set<string>(), loopUnits: [] as { elapsed: number; pin: string | null; launcher: string | null; handed: string | null; working: string | null }[], persists: [] as number[] };
   const unitLine = (text: string, pattern: RegExp) => text.match(pattern)?.[1] ?? null;
   const loopUnitBinding = (text: string) => ({ launcher: unitLine(text, /^ExecStart=\S+ (\S+) master run$/m), handed: unitLine(text, /^Environment="?GRAPHYARD_CHECKOUT_ROOT=([^"\n]+)"?$/m), working: unitLine(text, /^WorkingDirectory=(.+)$/m) });
-  const executorUnitBinding = (text: string) => ({ entry: unitLine(text, /^ExecStart=\S+ (\S+) --slot %i$/m), handed: unitLine(text, /^Environment="?GRAPHYARD_CHECKOUT_ROOT=([^"\n]+)"?$/m), working: unitLine(text, /^WorkingDirectory=(.+)$/m) });
-  if (options.codeRoot) {
-    // The executor template as init installs it for the managed repository from this CLI (setupRepository hands it the CLI checkout).
-    codeRootDay.executorUnit = renderExecutorUnit(await readFile(new URL('../../examples/master/graphyard-executor@.service', import.meta.url), 'utf8'), { root: managedRoot, node: process.execPath, ...executorEntryBinding(managedRoot, codeRoot, null) });
-  }
-  /** GY-1899: a violation unless a unit binds what the pin requires — the snapshot's launcher or entry handed the CLI checkout while it stands, the CLI checkout's own, handed nothing, once it lifts — always working in the managed repository. */
+  /** GY-1899: a violation unless a unit binds what the pin requires — the snapshot's launcher handed the CLI checkout while it stands, the CLI checkout's own, handed nothing, once it lifts — always working in the managed repository. */
   const bindingViolation = (what: string, binding: { started: string | null; handed: string | null; working: string | null }, held: string | null, own: string) => {
     const wanted = { started: held ?? own, handed: held ? codeRoot : null, working: managedRoot };
     if (binding.started !== wanted.started || binding.handed !== wanted.handed || binding.working !== wanted.working)
@@ -2644,13 +2578,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     if (op === 'checkout') { assert.ok(!checkout.dirty, 'a dirty checkout is never touched'); upgrades.checkouts.push({ at: clock.now(), from: checkout.head, to: operands[2] }); checkout.head = operands[2]; return ''; }
     throw new Error(`the simulated coordinator checkout cannot answer git ${args.slice(2).join(' ')}`);
   };
-  /** GY-1790: the launcher the loop unit must start, and the entry the executor units must, given the pin as it stands: the snapshot's while one stands, the checkout's otherwise. */
+  /** GY-1790: the launcher the loop unit must start, given the pin as it stands: the snapshot's while one stands, the checkout's otherwise. */
   const wantedLauncher = () => releaseLagDay.pin ? `snapshot:${releaseLagDay.pin}` : 'checkout';
-  const wantedExecutorEntry = () => releaseLagDay.pin ? heldExecutorEntryOf(codeRoot, releaseLagDay.pin)! : 'checkout';
   const selfUpgrade = (state: DaemonState) => performSelfUpgrade(config, state, {
     root: managedRoot, run: coordinatorGit, now: clock.now, persist: async () => { codeRootDay.persists.push(clock.now() - dayStart); },
     holdCli: async commit => {
-      if (commit === null && releaseLagDay.pin && clock.now() - dayStart >= (options.releaseLag?.fleet?.stalePinAt ?? Infinity)) throw new Error('EACCES: the pin could not be removed');
       upgrades.pins.push({ at: clock.now(), commit });
       releaseLagDay.pin = commit;
       // GY-1899: the pin is real under the CLI checkout, so the production unit alignment reads it from there.
@@ -2662,18 +2594,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
           await writeFile(heldCliPointer(codeRoot), `${JSON.stringify({ commit, root: heldCliSnapshotAt(codeRoot, commit), loop: true })}\n`);
         }
       }
-    },
-    restartExecutors: async to => {
-      // GY-1790: a slot the fleet restart starts runs the entry its unit names, which must be the one the pin requires now.
-      if (options.codeRoot) bindingViolation('executor', { ...executorUnitBinding(codeRootDay.executorUnit), started: executorUnitBinding(codeRootDay.executorUnit).entry }, releaseLagDay.pin ? heldExecutorEntryOf(codeRoot, releaseLagDay.pin) : null, join(codeRoot, 'scripts', 'graphyard-executor.mjs'));
-      if (upgrades.executorEntry !== wantedExecutorEntry()) violations.push(`${new Date(clock.now()).toISOString()} (+${Math.round((clock.now() - dayStart) / minute)} min) the executors restarted onto ${to.slice(0, 12)} through units starting ${upgrades.executorEntry}, not ${wantedExecutorEntry()}`);
-      // A busy fleet: a claim outlives restartExecutors' bounded wait for the first passes, and the restart is refused.
-      if (upgrades.held.length < plan.heldClaimRestarts) { upgrades.held.push(to); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
-      const fleet = options.releaseLag?.fleet, elapsed = clock.now() - dayStart;
-      if (fleet?.refuse && elapsed >= fleet.refuse.from && elapsed < fleet.refuse.to) { fleetDay.refused.push({ elapsed, to }); return { result: 'refused', reason: `Restart refused while an executor on ${config.hostId} holds a claimed action`, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }; }
-      if (fleet && elapsed < (fleet.strandAt ?? Infinity)) fleetDay.loaded = elapsed >= (fleet.stalePinAt ?? Infinity) && releaseLagDay.pin ? releaseLagDay.pin : to;
-      if (options.releaseLag) releaseLagDay.restarts.push({ elapsed: clock.now() - dayStart, kind: 'executors', to, served: production.sha, contained: github.contains(production.sha, to), pin: releaseLagDay.pin });
-      upgrades.executors.push(to); return { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
     },
     // The alignment re-applies the unit the loop runs under: a drifted watchdog window is rewritten to the configuration's,
     // and (GY-1790) its ExecStart follows the pin — the snapshot's launcher while one stands, the checkout's otherwise.
@@ -2693,18 +2613,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       if (!drifted && !moved) return { wrote: 'unchanged', reason: null };
       if (drifted) { upgrades.unit.watchdogSec = loopWatchdogSeconds(config.run.intervalSeconds); upgrades.unit.rewrites++; }
       if (moved) { upgrades.unit.launcher = wanted; upgrades.unit.launcherRewrites++; }
-      return { wrote: 'updated', reason: null };
-    },
-    // GY-1790: the executor units' entry follows the pin the same way — the snapshot's script while it stands, the checkout's when it lifts.
-    alignExecutorUnits: async script => {
-      // GY-1899: the production rewrite (alignExecutorUnitScript with the CLI checkout as its code root), rendered for real.
-      if (options.codeRoot) {
-        codeRootDay.executorUnit = renderExecutorUnit(codeRootDay.executorUnit, { root: managedRoot, node: process.execPath, ...executorEntryBinding(managedRoot, loopCodeRoot(config.cliPath, managedRoot), script) });
-        codeRootDay.executorUnits.push({ elapsed: clock.now() - dayStart, pin: releaseLagDay.pin, ...executorUnitBinding(codeRootDay.executorUnit) });
-      }
-      const wanted = script ?? 'checkout';
-      if (upgrades.executorEntry === wanted) return { wrote: 'unchanged', reason: null };
-      upgrades.executorEntry = wanted; upgrades.executorRewrites++;
       return { wrote: 'updated', reason: null };
     },
     // The supervisor re-executes the loop: the next process loads the release the checkout holds, as runDaemon records it,
@@ -2738,7 +2646,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     state.upgrade.snapshot = { at, commit: checkout.head, checkout: checkout.head, dirty: ['src/master.ts'] };
     state.upgrade.stalled = { cause: 'executors-refused', reason: 'a claim was in flight', since: at, at };
     releaseLagDay.pin = checkout.head;
-    upgrades.unit.launcher = `snapshot:${checkout.head}`; upgrades.executorEntry = heldExecutorEntryOf(codeRoot, checkout.head)!;
+    upgrades.unit.launcher = `snapshot:${checkout.head}`;
     await mkdir(join(heldCliSnapshotAt(codeRoot, checkout.head), 'src'), { recursive: true });
     await writeFile(heldCliPointer(codeRoot), `${JSON.stringify({ commit: checkout.head, root: heldCliSnapshotAt(codeRoot, checkout.head), loop: true })}\n`);
   }
@@ -3360,7 +3268,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       catch (error) { failures.push(`${new Date(now).toISOString()}: ${error instanceof Error ? error.message : String(error)}`); }
       for (const key of Object.keys(state.actions)) actionKeys.add(key);
       blockerKeysPeak = Math.max(blockerKeysPeak, Object.keys(state.actions).filter(key => key.startsWith('blocker:')).length);
-      if (hostDay) hostDay.peakRows = Math.max(hostDay.peakRows, Object.keys(state.actions).filter(key => key.startsWith(hostSupervisionKey)).length);
       // Only the day that holds a merge BLOCKED pays for the extra snapshot read each cycle.
       if (plan.blockedMerge) mergeStallSightings.push(...mergeStallAttention(await snapshot()).map(line => ({ subject: line.subject, text: line.text, at: clock.now() })));
       // The interval between cycles is when a hand-off launch settles; the day's clock waits for
@@ -3431,7 +3338,7 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       // GY-1773: each cycle's view of the checkout, the pin and the checkout the cursor names left behind.
       upgrades.samples.push({ elapsed, head: checkout.head, dirty: checkout.dirty, pin: releaseLagDay.pin, snapshot: state.upgrade.snapshot ? { ...state.upgrade.snapshot } : null, outcome: upgraded?.outcome ?? null,
         last: state.upgrade.last ? { to: state.upgrade.last.to, code: state.upgrade.last.code, self: state.upgrade.last.self } : null,
-        unit: upgrades.unit.launcher, executorEntry: upgrades.executorEntry, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null,
+        unit: upgrades.unit.launcher, pending: state.upgrade.pending?.to ?? null, stall: state.upgrade.stalled?.cause ?? null,
         unitRow: state.actions['upgrade:unit'] ? { state: state.actions['upgrade:unit'].state, attempts: state.actions['upgrade:unit'].attempts } : null, self: upgrades.self,
         refused: state.upgrade.refused ? { ...state.upgrade.refused } : null, refusedRow: state.actions['upgrade:refused'] ? { state: state.actions['upgrade:refused'].state, attempts: state.actions['upgrade:refused'].attempts } : null });
       if (options.releaseLag) {
@@ -3451,7 +3358,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         restartDay.pending.push({ elapsed, keys: state.doctor.pendingFiles.map(entry => entry.key) });
       }
       if (upgraded?.outcome === 'failed') failures.push(`${new Date(now).toISOString()}: self-upgrade failed: ${upgraded.reason}`);
-      if (upgraded?.outcome === 'pending') upgrades.owed.push({ to: state.upgrade.pending?.to ?? 'none', state: state.actions[`upgrade:${state.deployment?.sha}`]?.state ?? 'none', attempts: state.actions[`upgrade:${state.deployment?.sha}`]?.attempts ?? 0 });
       const watchdogActions = Object.entries(state.actions).filter(([key]) => key.startsWith('escalation:watchdog:'));
       upgrades.watchdog.push({ failed: watchdogActions.filter(([, action]) => action.state === 'failed').length, attempts: watchdogActions.reduce((total, [, action]) => total + action.attempts, 0), windowSec: upgrades.unit.watchdogSec });
       // The loop restarts after every other cycle a run is live, once its launches have settled as
@@ -3552,8 +3458,8 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
     mergeQueuePosts, config, refused, decideCalls, restarted, approverPanes, failing, herdrClosed: herdr.closed, diagnosisModel: settings.model, diagnosisRuns: diagnosed, baseBreak, capacityRefused, capacityLaunched, capacityWaiters,
     decided, misreads, prompts, screens, heldAccounts, approverAccounts, retryReset, limitMenuDay, menuReset, menuNotice, exitedLive, exitedClosed, exitedRowsSeen, reassign, workspaceFailures, workspaceCooled, docsFilings, docsActions, closedTrim, confined, unconfinedRefusals, fenced, mergeStallSightings, master, baseFailure,
     blockerEvents, blockerProbes, githubStatusReads, credentialReads, blockerRecords, blockerDecisions, blockerActions, blockerKeysPeak, attempts, lanesSeen, laneApplications, approverWorks, approverDecisions, failover, webhook, remedies, observeRequests, starvation, immutable: { ...immutable, bound: immutableBound, distinct: immutableSends.size }, mechanical: { ledger, botRounds, misclassified, reviewHolds }, shared, charges: { ...charged, b: charged.b.length, instancesSeen: [...charged.instancesSeen], restarts: chargeRestarts },
-    wakes, lateReading, staleMerges, restartLog, hostDay, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, planReportDay, loopWakeDay: loopWakeDay || null,
-    holdThrowDay, restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, fleetDay: options.releaseLag?.fleet ? fleetDay : null, dirtyLift: options.dirtyLift ? dirtyLift : null, failedLaunches, codeRootDay: options.codeRoot ? codeRootDay : null };
+    wakes, lateReading, staleMerges, restartLog, guardDay, mainWatchDay, budgetDay, slowPlaneDay, observationDay, deploymentDay, decompositionDay: decompositionHistory, diagnosisRaces, diagnosisRequestRaces, transientRefused, lateReads, staleReleaseDay, drain, acceptanceDay: acceptance?.day ?? null, plannerDay: planner?.day ?? null, planReportDay, loopWakeDay: loopWakeDay || null,
+    holdThrowDay, restartDay: options.checkoutRestart ? restartDay : null, releaseLagDay: options.releaseLag ? releaseLagDay : null, dirtyLift: options.dirtyLift ? dirtyLift : null, failedLaunches, codeRootDay: options.codeRoot ? codeRootDay : null };
 }
 
 /**

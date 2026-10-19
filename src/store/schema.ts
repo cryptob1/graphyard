@@ -15,7 +15,6 @@ import { flowTables } from './tables/flow.js';
 import { attributionTables } from './tables/attribution.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
 import { githubCacheTables } from './tables/github-cache.js';
-import { executorPresenceTables } from './tables/executor-presence.js';
 import { planeLivenessTables } from './tables/plane-liveness.js';
 import { mergerDefaultTables } from './tables/merger-default.js';
 
@@ -26,7 +25,7 @@ import { mergerDefaultTables } from './tables/merger-default.js';
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
   ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...attributionTables,
-  ...schemaGenerationTables, ...githubCacheTables, ...executorPresenceTables, ...planeLivenessTables, ...mergerDefaultTables,
+  ...schemaGenerationTables, ...githubCacheTables, ...planeLivenessTables, ...mergerDefaultTables,
 ];
 
 /** The additive startup migration: the append-only trigger function, then each table's DDL. */

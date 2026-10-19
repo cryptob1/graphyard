@@ -106,7 +106,7 @@ test('unit:unit-launcher-quoted-path — a loop unit whose ExecStart quotes a CL
   // CLI's commit, and nothing is stale.
   const run = (_command: string, args: string[]) => args[2] === 'rev-parse' ? `${args[1] === root ? REPO_COMMIT : COMMIT}\n` : '';
   const loaded = async () => (await readFile(unitFile, 'utf8')).includes(`"${cliPath}" master run`) ? COMMIT : OLD_COMMIT;
-  const read = async () => readLoopCode(root, { cliPath, run, units, unitDirectory, home, master: { repository: 'acme/shop', credentialFile: join(home, 'master.token') }, executors: null, cursor: JSON.stringify({ release: { commit: await loaded(), dirty: false } }) });
+  const read = async () => readLoopCode(root, { cliPath, run, units, unitDirectory, home, master: { repository: 'acme/shop', credentialFile: join(home, 'master.token') }, cursor: JSON.stringify({ release: { commit: await loaded(), dirty: false } }) });
   const reading = await read();
   assert.equal(reading.loop?.launcher, cliCheckout, 'the reading records the quoted launcher\'s checkout exactly');
   assert.equal(reading.loopCommit, COMMIT, 'the cursor reports this CLI\'s commit');
@@ -163,7 +163,6 @@ test('unit:unit-launcher-quoted-path — a loop unit whose ExecStart quotes a CL
   // Unquoted paths still parse as before, byte for byte the old whitespace split.
   assert.equal(unitLauncherCheckout(`[Service]\nExecStart=/usr/bin/node /opt/graphyard/bin/graphyard.mjs master run\n`, home), '/opt/graphyard');
   assert.equal(unitLauncherCheckout(`[Service]\nExecStart=/usr/bin/node /opt/pin/dist/cli.js master run\n`, home), '/opt/pin');
-  assert.equal(unitLauncherCheckout(`[Service]\nExecStart=/usr/bin/node /opt/cli/scripts/graphyard-executor.mjs --slot %i\n`, home), '/opt/cli');
   assert.equal(foreignUnitText(executor(`/usr/bin/node /opt/pilot/scripts/graphyard-executor.mjs --slot %i`), root), '/opt/pilot');
 
   // The wording itself, where the quoting rules bite: quoted whitespace groups one word, quoted and

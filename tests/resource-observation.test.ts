@@ -10,14 +10,9 @@ import { server, type Credential } from '../src/server.js';
 import { GitHub } from '../src/github.js';
 import type { Principal, Work } from '../src/model.js';
 import { capacityRoles } from '../src/model/capacity.js';
-import { claimAction, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
-import { actionStallThreshold } from '../src/model/action-progress.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { readReviewLedger, saveReviewLedger, sessionLedgerRefusal, type ReviewRecord } from '../src/reviewer.js';
-import { controlPlaneHandlers } from '../src/executor.js';
-import { runExecutorTick } from '../src/auto-dispatch.js';
+import { readReviewLedger, saveReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { stalledActionAttention } from '../src/cli/master-status.js';
 import { attributeAttention, resourceStatus } from '../src/master-status.js';
 import { dispatchRefusal, loadedRevision, owedUpgrade, selfUpgradeBoundMs, planeVerdict, readGitHubBudget, resourceAttention, finishedSessionGraceMs, nameReclaimBoundMs, stuckSessionMs, ledgerRetentionMs, readReclaimReports, readResources, reclaimResources, readTmpInodes, settleTmpReclaim, registryGaps, resourceIds, resourceRegistry, reviewLedgerBound, type ResourceInputs } from '../src/master-resources.js';
 import { classifyAttention } from '../src/model/fault-classes.js';
@@ -32,7 +27,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * refused by its schema, while `master status` reported "reviewer agent … is busy in Herdr";
  * finished panes held the agent names the next launch needed and read the same way. One case per
  * proof: unit:resource-registry-complete, integration:headroom-warned-before-exhaustion,
- * integration:refusal-names-exhausted-resource, integration:resources-reclaimed-within-bound and
+ * integration:resources-reclaimed-within-bound and
  * integration:health-reflects-write-capability; manual:resource-observation-docs-review reads
  * docs/master-agent.md and docs/operations-reference.md against the registry.
  */
@@ -73,10 +68,10 @@ test('unit:resource-registry-complete — every entry states its bound, usage, o
   }
 
   // What the loop consumes, derived from the code it runs: every capped ledger schema in a module
-  // the executor process and the loop load, every session role, and the resources the plane and
+  // the loop's production effects load, every session role, and the resources the plane and
   // the coordinator host provide it.
-  const executor = await readFile(join(root, 'scripts/graphyard-executor.mjs'), 'utf8');
-  const modules = [...new Set([...executor.matchAll(/tsImport\('\.\.\/(src\/[^']+\.ts)'/g)].map(match => match[1]).concat('src/master-daemon.ts'))];
+  const effects = await readFile(join(root, 'src/daemon/effects-production.ts'), 'utf8');
+  const modules = [...new Set([...effects.matchAll(/from '\.\.\/([\w-]+)\.js'/g)].map(match => `src/${match[1]}.ts`).concat('src/master-daemon.ts'))];
   assert.ok(modules.includes('src/reviewer.ts') && modules.includes('src/producer.ts'), 'the loop loads the launchers whose ledgers it writes');
   const ledgers: string[] = [];
   for (const module of modules) {
@@ -184,62 +179,6 @@ test('integration:headroom-warned-before-exhaustion — status reports each reso
 // ---- AC-3 --------------------------------------------------------------------------------------
 
 const requested = (id: string) => ({ id, kind: 'review' as const, sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, pr: 42, provider: 'github' as const, requestedAt: iso(Date.now()), reason: 'build gate passed', state: 'requested' as const });
-const reviewItem = { id: 'work-review', key: 'GY-42', stage: 'review', autoDispatch: { review: requested(randomUUID()), producers: [], history: [] } } as unknown as Work;
-const reviewRow = { id: randomUUID(), work: reviewItem.id, key: reviewItem.key, kind: 'request-review', inputs: { kind: 'request-review' } } as unknown as ActionRow;
-
-/** One claim-run-settle step of the real executor against one review row; returns the reason it recorded. */
-async function refusal(effects: { agents: HerdrAgent[]; launchReview: () => Promise<unknown> }) {
-  const recorded: string[] = [];
-  const handlers = controlPlaneHandlers(() => master('https://graphyard.example'), {
-    snapshot: async () => ({ work: [reviewItem], now: iso(Date.now()) }), mutate: async () => ({}), agents: () => effects.agents,
-    workerCredentials: async () => ({}), producerCredentials: async () => ({}), dispatchWorker: async () => ({}),
-    launchReview: effects.launchReview, launchProducer: async () => ({}),
-  });
-  const step = await runExecutorTick({ id: 'executor-a', host: 'machine-a' }, { claim: async () => ({ action: reviewRow }), settle: async (_action, result, reason) => { recorded.push(`${result}: ${reason}`); }, handlers: { 'request-review': handlers['request-review'] } });
-  assert.equal(step.result, 'failed');
-  assert.equal(recorded.length, 1);
-  return recorded[0].replace(/^failed: /, '');
-}
-
-/** The reason carried into the stalled-action entry once the row fails for it at the stall threshold. */
-function stalledEntry(reason: string) {
-  const at = Date.parse('2026-09-23T05:00:00.000Z');
-  const item = { id: 'work-stall', key: 'GY-43', title: 'Stall', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
-    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:x'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1,
-    createdAt: iso(at), updatedAt: iso(at), stageEnteredAt: iso(at), ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
-    reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [],
-    gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] } as unknown as Work;
-  reconcileActions(item, [item], new Date(at));
-  let now = at;
-  for (let failure = 0; failure < actionStallThreshold; failure++) {
-    const claimed = claimAction([item], { id: 'executor-a', host: 'machine-a', principal: 'executor-a' }, new Date(now))!;
-    const settled = settleAction(item, claimed.row.id, { executor: 'executor-a', principal: 'executor-a' }, 'failed', reason, new Date(now += 1000));
-    now = Date.parse(settled.action.retryAt!);
-  }
-  const entries = stalledActionAttention({ work: [item], now: iso(now) });
-  assert.equal(entries.length, 1, 'the row is classified stalled');
-  return entries[0].text;
-}
-
-test('integration:refusal-names-exhausted-resource — an exhausted agent-name namespace and a full review ledger are each named in the recorded refusal and the stalled-action entry, not as reviewer capacity', async () => {
-  // The namespace: a finished pane still holds the only name the reviewer profile may take.
-  const named = await refusal({ agents: [{ name: 'reviewer-a', pane_id: 'pane-3', agent_status: 'done' }], launchReview: async () => { throw new Error('unreachable: the launch is refused before the runtime is asked'); } });
-  assert.match(named, /^Herdr agent-name namespace \(reviewer-a\) is at its bound: 1 names used of 1 names, 0 names left — reviewer profile reviewer-a: reviewer-a \(done/);
-  assert.doesNotMatch(named, /busy|capacity|concurrency/i, 'the refusal is not read as reviewer capacity');
-  const namedStall = stalledEntry(named);
-  assert.match(namedStall, /stalled, retried only on a widening backoff: \d+ attempts in a row failed for one unchanged reason — Herdr agent-name namespace \(reviewer-a\) is at its bound: 1 names used of 1 names/);
-
-  // The review ledger: the launch reaches the ledger write, which its own cap refuses.
-  const directory = await scratchRoot();
-  await saveReviewLedger(directory, { version: 1, reviews: Array.from({ length: reviewLedgerBound }, (_, index) => pinned(index)) });
-  const full = await refusal({ agents: [], launchReview: async () => { const ledger = await readReviewLedger(directory); await saveReviewLedger(directory, { ...ledger, reviews: [...ledger.reviews, record(reviewLedgerBound, { state: 'pending' })] }); } });
-  assert.match(full, new RegExp(`^Review ledger is at its bound: ${reviewLedgerBound} records used of ${reviewLedgerBound} records, 0 records left — a write of a further record was refused by its bound \\(SessionLedgerFullError\\)`));
-  assert.doesNotMatch(full, /busy|concurrency/i, 'the refusal names the ledger, not a busy reviewer');
-  assert.match(full, sessionLedgerRefusal, 'the ledger\'s own refusal follows, for master status to attribute (GY-131)');
-  assert.match(stalledEntry(full), /unchanged reason — Review ledger is at its bound: 200 records used of 200 records/);
-  assert.equal((await readReviewLedger(directory)).reviews.length, reviewLedgerBound, 'nothing was written past the bound');
-});
-
 // ---- AC-4 --------------------------------------------------------------------------------------
 
 test('integration:resources-reclaimed-within-bound — a finished session and a terminal ledger record are reclaimed and recorded within the documented bound', async () => {

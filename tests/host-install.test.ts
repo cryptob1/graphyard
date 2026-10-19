@@ -58,13 +58,13 @@ test('unit:host-install-plan — the host plan names every unit, runtime and cre
     assert.equal(host.user, HOST_USER);
     assert.equal(host.configDirectory, CONFIG);
 
-    // Postgres, the server and TLS are system units; Herdr, the loop and the executors run in the graphyard user manager.
+    // Postgres, the server and TLS are system units; Herdr and the loop run in the graphyard user manager.
     const units = Object.fromEntries(host.units.map(unit => [unit.name, unit]));
     for (const name of ['graphyard-postgres.service', 'graphyard-server.service', 'graphyard-proxy.service']) assert.equal(units[name]?.path, `/etc/systemd/system/${name}`, name);
     assert.equal(units['graphyard-herdr.service']?.path, '/home/graphyard/.config/systemd/user/graphyard-herdr.service');
-    // The loop and executors are named for the install's repository (GY-1441), so another install on the host never shares them.
+    // The loop is named for the install's repository (GY-1441), so another install on the host never shares it.
     assert.equal(units['graphyard-master-owner-project.service']?.path, '/home/graphyard/.config/systemd/user/graphyard-master-owner-project.service');
-    assert.ok(units['graphyard-executor-owner-project@1.service'] && units['graphyard-executor-owner-project@2.service'], 'executor slots are supervised units');
+    assert.ok(!Object.keys(units).some(name => name.startsWith('graphyard-executor')), 'the plan supervises no executor unit');
 
     assert.deepEqual(host.runtimes.map(runtime => runtime.kind), ['claude', 'codex', 'opencode', 'pi']);
     // Every credential lives under the host account's ~/.config/graphyard/<install>/ with mode 0600.
@@ -86,7 +86,7 @@ test('unit:host-install-plan — the host plan names every unit, runtime and cre
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:host-install-plan — apply provisions the fixture host: units, runtimes, loop, executors, Herdr and 0600 credentials', async () => {
+test('unit:host-install-plan — apply provisions the fixture host: units, runtimes, loop, Herdr and 0600 credentials', async () => {
   const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
   try {
     const { session, summary } = await applyHost(fixture, hostInputs());
@@ -98,7 +98,7 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     const bootstrap = lines.find(line => line.startsWith('sh -c set -eu'))!;
     assert.match(bootstrap, /command -v bwrap >\/dev\/null \|\| apt-get install -y bubblewrap/);
     assert.match(bootstrap, /kernel\.apparmor_restrict_unprivileged_userns=0/);
-    // The probe runs as the account the loop and executors run as, after it exists, with the
+    // The probe runs as the account the loop runs as, after it exists, with the
     // namespaces a contained dependency install asks for: root passing says nothing about graphyard.
     assert.doesNotMatch(bootstrap, /\nbwrap /, 'no root-only bubblewrap probe');
     const probe = bootstrap.indexOf(`\nrunuser -u ${HOST_USER} -- bwrap ${HOST_BWRAP_PROBE.join(' ')} true`);
@@ -132,7 +132,7 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     // No credential is written on the operator's machine: only the install record lives there.
     assert.ok(![...fixture.transport.files.keys()].some(path => path.endsWith('.token')));
 
-    // The loop takes the coordinator credential on standard input and is supervised; executors are installed.
+    // The loop takes the coordinator credential on standard input and is supervised; no executor is installed.
     const master = hostOf(fixture).commands.find(command => command.args.includes('master') && command.args.includes('init'))!;
     assert.equal(master.input, session.tokens.get('owner-project-master'));
     assert.ok(!master.args.some(arg => arg.includes(master.input!)), 'the coordinator credential is never an argument');
@@ -144,11 +144,12 @@ test('unit:host-install-plan — apply provisions the fixture host: units, runti
     assert.ok(!autonomy.args.some(arg => arg.includes(autonomy.input!)), 'the admin credential is never an argument');
     assert.ok(hostOf(fixture).commands.indexOf(autonomy) > hostOf(fixture).commands.indexOf(master), 'after master init wrote the master configuration');
     assert.equal(summary.host!.masterIdentities, true);
-    assert.ok(lines.some(line => line.includes('graphyard-executor.mjs --install --count 2')));
+    assert.ok(!lines.some(line => line.includes('graphyard-executor.mjs') || line.startsWith('systemctl') && line.includes('graphyard-executor')), 'apply runs no executor installer and starts no executor unit');
+    assert.ok(![...files.keys()].some(path => path.includes('graphyard-executor')), 'apply writes no executor unit');
     assert.ok(lines.some(line => line.includes('systemctl --user enable --now graphyard-master-owner-project.service')));
 
-    // master init keeps its copy of the coordinator credential inside <install>/, and the executors
-    // create every connected account's login home under <install>/accounts.
+    // master init keeps its copy of the coordinator credential inside <install>/, and the loop
+    // creates every connected account's login home under <install>/accounts.
     assert.ok(master.args.includes(`GRAPHYARD_CONFIG_HOME=${CONFIG}`), master.args.join(' '));
     assert.ok(lines.some(line => line.includes(`systemctl --user set-environment GRAPHYARD_AGENT_ENVIRONMENTS=${CONFIG}/accounts GRAPHYARD_CONFIG_HOME=${CONFIG}`)));
     assert.match(files.get('/home/graphyard/.config/environment.d/graphyard.conf')!.content, new RegExp(`^GRAPHYARD_AGENT_ENVIRONMENTS=${CONFIG}/accounts$`, 'm'));
@@ -291,7 +292,7 @@ test('unit:host-install-plan — a loop that cannot be set up on the host fails 
     extraResponses: [{ match: 'master init', result: { stdout: '', stderr: 'master init: Herdr workspace w1 is not reachable', code: 1 } }] });
   try {
     await assert.rejects(applyHost(fixture, hostInputs()), /master init did not complete on graphyard-host: master init: Herdr workspace w1 is not reachable/);
-    assert.ok(!hostLines(fixture).some(line => line.includes('graphyard-executor.mjs --install')), 'nothing is supervised after the failure');
+    assert.ok(!hostLines(fixture).some(line => line.includes('systemctl --user enable --now graphyard-master')), 'nothing is supervised after the failure');
   } finally { await fixture.cleanup(); }
 });
 
@@ -482,7 +483,7 @@ test('unit:self-contained-auth-plan — the sign-in claim is spent once and refu
   assert.equal((await call(code)).status, 410, 'a spent claim is refused');
 });
 
-test('unit:host-migration — --migrate moves the database (backup/restore) onto the host without losing work: every old writer is fenced before the snapshot, the verified backup is restored before the server starts, executors and agent accounts are re-registered, the old loop is left stopped, and the old loop is refused leases after cutover', async () => {
+test('unit:host-migration — --migrate moves the database (backup/restore) onto the host without losing work: every old writer is fenced before the snapshot, the verified backup is restored before the server starts, agent accounts are re-registered, the old loop is left stopped, and the old loop is refused leases after cutover', async () => {
   const OLD_DATABASE = 'postgres://graphyard:old-database-password-0123456789@old.example.test:5432/graphyard';
   const BACKUP = JSON.stringify({ format: 'graphyard-backup-v1', digest: `sha256:${'b'.repeat(64)}`, tables: [], sequences: [] });
   const oldRegistry = { version: 1, revision: 7, updatedAt: null, sessions: [], refusals: [], lastMutation: null,
@@ -540,7 +541,6 @@ test('unit:host-migration — --migrate moves the database (backup/restore) onto
     // The old server, its webhooks and any session still calling it are fenced before the snapshot.
     assert.ok(freeze >= 0 && freeze < fence && fence < backup && backup < verify, local.join('\n'));
     assert.equal(fixture.transport.commands[fence].input, OLD_DATABASE, 'the old database reaches db fence on standard input');
-    assert.ok(local.some(line => line === 'systemctl --user stop graphyard-executor@*.service'), 'the old executors are stopped');
     const backupCommand = fixture.transport.commands[backup];
     assert.equal(backupCommand.input, OLD_DATABASE, 'the old database reaches db backup on standard input');
     assert.ok(!backupCommand.args.join(' ').includes('old-database-password'));
@@ -568,8 +568,7 @@ test('unit:host-migration — --migrate moves the database (backup/restore) onto
     await assert.rejects(renew(oldTokens.get('owner-project-master')!), (error: any) => error.status === 401 || /valid Graphyard bearer token/.test(error.message));
     assert.equal((await renew(session.tokens.get('owner-project-master')!)).id, 'owner-project-master');
 
-    // Executors re-register from the host's units; registry accounts of installed runtimes move onto the host.
-    assert.ok(remote.some(line => line.includes('graphyard-executor.mjs --install --count 2')));
+    // Registry accounts of installed runtimes move onto the host.
     const change = JSON.parse(fixture.requests.find(request => request.url.endsWith('/api/agent-registry/apply'))!.body!);
     assert.deepEqual(change.accounts.map((account: any) => [account.name, account.model, account.credential.host, account.credential.home, account.maxSessions, account.enabled]),
       [['claude-primary', 'opus', 'graphyard-host', `${CONFIG}/accounts/claude-primary`, 2, true], ['claude-laptop', 'opus', 'graphyard-host', `${CONFIG}/accounts/claude-laptop`, null, false]]);

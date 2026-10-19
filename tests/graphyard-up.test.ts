@@ -1731,9 +1731,8 @@ process.exit(answer.code);
   }
 });
 
-test('unit:land-coordinator-commits — the operator commits landed from the coordinator checkout (GY-1675) keep their behaviour: a Herdr session whose socket path would pass 107 characters is shortened, the executor unit falls back to the package\'s own script, onboarding submits by head where the control plane refuses a pull request number, and the up and Herdr-instance coverage they touched still stands', async () => {
+test('unit:land-coordinator-commits — the operator commits landed from the coordinator checkout (GY-1675) keep their behaviour: a Herdr session whose socket path would pass 107 characters is shortened, onboarding submits by head where the control plane refuses a pull request number, and the up and Herdr-instance coverage they touched still stands', async () => {
   const { installHerdrInstance } = await import('../src/master/herdr.js');
-  const { renderExecutorUnit } = await import('../src/repository-setup.js');
   const { fileOnboardingWork } = await import('../src/onboarding.js');
   const socket = (instance: { configHome: string; session: string }) => join(instance.configHome, 'herdr', 'sessions', instance.session, 'herdr-client.sock');
   // A short install keeps its readable session name.
@@ -1760,33 +1759,6 @@ test('unit:land-coordinator-commits — the operator commits landed from the coo
   assert.deepEqual(installHerdrInstance(longId, '/home/graphyard'), relocated, 'the relocation is deterministic');
   // A home even the relocated `gy` cannot fit under is refused by name.
   assert.throws(() => installHerdrInstance('owner-project', `/home/${'x'.repeat(60)}`), /gy-[0-9a-f]{6}\/herdr\/herdr\/sessions\/gy\/herdr-client\.sock is 136 bytes and a Unix socket path holds 107; install from a home directory with a shorter path/);
-
-  // The executor unit runs the checkout's script when it has one, else the package's own.
-  const template = 'WorkingDirectory=/x\nExecStart=/bin/false';
-  const withScript = renderExecutorUnit(template, { root: resolve(import.meta.dirname, '..'), node: '/usr/bin/node' });
-  assert.match(withScript, new RegExp(`^ExecStart=/usr/bin/node ${resolve(import.meta.dirname, '../scripts/graphyard-executor.mjs').replace(/[.]/g, '\\.')} --slot %i$`, 'm'));
-  const bare = await temporaryDirectory('land-coordinator-commits-unit');
-  const fallback = renderExecutorUnit(template, { root: bare, node: '/usr/bin/node' });
-  assert.match(fallback, new RegExp(`^WorkingDirectory=${bare.replace(/[.]/g, '\\.')}$`, 'm'));
-  assert.match(fallback, new RegExp(`^ExecStart=/usr/bin/node ${resolve(import.meta.dirname, '../scripts/graphyard-executor.mjs').replace(/[.]/g, '\\.')} --slot %i$`, 'm'), 'a target repository without the script runs the package\'s');
-  assert.match(renderExecutorUnit(template, { root: bare, node: '/usr/bin/node', script: '/opt/run.mjs' }), /^ExecStart=\/usr\/bin\/node \/opt\/run\.mjs --slot %i$/m);
-  // That unit is the repository's own, so its next install rewrites it rather than refusing it as another install's; another checkout's stays refused.
-  const { foreignUnitText } = await import('../src/install/units.js');
-  assert.equal(foreignUnitText(fallback, bare), null);
-  assert.equal(foreignUnitText(withScript, bare), resolve(import.meta.dirname, '..'));
-  // The release a fallback executor registers is the package checkout's, whose script and modules it runs, never the
-  // managed repository's the unit runs in (review of 355a8b88): the coordinator CLI's checkout commit is what the fleet is
-  // reconciled against, so a restart or an upgrade of the package finds the executor on the release it asked for.
-  // @ts-expect-error The standalone executor is a dependency-free entry point script.
-  const { executorModuleRoot, executorRelease } = await import('../scripts/graphyard-executor.mjs');
-  const { readCommit, readRelease } = await import('../src/executor-fleet.js');
-  const packageRoot = resolve(import.meta.dirname, '..');
-  assert.equal(executorModuleRoot(resolve(packageRoot, 'scripts/graphyard-executor.mjs')), packageRoot, 'the module root is the checkout whose script the unit names');
-  assert.equal(executorModuleRoot('scripts/graphyard-executor.mjs'), resolve('scripts', '..'), 'a relative spelling resolves against the working directory the unit runs in');
-  assert.equal(readCommit(bare), null, 'the repository without the script names no commit of its own');
-  const fallbackRelease = executorRelease(executorModuleRoot(), null, { readRelease, readCommit });
-  assert.equal(fallbackRelease.release.commit, readCommit(packageRoot), 'the registered release is the package checkout\'s commit');
-  assert.equal(fallbackRelease.current(), readCommit(packageRoot), 'and so is the commit compared before every claim');
 
   // Onboarding: a control plane that refuses a pull-request submission (no GitHub App) is answered with the published head.
   const submitted: any[] = [];
@@ -1823,6 +1795,7 @@ test('unit:land-coordinator-commits — the operator commits landed from the coo
   const linked = join(plain, '.graphyard', 'worktrees', 'GY-1-1');
   execFileSync('git', ['-C', plain, 'worktree', 'add', '-q', linked]);
   assert.deepEqual(composeCheckoutMounts(linked), { repoCheckout: resolve(execFileSync('git', ['-C', plain, 'rev-parse', '--path-format=absolute', '--git-common-dir'], { encoding: 'utf8' }).trim(), '..'), repoGitDir: null }, 'the main checkout, whose .git holds the worktree\'s refs and objects');
+  const bare = await temporaryDirectory('land-coordinator-commits-bare');
   assert.deepEqual(composeCheckoutMounts(bare), { repoCheckout: null, repoGitDir: null }, 'no .git, nothing to mount');
 
   // AC-2: the coverage of graphyard up and of the install's own Herdr instance that these commits touched is kept, not dropped.

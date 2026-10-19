@@ -201,33 +201,28 @@ test('integration:live-throughput-population — the population rule reads the r
   assert.ok(report.idle.maxMs !== null && report.idle.maxMs < throughputClaim.idleActionableMs, `the counted deliveries idled ${report.idle.maxMs}ms`);
   assert.equal(report.met, true); assert.equal(report.verdict, 'verified'); assert.equal(report.shortfall, null);
   assert.match(report.reason, new RegExp(`${throughputClaim.item}'s throughput claim holds on the deployed release ${deployedRevision}`));
-  // The exclusions flattered the idle figure, and the report says so rather than leaving it to be noticed.
+  // The excluded deliveries' idle figure is reported beside the admitted one (GY-1984: no budget rests on it).
   assert.ok(report.all.idleMaxMs! > throughputClaim.idleActionableMs);
-  assert.match(report.populationEffect!, /longest idle-but-actionable wait over all real deliveries in the window is 20 min/);
   assert.match(renderThroughput(report), /Counted:/);
   assert.match(renderThroughput(report), new RegExp(`${fast[0].key} \\(PR \\d+, merged .*\\): submit→merge 12 min`));
 
-  // AC-3: a real delivery that idled past the bound is a miss, and a miss is a finding with the
-  // values measured and a follow-up naming what missed and by how much. The budget is not moved
-  // and the population is not narrowed: the slow delivery is counted, not excluded.
+  // AC-3: a real delivery whose row stood unclaimed twenty minutes is counted, not excluded, and its
+  // wait is the report's idle figure. With no executor left to claim rows (GY-1984) it misses nothing.
   const idled = await executorDelivery('Nobody claimed it for twenty minutes', 16 * minute, { idleMs: 20 * minute });
   const withIdle = verifyThroughput([...work, await reload(idled)], now, { deployed: release(), claimKey });
   assert.equal(withIdle.population.admitted, 11, 'the slow delivery is admitted, not excluded');
-  assert.equal(withIdle.met, false); assert.equal(withIdle.verdict, 'unverified');
   assert.equal(withIdle.idle.key, idled.key);
   assert.ok(Math.abs(withIdle.idle.maxMs! - 20 * minute) < minute, `the recorded wait was ${withIdle.idle.maxMs}ms`);
-  const idleMiss = withIdle.shortfall!.missed.find(entry => entry.metric === 'idle-actionable')!;
-  assert.equal(idleMiss.budget, throughputClaim.idleActionableMs);
-  assert.ok(idleMiss.by! > 14 * minute, `${idleMiss.text}`);
-  assert.match(idleMiss.text, /past the 5 min bound/);
-  assert.match(withIdle.shortfall!.finding, /This is a finding about the design of GY-87/);
-  assert.match(withIdle.shortfall!.finding, /the budgets stay as GY-87 stated them and the population rule is not narrowed to make them pass/);
-  assert.match(withIdle.shortfall!.followUp.description, /What missed, and by how much/);
-  assert.match(withIdle.shortfall!.followUp.description, new RegExp(populationRule.slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(withIdle.verdict, 'verified', withIdle.reason);
   assert.equal(withIdle.claim.submitToMergeP50Ms, throughputClaim.submitToMergeP50Ms, 'the budgets the report carries are the claim\'s own');
 
-  // Too few deliveries judge nothing, and say how many are missing rather than passing on nine.
+  // Too few deliveries judge nothing, and say how many are missing rather than passing on nine; a
+  // miss is a finding with the values measured and a follow-up naming what missed and by how much.
   const nine = verifyThroughput([claimItem, ...fast.slice(1), handRun, blocked], now, { deployed: release(), claimKey });
+  assert.match(nine.shortfall!.finding, /This is a finding about the design of GY-87/);
+  assert.match(nine.shortfall!.finding, /the budgets stay as GY-87 stated them and the population rule is not narrowed to make them pass/);
+  assert.match(nine.shortfall!.followUp.description, /What missed, and by how much/);
+  assert.match(nine.shortfall!.followUp.description, new RegExp(populationRule.slice(0, 40).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.equal(nine.met, null); assert.equal(nine.verdict, 'unverified');
   assert.match(nine.shortfall!.missed[0].text, /9 of the 10 deliveries the claim is judged over were made with no master session running; 1 more/);
   // A release that does not carry the claim, or that cannot name itself, verifies nothing.
@@ -250,7 +245,7 @@ test('integration:live-throughput-population — the population rule reads the r
   // Beside a slow window, an empty admitted population is said to measure nothing, not zero.
   const emptyBesideSlow = verifyThroughput(work.filter(item => item.key === claimKey || report.excluded.some(entry => entry.work === item.id)), now, { deployed: release(), claimKey });
   assert.equal(emptyBesideSlow.population.admitted, 0);
-  assert.match(emptyBesideSlow.populationEffect!, /while the admitted deliveries measure n\/a \(no deliveries measured\)/);
+  assert.match(renderThroughput(emptyBesideSlow), /submit→merge p50 n\/a \(no deliveries measured\)/);
   assert.match(renderThroughput(unnamedEmpty), /Measured: submit→merge p50 n\/a \(no deliveries measured\)/);
   // The deployed commit comes from the deployment: the release stamp first, else the build identity
   // the platform injects (the same `commit` /healthz serves); never a guess.
@@ -374,14 +369,14 @@ test('integration:live-throughput-population — the population rule reads the r
     assert.equal(fromBuild.verdict, 'verified');
     assert.match(logged.join('\n'), new RegExp(`Deployed release: ${deployedRevision} \\(from build\\.commit\\)`));
     statusRelease = { release: { version: '0.9.1', revision: deployedRevision } };
-    // The same run over a ledger holding the delivery that idled past the bound: the finding and
-    // the follow-up are printed, the report is recorded, and the exit status says it missed — a
-    // scheduled measurement can never report a shortfall as a quiet success.
-    ledger = snapshot; logged.length = 0; process.exitCode = undefined;
+    // The same run over a ledger one admitted delivery short: the finding and the follow-up are
+    // printed, the report is recorded, and the exit status says it missed — a scheduled measurement
+    // can never report a shortfall as a quiet success.
+    ledger = snapshot.filter(item => item.id !== idled.id && item.id !== fast[0].id); logged.length = 0; process.exitCode = undefined;
     const missed = await measureMain(['--claim', claimKey, '--record', directory], environment, { run: () => ({ status: 0, stderr: '' }) }) as ThroughputReport & { recorded: string };
     assert.equal(missed.verdict, 'unverified'); assert.equal(process.exitCode, 2);
-    assert.equal(missed.population.admitted, 11, 'the slow delivery is measured, not dropped');
-    assert.ok(missed.shortfall!.missed.some(entry => entry.metric === 'idle-actionable'));
+    assert.equal(missed.population.admitted, 9);
+    assert.ok(missed.shortfall!.missed.some(entry => entry.metric === 'population'));
     assert.match(logged.join('\n'), /throughput claim: UNVERIFIED/);
     assert.match(logged.join('\n'), /Finding: .*finding about the design of GY-87/);
     assert.match(logged.join('\n'), /Follow-up: GY-87's throughput claim is unverified against the deployed release/);

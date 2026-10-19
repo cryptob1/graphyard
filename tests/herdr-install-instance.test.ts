@@ -119,7 +119,7 @@ test('unit:herdr-install-instance-created — a host whose default Herdr plugin 
     // instance is spelled out as installHerdrInstance computes it under a short home.
     const scoped = { configHome: join(home, '.config', 'graphyard', 'acme-shop', 'herdr'), session: 'graphyard-acme-shop' };
     const fetcher = (async () => new Response(JSON.stringify({ actor: { id: 'worker-a', role: 'worker' }, repository: 'acme/shop' }))) as unknown as typeof fetch;
-    const linked = await setupRepository(repo, { url: 'https://new.example', cliPath: launcher, hostId: 'host', token: 'worker-token-0123456789abcdef0123456789' }, { herdr: true, herdrInstance: scoped, fetcher, executors: false });
+    const linked = await setupRepository(repo, { url: 'https://new.example', cliPath: launcher, hostId: 'host', token: 'worker-token-0123456789abcdef0123456789' }, { herdr: true, herdrInstance: scoped, fetcher });
     assert.equal(linked.pluginConfigured, true);
     const lines = (await readFile(log, 'utf8')).trim().split('\n');
     assert.ok(lines.every(line => line.startsWith(`XDG=${scoped.configHome} ARGS=--session ${scoped.session} `)), lines.join('\n'));
@@ -633,7 +633,7 @@ test('unit:setup-page-herdr-connect-instructions — the Setup page shows copyab
   const { SetupView } = await import('../web/pages/setup.js');
   const { paneServer } = await import('../src/model/setup-checklist.js');
   const { herdrConnectCommands } = await import('../src/herdr-connect.js');
-  const { loopPanes, encodeLoopPanes, LoopPanesRegistry } = await import('../src/model/executor-presence.js');
+  const { loopPanes, encodeLoopPanes, LoopPanesRegistry } = await import('../src/model/loop-presence.js');
   const page = (herdrReport: unknown) => renderToStaticMarkup(createElement(SetupView, { status: { setup: { protection: 'off', loop: true, panes: herdrReport } }, onConnect: () => {}, onSubmitGoal: () => {} }));
   const decode = (html: string) => html.replaceAll('&#x27;', '\'').replaceAll('&quot;', '"').replaceAll('&amp;', '&');
 

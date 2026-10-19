@@ -185,10 +185,10 @@ async function loopCodeCheck(root: string, injected: LoopCodeReading | null | un
   const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'loop-code', status, step: setupSteps.loopCode, detail });
   if (!code) return check('fail', 'the units this install runs could not be read');
   if (code.error) return check('fail', `the units this install records are unreadable: ${code.error}`);
-  if (!code.loop && !code.executor) return null;
-  const stale = [code.loopStale, code.executorStale].filter(Boolean).join('; ');
+  if (!code.loop) return null;
+  const stale = code.loopStale;
   if (stale) return check('fail', `${stale}: rerun graphyard up${code.repository ? ` --repo ${code.repository}` : ''} --agent from this checkout (${code.cli.root}); its master-loop step rewrites the units to it and restarts them`);
-  return check('pass', `the loop${code.loop ? ` (${code.loop.unit} at ${code.loop.path})` : ''}${code.loopCommit ? ` at ${code.loopCommit.slice(0, 12)}` : ''} and its executors run this checkout (${code.cli.root})`);
+  return check('pass', `the loop${code.loop ? ` (${code.loop.unit} at ${code.loop.path})` : ''}${code.loopCommit ? ` at ${code.loopCommit.slice(0, 12)}` : ''} runs this checkout (${code.cli.root})`);
 }
 
 /** Every setup-from-zero line for this machine and installation, in checklist order. */

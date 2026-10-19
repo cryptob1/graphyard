@@ -51,7 +51,7 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 
 ## Self-contained host
 
-`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/executors/Herdr/runtimes on one machine. Price: `--confirm-price`/`--max-monthly`. `--migrate` stops loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL`.
+`--target host --ssh-host HOST` (or `--target hetzner`): server/Postgres/loop/Herdr/runtimes on one machine. Price: `--confirm-price`/`--max-monthly`. `--migrate` stops loop, fences `GRAPHYARD_MIGRATE_DATABASE_URL`.
 
 ## Upgrading an existing installation
 

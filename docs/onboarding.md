@@ -76,13 +76,13 @@ Adding workers: worker count `W` and `G` proof groups need `⌈W/2⌉` review an
 
 ## 3. Start the master
 
-`master init`, executor `init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as OS user whose GitHub credentials workers can't read; `--browser-profile`: Chrome as GitHub admin (`master browser`); App confirmation and GitHub Mobile *Confirm access* stay human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
+`master init`, `master start` ([setup](setup-from-zero.md#10-start-the-master)) as OS user whose GitHub credentials workers can't read; `--browser-profile`: Chrome as GitHub admin (`master browser`); App confirmation and GitHub Mobile *Confirm access* stay human-only. Reviewer: `master reviewer setup` or `master reviewer add PROFILE` ([template](../examples/master/claude-reviewer.json)); `master review GY-N` relaunches.
 
 ### The loop must be supervised
 
 `master init` (coordinator checkout) writes `~/.config/systemd/user/graphyard-master-OWNER-NAME.service`, runs `systemctl --user enable --now`, `loginctl enable-linger`; never a side effect (worker checkouts, temp directories refused). Move: `master init --token-stdin --replace-supervisor` there. `master status`: `setup.supervisor`. The loop and `graphyard up` preflight refuse a dirty CLI checkout; its research scratch is a managed-repository worktree.
 
-Shared hosts: units are per repository (`graphyard-executor-OWNER-NAME@N.service` too) in `.graphyard/units.json` (`graphyard-master.service` alias); setup never touches another checkout's; each install needs its `--herdr-workspace`.
+Shared hosts: units are per repository (`graphyard-master-OWNER-NAME.service`) in `.graphyard/units.json` (`graphyard-master.service` alias); setup never touches another checkout's; each install needs its `--herdr-workspace`.
 
 ### The pipeline doctor
 

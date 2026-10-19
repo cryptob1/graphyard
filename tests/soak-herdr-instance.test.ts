@@ -5,7 +5,7 @@ import { delimiter, join } from 'node:path';
 import { herdrSubcommand, installHerdrInstance, isHerdrCommand, herdrTarget, listHerdrAgents, targetHerdr, type HerdrAgent, type HerdrInstance } from '../src/master/herdr.js';
 import { atomicPrivateWrite, liveMasterConfig, loadMasterConfig, recordHerdrInstance } from '../src/master/config.js';
 import { loopHerdrReport } from '../src/cli/master/loop.js';
-import { LoopPanesRegistry, loopPanes } from '../src/model/executor-presence.js';
+import { LoopPanesRegistry, loopPanes } from '../src/model/loop-presence.js';
 import { hour, minute } from './helpers/soak-world.js';
 import { FailoverWorld, failoverInstalled, soakControlPlanes } from './helpers/soak-plane.js';
 import { simulateDay } from './helpers/soak-simulation.js';

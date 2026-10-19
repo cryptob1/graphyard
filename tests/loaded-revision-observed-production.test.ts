@@ -6,7 +6,6 @@ import { emptyDaemonState, type DaemonState } from '../src/master-daemon.js';
 import { performSelfUpgrade, type SelfUpgradeDeps } from '../src/daemon/upgrade.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
 import { owedUpgrade, readResources, resourceAttention, type ResourceInputs } from '../src/master-resources.js';
-import type { ExecutorRestartResult } from '../src/executor-fleet.js';
 
 // GY-1464: manual:fault-class-resources (resource:loaded-revision at its bound three times on 7 October 2026).
 //
@@ -50,14 +49,9 @@ class FakeGit {
   };
 }
 
-const executorResult = (to: string, held: boolean): ExecutorRestartResult => held
-  ? { result: 'refused', reason: 'Restart refused while an executor on host-a holds a claimed action', coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] }
-  : { result: 'restarted', reason: null, coordinator: { commit: to }, held: [], restarted: [], unsupervised: [], forgotten: [] };
-
-function deps(fake: FakeGit, clock: { now: number }, fleet: { held: boolean; self: number; executors: string[] }): SelfUpgradeDeps {
+function deps(fake: FakeGit, clock: { now: number }, fleet: { self: number }): SelfUpgradeDeps {
   return {
     root: '/coordinator', run: fake.run, now: () => clock.now,
-    restartExecutors: async to => { fleet.executors.push(to); return executorResult(to, fleet.held); },
     restartSelf: async () => { fleet.self += 1; },
   };
 }
@@ -79,7 +73,7 @@ function instanceState(instance: typeof instances[number], shape: 'awaiting' | '
     // A verified release the loop aligned onto, whose re-execution never ended the process.
     state.deployment = { source: 'endpoint', sha: instance.checkout, at: instance.at, reason: null, deployed: ['GY-1445'], pending: [] };
     state.upgrade.alignedRelease = instance.checkout;
-    state.upgrade.last = { at: iso(at - 2 * hour), from: instance.loaded, to: instance.checkout, code: true, executors: 'restarted', self: true };
+    state.upgrade.last = { at: iso(at - 2 * hour), from: instance.loaded, to: instance.checkout, code: true, self: true };
   } else {
     // Production serves what the loop loaded, and the promotion that would serve the rest is overdue.
     state.deployment = { source: 'endpoint', sha: instance.loaded, at: instance.at, reason: null, deployed: [], pending: ['GY-1450'] };
@@ -93,7 +87,7 @@ test('manual:fault-class-resources — GY-1464: each loaded-revision instance, w
     for (const shape of ['awaiting', 'aligned', 'served-overdue'] as const) {
       const label = `${instance.at} (${shape})`, faultAt = Date.parse(instance.at);
       const state = instanceState(instance, shape), fake = new FakeGit(instance.checkout, instance.checkout), clock = { now: faultAt };
-      const fleet = { held: true, self: 0, executors: [] as string[] };
+      const fleet = { self: 0 };
       const revision = { behind: instance.behind, loaded: instance.loaded, checkout: instance.checkout, movedAt: faultAt - 3 * hour };
 
       // The instance as it stood: no restart owed or attempted, the reading at its bound.
@@ -110,30 +104,19 @@ test('manual:fault-class-resources — GY-1464: each loaded-revision instance, w
       const upgrade = (current: DaemonState) => performSelfUpgrade(master, current, deps(fake, clock, fleet));
 
       // The base skipped this pass; the candidate owes the restart onto the checkout's HEAD and
-      // attempts it, with no fetch and no move: production's promotion still decides the tip.
-      const first = await guard.betweenCycles(upgrade);
-      assert.equal(first.upgraded?.outcome, 'pending', `${label}: the owed restart is attempted, not skipped`);
-      assert.deepEqual(fleet.executors, [instance.checkout], `${label}: the executor restart targets the checkout's HEAD`);
-      assert.deepEqual({ fetches: fake.fetches, checkouts: fake.checkouts }, { fetches: 0, checkouts: [] }, `${label}: the checkout stays where it stands`);
-      assert.deepEqual(state.upgrade.pending, { from: instance.loaded, to: instance.checkout, code: true });
-      assert.equal(guard.expected(), instance.checkout);
-      let reading = loadedRevision(state, revision, clock.now);
-      assert.equal(reading.used, 0, `${label}: the restart attempted within the bound is the upgrade under way`);
-      assert.match(reading.detail!, /owed restart onto it is under way/);
-
-      // The claims settle ten minutes in: the fleet restarts and the loop re-executes onto the checkout.
-      fleet.held = false;
-      clock.now = faultAt + 10 * minute;
+      // makes it, with no fetch and no move: production's promotion still decides the tip.
       const done = await guard.betweenCycles(upgrade);
-      assert.equal(done.upgraded?.outcome, 'upgraded', `${label}: the restart completes`);
+      assert.equal(done.upgraded?.outcome, 'upgraded', `${label}: the owed restart is made, not skipped`);
       assert.equal(fleet.self, 1, `${label}: the loop re-executed once`);
+      assert.deepEqual({ fetches: fake.fetches, checkouts: fake.checkouts }, { fetches: 0, checkouts: [] }, `${label}: the checkout stays where it stands`);
+      assert.equal(guard.expected(), instance.checkout);
       assert.equal(state.upgrade.pending, null);
       assert.equal(state.upgrade.stalled, undefined);
       assert.deepEqual(fake.checkouts, [], `${label}: the checkout was never moved`);
 
       // The process the supervisor starts loads the checkout: nothing is behind, and nothing repeats.
       state.release = { commit: instance.checkout, dirty: false };
-      reading = loadedRevision(state, { behind: 0, loaded: instance.checkout, checkout: instance.checkout }, clock.now + 25 * minute);
+      const reading = loadedRevision(state, { behind: 0, loaded: instance.checkout, checkout: instance.checkout }, clock.now + 25 * minute);
       assert.equal(reading.used, 0, `${label}: the instance does not recur`);
       clock.now = faultAt + 20 * minute;
       assert.equal((await performSelfUpgrade(master, state, deps(fake, clock, fleet))).outcome, 'skipped', `${label}: a loop running its checkout is idle`);
@@ -147,24 +130,24 @@ test('manual:fault-class-resources — GY-1464: the restart owed while productio
   const revision = { behind: instance.behind, loaded: instance.loaded, checkout: instance.checkout, movedAt: faultAt - 3 * hour };
 
   // GY-1982: the promotion schedule no longer holds the pass; the loop deploys and restarts onto its tip.
-  const waiting = instanceState(instance, 'served-overdue'), fake = new FakeGit(instance.checkout, instance.checkout), fleet = { held: false, self: 0, executors: [] as string[] };
+  const waiting = instanceState(instance, 'served-overdue'), fake = new FakeGit(instance.checkout, instance.checkout), fleet = { self: 0 };
   waiting.promotion = { ...waiting.promotion!, nextDueAt: iso(faultAt + 30 * minute) };
   assert.equal(loadedRevision(waiting, revision, faultAt).used, 0);
   assert.equal((await performSelfUpgrade(master, waiting, deps(fake, { now: faultAt }, fleet))).outcome, 'upgraded');
   assert.equal(fleet.self, 1);
 
   // A docs-only gap the loop already processed from what it loaded restarts nothing, cycle after cycle.
-  const docs = instanceState(instance, 'awaiting'), page = new FakeGit(instance.checkout, instance.checkout, ['docs/operations.md']), calm = { held: false, self: 0, executors: [] as string[] };
+  const docs = instanceState(instance, 'awaiting'), page = new FakeGit(instance.checkout, instance.checkout, ['docs/operations.md']), calm = { self: 0 };
   const first = await performSelfUpgrade(master, docs, deps(page, { now: faultAt }, calm));
-  assert.deepEqual(first, { outcome: 'upgraded', from: instance.loaded, to: instance.checkout, code: false, executors: null, self: false });
+  assert.deepEqual(first, { outcome: 'upgraded', from: instance.loaded, to: instance.checkout, code: false, self: false });
   for (const step of [1, 2, 3]) assert.equal((await performSelfUpgrade(master, docs, deps(page, { now: faultAt + step * 10 * minute }, calm))).outcome, 'skipped');
-  assert.deepEqual({ executors: calm.executors, self: calm.self, fetches: page.fetches }, { executors: [], self: 0, fetches: 0 });
+  assert.deepEqual({ self: calm.self, fetches: page.fetches }, { self: 0, fetches: 0 });
 
   // A verified release whose tip the checkout already holds, but the loop never loaded: restarted, not up to date.
-  const verified = emptyDaemonState(master), tipped = new FakeGit(instance.checkout, instance.checkout), quiet = { held: false, self: 0, executors: [] as string[] };
+  const verified = emptyDaemonState(master), tipped = new FakeGit(instance.checkout, instance.checkout), quiet = { self: 0 };
   verified.release = { commit: instance.loaded, dirty: false };
   verified.deployment = { source: 'endpoint', sha: instance.checkout, at: instance.at, reason: null, deployed: ['GY-1445'], pending: [] };
   const aligned = await performSelfUpgrade(master, verified, deps(tipped, { now: faultAt }, quiet));
   assert.equal(aligned.outcome, 'upgraded');
-  assert.deepEqual({ executors: quiet.executors, self: quiet.self, aligned: verified.upgrade.alignedRelease }, { executors: [instance.checkout], self: 1, aligned: instance.checkout });
+  assert.deepEqual({ self: quiet.self, aligned: verified.upgrade.alignedRelease }, { self: 1, aligned: instance.checkout });
 });
