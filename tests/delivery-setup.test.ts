@@ -92,10 +92,13 @@ test('unit:init-splits-merge-gate-and-candidate-checks — init classifies build
   assert.deepEqual(config.delivery, delivery);
   assert.ok(config.documentation.paths.length > 0, 'the documentation policy is kept beside the delivery policy');
   assert.deepEqual(first.delivery!.requiredChecks, ['build', 'typecheck', 'lint', 'test', 'unit']);
-  assert.deepEqual(first.delivery!.workflows, [candidateWorkflowFile, promotionWorkflowFile]);
-  // Re-applying changes nothing, and the generated workflows never feed back into the scan.
+  // GY-2009: repository setup writes no .github/workflows file.
+  assert.deepEqual(first.delivery!.workflows, []);
+  assert.equal(await exists(join(root, candidateWorkflowFile)), false);
+  assert.equal(await exists(join(root, promotionWorkflowFile)), false);
+  // Re-applying changes nothing, and nothing feeds back into the scan.
   const second = await applyProposal(root, proposal, dependencies);
-  assert.ok(second.unchanged.includes('graphyard.json delivery policy') && second.unchanged.includes(candidateWorkflowFile));
+  assert.ok(second.unchanged.includes('graphyard.json delivery policy'));
   assert.deepEqual(repositoryScanDifference(await scanProposal(root, { url: 'https://graphyard.example', runtimes: [] }), proposal), []);
 
   // An operator's edit to the committed split is what the next scan proposes.
@@ -104,8 +107,7 @@ test('unit:init-splits-merge-gate-and-candidate-checks — init classifies build
   assert.ok(names((await scanProposal(root, { runtimes: [] })).delivery!.mergeGate.preMerge).includes('test:snapshots'));
   await writeFile(join(root, 'graphyard.json'), JSON.stringify({ ...config, delivery }));
 
-  // Opting out to the per-PR model: every check stays required on pull requests, no candidate is cut,
-  // and generated workflows left behind are named for removal rather than silently deleted.
+  // Opting out to the per-PR model: every check stays required on pull requests and no candidate is cut.
   const perPr = await scanProposal(root, { url: 'https://graphyard.example', runtimes: [], delivery: { mode: 'per-pr' } });
   assert.equal(perPr.delivery!.mode, 'per-pr');
   assert.deepEqual(perPr.policy.checks, perPr.checks);
@@ -114,7 +116,7 @@ test('unit:init-splits-merge-gate-and-candidate-checks — init classifies build
   const optedOut = await applyDelivery(root, perPr.delivery!, 'node');
   assert.equal(parseRepositoryConfig(await readFile(join(root, 'graphyard.json'), 'utf8')).delivery!.mode, 'per-pr');
   assert.deepEqual(optedOut.workflows, []);
-  assert.ok(optedOut.drift.some(line => line.includes(candidateWorkflowFile) && /opting out/.test(line)));
+  assert.equal(await exists(join(root, candidateWorkflowFile)), false, 'GY-2009: no workflow was ever written to name for removal');
   // The committed opt-out is what a later scan proposes.
   assert.equal((await scanProposal(root, { runtimes: [] })).delivery!.mode, 'per-pr');
   // An invalid cadence is refused rather than written.
@@ -231,16 +233,18 @@ test('unit:setup-generates-candidate-and-promotion-workflows — the generated w
   assert.equal(assessPromotion(rc, record({ deployedSha: 'c'.repeat(40) }), null).promotable, false, 'UAT served another SHA');
   assert.deepEqual(assessPromotion(rc, record({}), null), { promotable: true, refusals: [], sha, already: false });
 
-  // Setup writes exactly what it renders.
+  // GY-2009: setup writes the policy and no workflow, and removes a leftover one an older init generated.
   const root = await fixtureRepo(service);
   const applied = await applyDelivery(root, railwayPolicy(), 'node');
-  assert.equal(await readFile(join(root, candidateWorkflowFile), 'utf8'), renderCandidateWorkflow(railwayPolicy(), { stack: 'node' }));
-  assert.equal(await readFile(join(root, promotionWorkflowFile), 'utf8'), renderPromotionWorkflow(railwayPolicy(), { stack: 'node' }));
-  assert.deepEqual(applied.workflows, [candidateWorkflowFile, promotionWorkflowFile]);
-  // A command adapter without its commands writes the policy but no workflow, and says what is missing.
-  const unconfigured = await applyDelivery(await fixtureRepo(service), railwayPolicy({ adapter: 'command', project: null }), 'node');
-  assert.deepEqual(unconfigured.workflows, []);
-  assert.ok(unconfigured.drift.some(line => /delivery\.deploy\.uat/.test(line)));
+  assert.equal(await exists(join(root, candidateWorkflowFile)), false);
+  assert.equal(await exists(join(root, promotionWorkflowFile)), false);
+  assert.deepEqual(applied.workflows, []);
+  const leftover = await fixtureRepo(service);
+  await mkdir(join(leftover, '.github', 'workflows'), { recursive: true });
+  await writeFile(join(leftover, candidateWorkflowFile), renderCandidateWorkflow(railwayPolicy(), { stack: 'node' }));
+  const cleaned = await applyDelivery(leftover, railwayPolicy(), 'node');
+  assert.equal(await exists(join(leftover, candidateWorkflowFile)), false, 'a leftover generated workflow is removed');
+  assert.ok(cleaned.applied.some(line => line.startsWith(`removed ${candidateWorkflowFile}`)));
 });
 
 async function committedDelivery(root: string, policy: DeliveryPolicy) {
@@ -268,7 +272,7 @@ test('unit:install-plan-lists-candidate-environments — install --plan lists ev
     // The reviewed split, not the discovered checks, is what protection requires.
     assert.deepEqual(plan.delivery, { mode: 'release-candidate', committed: true, preMerge: ['test'], perCandidate: ['test:e2e', 'soak', 'browser-e2e'], adapter: 'railway' });
     assert.deepEqual(session.requiredChecks, ['test']);
-    assert.match(plan.actions.find(action => action.id === 'github.protection')!.title, /Require status checks \(test, Graphyard/);
+    assert.ok(!plan.actions.some(action => action.id === 'github.protection'), 'GY-2009: no branch protection is planned');
     // The plan applied nothing.
     const lines = railway.commandLines();
     for (const mutation of ['railway init', 'railway environment', 'railway add', '--method POST', '--method PUT']) assert.ok(!lines.some(line => line.includes(mutation)), `plan ran ${mutation}`);

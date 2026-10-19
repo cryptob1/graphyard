@@ -1,10 +1,10 @@
-// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, verify-deployment, main-watch.
+// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, main-watch.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
 import { handSettlementRefusal } from '../../model/containment.js';
 import { dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { observeDeployment, readDaemonState } from '../../master-daemon.js';
-import { localPostDeployChecks, verificationEffects, verifyDeployment, type PostDeployChecksInput } from '../../master-verification.js';
+import { localPostDeployChecks, type PostDeployChecksInput } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
 import { assertHandDispatch } from '../hand-actions.js';
@@ -42,7 +42,7 @@ const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart
 /**
  * `master post-deploy-checks` (GY-1732): this checkout's decision of a delivered item's post-deploy
  * checks and the follow-ups they file, printed as JSON from a `PostDeployChecksInput` on stdin.
- * verify-deployment runs it from the observed release's isolated checkout, so a follow-up's text and
+ * The loop's readings run it from the observed release's isolated checkout, so a follow-up's text and
  * observation window are the serving release's, not those of a coordinator checkout behind it.
  */
 export async function postDeployChecksCommand(stdin: AsyncIterable<string | Buffer> = process.stdin, write: (text: string) => void = text => process.stdout.write(text)) {
@@ -52,7 +52,7 @@ export async function postDeployChecksCommand(stdin: AsyncIterable<string | Buff
   write(`${JSON.stringify(await localPostDeployChecks(input))}\n`);
 }
 
-/** Reading status and acting on one item: settle a quarantine, dispatch, merge, verify a deployment. */
+/** Reading status and acting on one item: settle a quarantine, dispatch, merge, record a reading. */
 export async function operationsCommand(session: MasterSession, effects: RecoverEffects = recoverEffects): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
   if (id === 'status') {
@@ -176,15 +176,6 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const proof = named ?? proofs.find(candidate => loopReadingOn(work, candidate, served.sha as string)?.result !== 'pass') ?? proofs[0];
     const reading = { proof, sha: served.sha, baseSha: request ? parent.delivery.mergeSha : served.sha, policyRevision: work.policyRevision, result, detail: detail.slice(0, 2000) };
     return print(await masterMutation(`work/${work.id}/reading`, reading));
-  }
-  if (id === 'verify-deployment') {
-    if (!args[0]) throw new Error('Use master verify-deployment GY-N');
-    const snapshot = await masterApi('work-snapshot');
-    const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-    if (!work) throw new Error(`Unknown work item ${args[0]}`);
-    const result = await verifyDeployment(work, verificationEffects(master, { root, snapshot: () => masterApi('work-snapshot'), mutate: masterMutation, read: path => masterApi(path) }));
-    if (result.result === 'refused') process.exitCode = 1;
-    return print(result);
   }
   return unhandled;
 }

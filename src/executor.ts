@@ -6,13 +6,13 @@ import type { Work } from './model.js';
 import type { ActionRow } from './model/actions.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { actionJudgment, type NextActionKind } from './model/next-action.js';
-import { describeObservationJob, resyncUnobservedPrefix, staleContainmentReasonPrefix } from './model/action-kinds.js';
+import { describeObservationJob, resyncUnobservedPrefix } from './model/action-kinds.js';
 import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { answeredByPendingSession, independentProducerProfiles } from './producer.js';
 import { answeredByPendingReview } from './reviewer.js';
-import { daemonSummary, profileHealth, readDaemonState, type DaemonState, type DeploymentObservation } from './master-daemon.js';
-import { patternReader, reportPostDeployChecks } from './master-verification.js';
+import { daemonSummary, profileHealth, readDaemonState, type DaemonState } from './master-daemon.js';
+import { patternReader } from './master-verification.js';
 export { patternReader };
 import { withLaunchedRuntime } from './master/launch.js';
 import { launchedSessionHandle, selectReviewerProfile, type ExecutorEffects, type ExecutorHandler } from './auto-dispatch.js';
@@ -67,18 +67,6 @@ export interface ControlPlaneEffects {
   dispatchWorker: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<any>;
   launchReview: (work: Work, request: DispatchRequest, agents: HerdrAgent[], observedAt: string) => Promise<any>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<any>;
-  observeDeployment: (delivered: Work[]) => Promise<DeploymentObservation>;
-  /**
-   * GY-1831, GY-1966: the wait a `verify-deployment` failure names while the promotion pipeline is
-   * moving `mergeSha` toward the release that serves it, with the pipeline's newest demonstrated
-   * movement, answered from the promotion state the loop already records on its cursor, read at
-   * the failed attempt. Null, absent, or failing to read, a `verify-deployment` failure that the
-   * running release does not carry the merge keeps its plain reason and stalls as before; the
-   * wiring fails closed the same way when the state cannot be read.
-   */
-  promotionWaitSuffix?: (mergeSha: string) => Promise<string | null>;
-  /** Where the handler's own diagnostics go; absent, a failed promotion read is logged nowhere. */
-  log?: (line: string) => void;
   /** Records a launched session's durable handle on the item (AC-8). */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
   /** GY-1764: the base branch's tracked files the approve-scope handler judges a scope ask's paths against; built from the coordinator checkout when absent, injectable so a test supplies its own tree. */
@@ -442,36 +430,6 @@ export function controlPlaneHandlers(config: () => MasterConfig, effects: Contro
       const { work } = await find(action);
       await effects.mutate(`work/${work.id}/resync`, {}, randomUUID());
       return `${work.key}: GitHub merges ${work.candidate?.sha.slice(0, 12) ?? 'the candidate'} on its branch protection; Graphyard records the delivery from the merged observation`;
-    },
-    'verify-deployment': async action => {
-      const { work, all } = await find(action);
-      if (action.inputs.kind !== 'verify-deployment') throw new Error('unreachable');
-      const observation = await effects.observeDeployment([work]);
-      if (observation.source === 'unavailable' || !observation.sha) throw new Error(observation.reason ?? `no deployment could be read for ${work.key}`);
-      if (!observation.deployed.includes(work.key)) {
-        // An informational reason (an inactive release production still serves) follows the does-not-carry sentence, so a
-        // stall still names the release machinery; a stale containment reason stands alone, its pending list unreliable.
-        const notCarried = `the running release ${observation.sha.slice(0, 12)} does not carry ${work.key}'s merge ${action.inputs.mergeSha.slice(0, 12)} yet`;
-        const plain = !observation.reason ? notCarried : observation.reason.includes(staleContainmentReasonPrefix) ? observation.reason : `${notCarried}: ${observation.reason}`;
-        // GY-1831: a release the promotion pipeline is about to serve is the pipeline's ordinary
-        // pace, not a fault. GY-1966: the wait names the pipeline's newest demonstrated movement,
-        // so the row's unchanged run measures the stretch since the pipeline last moved and the
-        // promotion wait bound holds it — a re-cut cycle longer than an hour no longer files.
-        // Containment derived without a fresh base branch is not this shape, since its pending
-        // list is not reliable; an informational reason (an inactive release production still
-        // serves) is. A state that cannot be read stands as not carrying — logged, so an
-        // unreadable pipeline is diagnosable — and the plain reason and the stall are what they
-        // were.
-        const waiting = !observation.reason?.includes(staleContainmentReasonPrefix) && await Promise.resolve(effects.promotionWaitSuffix?.(action.inputs.mergeSha)).catch(error => {
-          effects.log?.(`[graphyard-executor] the promotion state could not be read for ${work.key}, so the failure stands as it was: ${error instanceof Error ? error.message : String(error)}`);
-          return null;
-        });
-        throw new Error(waiting ? `${plain}; ${waiting}` : plain);
-      }
-      // An unobserved post-deploy criterion is named in the result, never filed as a work item (2026-10-17).
-      const owed = reportPostDeployChecks(work, observation.sha, new Date(effects.now?.() ?? Date.now())).filter(check => check.result === 'owed');
-      await effects.mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: action.inputs.mergeSha, source: observation.source, observedAt: observation.at }, randomUUID());
-      return `observed the release serving ${observation.sha.slice(0, 12)} for ${work.key}${owed.length ? `; ${owed.map(check => `${check.criterion} (${check.proof}) is not yet observed on this release`).join(', ')}` : ''}`;
     },
   };
   if (checkoutRefusal) for (const kind of Object.keys(handlers) as NextActionKind[]) {

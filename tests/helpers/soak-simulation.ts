@@ -2426,13 +2426,11 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
       }));
     };
   }
-  // GY-1418: a goal is delivered only once production is observed serving every item, so the planner's day records each observation on the real route.
-  if (planner) effects.recordDeployment = (item, observation) => api(principals.coordinator, 'POST', `work/${item.id}/deployment`, { sha: observation.sha, mergeSha: item.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt });
   // ---- GY-1354: the slow-deployment day. Inside the window the release observation answers
   // ---- `observationMs` after it is asked, as cycle 12624's did in 587.1s: the cycle that asks spends the
   // ---- deployment step's whole budget on it and is cut, and the read stays in flight across cycles.
   const deploymentDay = { cycles: [] as { cycle: number; elapsed: number; spentMs: number; cut: boolean; pending: number }[], started: 0, landed: 0, inFlight: 0, maxInFlight: 0,
-    records: [] as string[], smokes: [] as string[], land: () => {} };
+    land: () => {} };
   if (options.slowDeployment) {
     const window = options.slowDeployment, { observeDeployment } = effects;
     const budget = deploymentStep.deploymentStepBudgetMs(config.run.intervalSeconds * 1000);
@@ -2450,12 +2448,6 @@ export async function simulateDay(options: { hours: number; backlog?: boolean; m
         landing = { at: clock.now() - waited + window.observationMs, answer: () => { deploymentDay.inFlight--; deploymentDay.landed++; resolve(observeDeployment(delivered, containment)); } };
       }));
     };
-    // The loop's real route for the deployment record (src/daemon/effects.ts), so a smoke request follows it.
-    effects.recordDeployment = async (item, observation) => {
-      deploymentDay.records.push(item.key);
-      return api(principals.coordinator, 'POST', `work/${item.id}/deployment`, { sha: observation.sha, mergeSha: item.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt });
-    };
-    effects.requestSmoke = async item => { deploymentDay.smokes.push(item.key); };
   }
   // ---- GY-1416: the loop's setup step (7e) on a Railway deployment that lacks the revert approver.
   // ---- The real `master setup --apply` runs against a scripted Railway CLI on the simulated clock;

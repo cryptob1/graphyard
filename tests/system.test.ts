@@ -8,9 +8,8 @@ import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { OperatorAgents } from '../src/operator-agent.js';
-import { ReconciliationRetry, deliveryState, rollbackGuidance, type Principal, type Work, type Observation, type ScopeFile } from '../src/model.js';
+import { ReconciliationRetry, deliveryState, type Principal, type Work, type Observation, type ScopeFile } from '../src/model.js';
 import { diagnose } from '../src/coordination.js';
-import { stageMetrics } from '../src/master-daemon.js';
 import { defineScenario, scenarios } from '../src/scenarios.js';
 import { proofPreview } from '../src/coordination.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -1135,8 +1134,8 @@ test('formal review identities stay excluded after revisions regardless of clock
   assert.equal(w.gates.find(g => g.name === 'review')!.passed, false);
 });
 
-// Post-deployment smoke proof: trunk stays the only pre-merge gate, and the second confidence
-// layer binds to the exact commit Graphyard observed serving the merge.
+// Post-deployment smoke proof: trunk stays the only pre-merge gate, and a smoke result binds to the
+// exact commit recorded serving the merge; the item is delivered at its merge either way (GY-1981).
 const smokeProducer: Principal = { id: 'smoke-runner', role: 'producer', proofs: ['e2e:deploy-smoke', 'integration:claim-safety'] };
 const mergeSha = 'e'.repeat(40), servingSha = 'f'.repeat(40);
 async function deliveredWithSmokePolicy() {
@@ -1156,82 +1155,65 @@ async function deliveredWithSmokePolicy() {
 }
 const smoke = (sha: string, baseSha: string, result: 'pass' | 'fail' = 'pass', extra: Record<string, unknown> = {}) => ({ proof: 'e2e:deploy-smoke', sha, baseSha, policyRevision: 1, result, executed: 3, skipped: 0, ...extra });
 
-test('deploy-smoke evidence binds to the observed deployed commit, is accepted only from an authorized producer, and lands in the delivery snapshot', async () => {
+/** A deployment an older ledger recorded on the delivery (GY-1981 removed the command that wrote one). */
+async function recordDeployment(w: Work, sha: string) {
+  const deployment = { sha, mergeSha, source: 'endpoint', observedAt: new Date().toISOString(), covers: sha === mergeSha ? 'exact' : 'descendant', at: new Date().toISOString(), observer: coordinator.id };
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{delivery,deployment}',$2::jsonb) WHERE id=$1", [w.id, JSON.stringify(deployment)]);
+  return reload(w);
+}
+
+test('deploy-smoke evidence binds to the recorded deployed commit, is accepted only from an authorized producer, and lands in the delivery snapshot; the item is delivered at its merge throughout', async () => {
   await assert.rejects(engine.execute(operator, 'create', null, { ...workInput, criteria: [{ id: 'AC-1', text: 'Smoke', proofs: ['e2e:deploy-smoke'] }] }, randomUUID()), /policy\.deploySmoke/, 'the post-deploy proof is a policy, never a merge criterion');
   let w = await deliveredWithSmokePolicy();
-  assert.equal(deliveryState(w), 'awaiting-deployment');
-  const observed = new Date().toISOString();
-  // Nobody may report smoke before Graphyard has observed the deployment, whoever they are.
+  assert.equal(deliveryState(w), 'delivered', 'done = merged, whatever the smoke policy (GY-1981)');
+  // Nobody may report smoke against a delivery with no recorded deployment, whoever they are.
   await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha), randomUUID()), /has not observed a deployment/);
-  // Only the coordinator (or an operator) records a deployment observation, only for delivered work, only for this merge.
-  await assert.rejects(engine.execute(worker, 'deployment', w.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID()), /Coordinator permission/);
-  await assert.rejects(engine.execute(producer, 'deployment', w.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID()), /Coordinator permission/);
-  await assert.rejects(engine.execute(coordinator, 'deployment', w.id, { sha: mergeSha, mergeSha: head, source: 'endpoint', observedAt: observed }, randomUUID()), /another merge commit/);
-  const open = await submitted();
-  await assert.rejects(engine.execute(coordinator, 'deployment', open.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID()), /only for delivered work/);
-  w = await engine.execute(coordinator, 'deployment', w.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID());
-  assert.equal(w.stage, 'done'); assert.equal(w.delivery!.deployment!.covers, 'exact'); assert.equal(w.delivery!.deployment!.observer, coordinator.id);
-  assert.equal(deliveryState(w), 'awaiting-smoke');
-  await assert.rejects(engine.execute(coordinator, 'deployment', w.id, { sha: servingSha, mergeSha, source: 'endpoint', observedAt: observed }, randomUUID()), /already has a recorded deployment/);
+  // The per-item deployment command is gone.
+  await assert.rejects(engine.execute(coordinator, 'deployment' as never, w.id, { sha: mergeSha, mergeSha, source: 'endpoint', observedAt: new Date().toISOString() }, randomUUID()), /Unknown command/);
+  w = await recordDeployment(w, mergeSha);
   // Authorization: a worker, an operator, and a producer without the grant are all refused outright; nothing untrusted is stored.
   await assert.rejects(engine.execute(worker, 'evidence', w.id, smoke(mergeSha, mergeSha), randomUUID()), /only from a producer authorized/);
   await assert.rejects(engine.execute(operator, 'evidence', w.id, smoke(mergeSha, mergeSha), randomUUID()), /only from a producer authorized/);
   await assert.rejects(engine.execute(producer, 'evidence', w.id, smoke(mergeSha, mergeSha), randomUUID()), /only from a producer authorized/);
-  // Binding: the evidence must name the observed deployed commit and this item's merge commit.
+  // Binding: the evidence must name the recorded deployed commit and this item's merge commit.
   await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(head, mergeSha), randomUUID()), /must name the observed deployed commit/);
   await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, head), randomUUID()), /must name the observed deployed commit/);
   await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha, 'pass', { policyRevision: 2 }), randomUUID()), /Policy revision/);
   assert.equal((await reload(w)).evidence.filter(e => e.proof === 'e2e:deploy-smoke').length, 0, 'refused smoke evidence is never stored');
   const before = structuredClone(w.delivery);
   w = await engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha, 'pass', { url: 'https://github.com/owner/project/actions/runs/7' }), randomUUID());
-  assert.equal(w.stage, 'done'); assert.equal(deliveryState(w), 'smoke-passed');
+  assert.equal(w.stage, 'done'); assert.equal(deliveryState(w), 'delivered');
   const { smoke: _smoke, ...mergeFacts } = w.delivery!;
   assert.deepEqual(mergeFacts, before, 'merge facts in the delivery snapshot are untouched');
   assert.equal(w.delivery!.smoke!.sha, mergeSha); assert.equal(w.delivery!.smoke!.mergeSha, mergeSha); assert.equal(w.delivery!.smoke!.producer, smokeProducer.id);
   assert.equal(w.delivery!.smoke!.evidenceId, w.evidence.find(e => e.proof === 'e2e:deploy-smoke')!.id);
   assert.ok(w.gates.every(gate => gate.passed), 'post-deployment facts never re-evaluate the delivered gates');
   assert.equal((await store.pool.query('SELECT 1 FROM jobs WHERE work_id=$1', [w.id])).rowCount, 0, 'delivered work does not re-enter integration reconciliation');
-  const history = (await store.events(w.id)).map(e => e.kind);
-  assert.ok(history.includes('deployment') && history.includes('evidence'));
+  assert.ok((await store.events(w.id)).some(e => e.kind === 'evidence'));
   // A delivery without the policy keeps the ordinary immutability and refuses the smoke proof.
   const plain = await (async () => { let item = await submitted(); item = await engine.observe(item.id, item.revision, observation(item)); item = await proven(item);
     const c = await reload(item);
     await delay(5); const at = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
     return engine.observe(item.id, c.revision, { ...observation(item), merged: true, mergedAt: at, mergeSha }); })();
   assert.equal(deliveryState(plain), 'delivered');
-  const recorded = await engine.execute(coordinator, 'deployment', plain.id, { sha: mergeSha, mergeSha, source: 'github-deployment', observedAt: new Date().toISOString() }, randomUUID());
-  assert.equal(recorded.delivery!.deployment!.source, 'github-deployment', 'deployment observations are recorded for every delivery; the smoke policy decides what they gate');
   await assert.rejects(engine.execute(smokeProducer, 'evidence', plain.id, smoke(mergeSha, mergeSha), randomUUID()), /does not require e2e:deploy-smoke/);
   await assert.rejects(engine.execute(worker, 'claim', plain.id, {}, randomUUID()), /immutable/);
 });
 
-test('a failed deploy-smoke proof is delivered-with-failure with rollback guidance in master status, and counts as post-deploy time in flow analytics', async () => {
+test('a failed deploy-smoke proof is a recorded outcome on a delivered item, never a violation, and a later pass supersedes it', async () => {
   let w = await deliveredWithSmokePolicy();
-  const observedAt = new Date().toISOString();
   // A descendant rollout still covers the merge; the smoke result binds to that serving commit.
-  w = await engine.execute(coordinator, 'deployment', w.id, { sha: servingSha, mergeSha, source: 'endpoint', observedAt }, randomUUID());
-  assert.equal(w.delivery!.deployment!.covers, 'descendant');
+  w = await recordDeployment(w, servingSha);
   await assert.rejects(engine.execute(smokeProducer, 'evidence', w.id, smoke(mergeSha, mergeSha, 'fail'), randomUUID()), /must name the observed deployed commit/);
   await delay(5);
   w = await engine.execute(smokeProducer, 'evidence', w.id, smoke(servingSha, mergeSha, 'fail', { url: 'https://github.com/owner/project/actions/runs/8' }), randomUUID());
   assert.equal(w.stage, 'done', 'delivery history is never rewritten by a later failure');
-  assert.equal(deliveryState(w), 'delivered-with-failure');
+  assert.equal(deliveryState(w), 'delivered'); assert.equal(w.delivery!.smoke!.result, 'fail');
   assert.deepEqual(w.violations, [], 'a failed smoke proof is a recorded outcome, not a merge-bypass violation');
-  const guidance = rollbackGuidance(w, 'main')!;
-  assert.match(guidance, new RegExp(`${w.key} is delivered with a failed post-deployment smoke proof`));
-  assert.ok(guidance.includes(servingSha) && guidance.includes(mergeSha) && /revert .* on main/.test(guidance) && /Do not backfill/.test(guidance));
-  const snapshot = await store.workSnapshot();
-  const status = buildMasterStatus(snapshot, [], [], {}, {}, { pending: [], completed: [] }, 'main');
-  const row = status.delivered.find(entry => entry.key === w.key)!;
-  assert.equal(row.state, 'delivered-with-failure'); assert.equal(row.rollback, guidance); assert.equal(row.smoke!.result, 'fail'); assert.equal(row.deployment!.sha, servingSha);
-  assert.ok(status.counts.postDeployFailures >= 1);
-  assert.ok(row.postDeployMs! > 0 && row.productionLatencyMs! > 0);
+  const status = buildMasterStatus(await store.workSnapshot(), [], [], {}, {}, { pending: [], completed: [] }, 'main');
   assert.equal(status.work.some(entry => entry.key === w.key), false, 'delivered work stays out of the open ledger');
-  const metrics = stageMetrics(snapshot.work, Date.parse(snapshot.now));
-  assert.ok(metrics.postDeployFailures >= 1); assert.ok(metrics.postDeploy.count >= 1 && metrics.postDeploy.p90Ms > 0); assert.ok(metrics.production.count >= 1);
-  // A later pass at the same deployed commit supersedes the verdict; the failure stays in the ledger.
   w = await engine.execute(smokeProducer, 'evidence', w.id, smoke(servingSha, mergeSha, 'pass'), randomUUID());
-  assert.equal(deliveryState(w), 'smoke-passed'); assert.equal(w.evidence.filter(e => e.proof === 'e2e:deploy-smoke').length, 2);
+  assert.equal(w.delivery!.smoke!.result, 'pass'); assert.equal(w.evidence.filter(e => e.proof === 'e2e:deploy-smoke').length, 2);
 });
 
 const sha40 = (label: string) => label.padEnd(40, '0');
