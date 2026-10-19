@@ -539,6 +539,9 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   //    the loop did not load still owes the restart onto its own HEAD (GY-1464): a re-execution
   //    that failed or never ended the process, or a move the loop did not make, must not pin the
   //    loop on stale code until the next promotion.
+  // GY-1982: the install's deploy ports, read once per pass; a provider without them names why and keeps the alignment as it was.
+  const ports = deps.deploy ? await deps.deploy() : null, deploying = !!ports && typeof ports !== 'string';
+  if (typeof ports === 'string' && state.promotion?.reason !== ports) { state.promotion = promotionReading(state.promotion, at(), { reason: ports }); await persist(); }
   const observation = state.deployment;
   const observed = !!observation && observation.source !== 'unavailable' && !!observation.sha;
   const release = observed && observation!.deployed.length ? observation!.sha : null;
@@ -586,8 +589,8 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
       return { outcome: 'skipped', reason: standing!.dirty === false && standing!.detached === true ? `the coordinator checkout stands clean at ${shortCommit(head)}, moved there by hand while the loop runs its held snapshot of ${shortCommit(left!.commit)}; the pin stands until it is moved onto that commit` : idle };
     }
     // GY-1982: a loop that deploys continuously fetches every pass: the base tip it has not deployed is its trigger.
-    if (!deps.deploy && !cleaned && (!head || head === loaded || processed(head))) return { outcome: 'skipped', reason: idle };
-    if (!deps.deploy && observed && !cleaned && head) {
+    if (!deploying && !cleaned && (!head || head === loaded || processed(head))) return { outcome: 'skipped', reason: idle };
+    if (!deploying && observed && !cleaned && head) {
       // GY-1790: a status that cannot be read is never taken for clean: the failed read is
       // recorded and the restart is retried on the first pass that can read the checkout.
       if (standing!.dirty === null) return unaligned(`the restart onto ${shortCommit(head)} is owed, but whether the coordinator checkout at ${shortCommit(head)} is dirty could not be read; it is never taken for clean, retried next cycle`, 'checkout-failed');
@@ -627,8 +630,6 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   if (!checkout.commit) return unaligned(`the coordinator checkout at ${codeRoot} could not be read`);
   // GY-1982: continuous deploy, from a clean detached checkout. A tip the install does not run is
   // deployed first; only a deployed (or kept) tip goes on to the alignment and the restarts below.
-  const ports = deps.deploy && await deps.deploy();
-  if (typeof ports === 'string' && state.promotion?.reason !== ports) { state.promotion = promotionReading(state.promotion, at(), { reason: ports }); await persist(); }
   if (ports && typeof ports !== 'string' && checkout.dirty === false && checkout.detached === true) {
     const deployed = await deployTip(state, to, checkout.commit, ports, { git, at, persist, note: (detail, failure) => note(detail, failure, deployKey) });
     if (deployed) return deployed;
