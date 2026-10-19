@@ -9,7 +9,7 @@ import { NOW, boardApi, boardStatus, boardWork, realDeliveredWork } from '../bro
 // @ts-expect-error Dependency-free fixture script.
 import { fixtureApi, flowApi, flowDataset, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { boardFromStatus, classify, groupLabel, groupOf, groupWithin, groups, humanOnlyIds, mergedAt, nextActor, releasedAt, timedGroups, type OpenGroup } from '../web/groups.js';
-import { checkStates, prSteps, stepHeld, stepIds, stepSince } from '../src/model/pr-steps.js';
+import { checkStates, flowStep, prSteps, stateIds, stateLabel, stepHeld, stepIds, stepSince } from '../src/model/pr-steps.js';
 import { noRelease, releaseView } from '../src/model/release.js';
 import ShippedPage from '../web/pages/shipped.js';
 import { positionsAt, replayFrames, transitionsFromRows } from '../web/flow-replay.js';
@@ -106,18 +106,31 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
     // The tile row still counts every group, so the numbers never change under the reader.
     for (const other of groups) assert.equal(tileCount(filtered, other), byGroup[other].length);
   }
-  // Merged work is Shipped (GY-1981: done = merged), whatever its smoke policy, deployment record or smoke verdict.
+  // Merged work is Done (GY-1979): it has left the board in every delivery state — the top bar's
+  // release line carries the commit production serves, its health and the merged changes it does
+  // not carry yet. It still counts as shipped this week only once the release serves it.
   const merged = find('GY-18', work);
   const release = (delivery: Record<string, unknown>) => ({ ...merged, policy: { ...merged.policy, deploySmoke: true }, delivery: { ...merged.delivery!, ...delivery } }) as Work;
   const deployment = { sha: merged.delivery!.mergeSha, covers: 'exact' };
   const smoke = (result: string) => ({ sha: merged.delivery!.mergeSha, mergeSha: merged.delivery!.mergeSha, result, producer: 'smoke', executed: 1, skipped: 0, at: new Date(NOW).toISOString() });
-  const awaiting = release({ deployment: null });
+  const awaiting = release({ deployment: null }), checking = release({ deployment, smoke: null }), failed = release({ deployment, smoke: smoke('fail') }), live = release({ deployment, smoke: smoke('pass') });
+  assert.equal(groupOf(merged, NOW), 'shipped');
+  assert.equal(groupOf(live, NOW), 'shipped');
+  // With no post-deployment check asked for, no per-item deployment record is written: the merge is Done like any other (AC-11).
   const unverified = { ...merged, delivery: { ...merged.delivery!, deployment: undefined } } as Work;
-  for (const item of [merged, unverified, awaiting, release({ deployment, smoke: null }), release({ deployment, smoke: smoke('fail') }), release({ deployment, smoke: smoke('pass') })]) {
-    assert.equal(groupOf(item, NOW), 'shipped'); assert.equal(prSteps(item, NOW).current, null);
+  assert.equal(groupOf(unverified, NOW), 'shipped'); assert.equal(prSteps(unverified, NOW).current, 'done');
+  for (const [state, item] of [['awaiting', awaiting], ['checking', checking], ['failed', failed]] as const) {
+    assert.equal(groupOf(item, NOW), 'shipped', `${state}: a merged item is off the board`);
+    assert.equal(prSteps(item, NOW).current, 'done', `${state}: merged is Done whatever the deployment owes`);
+    assert.equal(prSteps(item, NOW).label, 'Merged');
   }
-  // "Shipped this week" counts what the page classifies as Shipped and the release was seen serving:
-  // a merge from this morning with no observed release is off the open board but not in the count.
+  const releasing = classify(work.map(item => item.key === 'GY-18' ? awaiting : item), NOW);
+  assert.equal(releasing.open, open, 'a merge waiting on its release adds no open item');
+  const releasingPage = home(dashboard({ work: work.map(item => item.key === 'GY-18' ? awaiting : item) }));
+  for (const group of groups) assert.ok(!rowsOf(releasingPage, group).includes('GY-18'), `${group}: no row for the merged item`);
+  // "Shipped this week" counts what the release was seen serving this week; a merge from this
+  // morning still waiting on the post-deployment check its policy asks for is not in the footer —
+  // the release line says what production does not carry yet.
   const shippedLine = (html: string) => Number(/<strong>(\d+) shipped this week\.<\/strong>/.exec(html)?.[1]);
   const servedThisWeek = (items: Work[]) => items.filter(item => groupOf(item, NOW) === 'shipped' && releasedAt(item) !== null && NOW - releasedAt(item)! <= 7 * 24 * hour).map(item => item.key);
   assert.equal(shippedLine(page), servedThisWeek(work).length);
@@ -126,8 +139,8 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   const pendingPage = home(dashboard({ work: pending }));
   assert.ok(!servedThisWeek(pending).includes('GY-18'));
   assert.equal(shippedLine(pendingPage), servedThisWeek(pending).length);
-  assert.ok(!rowsOf(pendingPage, 'moving').includes('GY-18'), 'the merge is off the open board');
-  // The footer names it as the latest merge (GY-168).
+  assert.ok(!rowsOf(pendingPage, 'moving').includes('GY-18'), 'the pending merge has no row; it is Done');
+  // The footer names it only as the latest merge (GY-168), never as shipped.
   assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · merged /);
   // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
   const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
@@ -220,10 +233,14 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
   // The why and the next step in plain words for the three cases a newcomer meets most.
   assert.match(firstScreen(itemPage('GY-20')), /Waiting on your decision about spending money or opening third-party accounts/);
   assert.match(firstScreen(itemPage('GY-17')), /A fault blocks it; the master agent clears it/);
-  assert.match(firstScreen(itemPage('GY-22')), /Testing · 1 of 2 checks done/);
-  // GY-22 waits on CI and on review; the page shows Test as current, so what is left is the test step's, not the review's.
+  assert.match(firstScreen(itemPage('GY-22')), /Checking · 1 of 2 checks done/);
+  // GY-22 waits on CI and on review: both fold into Checking (GY-1979), so what is left lists every
+  // Checking requirement at once, the checks first, each with who clears it.
   const left = /aria-label="What is left"[\s\S]*?<\/section>/.exec(itemPage('GY-22'))?.[0] ?? '';
-  assert.match(left, /test/i); assert.doesNotMatch(left, /approv|review/i);
+  assert.match(left, /aria-label="Checking state"/);
+  assert.match(left, /cleared by Automated checks/);
+  assert.match(left, /Automated check “test” has not passed yet/);
+  assert.match(left, /Waiting for someone else to approve the latest code/);
   // Review status is the review gate's verdict, whichever provider gave it.
   const reviewRow = (item: Work) => /<dt>Review<\/dt><dd>([^<]+)<\/dd>/.exec(markup(createElement(WorkDetails, { ...dashboard({ work: board().map(entry => entry.key === item.key ? item : entry) }), item })))?.[1];
   const codex = { ...find('GY-16'), policy: { ...find('GY-16').policy, reviewProvider: 'codex' }, observation: { ...find('GY-16').observation!, reviews: [] } } as Work;
@@ -277,65 +294,67 @@ test('unit:ui-browser-screenshots — the browser suite captures every page at d
   for (const file of ['dashboard.spec.ts', 'flow-analytics.spec.ts', 'attribution.spec.ts', 'screenshots.spec.ts']) assert.ok(existsSync(new URL(`browser-tests/${file}`, root)), file);
 });
 
-test('unit:ui-pr-steps — every moving item shows the six steps from its gates, ending at merge, done, current and pending, with the current step in plain words naming what it waits on', () => {
+test('unit:ui-pr-steps — every moving item shows the four states from its gates, done, current and pending, with the current state in plain words naming what it waits on', () => {
   const work = board();
   const withReasons = (item: Work, reasons: Record<string, string[]>) => ({ ...item, gates: item.gates.map(gate => reasons[gate.name] ? { ...gate, passed: reasons[gate.name].length === 0, reasons: reasons[gate.name] } : gate) }) as Work;
   const handedIn = find('GY-22', work);
   const ci = (name: string) => `Required CI check ${name} has not passed on the current candidate`;
+  // Checking folds validate, test, review, proof and merge (GY-1979), so every gate case below is
+  // Checking, and the label names the gate it waits on. A merge the release does not serve yet is Done.
   const cases: [string, Work, string, string, string][] = [
-    ['worker building', find('GY-14', work), 'build', 'Building · the builder is writing the code', 'Builder agent'],
-    ['scope check', withReasons(handedIn, { build: ['Candidate diff has not been compared with the planned files'] }), 'validate', 'Validating · checking which files it changes', 'Graphyard (automatic)'],
-    ['out of scope', withReasons(handedIn, { build: ['Candidate changes 2 files outside plannedFiles: a, b'] }), 'validate', 'Validating · it changes files outside its plan', 'Builder agent'],
-    ['CI running', handedIn, 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
-    ['CI failed', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1 }, { name: 'typecheck', result: 'success', appId: 1 }] } } as Work, 'test', 'Testing · the check test failed', 'Builder agent'],
-    ['CI re-run after a failure', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'in_progress', appId: 1, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
-    ['CI re-run after a success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'success', appId: 1, id: 1 }, { name: 'test', result: 'queued', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, { test: [ci('test'), ci('typecheck')] }), 'test', 'Testing · 0 of 2 checks done', 'Automated checks'],
-    ['CI fixed on a re-run', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, { test: [ci('typecheck')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
+    ['worker building', find('GY-14', work), 'doing', 'Doing · the builder is writing the code', 'Builder agent'],
+    ['scope check', withReasons(handedIn, { build: ['Candidate diff has not been compared with the planned files'] }), 'checking', 'Checking · checking which files it changes', 'Graphyard (automatic)'],
+    ['out of scope', withReasons(handedIn, { build: ['Candidate changes 2 files outside plannedFiles: a, b'] }), 'checking', 'Checking · it changes files outside its plan', 'Builder agent'],
+    ['CI running', handedIn, 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
+    ['CI failed', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1 }, { name: 'typecheck', result: 'success', appId: 1 }] } } as Work, 'checking', 'Checking · the check test failed', 'Builder agent'],
+    ['CI re-run after a failure', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'in_progress', appId: 1, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
+    ['CI re-run after a success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'success', appId: 1, id: 1 }, { name: 'test', result: 'queued', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, { test: [ci('test'), ci('typecheck')] }), 'checking', 'Checking · 0 of 2 checks done', 'Automated checks'],
+    ['CI fixed on a re-run', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, { test: [ci('typecheck')] }), 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
     // Only the trusted CI App's runs count, as in the test gate, whose reasons name the checks not yet passed:
     // a newer run of the same name from another App neither completes a check nor fails it.
-    ['CI pending behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'in_progress', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
-    ['CI pending behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'queued', appId: 1, id: 1 }, { name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
-    ['CI failed behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · the check test failed', 'Builder agent'],
+    ['CI pending behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'in_progress', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
+    ['CI pending behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'queued', appId: 1, id: 1 }, { name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
+    ['CI failed behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'checking', 'Checking · the check test failed', 'Builder agent'],
     // No trusted run yet, only another App's failure under the same name: the gate says only that the trusted check has not passed.
-    ['CI absent from the trusted App behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'test', 'Testing · 1 of 2 checks done', 'Automated checks'],
-    ['review requested', find('GY-15', work), 'review', 'Reviewing · waiting for the reviewer', 'Reviewer agent'],
-    ['proofs pending', find('GY-16', work), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
+    ['CI absent from the trusted App behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
+    ['review requested', find('GY-15', work), 'checking', 'Checking · waiting for the reviewer', 'Reviewer agent'],
+    ['proofs pending', find('GY-16', work), 'checking', 'Checking · 2 of 3 proofs passed', 'Prover agent'],
     // An obligation inherited from another change's deferred proof counts in the total and stays open until proven.
-    ['proofs pending on an inherited obligation', withReasons(find('GY-16', work), { acceptance: ['Bootstrap obligation inherited from GY-9 AC-2: integration:contract needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'] }), 'prove', 'Proving · 3 of 4 proofs passed', 'Prover agent'],
-    ['proofs no longer independent', withReasons(find('GY-16', work), { acceptance: [`Trusted ${find('GY-16', work).criteria[0].proofs[0]} evidence from producer-1 is no longer independent: producer-1 has since held an assignment on GY-16`] }), 'prove', 'Proving · 2 of 3 proofs passed', 'Prover agent'],
-    ['merging', find('GY-21', work), 'merge', 'Merging · Graphyard is merging it', 'Graphyard (automatic)'],
-    // A change request sends it back to the builder: the item waits at Build, not at Review.
-    ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'build', 'Building · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
+    ['proofs pending on an inherited obligation', withReasons(find('GY-16', work), { acceptance: ['Bootstrap obligation inherited from GY-9 AC-2: integration:contract needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'] }), 'checking', 'Checking · 3 of 4 proofs passed', 'Prover agent'],
+    ['proofs no longer independent', withReasons(find('GY-16', work), { acceptance: [`Trusted ${find('GY-16', work).criteria[0].proofs[0]} evidence from producer-1 is no longer independent: producer-1 has since held an assignment on GY-16`] }), 'checking', 'Checking · 2 of 3 proofs passed', 'Prover agent'],
+    ['merging', find('GY-21', work), 'checking', 'Checking · Graphyard is merging it', 'Graphyard (automatic)'],
+    // There is no Deploy state (GY-1979): a merge the release does not serve yet is Done, and the
+    // top bar's release line carries the deployment.
+    ['merged, not yet deployed', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'done', 'Merged', 'Nobody — it has merged'],
+    ['merged, deployment observed, smoke policy', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true } } as Work, 'done', 'Live', 'Nobody — it is live'],
+    // A change request says so in the Checking label; the hand-in stands until the merge.
+    ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'checking', 'Checking · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
   ];
   // The CI Apps the test gate trusts, as status carries them.
   const trusted = { ...noRelease, ciAppIds: [1] };
   for (const [name, item, current, label, who] of cases) {
     const steps = prSteps(item, NOW, trusted);
-    assert.deepEqual(steps.steps.map(step => step.id), [...stepIds], name);
-    assert.deepEqual(steps.steps.map(step => step.label), ['Build', 'Validate', 'Test', 'Review', 'Prove', 'Merge']);
+    assert.deepEqual(steps.steps.map(step => step.id), [...stateIds], name);
+    assert.deepEqual(steps.steps.map(step => step.label), ['Todo', 'Doing', 'Checking', 'Done']);
     assert.equal(steps.current, current, name); assert.equal(steps.label, label, name); assert.equal(steps.who, who, name);
-    const at = stepIds.indexOf(current as any);
-    assert.equal(steps.steps.filter(step => step.state === 'current').length, 1, `${name}: one current step`);
-    for (const step of steps.steps.slice(0, at)) assert.equal(step.state, 'done', `${name}: ${step.id} before the current step is done`);
-    assert.equal(steps.steps.at(-1)!.id, 'merge', `${name}: the steps end at merge`);
+    const at = stateIds.indexOf(current as never);
+    assert.equal(steps.steps.filter(step => step.state === 'current').length, current === 'done' ? 0 : 1, `${name}: one live state until it is Done`);
+    for (const step of steps.steps.slice(0, at)) assert.equal(step.state, 'done', `${name}: ${step.id} before the current state is done`);
+    for (const step of steps.steps.slice(at + 1)) assert.equal(step.state, 'pending', `${name}: ${step.id} after the current state is pending`);
   }
-  // A merged item has every step done, the last one Merge, whatever its smoke policy and without any deployment observation (GY-1981).
-  for (const merged of [find('GY-18', work), { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work]) {
-    const steps = prSteps(merged, NOW);
-    assert.equal(steps.current, null);
-    assert.deepEqual(steps.steps.map(step => step.id), [...stepIds]);
-    assert.equal(steps.steps.at(-1)!.id, 'merge');
-    assert.ok(steps.steps.every(step => step.state === 'done'));
-  }
-  // The Work page row, the phone card (the same element, laid out as a card) and the item page draw the same steps.
+  // A shipped item the live release serves has every state done, and Done current.
+  const shipped = prSteps(find('GY-18', work), NOW);
+  assert.equal(shipped.current, 'done');
+  assert.ok(shipped.steps.every(step => step.state === 'done'));
+  // The Work page row, the phone card (the same element, laid out as a card) and the item page draw the same states.
   for (const key of ['GY-14', 'GY-15', 'GY-16', 'GY-21', 'GY-22']) {
     const steps = prSteps(find(key, work), NOW);
     const row = markup(createElement(WorkCard, { item: find(key, work), now: NOW, onOpen: noop }));
-    assert.equal((row.match(/data-step="/g) ?? []).length, 6, `${key} row shows six steps`);
+    assert.equal((row.match(/data-step="/g) ?? []).length, 4, `${key} row shows the four states`);
     assert.match(row, new RegExp(`data-step="${steps.current}" data-state="current"`));
-    assert.ok(row.includes(steps.label), `${key} row labels the current step`);
+    assert.ok(row.includes(steps.label), `${key} row labels the current state`);
     const detail = firstScreen(itemPage(key));
-    assert.match(detail, /aria-label="Pull request steps"/);
+    assert.match(detail, /aria-label="Item states"/);
     assert.match(detail, new RegExp(`data-step="${steps.current}" data-state="current"`), `${key} item page`);
   }
   const css = readdirSync(new URL('web/', root)).includes('style.css');
@@ -371,11 +390,11 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   assert.deepEqual(at(1), { 'GY-15': 'test', 'GY-16': 'validate' });
   // The recorded moves are read from the control plane's own gate facts by the same rule the Now
   // view uses: replaying the board's whole recorded history leaves every item in the flow at
-  // exactly the step prSteps shows — GY-22, refused by both CI and review, at Test, not Review.
+  // exactly the recorded step flowStep shows — GY-22, refused by both CI and review, at Test, not Review.
   const recorded = boardApi('analytics/flow/drilldown?window=7&metric=steps') as { rows: { workKey: string; observedAt: string | null; detail: string }[] };
   const replayed = positionsAt(replayFrames(transitionsFromRows(recorded.rows), NOW, 60 * 24 * hour), 1);
   const { byGroup: flowGroups } = classify(board(), NOW);
-  for (const item of [...flowGroups.moving, ...flowGroups.blocked]) assert.equal(replayed.get(item.key)?.step, prSteps(item, NOW).current, `${item.key} replays to its true step`);
+  for (const item of [...flowGroups.moving, ...flowGroups.blocked]) assert.equal(replayed.get(item.key)?.step, flowStep(item, NOW).current, `${item.key} replays to its true step`);
   assert.equal(replayed.get('GY-22')?.step, 'test');
   // A merge takes its dot from Deploy out of the flow (GY-1981: done = merged), as the Now view drops it.
   const shipped = board().filter(item => groupOf(item, NOW) === 'shipped');
@@ -404,7 +423,7 @@ test('unit:ui-insights-flow — Insights shows a Now view at each item\'s true s
   const now = [...page.matchAll(/class="now-dot[^"]*" data-step="([\w-]+)" data-key="([^"]+)"/g)].map(match => [match[2], match[1]]);
   const { byGroup } = classify(board(), NOW);
   assert.deepEqual(now.map(([key]) => key).sort(), [...byGroup.moving, ...byGroup.blocked].map(item => item.key).sort());
-  for (const [key, step] of now) assert.equal(step, prSteps(find(key), NOW).current, `${key} at its true step`);
+  for (const [key, step] of now) assert.equal(step, flowStep(find(key), NOW).current, `${key} at its true step`);
   // However many items share a step, each Now dot has its own place in that step's column.
   const crowd = Array.from({ length: 8 }, (_, index) => ({ ...find('GY-15'), id: `crowd-${index}`, key: `GY-${70 + index}` })) as Work[];
   const crowded = markup(createElement(InsightsFlow, dashboard({ work: [...board(), ...crowd] })));
@@ -537,37 +556,41 @@ test('unit:ui-review-polish — step names sit over their segments, commits show
   const page = home();
   const head = /<div class="row-head"[\s\S]*?<\/div>/.exec(page)?.[0] ?? '';
   assert.match(head, /<span class="row-steps"><span class="steps-track step-names" aria-hidden="true">/);
-  assert.deepEqual([...head.matchAll(/class="step-name" data-step="(\w+)">(\w+)</g)].map(match => match[1]), [...stepIds]);
+  assert.deepEqual([...head.matchAll(/class="step-name" data-step="(\w+)">(\w+)</g)].map(match => match[1]), [...stateIds]);
+  assert.deepEqual([...head.matchAll(/class="step-name" data-step="(\w+)">(\w+)</g)].map(match => match[2]), ['Todo', 'Doing', 'Checking', 'Done']);
   assert.match(markup(createElement(WorkCard, { item: find('GY-15'), now: NOW, onOpen: noop })), /<span class="row-steps"><span class="steps-bar"[^>]*><span class="steps-track"/);
   assert.match(css, /\.row-head,\.work-row\{display:grid;grid-template-columns:/);
   assert.match(css, /\.steps-track\{display:flex;gap:3px\}\.step-seg\{flex:1;/); assert.match(css, /\.step-name\{flex:1;min-width:0;text-align:center/);
-  // The "In step" clock times the step the seven show, from the recorded move into it: GY-22 is
-  // in the review stage but waits at Test, and its clock starts when it reached Test.
+  // The "In state" clock times the state the bar shows, from the recorded move into Checking: GY-22
+  // is in the review stage but Checking since it was handed in, and a later move between the folded
+  // steps (validate to test) does not restart that clock.
   const testing = find('GY-22');
-  assert.equal(testing.stage, 'review'); assert.equal(prSteps(testing, NOW).current, 'test');
+  assert.equal(testing.stage, 'review'); assert.equal(prSteps(testing, NOW).current, 'checking');
   const reachedTest = new Date(NOW - 95 * 60_000).toISOString();
   const moves = [{ key: 'GY-22', from: 'build' as const, to: 'validate' as const, at: new Date(NOW - 3 * hour).toISOString() }, { key: 'GY-22', from: 'validate' as const, to: 'test' as const, at: reachedTest }];
-  assert.equal(stepSince(testing, NOW, moves), reachedTest);
+  assert.equal(stepSince(testing, NOW, moves), new Date(NOW - 3 * hour).toISOString());
   const clock = stepHeld(testing, NOW, moves);
-  assert.equal(clock.minutes, 95);
+  assert.equal(clock.minutes, 180);
   const timedRow = /<div class="work-row[^"]*" data-row="GY-22"[\s\S]*?<span class="row-time">([\s\S]*?)<\/span><\/div>/;
-  assert.match(timedRow.exec(home(dashboard({ stepMoves: moves })))?.[1] ?? '', new RegExp(`>${clock.text}( overdue)?<`), 'the Work row shows the step clock');
+  assert.match(timedRow.exec(home(dashboard({ stepMoves: moves })))?.[1] ?? '', new RegExp(`>${clock.text}( overdue)?<`), 'the Work row shows the state clock');
   assert.match(itemPage('GY-22', dashboard({ stepMoves: moves })), new RegExp(`title="${clock.label}"`), 'and the item page the same one');
-  // A record behind the live gates (its latest move is to another step) is not the step's start.
-  assert.notEqual(stepSince(testing, NOW, [...moves, { key: 'GY-22', from: 'test', to: 'review', at: new Date(NOW - 10 * 60_000).toISOString() }]), new Date(NOW - 10 * 60_000).toISOString());
-  // Validate starts at the hand-in, Deploy at the merge, when no recorded move says otherwise.
+  // A return to Build and a fresh hand-in restarts the Checking clock; a move inside Checking does not.
+  const reworkMoves = [...moves, { key: 'GY-22', from: 'review' as const, to: 'build' as const, at: new Date(NOW - hour).toISOString() }, { key: 'GY-22', from: 'build' as const, to: 'validate' as const, at: reachedTest }];
+  assert.equal(stepSince(testing, NOW, reworkMoves), reachedTest);
+  // Checking starts at the hand-in when no recorded move says otherwise; Done starts at the merge.
   const handed = { ...testing, pipeline: { attempts: [], submittedAt: new Date(NOW - 7 * hour).toISOString(), resubmittedAt: new Date(NOW - 2 * hour).toISOString(), reworkRounds: 1, interventions: { blocked: 0, requirements: 0 } }, gates: testing.gates.map(gate => gate.name === 'build' ? { ...gate, passed: false, reasons: ['Pull request has not been independently observed'] } : gate) } as unknown as Work;
-  assert.equal(prSteps(handed, NOW).current, 'validate'); assert.equal(stepSince(handed, NOW), new Date(NOW - 2 * hour).toISOString());
+  assert.equal(prSteps(handed, NOW).current, 'checking'); assert.equal(stepSince(handed, NOW), new Date(NOW - 2 * hour).toISOString());
   // Commits show 8 characters as their text (GY-168); the whole SHA stays in the title and the link.
   const sha = 'abcdef1234567890abcdef1234567890abcdef12';
   assert.match(markup(createElement(CandidateSha, { repository: 'fixture/shop', sha })), new RegExp(`href="[^"]*/commit/${sha}"[\\s\\S]*<code class="sha" title="${sha}">${sha.slice(0, 8)}</code>`));
   assert.match(css, /code\.sha\{display:inline-block;max-width:8ch;overflow:hidden;white-space:nowrap;/);
   const sources = ['web', 'web/pages', 'web/components'].flatMap(dir => readdirSync(new URL(`${dir}/`, root)).filter(name => /\.tsx?$/.test(name)).map(name => `${dir}/${name}`));
   for (const path of sources) for (const [, count] of (await read(path)).matchAll(/(?:[sS]ha|[tT]ip|[bB]ase)!?\)?\.slice\(0, ?(\d+)\)/g)) assert.equal(count, '8', `${path} shows ${count} characters of a commit`);
-  // After a change request the item waits on its builder: the current step is Build, not Review — on the item and in the recorded history.
+  // After a change request the hand-in stands until the merge: Checking, saying it was sent back —
+  // on the item, and in the recorded history as a return to Build.
   const changes = { ...find('GY-15'), gates: find('GY-15').gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] } : gate) } as Work;
-  assert.equal(prSteps(changes, NOW).current, 'build');
-  assert.equal(prSteps(changes, NOW).steps.find(step => step.id === 'review')!.state, 'pending');
+  assert.equal(prSteps(changes, NOW).current, 'checking');
+  assert.equal(prSteps(changes, NOW).steps.find(step => step.id === 'checking')!.state, 'current');
   assert.equal(gateFactStep({ stage: 'review', unmet: ['review'], firstUnmet: 'review', reasons: ['Outstanding change requests must be resolved through a new review'], hasCandidate: true }), 'build');
   assert.equal(gateFactStep({ stage: 'review', unmet: ['review'], firstUnmet: 'review', reasons: ['Independent approval of the current commit is required'], hasCandidate: true }), 'review');
   // No session-kind badge in the sidebar, for a human or an AI session.
@@ -602,8 +625,8 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   for (const item of real) {
     assert.equal(groupOf(item, NOW), 'shipped', `${item.key} is Shipped`);
     const steps = prSteps(item, NOW);
-    assert.equal(steps.current, null, `${item.key} is at no step`);
-    assert.ok(steps.steps.every(step => step.state === 'done'), `${item.key} has every step done`);
+    assert.equal(steps.current, 'done', `${item.key} is Done: merged`);
+    assert.ok(steps.steps.every(step => step.state === 'done'), `${item.key} has every state done`);
     // No production observation covers it, so it reads "Merged", not "Live": it left the flow at its
     // merge (`deliveredAt`), but nothing says the release serves it yet (`servedAt` is null).
     assert.equal(steps.label, 'Merged');
@@ -660,9 +683,10 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   assert.deepEqual(stepMoves(asOf, later).map(move => `${move.from}>${move.to}`), ['null>deploy'], 'a delivery after the cutoff is not in the report');
   assert.deepEqual(stepMoves({ ...asOf, to: new Date(NOW).toISOString() }, later).map(move => `${move.from}>${move.to}`), ['null>deploy', 'deploy>null']);
   assert.deepEqual(stepMoves({ ...dataset, to: new Date(NOW - 2 * hour).toISOString() }, later), [], 'a gate fact after the cutoff is not a move');
-  // Done = merged (GY-1981): a smoke policy keeps nothing at Deploy.
+  // Only a policy that asks for the post-deployment check keeps a deployment owed — and that is
+  // the release line's news, not a state: the item is Done like every merge (GY-1979).
   const smoke = { ...real[0], policy: { ...real[0].policy, deploySmoke: true } } as Work;
-  assert.equal(groupOf(smoke, NOW), 'shipped'); assert.equal(prSteps(smoke, NOW).current, null);
+  assert.equal(groupOf(smoke, NOW), 'shipped'); assert.equal(prSteps(smoke, NOW).current, 'done'); assert.equal(prSteps(smoke, NOW).label, 'Merged');
   // A Deploy stay that ended before the window opened is not in the window: no carried move, no exit.
   const before = { facts: [], carryIn: [{ workId: real[0].id, kind: 'gates.changed', observedAt: new Date(NOW - 30 * hour).toISOString(), details: { stage: 'done' } }], from: new Date(NOW - 24 * hour).toISOString(), to: new Date(NOW).toISOString() } as any;
   const early = { ...real[0], delivery: { ...real[0].delivery!, mergedAt: new Date(NOW - 28 * hour).toISOString() } } as Work;
@@ -675,13 +699,31 @@ test('unit:ui-delivered-without-deployment-record — a merged item is Shipped w
   const atDeploy = { facts: [{ workId: stale.id, kind: 'gates.changed', observedAt: new Date(NOW - 47 * hour).toISOString(), details: { stage: 'done' } }], carryIn: [] } as any;
   for (const release of [noRelease, failing, pending, { ...noRelease, observedAt: NOW - 49 * hour }]) {
     assert.equal(groupOf(stale, NOW, undefined, undefined, release), 'shipped');
-    assert.equal(prSteps(stale, NOW, release).current, null); assert.equal(stepHeld(stale, NOW, [], release).overdue, false, 'work that left the flow is never overdue');
+    assert.equal(prSteps(stale, NOW, release).current, 'done'); assert.equal(stepHeld(stale, NOW, [], release).overdue, false, 'work that left the flow is never overdue');
     assert.deepEqual(stepMoves({ ...atDeploy, production: release }, stale).map(move => `${move.from}>${move.to}`), ['null>deploy', 'deploy>null']);
   }
   // Merges the watch reports pending or failed are merged and not yet seen live: the footer counts them.
   const watch = { observedAt: new Date(NOW).toISOString(), serving: 'abc', pending: [keys[0]], incidents: [{ key: keys[1] }] };
-  const watched = home(dashboard({ work, status: { ...boardStatus(), production: watch } as any }));
-  assert.equal(Number(/data-unreleased="(\d+)"/.exec(watched)?.[1]), 2, `${keys[0]} pending and ${keys[1]} failed`);
+  const watchView = releaseView({ ...boardStatus(), production: watch });
+  assert.deepEqual([...productionHold(watch).unserved], [...watchView.unserved]); assert.deepEqual([...productionHold(watch).failed], [...watchView.failed]);
+  assert.equal(groupOf(real[0], NOW, undefined, undefined, watchView), 'shipped'); assert.equal(groupOf(real[1], NOW, undefined, undefined, watchView), 'shipped');
+  // Merges the watch holds are still merged and not yet seen live: the footer counts them, and the
+  // release line names the served commit, its health and the two changes it does not carry.
+  const watchedPage = home(dashboard({ work, status: { ...boardStatus(), production: watch } as any }));
+  assert.equal(Number(/data-unreleased="(\d+)"/.exec(watchedPage)?.[1]), 2, `${keys[0]} pending and ${keys[1]} failed`);
+  const watchedBar = markup(createElement(TopBar, dashboard({ work, status: { ...boardStatus(), production: watch } as any })));
+  assert.match(watchedBar, /data-release-line="serving" data-healthy="false" data-pending="1"/);
+  assert.match(watchedBar, /<strong>unhealthy: 1 open deployment incident<\/strong> · 1 merged change not carried yet/);
+  // A deployment incident reads on the release line and the item page — never as a board state.
+  assert.equal(groupOf(stale, NOW, undefined, undefined, failing), 'shipped');
+  const incident = { observedAt: new Date(NOW).toISOString(), serving: 'abc', incidents: [{ key: stale.key }], pending: [] };
+  const watchedLine = renderToStaticMarkup(createElement(TopBar, dashboard({ work: [stale], status: { ...boardStatus(), production: incident } as any })));
+  assert.match(watchedLine, /data-healthy="false"/);
+  const detail = firstScreen(markup(createElement(WorkDetails, { ...dashboard({ work: [stale], status: { ...boardStatus(), production: incident } as any }), item: stale })));
+  assert.doesNotMatch(detail, /Shipped in/);
+  // What is left is empty for merged work: the deployment is the release line's to name.
+  const left = /aria-label="What is left">[\s\S]*?<\/section>/.exec(detail)![0];
+  assert.match(left, /<small>nothing blocks it<\/small>/);
 });
 
 test('unit:ui-insights-real-items — Insights builds its flow and 24-hour replay from real-shaped items (no observation, no reviews, no candidate) without failing, through the same code path the page reads', async () => {
@@ -758,21 +800,32 @@ test('unit:ui-workers-finish — agent names and roles never break mid-word, Hea
   assert.match(await read('browser-tests/screenshots.spec.ts'), /\.sessions-table \.agent-name, \.sessions-table td\[data-label=Role\][\s\S]*getClientRects[\s\S]*toEqual\(\[\]\)/);
 });
 
-test('GY-161 review: whatever the production watch observes, a merge is Shipped (GY-1981: done = merged); the configured production environment decides Live; the item page reads its checks from the test gate', async () => {
+test('GY-161 review: a merged item is Done whichever delivery state it is in, and the release line names what production serves and owes; the configured production environment decides Live; the item page reads its checks from the test gate', async () => {
   const real = realDeliveredWork() as unknown as Work[];
   const [waiting, failing, deployed] = real;
   const status = (production: unknown, productionEnvironment?: string) => ({ ...boardStatus('admin'), production, ...(productionEnvironment ? { productionEnvironment } : {}) });
   const observed = { observedAt: new Date(NOW - 60_000).toISOString(), serving: 'a'.repeat(40), servingSource: 'provider', error: null,
     deployed: [deployed.key], pending: [waiting.key, failing.key], incidents: [{ id: 'i1', workId: failing.id, key: failing.key, status: 'missing', reason: 'no deployment observed' }] };
   const release = releaseView(status(observed));
-  // Production observed not serving it yet, an open deployment incident, or served: every merge is Shipped, at no step.
-  for (const item of [waiting, failing, deployed]) { assert.equal(groupOf(item, NOW, undefined, undefined, release), 'shipped'); assert.equal(prSteps(item, NOW, release).current, null); }
-  // The Work page and Insights read the same view from status.
+  // Production observed not serving it yet: still Done, off the board (GY-1979); the release line
+  // names the served commit, its health and the merged changes it does not carry yet.
+  assert.equal(groupOf(waiting, NOW, undefined, undefined, release), 'shipped');
+  const steps = prSteps(waiting, NOW, release);
+  assert.equal(steps.current, 'done'); assert.equal(steps.label, 'Merged'); assert.equal(steps.who, 'Nobody — it has merged');
+  // An open deployment incident is the release's health, not the item's group.
+  assert.equal(groupOf(failing, NOW, undefined, undefined, release), 'shipped');
+  assert.equal(prSteps(failing, NOW, release).label, 'Merged');
+  // Served: Shipped.
+  assert.equal(groupOf(deployed, NOW, undefined, undefined, release), 'shipped');
+  // The Work page lists none of them, and the release line in its top bar says what production owes.
   const work = [...board(), ...real];
   const { byGroup } = classify(work, NOW, undefined, release);
   const page = home(dashboard({ work, status: status(observed) }));
-  assert.ok(!rowsOf(page, 'moving').includes(waiting.key)); assert.ok(!rowsOf(page, 'blocked').includes(failing.key));
+  for (const item of real) for (const group of groups) assert.ok(!rowsOf(page, group).includes(item.key), `${item.key} has no ${group} row`);
   assert.equal(tileCount(page, 'moving'), byGroup.moving.length); assert.equal(tileCount(page, 'blocked'), byGroup.blocked.length);
+  const bar = markup(createElement(TopBar, dashboard({ work, status: status(observed) as any })));
+  assert.match(bar, /data-release-line="serving" data-healthy="false" data-pending="2"/);
+  assert.match(bar, /Serving <span class="mono" title="a{40}">a{8}<\/span> · <strong>unhealthy: 1 open deployment incident<\/strong> · 2 merged changes not carried yet/);
   assert.doesNotMatch(markup(createElement(InsightsFlow, dashboard({ work, status: status(observed) }))), new RegExp(`class="now-dot[^"]*"[^>]*data-key="${waiting.key}"`));
   // No observation of what production serves (none configured, an unknown serving commit, a failed
   // provider read) holds nothing back: every real-shaped merge stays Shipped (AC-11).
@@ -823,7 +876,7 @@ test('GY-161 review: whatever the production watch observes, a merge is Shipped 
 });
 
 
-test('GY-161 review: a check fails on the latest trusted run across Apps; closed work has no step; a pending rework replays at Build; step moves are read page by page; a merge after the watch\'s last pass is Shipped', async () => {
+test('GY-161 review: a check fails on the latest trusted run across Apps; closed work has no state; a pending rework replays at Build; step moves are read page by page; a merge after the watch\'s last pass is Done with the release line carrying the deployment', async () => {
   // The latest run across every trusted App decides, as the test gate's `latestCheck` does: an
   // older pending run from one App never hides a newer failure from another.
   const handedIn = find('GY-22');
@@ -833,7 +886,7 @@ test('GY-161 review: a check fails on the latest trusted run across Apps; closed
   const newerFailure = withChecks([{ id: 1, name: 'test', result: 'in_progress', appId: 1 }, { id: 2, name: 'test', result: 'failure', appId: 15368 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }]);
   assert.equal(checkStates(newerFailure, trusted.ciAppIds).find(check => check.name === 'test')!.state, 'failed');
   const failedSteps = prSteps(newerFailure, NOW, trusted);
-  assert.equal(failedSteps.current, 'test'); assert.equal(failedSteps.label, 'Testing · the check test failed'); assert.equal(failedSteps.who, 'Builder agent');
+  assert.equal(failedSteps.current, 'checking'); assert.equal(failedSteps.label, 'Checking · the check test failed'); assert.equal(failedSteps.who, 'Builder agent');
   const newerPending = withChecks([{ id: 1, name: 'test', result: 'failure', appId: 1 }, { id: 2, name: 'test', result: 'queued', appId: 15368 }]);
   assert.equal(checkStates(newerPending, trusted.ciAppIds).find(check => check.name === 'test')!.state, 'running', 'a newer re-run replaces the older failure');
 
@@ -852,7 +905,8 @@ test('GY-161 review: a check fails on the latest trusted run across Apps; closed
   assert.equal(gateFactStep(rework), 'validate', 'without the rework the build gate reads as Validate');
   assert.equal(gateFactStep({ ...rework, reworkRequested: true }), 'build');
   const sentBack = { ...handedIn, reworkRequested: true, gates: handedIn.gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons: ['Lease expired'] } : gate) } as Work;
-  assert.equal(prSteps(sentBack, NOW).current, 'build');
+  assert.equal(prSteps(sentBack, NOW).current, 'checking');
+  assert.equal(prSteps(sentBack, NOW).label, 'Checking · held by a recorded blocker');
   const sentBackRows = flowApi([...board().filter(item => item.id !== sentBack.id), sentBack])('analytics/flow/drilldown?window=7&metric=steps') as { rows: { workKey: string; observedAt: string | null; detail: string }[] };
   assert.equal(positionsAt(replayFrames(transitionsFromRows(sentBackRows.rows), NOW, 60 * 24 * hour), 1).get(sentBack.key)?.step, 'build', 'the replay ends where the live step is');
 
@@ -885,8 +939,9 @@ test('GY-161 review: a check fails on the latest trusted run across Apps; closed
   const watch = releaseView({ ...boardStatus('admin'), production: { observedAt: new Date(lastPass).toISOString(), serving: 'a'.repeat(40), error: null, deployed: [], pending: [], incidents: [] } });
   assert.equal(watch.observedAt, lastPass);
   const fresh = { ...merged, delivery: { ...merged.delivery!, mergedAt: new Date(NOW - 5 * 60_000).toISOString() } } as Work;
-  assert.equal(groupOf(fresh, NOW, undefined, undefined, watch), 'shipped');
-  assert.equal(prSteps(fresh, NOW, watch).current, null);
+  assert.equal(groupOf(fresh, NOW, undefined, undefined, watch), 'shipped', 'a merge the watch has not looked for yet is Done all the same; the release line says what it owes');
+  assert.equal(prSteps(fresh, NOW, watch).current, 'done');
+  assert.equal(prSteps(fresh, NOW, watch).label, 'Merged');
   const older = { ...merged, delivery: { ...merged.delivery!, mergedAt: new Date(NOW - 48 * hour).toISOString() } } as Work;
   assert.equal(groupOf(older, NOW, undefined, undefined, watch), 'shipped');
   assert.equal(groupOf(fresh, NOW), 'shipped', 'with no production observation a merge alone is Shipped');
@@ -894,16 +949,21 @@ test('GY-161 review: a check fails on the latest trusted run across Apps; closed
 
 test('GY-161 review: a refusing ready gate keeps handed-in work at Build, in the steps and the recorded moves; one item\'s history longer than a drill-down page is read in full, or not at all', async () => {
   // Handed in, then a blocker is recorded or a requirements revision adds a dependency: the ready
-  // gate refuses, the control plane's stage is build (src/model/gates.ts), and so is the step.
+  // gate refuses, the control plane's stage is build (src/model/gates.ts), and Checking says so.
   const handedIn = find('GY-22');
-  assert.notEqual(prSteps(handedIn, NOW).current, 'build', 'handed in, it has moved past Build');
+  assert.notEqual(prSteps(handedIn, NOW).current, 'todo', 'handed in, it has moved past Todo');
   const refuse = (reasons: string[]) => ({ ...handedIn, stage: 'build', gates: handedIn.gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons } : gate) }) as Work;
   const blocked = prSteps(refuse(['Staging credentials expired']), NOW);
-  assert.equal(blocked.current, 'build'); assert.ok(blocked.steps.slice(1).every(step => step.state === 'pending'));
-  assert.equal(blocked.label, 'Building · held by a recorded blocker'); // the row's own line says which (GY-1739) assert.equal(blocked.who, 'Master agent');
+  assert.equal(blocked.current, 'checking'); assert.ok(blocked.steps.slice(3).every(step => step.state === 'pending'));
+  assert.equal(blocked.label, 'Checking · held by a recorded blocker'); // the row's own line says which (GY-1739)
+  assert.equal(blocked.who, 'Master agent');
   const waiting = prSteps(refuse(['Dependency GY-7 is unfinished']), NOW);
-  assert.equal(waiting.current, 'build'); assert.equal(waiting.label, 'Building · waiting for GY-7 to ship first'); assert.equal(waiting.who, 'Graphyard (automatic)');
-  assert.equal(stepSince(refuse(['Staging credentials expired']), NOW, [{ key: handedIn.key, at: new Date(NOW - hour).toISOString(), from: 'build', to: 'review' }]), stepSince(refuse(['Staging credentials expired']), NOW), 'Build keeps the builder\'s clock');
+  assert.equal(waiting.current, 'checking'); assert.equal(waiting.label, 'Checking · waiting for GY-7 to ship first'); assert.equal(waiting.who, 'Graphyard (automatic)');
+  // The recorded move into the folded steps starts the Checking clock; the same instant without moves falls back to the item's own record.
+  const refusedItem = refuse(['Staging credentials expired']);
+  const intoChecking = [{ key: handedIn.key, at: new Date(NOW - hour).toISOString(), from: 'build' as const, to: 'review' as const }];
+  assert.equal(stepSince(refusedItem, NOW, intoChecking), intoChecking[0].at, 'Checking starts at the recorded move into it');
+  assert.notEqual(stepSince(refusedItem, NOW, intoChecking), stepSince(refusedItem, NOW));
   // The recorded gate fact places it the same way, whichever later gate also refuses.
   const fact = { stage: 'build', unmet: ['ready', 'review', 'acceptance'], firstUnmet: 'ready', reasons: ['Dependency GY-7 is unfinished'], hasCandidate: true, dependencyWaiting: ['GY-7'] };
   assert.equal(gateFactStep(fact), 'build');
@@ -941,9 +1001,9 @@ test('GY-161 review: a refusing ready gate keeps handed-in work at Build, in the
 });
 
 test('GY-161 review: a step entered before the drill-down window still starts its clock at its entry; a truncated scan ends every step move where it stopped', () => {
-  // At Test since 12 days ago, with gate facts at that step 10 and 9 days ago (other checks changing),
+  // At Checking since 12 days ago, with gate facts at that step 10 and 9 days ago (other checks changing),
   // and nothing recorded in the 7-day window: the carried move starts at the entry, not at the last fact.
-  const testing = board().find(item => prSteps(item, NOW).current === 'test')!;
+  const testing = board().find(item => prSteps(item, NOW).current === 'checking')!;
   const day = 24 * hour;
   const fact = (id: number, ago: number, details: Record<string, unknown>) => ({ id, workId: testing.id, workKey: testing.key, kind: 'gates.changed', observedAt: new Date(NOW - ago).toISOString(), details });
   const atTest = { stage: 'review', unmet: ['test', 'review'], firstUnmet: 'test', hasCandidate: true, reasons: [] };
@@ -1050,7 +1110,10 @@ test('unit:ui-insights-tabs-and-ended-sessions — Insights is one page with no 
   const configured = { validation: true, releases: true, automation: true };
   const d = dashboard({ features: configured });
   assert.deepEqual(views.filter(view => view.section === 'insights').map(view => view.id), ['insights']);
-  assert.equal(markup(createElement(TopBar, { ...d, view: 'insights' })), '', 'no sub-page row under Insights');
+  // No tab row under Insights — only the top bar's release line, which every page carries (GY-1979).
+  const insightsTopBar = markup(createElement(TopBar, { ...d, view: 'insights' }));
+  assert.doesNotMatch(insightsTopBar, /class="tabs"|aria-label="Pages in this section"/);
+  assert.match(insightsTopBar, /data-release-line="unobserved"/);
   assert.ok(primaryEntry(d, views.find(view => view.id === 'insights')!), 'Insights is still its sidebar entry');
   const page = markup(createElement(InsightsFlow, d));
   assert.doesNotMatch(page, /role="tab(list)?"|class="tabs?(?: active)?"|aria-label="Pages in this section"/, 'the page draws no tabs');

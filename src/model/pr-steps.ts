@@ -1,4 +1,4 @@
-import { carriedBindings, isClosed, type Gate, type Work } from '../model.js';
+import { isClosed, type Gate, type Work } from '../model.js';
 import { latestCheck } from '../merge-queue.js';
 import { noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
@@ -8,42 +8,45 @@ import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
 
 /**
- * The six pull-request steps every moving item shows (GY-161): Build, Validate, Test, Review,
- * Prove, Merge. Each step after Build reads one gate the control plane evaluates
- * (ready, build, review, test, acceptance, merge): Validate is the build gate once the work is
- * handed in, Test the CI checks, Review the approval, Prove the acceptance criteria and Merge the
- * merge gate; the steps end at the merge (GY-1981). A step whose gate passed is done, the first
- * step (in the order a pull request travels) whose gate refuses is current, and the rest are
- * pending. The dashboard adds nothing the gates do not say; it only names the step in plain words
- * and says what it waits on and who acts next — as a role, never a worker's code name.
+ * The four item states the dashboard draws (GY-1979): Todo (not started — no lease and nothing
+ * handed in), Doing (a worker holds it and has not handed in), Checking (handed in — the validate,
+ * test, review, proof and merge gates folded into one step whose label names what it waits on) and
+ * Done (merged). The board lists Todo, Doing and Checking; a merged item is Done, off the board,
+ * and the release line on the top bar carries the deployment instead of a per-item Deploy step.
+ */
+export const stateIds = ['todo', 'doing', 'checking', 'done'] as const;
+export type StateId = typeof stateIds[number];
+export const stateLabel: Record<StateId, string> = { todo: 'Todo', doing: 'Doing', checking: 'Checking', done: 'Done' };
+
+/**
+ * The recorded flow's own steps (GY-161): Build, Validate, Test, Review, Prove, Merge, in the
+ * order a change travels; they end at the merge (GY-1981). The board and the item page no longer draw them — items show the
+ * four states above — but the recorded step history keeps this vocabulary: the gate facts, the
+ * steps drill-down, the Insights Flow panel and the replay (src/flow-analytics.ts `flowSteps`)
+ * all read and write these names, so a recorded move says exactly which gate changed.
  */
 export const stepIds = ['build', 'validate', 'test', 'review', 'prove', 'merge'] as const;
 export type StepId = typeof stepIds[number];
-/** One recorded move of an item between steps, as the Insights Flow replay (web/flow-replay.ts) plays it. */
+/** One recorded move of an item between recorded steps, as the Insights Flow replay (web/flow-replay.ts) plays it. */
 export interface StepTransition { key: string; from: StepId | null; to: StepId | null; at: string }
 export type StepState = 'done' | 'current' | 'pending';
 export const stepLabel: Record<StepId, string> = { build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge' };
-/** The verb the live label starts with: "Testing · 3 of 5 checks done". */
+/** The verb the recorded step's live label starts with: "Testing · 3 of 5 checks done". */
 export const stepVerb: Record<StepId, string> = { build: 'Building', validate: 'Validating', test: 'Testing', review: 'Reviewing', prove: 'Proving', merge: 'Merging' };
-/** The gate each step after Build reads. */
+/** The gate each recorded step after Build reads. */
 export const stepGate: Partial<Record<StepId, string>> = { validate: 'build', test: 'test', review: 'review', prove: 'acceptance', merge: 'merge' };
-/** The control plane's gate evaluation order (src/model evaluate). */
-export const gateOrder = ['ready', 'build', 'review', 'test', 'acceptance', 'merge'] as const;
+/** The recorded steps folded into the Checking state, in the order the control plane evaluates them. */
+const checkingSteps: StepId[] = ['validate', 'test', 'review', 'prove', 'merge'];
 
-/**
- * `carried` is set on a done Review or Prove step whose verdict the item holds by carry across a
- * Graphyard-authored merge rather than by a fresh one on this commit (GY-330): the ground the carry
- * rested on, such as `diff unchanged (patch-id 1a2b3c4d5e6f)`. The step's label says "carried" too,
- * so it never reads as a step that just passed ahead of the current one.
- */
-export interface PrStep { id: StepId; label: string; state: StepState; carried?: string }
+/** One of the four states as the bar draws it: done, current or pending. */
+export interface PrStep { id: StateId; label: string; state: StepState }
 export interface PrSteps {
   steps: PrStep[];
-  /** The current step, or null once the release serves it. */
-  current: StepId | null;
-  /** The current step in plain words, naming what it waits on: "Testing · 1 of 2 checks done". */
+  /** The current state: todo, doing or checking while it moves, done once merged; null for work closed without merging. */
+  current: StateId | null;
+  /** The current state in plain words, naming what it waits on: "Checking · 1 of 2 checks done". */
   label: string;
-  /** What the current step waits on, without the verb. */
+  /** What the current state waits on, without the state's name. */
   detail: string;
   /** Who acts next, as a role, never a code name. */
   who: string;
@@ -63,8 +66,8 @@ export type CheckState = 'passed' | 'failed' | 'running';
  * across every trusted App, the one run the test gate reads (src/model/gates.ts `latestCheck`),
  * finished without succeeding. An untrusted App's failure, no trusted run at all, or not being
  * told which Apps are trusted leaves it running — the gate says only that the trusted check has
- * not passed. A re-run replaces an old failure or success, whichever App ran it. The Test step
- * and the item page's Checks line both read this.
+ * not passed. A re-run replaces an old failure or success, whichever App ran it. The Checking
+ * state's label and the item page's Checks line both read this.
  */
 export function checkStates(work: Work, ciAppIds: readonly number[] | null = null): { name: string; state: CheckState }[] {
   const gate = work.gates.find(entry => entry.name === 'test');
@@ -95,13 +98,13 @@ const reviewersExhausted = /^Every configured reviewer profile is exhausted/;
 const mergeMasterClears = /branch protection have not been verified$|^Unresolved \S+ escalation requires operator resolution|^Slice lead \S+ ruled /;
 const mergeBuilderClears = /^Pull request is not mergeable against the current base$|^Branch protection requires conversation resolution and \d+ review threads? (is|are) unresolved|^Ejected from the merge queue:/;
 
-/** What the current step waits on, and who acts next, in plain words. */
+/** What the checked work waits on, and who acts next, in plain words, per recorded step. */
 export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: number, release: ReleaseView): { detail: string; who: string } {
   const reasons = gate?.reasons ?? [];
   switch (step) {
     case 'build': {
       // Handed in, but the ready gate refuses (a recorded blocker, or a dependency a requirements
-      // revision added): the control plane holds it at build, so it waits there on that, not on a builder.
+      // revision added): the control plane holds it there, so it waits on that, not on a builder.
       const ready = work.submission ? work.gates.find(gate => gate.name === 'ready' && !gate.passed)?.reasons[0] : undefined;
       if (ready !== undefined) {
         // A dependency waits for the other item to ship; a blocker is named, never restated: the row's
@@ -168,74 +171,105 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
 }
 
 /**
- * The six steps for one item. Before the work is handed in only Build can be current. After
- * it, each step's own gate decides done, and the first step whose gate refuses is current; when
- * every gate passes the item is merging. A merged item has every step done — reading "Live" where
- * production was observed serving it. Work closed without merging has no step at all.
+ * The four states for one item (GY-1979). Todo while nothing is handed in and no worker holds it;
+ * Doing while a worker holds it and has not handed in; Checking from the hand-in until the merge,
+ * its label naming which folded gate it waits on; Done once merged — a merged item is Done whether
+ * or not the release serves it yet, and the board's release line carries that deployment. Work
+ * closed without merging has no current state, and nobody acts.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
-  const make = (state: (id: StepId) => StepState, current: StepId | null, detail: string, who: string): PrSteps => ({
-    steps: stepIds.map(id => ({ id, label: stepLabel[id], state: state(id) })), current,
-    label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who,
+  const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, who: string): PrSteps => ({
+    steps: stateIds.map(id => ({ id, label: stateLabel[id], state: state(id) })), current,
+    label: current && current !== 'done' ? `${stateLabel[current]} · ${detail}` : detail, detail, who,
   });
-  // Closed without merging (src/model/closure.ts): no step is done or current, and nobody acts.
+  // Closed without merging (src/model/closure.ts): no state is done or current, and nobody acts.
   if (isClosed(work)) return make(() => 'pending', null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
-  // Done = merged (GY-1981): the steps end at merge. "Live" only once the release is observed serving it.
-  if (work.stage === 'done') return servedFor(work, release) ? make(() => 'done', null, 'Live', 'Nobody — it is live')
-    : make(() => 'done', null, 'Merged', 'Nobody — it has merged');
-  // A change request sends the work back to its builder, so it waits at Build, not at Review; and
-  // a refusing ready gate keeps handed-in work at build, as the control plane's stage does (src/model/gates.ts).
+  if (work.stage === 'done') {
+    // Done means merged (GY-1979): whether or not the release serves it yet. "Live" only once the
+    // release is observed serving it; the board's release line carries the deployment either way.
+    return servedFor(work, release) ? make(() => 'done', 'done', 'Live', 'Nobody — it is live')
+      : make(() => 'done', 'done', 'Merged', 'Nobody — it has merged');
+  }
+  if (!work.submission) {
+    const { detail, who } = waitsOn('build', undefined, work, now, release);
+    // Doing: a worker holds it and has not handed in. Todo: not started — no lease, nothing handed in.
+    return assignment(work, now).active ? make(id => id === 'doing' ? 'current' : id === 'todo' ? 'done' : 'pending', 'doing', detail, who)
+      : make(id => id === 'todo' ? 'current' : 'pending', 'todo', detail, who);
+  }
+  // Checking: handed in, until the merge. The validate, test, review, proof and merge gates fold
+  // into this one state, and the label names the gate it waits on. A recorded blocker, a
+  // dependency a requirements revision added, a requested rework or a change request says so here
+  // rather than sending the item back to Todo: the hand-in stands until the merge.
+  const byName = new Map(work.gates.map(gate => [gate.name, gate]));
+  const sentBack = work.reworkRequested || changesRequested(work) || byName.get('ready')?.passed === false;
+  const phase = sentBack ? 'build' : checkingSteps.find(id => byName.get(stepGate[id]!)?.passed === false) ?? 'merge';
+  const gate = phase === 'build' ? undefined : byName.get(stepGate[phase]!);
+  const { detail, who } = waitsOn(phase, gate, work, now, release);
+  const at = stateIds.indexOf('checking');
+  return make(id => {
+    const index = stateIds.indexOf(id);
+    return index < at ? 'done' : index === at ? 'current' : 'pending';
+  }, 'checking', detail, who);
+}
+
+/**
+ * The item's place in the recorded flow (the six steps the step history keeps), as the Insights
+ * Flow panel's Now view and the replay read it (web/flow-replay.ts, web/step-moves.ts). This is
+ * the reading the recorded gate facts are written against — src/flow-analytics.ts `gateFactStep`
+ * is its recorded counterpart — not the four states the board and the item page draw.
+ */
+export function flowStep(work: Work, now: number, release: ReleaseView = noRelease): { current: StepId | null; label: string; detail: string; who: string } {
+  const make = (current: StepId | null, detail: string, who: string) => ({ current, label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who });
+  if (isClosed(work)) return make(null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
+  if (work.stage === 'done') return servedFor(work, release) ? make(null, 'Live', 'Nobody — it is live') : make(null, 'Merged', 'Nobody — it has merged');
   const readyRefused = work.gates.some(gate => gate.name === 'ready' && !gate.passed);
   const handedIn = !!work.submission && !work.reworkRequested && !changesRequested(work) && !readyRefused;
   if (!handedIn) {
     const { detail, who } = waitsOn('build', undefined, work, now, release);
-    return make(id => id === 'build' ? 'current' : 'pending', 'build', detail, who);
+    return make('build', detail, who);
   }
   const byName = new Map(work.gates.map(gate => [gate.name, gate]));
   // A gate the item does not carry has nothing to refuse, so its step reads done.
   const passed = (id: StepId) => id === 'build' || (id !== 'merge' && byName.get(stepGate[id]!)?.passed !== false);
   const current = stepIds.find(id => !passed(id)) ?? 'merge';
   const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now, release);
-  const steps = make(id => id === current ? 'current' : passed(id) ? 'done' : 'pending', current, detail, who);
-  // A Review or Prove step passed by carry reads as carried, with its ground (GY-330).
-  const carried = carriedBindings(work, [work], new Date(now));
-  const marks: Partial<Record<StepId, string>> = {
-    ...(carried.review ? { review: carried.review.ground ?? carried.review.reason } : {}),
-    ...(carried.proofs.length ? { prove: [...new Set(carried.proofs.map(entry => entry.ground ?? entry.reason))].join('; ') } : {}),
-  };
-  return { ...steps, steps: steps.steps.map(step => step.state === 'done' && marks[step.id] ? { ...step, label: `${step.label} · carried`, carried: marks[step.id] } : step) };
+  return make(current, detail, who);
 }
 
 /**
- * When the item entered the step `prSteps` shows it at: the Work row's "In step" clock and the
- * item page's. The recorded step moves say it exactly — the same moves (`stepMoves`) the Insights
- * replay plays, read through the steps drill-down — so the clock starts at this item's latest
- * recorded move when that move put it at the step it is at now. Before the moves are read, or
- * while the record is a moment behind the gates, the item's own record gives the step's start:
- * Build keeps the builder's clock (`statusSince`: the claim, or the send-back, which is when
- * Build restarted), Validate starts at the hand-in, and a later step at the
- * latest move the item recorded (`statusSince`).
+ * When the item entered the state `prSteps` shows it at: the Work row's "In step" clock and the
+ * item page's. Checking began when the work was handed in — the recorded move out of Build into
+ * the folded steps, or the hand-in instant on the item's own timeline — and a later move between
+ * the folded steps does not restart it; a return to Build and a fresh hand-in does. Doing keeps
+ * the builder's clock (`statusSince`: the claim), Done starts at the merge, and anything the moves
+ * cannot say falls back to the item's own record (`statusSince`). The move list is the board's
+ * — one list for the whole board (web/main.tsx `useStepMoves`) — so a move counts for this clock
+ * only when it is this item's own (`move.key === work.key`): another item's move into Checking
+ * must never start this item's clock or its overdue flag.
  */
 export function stepSince(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): string {
   const current = prSteps(work, now, release).current;
   const own = statusSince(work, now);
-  if (!current || current === 'build') return own;
+  if (!current || current === 'todo' || current === 'doing') return own;
   const at = (value: string | null | undefined) => value && Number.isFinite(Date.parse(value)) && Date.parse(value) <= now ? Date.parse(value) : null;
-  const latest = (moves ?? []).filter(move => move.key === work.key && at(move.at) !== null).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1);
-  if (latest?.to === current) return latest.at;
-  if (current === 'validate') {
-    const pipeline = (work as Work & { pipeline?: PipelineTimeline }).pipeline;
-    const handedIn = at(pipeline?.resubmittedAt ?? pipeline?.submittedAt);
-    if (handedIn !== null) return new Date(handedIn).toISOString();
-  }
+  if (current === 'done') return work.delivery?.mergedAt ?? work.observation?.mergedAt ?? own;
+  const intoChecking = (moves ?? []).filter(move => {
+    if (move.key !== work.key) return false; // the board's list is board-wide: only this item's own moves count
+    const to = at(move.at) !== null && (stepIds as readonly string[]).includes(String(move.to)) ? move.to : null;
+    const from = move.from !== null && (stepIds as readonly string[]).includes(String(move.from)) ? move.from : null;
+    return to !== null && (checkingSteps as StepId[]).includes(to) && (from === null || from === 'build');
+  }).sort((a, b) => Date.parse(a.at) - Date.parse(b.at)).at(-1);
+  if (intoChecking) return intoChecking.at;
+  const pipeline = (work as Work & { pipeline?: PipelineTimeline }).pipeline;
+  const handedIn = at(pipeline?.resubmittedAt ?? pipeline?.submittedAt);
+  if (handedIn !== null) return new Date(handedIn).toISOString();
   return own;
 }
 
 /**
- * How long the item has held its current step, and whether that is past the one threshold
- * (src/model/duration.ts). Work that has left the flow (no current step: merged or closed) has arrived
- * and is never overdue.
+ * How long the item has held its current state, and whether that is past the one threshold
+ * (src/model/duration.ts). Work that has arrived (merged, `done`) is never overdue.
  */
 export function stepHeld(work: Work, now: number, moves?: readonly StepTransition[] | null, release: ReleaseView = noRelease): StatusDuration {
-  return statusDuration(stepSince(work, now, moves, release), now, prSteps(work, now, release).current === null);
+  return statusDuration(stepSince(work, now, moves, release), now, prSteps(work, now, release).current === 'done');
 }
