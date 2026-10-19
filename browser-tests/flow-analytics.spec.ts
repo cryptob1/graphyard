@@ -343,7 +343,7 @@ for (const viewport of [{ name: 'desktop', width: 1440, height: 1000 }, { name: 
     // Density follows measured column width while reserving room for touch targets.
     const rows = await lane.locator(`.now-dot[data-step="${step}"]`).evaluateAll(dots => new Set(dots.map(dot => (dot as HTMLElement).dataset.row)).size);
     const laneWidth = await lane.evaluate(node => node.clientWidth);
-    const capacity = Math.max(1, Math.min(12, Math.floor(laneWidth / 7 / (viewport.width <= 1250 ? 28 : 88))));
+    const capacity = Math.max(1, Math.min(12, Math.floor(laneWidth / 6 / (viewport.width <= 1250 ? 28 : 88))));
     expect(rows).toBe(Math.ceil(12 / capacity));
     if (viewport.name === 'compact desktop') expect(capacity).toBeGreaterThan(2);
     const more = lane.locator(`.now-more[data-step="${step}"]`);

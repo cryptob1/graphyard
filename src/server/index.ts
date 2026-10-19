@@ -2,14 +2,13 @@ import { createServer, type IncomingMessage } from 'node:http';
 import { z } from 'zod';
 import type { Engine } from '../engine.js';
 import { Refusal, demand, type Principal } from '../model.js';
-import type { GitHub } from '../github.js';
 import { artifactCapacityFromEnv } from '../artifacts.js';
 import { Next, Sent, matchRoute, registerApiRoutes, requestFailure, type RouteContext, type RouteModule } from './routes.js';
 import { assembleServices, authenticate, configuredActor, confinedLaneProducer, laneProducerScope, operatorAgentRouteGuard, operatorVisible, refreshDelegationLimits, type ArtifactOptions, type ServerOptions } from './auth.js';
 import { type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinRoutes } from './routes/signin.js';
-import { githubRoutes } from './routes/github.js';
+import { githubGoneRoutes } from './routes/github-gone.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
 import { proofGrantRoutes } from './routes/proof-grants.js';
 import { agentRegistryRoutes } from './routes/agent-registry.js';
@@ -32,7 +31,7 @@ export type { ArtifactOptions, ServerOptions } from './auth.js';
 export { assembleServices } from './auth.js';
 
 /** Routes that answer without a bearer token. */
-export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubRoutes, signinRoutes];
+export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubGoneRoutes, signinRoutes];
 /**
  * Every authenticated `/api/` route, in matching order. A resource adds its module here or in
  * routes.ts (`registerApiRoutes`); modules ahead of the operator-agent guard authorize their
@@ -50,8 +49,9 @@ async function body(req: IncomingMessage, limit = 1_000_000) {
   return Buffer.concat(chunks);
 }
 
-export function server(engine: Engine, credentials: Credential[], github: GitHub | null = null, artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}) {
-  const services = assembleServices(engine, credentials, github, artifacts, options);
+export function server(engine: Engine, credentials: Credential[], artifacts: ArtifactOptions | null = null, options: ServerOptions = {}) {
+  const artifactOptions: ArtifactOptions = artifacts ?? { backend: null, capacityBytes: artifactCapacityFromEnv() };
+  const services = assembleServices(engine, credentials, artifactOptions, options);
   // Reviewer slots counted from the grant store once it can be read; status reports it as soon as it lands.
   const delegationReady = refreshDelegationLimits(services, credentials, options.env ?? process.env, options.knownPrincipals)
     .catch(error => console.error('Delegation limits could not be recounted from recorded proof grants:', error instanceof Error ? error.message : 'unknown'));

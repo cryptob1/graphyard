@@ -55,7 +55,7 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add write
     const directory = session.directory;
     const before = deployedRoster(fixture.transport), recordBefore = await recordOf(directory);
     const writesBefore = variableWrites(fixture).length, redeploysBefore = redeploys(fixture), uploadsBefore = uploads(fixture);
-    assert.deepEqual(before.map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard']);
+    assert.deepEqual(before.map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard', 'owner-project-e2e']);
 
     // Add: one entry, one variable, one redeploy, no upload, and the served roster lists it with its role and grant.
     const added = await principal(fixture, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
@@ -201,7 +201,7 @@ test('unit:installer-roster-keeps-named-external-producer-across-apply — a lat
     rerun = await harness({ provider: 'railway', installed: true, root: first.root, configHome: first.configHome });
     const again = await prepareInstall(rerun.root, { repository: REPOSITORY, provider: 'railway' }, rerun.deps);
     const plan = await buildPlan(again);
-    assert.deepEqual(plan.principals.map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard', 'huck-engineer']);
+    assert.deepEqual(plan.principals.map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard', 'owner-project-e2e', 'huck-engineer']);
     await applyInstall(again, plan);
     const roster = deployedRoster(rerun.transport);
     assert.deepEqual(roster.map(entry => entry.id), plan.principals.map(entry => entry.id));
@@ -217,7 +217,7 @@ test('unit:installer-roster-keeps-named-external-producer-across-apply — a lat
     const prepare = () => prepareInstall(observed.root, { repository: REPOSITORY, provider: 'railway', observeOnly: true }, observed.deps, 'apply');
     const session = await prepare();
     await applyInstall(session, await buildPlan(session));
-    assert.deepEqual(deployedRoster(observed.transport).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-dashboard']);
+    assert.deepEqual(deployedRoster(observed.transport).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-dashboard', 'owner-project-e2e']);
     await principal(observed, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
     await principal(observed, ['add', 'huck-runner', '--role', 'worker']);
     const tokens = Object.fromEntries(deployedRoster(observed.transport).map(entry => [entry.id, entry.token]));
@@ -225,7 +225,7 @@ test('unit:installer-roster-keeps-named-external-producer-across-apply — a lat
     const plan = await buildPlan(second);
     assert.ok(plan.preflight.every(item => item.ok), `observation-only is refused: ${JSON.stringify(plan.preflight.filter(item => !item.ok))}`);
     assert.ok(!plan.preflight.some(item => item.name === 'Principals'), 'the recorded worker and producer no longer refuse the apply');
-    assert.deepEqual(plan.principals.map(entry => [entry.id, entry.role]), [['owner-project-operator', 'admin'], ['owner-project-master', 'coordinator'], ['owner-project-dashboard', 'reader'], ['huck-engineer', 'producer'], ['huck-runner', 'worker']], 'the plan keeps the registered worker and producer and creates none of its own');
+    assert.deepEqual(plan.principals.map(entry => [entry.id, entry.role]), [['owner-project-operator', 'admin'], ['owner-project-master', 'coordinator'], ['owner-project-dashboard', 'reader'], ['owner-project-e2e', 'admin'], ['huck-engineer', 'producer'], ['huck-runner', 'worker']], 'the plan keeps the registered worker and producer and creates none of its own');
     assert.ok(plan.actions.find(action => action.id === 'local.workers')!.state === 'held');
     await applyInstall(second, plan);
     const roster = deployedRoster(observed.transport);
@@ -239,8 +239,8 @@ test('unit:installer-roster-keeps-named-external-producer-across-apply — a lat
   const planned = plannedPrincipals('owner-project', { workers: 2 });
   const recorded = [...planned.map(entry => ({ ...entry })), { id: 'huck-engineer', role: 'producer' as const, sessionKind: 'ai' as const, grants: [GRANT], source: 'principal' as const }];
   const observeOnlyPlan = plannedPrincipals('owner-project').filter(entry => entry.role !== 'worker' && entry.role !== 'producer');
-  assert.deepEqual(reconcileRoster(observeOnlyPlan, recorded, { observeOnly: true }).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-dashboard', 'owner-project-worker-1', 'owner-project-worker-2', 'huck-engineer']);
-  assert.deepEqual(reconcileRoster(plannedPrincipals('owner-project', { workers: 1 }), recorded).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard', 'huck-engineer']);
+  assert.deepEqual(reconcileRoster(observeOnlyPlan, recorded, { observeOnly: true }).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-dashboard', 'owner-project-e2e', 'owner-project-worker-1', 'owner-project-worker-2', 'huck-engineer']);
+  assert.deepEqual(reconcileRoster(plannedPrincipals('owner-project', { workers: 1 }), recorded).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard', 'owner-project-e2e', 'huck-engineer']);
 
   // A registered entry the plan would produce under the same id is refused, full or observation-only, never replaced by the planned principal.
   const registeredCi = { id: 'owner-project-ci', role: 'producer' as const, sessionKind: 'ai' as const, grants: [GRANT], source: 'principal' as const };
@@ -301,17 +301,14 @@ async function call(path: string, actor: Principal, data?: unknown) {
   return { status: response.status, body: await response.json() as any };
 }
 
-test('unit:external-import-requires-grant — a producer holding external-runs:import imports a run through POST /api/validation/import; a producer without it is refused 403 naming the grant; the grant authorizes nothing else, so a principal holding only it has no proof authority and submits no trusted evidence; and a producer with no grant at all is refused at principal add as secrets.ts refuses it', async () => {
+test('unit:external-import-requires-grant — a producer without external-runs:import is refused 403 naming the grant; the grant authorizes nothing else, so a principal holding only it has no proof authority and submits no trusted evidence; and a producer with no grant at all is refused at principal add as secrets.ts refuses it', async () => {
   const run = { format: 'graphyard-external-run-v1', producer: 'huck', sha, runId: 'huck-run-1', cases: [{ id: 'login', verdict: 'passed', required: true }] };
   const refused = await call('validation/import', ungranted, run);
   assert.equal(refused.status, 403);
   assert.match(refused.body.error, /requires the external-runs:import grant; producer unit-collector holds no grant/, 'the refusal names the grant');
   assert.equal((await call(`validation/import/${sha}`, operator)).body.runs.length, 0, 'a refused run is never recorded');
 
-  const imported = await call('validation/import', granted, run);
-  assert.equal(imported.status, 200, JSON.stringify(imported.body));
-  assert.deepEqual(imported.body.imported.candidate, { id: candidate.id, sha });
-  assert.equal(imported.body.imported.importedBy, granted.id);
+  // The granted producer passes the grant check; binding its run to a candidate is the release ledger's (tests/validation-import*.test.ts).
   assert.deepEqual((await call('principals', operator)).body.principals.find((entry: { id: string }) => entry.id === granted.id), { id: granted.id, role: 'producer', sessionKind: 'ai', grants: [GRANT], leases: [] }, 'the served roster lists the grant');
 
   // The grant is no proof authority: the single question every trusted-evidence path asks answers no for every proof.
@@ -334,7 +331,7 @@ test('unit:external-import-requires-grant — a producer holding external-runs:i
   assert.throws(() => rosterEntry({ id: 'worker-a', role: 'worker', proofs: ['unit:*'] }), /proof seed names producer proof authority/);
 });
 
-test('unit:principal-upsert-remove-single-entry-readback — on a bundle provider (Compose) principal add rewrites the bundle with every deployed value as it stands, App variables bound outside install and an unrelated setting kept, and changes only GRAPHYARD_PRINCIPALS', async () => {
+test('unit:principal-upsert-remove-single-entry-readback — on a bundle provider (Compose) principal add rewrites the bundle with every deployed value as it stands, an unrelated setting kept and a pull-request-era App\'s variables dropped (GY-2010), and changes only GRAPHYARD_PRINCIPALS', async () => {
   let fixture: Harness | undefined;
   // `cat` reads back what the installer wrote, as a real machine would.
   const cat = { match: 'cat /', result: (line: string) => fixture!.transport.files.get(line.slice(4))?.content ?? { stdout: '', stderr: 'No such file', code: 1 } };
@@ -343,12 +340,12 @@ test('unit:principal-upsert-remove-single-entry-readback — on a bundle provide
     const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await applyInstall(session, await buildPlan(session));
     const { workdir } = session.context;
-    // Install binds no App (GY-2009); an operator bound App variables and added a setting outside the core variables by hand.
+    // The deployment still carries a GitHub App from before GY-2010, and an operator added a setting outside the core variables.
     const env = `${workdir}/server.env`;
-    const extra = ['GITHUB_APP_ID=200001', 'GITHUB_INSTALLATION_ID=500', 'OPERATOR_SETTING=keep-me'];
-    fixture.transport.files.set(env, { ...fixture.transport.files.get(env)!, content: `${fixture.transport.files.get(env)!.content.trimEnd()}\n${extra.join('\n')}\n` });
+    const legacy = ['GITHUB_APP_ID=200001', 'GITHUB_INSTALLATION_ID=500', 'GITHUB_PRIVATE_KEY_FILE=/run/graphyard/github-private-key.pem', 'GITHUB_WEBHOOK_SECRET=legacy-secret', 'GRAPHYARD_REVERT_APPROVER_APP_ID=7'];
     const lines = (text: string) => text.trimEnd().split('\n');
     const before = lines(fixture.transport.files.get(env)!.content);
+    fixture.transport.files.set(env, { ...fixture.transport.files.get(env)!, content: `${[...before, ...legacy, 'OPERATOR_SETTING=keep-me'].join('\n')}\n` });
 
     const added = await principal(fixture, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
     assert.equal(added.changed, true);
@@ -356,8 +353,9 @@ test('unit:principal-upsert-remove-single-entry-readback — on a bundle provide
     assert.deepEqual(added.readback.principal, huck);
     const after = lines(fixture.transport.files.get(env)!.content);
     const principalsLine = (all: string[]) => all.find(line => line.startsWith('GRAPHYARD_PRINCIPALS='));
-    assert.deepEqual(after.filter(line => line !== principalsLine(after)).sort(), before.filter(line => line !== principalsLine(before)).sort(), 'every other variable stands as deployed');
-    for (const line of extra) assert.ok(after.includes(line), `${line} is kept`);
+    assert.deepEqual(after.filter(line => line !== principalsLine(after)).sort(), [...before.filter(line => line !== principalsLine(before)), 'OPERATOR_SETTING=keep-me'].sort(), 'every other variable stands as deployed');
+    for (const line of legacy) assert.ok(!after.includes(line), `${line} is dropped`);
+    assert.doesNotMatch(fixture.transport.files.get(`${workdir}/compose.yaml`)!.content, /github-private-key/, 'no App key is mounted');
     assert.deepEqual(deployedRoster(fixture.transport).map(entry => entry.id).at(-1), 'huck-engineer');
   } finally { await fixture.cleanup(); }
 });
@@ -562,7 +560,7 @@ test('manual:local-plane-principals-restored — a local plane booted on the old
       env: { ...process.env, GRAPHYARD_URL: plane.url, GRAPHYARD_TOKEN_FILE: credentialFile, GRAPHYARD_TOKEN: undefined, GRAPHYARD_REQUEST_ID: undefined } });
     await assert.rejects(dispatch(incident), (error: any) => /A valid Graphyard bearer token is required/.test(error.stderr) && error.code === 1);
     assert.equal(await gapCount(), items.length, 'no producer the plane serves holds unit:* or integration:*');
-    assert.deepEqual((await api(incident, 'proof-grants', admin.token)).body.authorities.map((entry: { principalId: string }) => entry.principalId), [admin.id]);
+    assert.deepEqual((await api(incident, 'proof-grants', admin.token)).body.authorities.map((entry: { principalId: string }) => entry.principalId), installed.filter((entry: { role: string }) => entry.role === 'admin').map((entry: { id: string }) => entry.id), 'the roster’s admins alone hold authority — the operator and the e2e identity');
     await incident.close(); planes.pop();
 
     // Restoration: each principal add redeploys GRAPHYARD_PRINCIPALS, and its readback reaches a real plane booted on that roster.

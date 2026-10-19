@@ -3,12 +3,11 @@ import { reviewerBindingHealth } from '../reviewer.js';
 import { loopSupervision, loopSupervisionAttention, type LoopSupervisorEvidence, type LoopSupervisorHost } from '../supervisor.js';
 import { readDaemonState } from '../master-daemon.js';
 import { detectLoopSupervisorUnit } from '../daemon/upgrade.js';
-import type { MainGuardReadiness } from '../main-guard.js';
 import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { CliContext } from './context.js';
-import { deploymentTarget, derivedFrom, derivedVariables, installIdFor, prepareInstall, providers, revertApproverFromFile, selfProvision, type DerivedVariable, type PendingRedeploy, type PendingSetup, type Provider, type SelfProvisionAudit } from '../install/index.js';
+import { deploymentTarget, derivedVariables, installIdFor, prepareInstall, providers, selfProvision, type DerivedVariable, type PendingRedeploy, type PendingSetup, type Provider, type SelfProvisionAudit } from '../install/index.js';
 import type { AdapterContext, ProviderAdapter } from '../install/adapters.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { provisionReleaseFiling, type ReleaseFilingAudit, type ReleaseFilingDeps, type ReleaseFilingHandoff, type ReleaseFilingStep, releaseFilingSetupNext } from '../master/release-filing.js';
@@ -21,9 +20,6 @@ import { provisionReleaseFiling, type ReleaseFilingAudit, type ReleaseFilingDeps
  * to the master, naming the command that repairs it; `attention` lists them in that order. A
  * missing browser profile is the operator's to give (it lends the master their signed-in GitHub
  * session), so it is recorded here for them rather than asked for in the master's chat (GY-184).
- * An armed main guard without its revert approver App (GY-1335), read from the control plane's
- * status, is named here too: every revert it opens would be refused by main's last-push-approval
- * rule, so it is raised before a merge breaks main, not after.
  */
 export const browserProfileMissing = 'No browser profile is configured: App permission updates and installation acceptance cannot run through master browser until the operator lends the master a signed-in Chrome profile';
 /**
@@ -31,7 +27,7 @@ export const browserProfileMissing = 'No browser profile is configured: App perm
  * master's, never the human's (GY-1416): `master setup --apply` sets it, and the loop runs that
  * itself whenever the provider adapter can apply variables in place.
  */
-export const setupApplyNext = 'graphyard master setup --apply: sets GRAPHYARD_REVERT_APPROVER_APP_ID, GRAPHYARD_REVERT_APPROVER_INSTALLATION_ID and GRAPHYARD_REVERT_APPROVER_PRIVATE_KEY from the reviewer App registration saved on this host, and every other derived deployment variable the deployment lacks, through the provider adapter, then redeploys, and keeps the release filing identity and its uat GRAPHYARD_RELEASE_TOKEN current with the install\'s admin credential (GY-1692); the loop runs it itself when the adapter can apply variables. graphyard doctor then shows revert-approver ready';
+export const setupApplyNext = 'graphyard master setup --apply: sets every derived deployment variable the deployment lacks through the provider adapter, then redeploys, and keeps the release filing identity and its uat GRAPHYARD_RELEASE_TOKEN current with the install\'s admin credential (GY-1692); the loop runs it itself when the adapter can apply variables';
 export const browserProfileNext = (cliPath: string) => `node ${cliPath} master init --token-stdin --browser-profile PROFILE`;
 /**
  * What the loop's cursor records of its own supervision (GY-1400), for a probe that could not reach
@@ -43,7 +39,7 @@ export async function loopSupervisorEvidence(root: string, master: MasterConfig,
   return { unit, reexecuted: state?.upgrade?.last?.self === true };
 }
 
-export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost, coordinator?: { mainGuard?: MainGuardReadiness | null } | null,
+export async function setupHealth(root: string, master: MasterConfig, supervisorHost?: LoopSupervisorHost,
   evidence: (root: string, master: MasterConfig) => Promise<LoopSupervisorEvidence | null> = loopSupervisorEvidence) {
   // What the loop's own setup step last did (GY-1416), from this process or the file it keeps.
   const selfProvisioned = await lastLoopSelfProvision(root);
@@ -52,7 +48,6 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   // The cursor is read only when this vantage could not reach the user manager.
   const supervisorAttention = loopSupervisionAttention(supervisor, supervisor.unreachable ? await evidence(root, master).catch(() => null) : null);
   const herdrWorkspace = await herdrWorkspaceHealth(master);
-  const mainGuard = coordinator?.mainGuard ?? null, revertApprover = mainGuard?.attention ?? null;
   // The loop's own setup step: a failed run, and (GY-1692, GY-1691) the release filing credential it keeps current, which only a host
   // holding no admin credential leaves to the administrator — named here, never in a park. Both belong to the setup section too.
   const filing = selfProvisioned?.releaseFiling;
@@ -61,13 +56,12 @@ export async function setupHealth(root: string, master: MasterConfig, supervisor
   const filingItem: AttentionItem | null = filing?.state === 'unavailable' ? { subject: 'setup', text: `The release filing credential cannot be issued from this host: ${filing.detail}`, ...humanOwner('issuing credentials to people', filing.next ?? releaseFilingSetupNext) }
     : filing?.state === 'failed' ? { subject: 'setup', text: `The loop's master setup --apply left the release filing credential failed (${selfProvisioned!.at}; the failed run is retried from ten minutes on, backing off): ${filing.detail}`, ...agentOwner('master', setupApplyNext) }
     : filing?.state === 'planned' ? { subject: 'setup', text: `The loop's master setup --apply left the release filing credential planned: ${filing.detail}`, ...agentOwner('master', setupApplyNext) } : null;
-  const setup = { reviewer, supervisor, herdrWorkspace, mainGuard, selfProvision: selfProvisioned,
-    attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : []), ...(revertApprover ? [revertApprover] : []), ...(selfProvisionFailed ? [selfProvisionFailed] : []), ...(filingItem ? [filingItem.text] : [])] };
+  const setup = { reviewer, supervisor, herdrWorkspace, selfProvision: selfProvisioned,
+    attention: [...reviewer.attention, ...supervisorAttention.map(item => item.text), ...(herdrWorkspace.exists === false ? [herdrWorkspace.reason!] : []), ...(selfProvisionFailed ? [selfProvisionFailed] : []), ...(filingItem ? [filingItem.text] : [])] };
   // An unsupervised loop stays stopped; each supervisor state names its own repair.
   const attention: AttentionItem[] = supervisorAttention.map(item => ({ subject: 'setup', text: item.text, ...agentOwner('master', item.next) }));
   for (const text of reviewer.attention) attention.push({ subject: 'setup', text, ...agentOwner('master', 'graphyard master reviewer setup (or graphyard master reviewer bind FILE --key-stdin) to bind the reviewer App') });
   if (herdrWorkspace.exists === false) attention.push({ subject: 'setup', text: herdrWorkspace.reason!, ...agentOwner('master', 'Set herdrWorkspace in .graphyard/master.json to a workspace herdr workspace list shows; master run adopts it on its next tick') });
-  if (revertApprover) attention.push({ subject: 'setup', text: revertApprover, ...agentOwner('master', setupApplyNext) });
   if (selfProvisionFailed) attention.push({ subject: 'setup', text: selfProvisionFailed, ...agentOwner('master', setupApplyNext) });
   if (filingItem) attention.push(filingItem);
   if (!master.browser) attention.push({ subject: 'setup', text: browserProfileMissing, ...humanOwner('issuing credentials to people', browserProfileNext(master.cliPath)) });
@@ -180,8 +174,7 @@ export async function recordedDeployment(root: string, master: Pick<MasterConfig
 
 /**
  * `master setup [--apply]` (GY-1416): every deployment variable derived from credentials saved on
- * this host that the running deployment lacks — the install record's, and the revert approver from
- * the reviewer App bound in .graphyard/master.json — planned, or set with --apply through the
+ * this host that the running deployment lacks — the install record's — planned, or set with --apply through the
  * provider adapter with one audit entry each. Nothing is printed but names and fingerprints.
  */
 export async function masterSetup(root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>, options: MasterSetupOptions, deps: MasterSetupDependencies = {}) {
@@ -191,14 +184,12 @@ export async function masterSetup(root: string, master: Pick<MasterConfig, 'repo
   const located = await (deps.locate ?? recordedDeployment)(root, master, options);
   if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], redeployed: [] as string[], pendingRedeploy: [] as string[], audit: [], releaseFiling,
     next: `No deployment is recorded for ${master.repository} on this host (no graphyard install record): name it with graphyard master setup --provider railway --service NAME --link-dir DIR${options.apply ? ' --apply' : ''}` };
-  const reviewer = master.reviewer ? derivedFrom(await revertApproverFromFile(master.reviewer.credentialFile), `the reviewer App ${master.reviewer.slug} registration ${master.reviewer.credentialFile}`) : [];
   const pendingFile = resolve(root, '.graphyard', `setup-redeploy-${located.context.provider}-${located.context.service}.json`);
   const pending: PendingRedeploy = {
     read: () => readFile(pendingFile, 'utf8').then(text => JSON.parse(text) as PendingSetup, () => ({ redeploy: [], audit: [] })),
     write: async staged => { await (staged.redeploy.length || staged.audit.length ? writeAtomically(pendingFile, staged) : rm(pendingFile, { force: true })); },
   };
-  // The reviewer bound now comes first: the first occurrence of a name wins, and the install record's reviewer may since have been replaced.
-  return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, [...reviewer, ...located.derived], { apply: options.apply, audit, now: deps.now, pending }), releaseFiling };
+  return { target: { provider: located.context.provider, service: located.context.service }, ...await selfProvision(located, located.derived, { apply: options.apply, audit, now: deps.now, pending }), releaseFiling };
 }
 
 export async function masterSetupCommand(context: CliContext, root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>) {

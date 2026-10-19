@@ -24,7 +24,6 @@ export async function runDoctor(context: CliContext) {
   try { live = await api('status'); } catch (error: any) { failure = error.message; }
   const setup = await readSetupStatus(root).catch((error: any) => ({ error: error.message }));
   const stored = await loadProposal(root).catch(() => null);
-  const appPermissions = live?.appPermissions ?? null;
   const documentation = doctorDocumentation(await readDocumentationConfig(root).catch((error: any) => ({ error: error.message as string })), live?.documentation ?? null);
   // Capacity drift and production lag, which a deploy can break silently: the server reports both.
   const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
@@ -34,7 +33,7 @@ export async function runDoctor(context: CliContext) {
   if (live && ['admin', 'reader'].includes(live.actor?.role)) { try { definitions = (await api('validation/definitions')).definitions; } catch { definitions = null; } }
   const readiness = readinessChecklist(profile, {
     repository: discovered.repository ?? null,
-    server: { url: base, reachable: !!live, role: live?.actor?.role, github: !!live?.github, githubPermissions: live?.githubPermissions ?? {}, appPermissions, mainGuard: live?.mainGuard ?? null, failure },
+    server: { url: base, reachable: !!live, role: live?.actor?.role, failure },
     setup: 'error' in setup ? { proposal: null, appliedAt: null, githubApp: null, drift: [], unreadable: [String(setup.error)] } : { ...setup, unreadable: setup.unreadable.filter((entry): entry is string => typeof entry === 'string') },
     proposal: stored?.proposal ?? null,
     validation: definitions ? summarizeDefinitions(definitions) : null,
@@ -52,9 +51,8 @@ export async function runDoctor(context: CliContext) {
     : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
     : readiness.next;
   await coordinatorDoctor(root, discovered.repository, production);
-  return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, githubConfigured: !!live?.github, role: live?.actor?.role, release: live?.release ?? null, failure,
+  return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, role: live?.actor?.role, release: live?.release ?? null, failure,
     setup,
-    appPermissions: appPermissions ? { verifiedAt: appPermissions.verifiedAt, missing: appPermissions.missing, attention: appPermissions.attention, installationUrl: appPermissions.installationUrl } : null,
     heldJobs: live?.heldJobs ?? 0,
     mainGuard: live?.mainGuard ?? null,
     build: live?.build ?? null,

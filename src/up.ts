@@ -8,7 +8,6 @@ import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
-import { appImportRoute, githubOwnerType } from './github-setup.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
@@ -28,6 +27,12 @@ import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupF
 import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, readHostLoopCode, alignExecutorUnits, liftLoopPins, unitLauncherCheckout, executorDeclarationFile, executorDeclarationSchema, type LoopCodeReading } from './repository-setup.js';
 import { loopCodeRoot } from './daemon/checkout-state.js';
 import { recordHerdrInstance } from './master/config.js';
+
+/** GY-2010: App-import routes are gone; quote the control-plane up path instead. */
+function appImportRoute(repository: string, upFlags = '', _org = false, _ownerType?: string) {
+  return `graphyard up --repo ${repository}${upFlags} (GitHub App registration is removed; the merge writer uses the deploy key)`;
+}
+async function githubOwnerType(_owner: string): Promise<'User' | 'Organization' | null> { return 'User'; }
 
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
@@ -659,9 +664,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     return result.stdout;
   };
   const passed = request.install ?? {};
-  // Supervised installs register no reviewer App (GY-1501): the operator is the reviewer.
-  // Control-plane merger (GY-1552) registers no App at all: install binds none (GY-2009), no --reviewer.
-  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, ...(supervised || controlPlaneMerger ? [] : ['--reviewer', request.reviewer]), mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []),
+  // install registers no GitHub App (GY-2010): it registers the merge writer's deploy key instead.
+  const installArgs = (mode: '--plan' | '--apply') => ['install', '--provider', request.provider, '--repo', request.repository, mode, ...(state.noHerdr ? ['--no-herdr'] : state.herdrInstance ? ['--herdr-instance'] : []),
     // GY-1851: a re-issue restarts a host install's loop on a fresh cursor where it runs; other installs ignore it.
     ...(mode === '--apply' && state.reissue?.length ? ['--fresh-cursor'] : []),
     ...([['--confirm-price', passed.confirmPrice], ['--max-monthly', passed.maxMonthly], ['--ssh-key', passed.sshKey], ['--ssh-host', passed.sshHost], ['--ssh-user', passed.sshUser]] as const).flatMap(([flag, value]) => value ? [flag, value] : [])];
@@ -1450,7 +1454,7 @@ class AppRejected extends Error {}
  * (REMEMBER) so a rerun meeting the same page resumes it (PENDING, ONRESUME) instead of handing it
  * off again; NOWAIT ends the drive at the handoff with that route as the next step.
  */
-export function browserAppDriver(options: { page: BrowserPage; repository: string; ids: () => { owner: number; repository: number }; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void;
+export function browserAppDriver(options: { page: BrowserPage; repository: string; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void;
   profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; upFlags?: string; reuseFlags?: string;
   /** GY-1878: the repository owner's account type for the App-import route; defaults to githubOwnerType. */
   ownerType?: (owner: string) => Promise<'User' | 'Organization' | null>;
@@ -1539,8 +1543,12 @@ export function browserAppDriver(options: { page: BrowserPage; repository: strin
       page.open(url);
       const install = page.locate('link', 'Install GitHub App');
       if (install?.href) {
-        const ids = options.ids();
-        page.open(`${install.href}/permissions?suggested_target_id=${ids.owner}&repository_ids[]=${ids.repository}`);
+        // The owner and repository ids from the repository page's own metadata: Graphyard calls no GitHub API.
+        const href = install.href;
+        page.open(`https://github.com/${options.repository}`);
+        const owner = page.meta('octolytics-dimension-user_id'), repository = page.meta('octolytics-dimension-repository_id');
+        if (!owner || !repository) throw new Error(`The page of ${options.repository} names no owner or repository id; install the App on ${options.repository} alone at ${href}`);
+        page.open(`${href}/permissions?suggested_target_id=${owner}&repository_ids[]=${repository}`);
         await press('button', 'Install', handoff);
       }
       outcome = { state: 'done' };
@@ -1617,9 +1625,11 @@ export function browserProfileLogin(browser: { profile: string; executable?: str
 const underTestRunner = () => !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
 /** browserProfileLogin, except that under the test runner no real browser is opened. */
 const hostProfileLogin = (browser: { profile: string; executable?: string }) => underTestRunner() ? null : browserProfileLogin(browser);
+/** gh's own record of the login it is signed in as, read from its configuration: no GitHub API request. */
+export const ghLoginArgs = ['config', 'get', 'user', '-h', 'github.com'];
 /** The GitHub login this host's gh is authenticated as, or null when gh is not signed in. */
 export function hostGithubLogin(): string | null {
-  try { return execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
+  try { return execFileSync('gh', ghLoginArgs, { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
 }
 const canonicalPath = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
 /**
@@ -1659,10 +1669,6 @@ export function recordedAppDriver(root: string, request: UpRequest, browser: { p
     upFlags: upCommandFlags(request), reuseFlags: (request.reuseApps ?? []).map(slug => ` --reuse-app ${shellWord(slug)}`).join(''),
     pending: () => readPendingSudo(root, scope), remember: state => rememberPendingSudo(root, state, scope),
     onResume: state => clock.emit?.({ kind: 'note', text: `Resuming the Confirm access handed off at ${state.issuedAt}; no new handoff: confirm it as asked then, or pass a code with graphyard up --sudo-code` }),
-    ids: () => {
-      const repo = JSON.parse(execFileSync('gh', ['api', `repos/${request.repository}`], { encoding: 'utf8', timeout: 30_000 }));
-      return { owner: Number(repo.owner?.id), repository: Number(repo.id) };
-    },
     onClose: async outcome => {
       if (!created) return;
       await writeFile(resolve(directory, 'record.json'), `${JSON.stringify({ id, flow: 'app-create', startedAt: startedAt.toISOString(), completedAt: new Date().toISOString(), actor: { profile: browser.profile }, target: { repository: request.repository }, outcome: outcome.state === 'done' ? 'applied' : 'refused', ...(outcome.state === 'failed' ? { reason: outcome.reason } : outcome.state === 'rejected' ? { reason: outcome.error } : {}), screenshots: steps.filter(step => step.screenshot).length, steps }, null, 2)}\n`, { mode: 0o600 });
@@ -2062,7 +2068,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     supervise: async () => {
       // Only the login's name is read; gh's token stays in gh, used for setup alone (GY-1501).
       let login: string | null = null;
-      try { login = execFileSync('gh', ['api', 'user', '--jq', '.login'], { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { /* recorded without it */ }
+      try { login = hostGithubLogin(); } catch { /* recorded without it */ }
       const recorded = await recordSupervision(root, 'supervised', login);
       return { operatorLogin: recorded.operatorLogin };
     },

@@ -33,7 +33,7 @@ Once green, **Describe what you want built** records a goal.
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: from `master.json` or install); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting), `step-failed` naming argv and stderr. No GitHub App, branch protection, ruleset or `--reviewer`: the merge writer's deploy key is the only GitHub access, and `--reuse-app` is refused (GY-2009). Missing repo: `gh repo create --source . --push`; no `--local`. Handoff: subscription login approval. `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
+`up --agent` takes `[--goal FILE] [--browser-profile PROFILE] [--url URL]` (server: from `master.json` or install); exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting), `step-failed` naming argv and stderr. No GitHub App, branch protection or ruleset is set up and no browser drives GitHub: the merge writer's deploy key is the only GitHub access. Missing repo: `gh repo create --source . --push`; no `--local`. Handoff: subscription login approval. `--wait MINUTES` (20). Preflight refuses `/tmp`, `/var/tmp`.
 
 ## Troubleshooting: manual steps
 
@@ -43,7 +43,7 @@ Once green, **Describe what you want built** records a goal.
 
 ```sh
 node --version          # v24+
-gh auth status          # scope repo (deploy-key registration); no provider needs admin:repo_hook
+gh auth status          # scope repo (registers the deploy key)
 docker compose version
 herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
@@ -53,19 +53,15 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-Needs a GitHub `origin`. Install writes no Actions workflows; the merge writer's trial is the gate. **Verify:** doctor readiness `repository` and `test-formats` are `ready`.
+Needs a GitHub `origin` the deploy key can push to over SSH. Install writes no Actions workflows; the merge writer's trial is the gate. **Verify:** doctor readiness `repository` and `test-formats` are `ready`.
 
 ## 3. Install the control plane
 
-`gy install --provider compose --repo OWNER/REPO --reviewer claude --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
+`gy install --provider compose --repo OWNER/REPO --plan`, then `--apply` ([install](install.md); `gy` is `node ~/graphyard/bin/graphyard.mjs`). `--apply` records the master connection `.graphyard/master.json`, its `0600` credential under `installDirectory`; `gy doctor` reads as it; `GRAPHYARD_TOKEN_FILE` overrides it. **Verify:** `control-plane` and `credentials-file` pass.
 
 ### Control-plane merger
 
-`up` creates an ed25519 deploy key and registers it read-write on OWNER/REPO for the [merge writer](delivery-redesign.md#the-merger), which pushes through an SSH origin; no App, no branch protection. The loop re-registers a missing key each setup run. **Verify:** `github-app` and `reviewer-app` print `PASS ... not required (merger: control-plane)`.
-
-## 4. Register the GitHub App
-
-Not required for the control-plane merger: install and `up` register no App and write no branch protection ([github](github.md)). Doctor `github-app` / `reviewer-app` print `PASS ... not required`. Optional legacy observation-only binding remains via `graphyard app import` / `app bind`. Reviewer and revert-approver Apps: only when an observation-only install still uses them.
+`install --apply` (and `up`) creates an ed25519 deploy key and registers it read-write on OWNER/REPO for the [merge writer](delivery-redesign.md#the-merger), which trial-merges each submitted head and pushes through an SSH origin ([deploy key](install.md#step-3-deploy-key)). No GitHub App, webhook or branch protection is set up, and nothing asks for one; reviews run as control-plane reviewer sessions. **Verify:** `gh repo deploy-key list -R OWNER/REPO` lists `graphyard-merge-writer-HOST`; `github-app` and `reviewer-app` print `PASS ... not required (merger: control-plane)`.
 
 ## 6. Onboard the checkout
 

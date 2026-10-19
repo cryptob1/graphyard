@@ -9,23 +9,30 @@ import {
   leadMay, leadPermittedActions, leadRulingActions, mergeOrder, producerIndependenceRefusal, recordIntake, recordLeadRuling,
   routineIntakeOrigins, sessionKind, slices, validateDelegationPrincipals,
 } from '../src/delegation.js';
-import { mergeAuthorized } from '../src/merge-queue.js';
+import { pushRefusal } from '../src/model/gates.js';
 import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { currentEvidence, sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { mergeIntent } from './helpers/merge-ledger.js';
 
-// GitHub merges (GY-1235): what GitHub may merge is every gate passing on the item as it stands,
-// in the merge order the delegation computes. These stand in for the guarded broker's selection.
+// The merge writer merges (GY-1524, GY-2010): what it may push is a head its trial passed with every
+// other gate passing on the item as it stands, the merge gate waiting only on the push, in the merge
+// order the delegation computes. These stand in for the writer's selection.
+function mergeAuthorized(work: Work) {
+  const merge = work.gates.find(gate => gate.name === 'merge');
+  return work.stage === 'merge' && !!work.candidate && !work.violations.length && !work.leadHold
+    && work.gates.every(gate => gate.name === 'merge' || gate.passed) && !!merge && merge.reasons.length === 1 && merge.reasons[0] === pushRefusal(work.candidate.sha);
+}
 function currentMergeCandidates(work: Work[], observedAt: string) {
   const order = mergeOrder(work, Date.parse(observedAt));
   const rank = (item: Work) => order.indexOf(item.key) + 1 || Number.MAX_SAFE_INTEGER;
   return work.filter(mergeAuthorized).sort((a, b) => rank(a) - rank(b) || a.key.localeCompare(b.key));
 }
 function assertMergeCandidate(work: Work, _observedAt: string) {
-  if (!mergeAuthorized(work)) throw new Error(`${work.key} does not pass every gate for GitHub to merge it`);
+  if (!mergeAuthorized(work)) throw new Error(`${work.key} does not pass every gate for the merge writer to merge it`);
 }
 
 // Each test is named for the proof it produces, so acceptance evidence maps to
@@ -78,7 +85,8 @@ async function publish(work: Work, sha = head) {
 }
 async function proven(work: Work, sha = head) {
   const observed = await engine.observe(work.id, (await reload(work)).revision, observation(work, sha));
-  return publish(await engine.execute(reviewer, 'evidence', observed.id, proof({ sha }), id()), sha);
+  // The merge writer's trial of the head is what opens the test gate (GY-2010).
+  return publish(await mergeIntent(engine, await engine.execute(reviewer, 'evidence', observed.id, proof({ sha }), id())), sha);
 }
 
 before(async () => {
@@ -712,7 +720,7 @@ test('unit:dynamic-merge-ordering — order follows dependencies and current con
   const observedAt = new Date().toISOString();
   const mergeable = (key: string, overrides: Partial<Work> = {}) => work(key, {
     candidate: { sha: head, baseSha: base, pr: 1, branch: `graphyard/${key}`, author: 'implementer' },
-    policyRevision: 1,
+    policyRevision: 1, gates: [{ name: 'merge', passed: false, reasons: [pushRefusal(head)] }],
     observation: { at: observedAt } as Observation, ...overrides,
   } as Partial<Work>);
   const first = mergeable('GY-11', { plannedFiles: ['src/shared/'] });
@@ -864,7 +872,7 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Stale read', expectedRevision: escalated.revision - 1 }, id()), /Task revision changed; reload before resolving/);
   let resolved = await engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Dependency change reviewed and accepted', expectedRevision: escalated.revision }, id());
   assert.equal(resolved.escalation, null);
-  assert.equal(resolved.gates.find(gate => gate.name === 'merge')!.passed, true);
+  assert.deepEqual(resolved.gates.find(gate => gate.name === 'merge')!.reasons, [pushRefusal(resolved.candidate!.sha)], 'the merge gate waits on the push alone');
   assert.ok(mergeAuthorized(resolved), 'authorization is reissued only after the human resolution');
   assert.deepEqual(currentMergeCandidates([resolved], resolved.observation!.at).map(item => item.key), [resolved.key]);
   await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Again', expectedRevision: resolved.revision }, id()), /no escalation to resolve/);
@@ -931,6 +939,7 @@ test('integration:bootstrap-compatibility — the single-agent bootstrap flow is
   item = await bootstrap.execute(reviewer, 'evidence', item.id, proof(), id());
   assert.equal(item.evidence.at(-1)!.trusted, true);
   assert.ok(currentEvidence(item, 'unit:works'));
+  item = await mergeIntent(bootstrap, item);
   assert.equal(item.stage, 'merge');
   // Unsliced work is never constrained by per-lead engineer capacity.
   const peers: Work[] = [];

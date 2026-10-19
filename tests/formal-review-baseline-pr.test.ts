@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { Store, save } from '../src/store.js';
-import { reopenReverted } from '../src/main-guard.js';
+import { applyCandidateRevert } from '../src/release-revert.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
 type Review = Observation['reviews'][number];
@@ -55,15 +55,15 @@ async function revisedOnFirstPullRequest(first: number) {
   return w;
 }
 /**
- * The same item moved to `second`, as GY-1394 was: its first pull request merged, the main guard
- * reverted it and reopened the item (reopenReverted), and a new attempt submitted another pull request.
+ * The same item moved to `second`, as GY-1394 was: its first pull request merged, a revert
+ * reopened the item (applyCandidateRevert), and a new attempt submitted another pull request.
  */
 async function moved(w: Work, second: number) {
   await store.transaction(async db => {
     const current: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [w.id])).rows[0].document;
     const mergeSha = 'c'.repeat(40);
     current.stage = 'done'; current.delivery = { mergeSha } as Work['delivery'];
-    assert.ok(reopenReverted(current, { mergeSha } as Parameters<typeof reopenReverted>[1], new Date()));
+    assert.ok(applyCandidateRevert(current, { mergeSha, revertSha: 'd'.repeat(40) } as Parameters<typeof applyCandidateRevert>[1], new Date()).reopened);
     await save(db, current, operator.id, 'test.reverted', new Date());
   });
   w = await submit(w, second);

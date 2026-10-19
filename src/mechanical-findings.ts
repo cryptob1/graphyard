@@ -250,11 +250,6 @@ export type FreshReadRecord = z.infer<typeof freshReadRecordSchema>;
 /** The most attempts at recording one misclassification before the loop stops retrying it. */
 export const misclassificationAttempts = 10;
 
-/** One approval's review, read with the loop's own GitHub access. */
-export async function readReview(repository: string, pr: number, reviewId: number, run: ChildRun): Promise<{ state?: string; commit_id?: string; body?: unknown }> {
-  return JSON.parse(String(await run('gh', ['api', `repos/${repository}/pulls/${pr}/reviews/${reviewId}`])));
-}
-
 /** The plan an approval of `record.sha` records: `planned` with its findings when anything on it is mechanical, `none` otherwise. */
 export function planMechanicalFix(record: { key: string; pr: number; sha: string }, reviewId: number, body: unknown, epoch: number, at: string): MechanicalFixRecord {
   const plan = mechanicalFixPlan({ key: record.key, pr: record.pr, sha: record.sha, reviewId, state: 'APPROVED', body });
@@ -380,12 +375,6 @@ export function mechanicalWorkerSection(repository: string, cliPath: string, wor
   if (!request) return '';
   return `This attempt is a mechanical-fix round, not a rework of substance. ${mechanicalFixPrompt(repository, request)} `
     + `Commit on the assigned branch and submit it with node ${cliPath} complete ${work.key} ${epoch} --head; unless the fixes are to documentation, add --no-docs "mechanical review fixes only; no documented behaviour changed". `;
-}
-
-/** A head as GitHub reports its commit: parents, changed files and time. */
-export async function observeGitHubCommit(repository: string, sha: string, run: ChildRun): Promise<{ parents: string[]; files: string[]; at: string }> {
-  const commit = JSON.parse(String(await run('gh', ['api', `repos/${repository}/commits/${sha}`])));
-  return { parents: (commit?.parents ?? []).map((parent: any) => parent?.sha), files: (commit?.files ?? []).map((file: any) => file?.filename), at: commit?.commit?.committer?.date ?? commit?.commit?.author?.date };
 }
 
 /**

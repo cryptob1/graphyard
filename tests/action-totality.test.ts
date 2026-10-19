@@ -202,15 +202,13 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'agent provider', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'agent', reviewerProfiles: profiles }, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'reviewer roster spent', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'agent', reviewerProfiles: profiles }, observation: { ...unproven.observation!, reviews: [] },
       reviewFailovers: [{ profile: 'reviewer-a', reviewerApp: 'app-a', runtime: 'claude', exhaustion: 'timeout', reason: 'the reviewer session timed out', at: now.toISOString(), sha: head, baseSha: base, policyRevision: unproven.policyRevision, requestCommentId: 7, nextProfile: null }] } as Work },
-    { name: 'a required check failed', work: { ...unproven, observation: { ...unproven.observation!, checks: [{ name: 'test', result: 'failure', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }] } } as Work },
-    { name: 'a check only branch protection requires failed', work: { ...unproven, observation: { ...unproven.observation!, requiredChecks: [{ name: 'secrets', appId: null }], checks: [...unproven.observation!.checks, { name: 'secrets', result: 'failure', appId: CI_APP }] } } as Work },
-    { name: 'a required check has not answered', work: { ...unproven, observation: { ...unproven.observation!, checks: [] } } as Work },
-    // GitHub merges (GY-1235): the merge gate reads GitHub at the current candidate, its
-    // mergeability, conversation-protection drift and standing escalations — no proof, queue,
-    // observation age or protection verification gates it.
+    // The merge writer gates test and merge (GY-2010): a head it has not trialled, one it trialled
+    // and has not pushed, and one whose trial it refused; no GitHub check refuses either gate.
+    { name: 'trialled, not pushed', work: { ...unproven, mergeLedger: { key: unproven.key, state: 'intent', head, baseTip: base, mergeSha: null, risk: null, intentAt: now.toISOString(), pushedAt: null, observedTip: null, refusal: null, events: 2 } } as Work },
+    { name: 'trial refused', work: { ...unproven, mergeLedger: { key: unproven.key, state: 'refused', head, baseTip: base, mergeSha: null, risk: null, intentAt: now.toISOString(), pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason: 'trial failed: tests/a.test.ts' }, events: 3 } } as Work },
+    // The merge gate also reads the control plane's reading of the current candidate and standing
+    // escalations — no proof, queue, observation age, mergeability or protection gates it.
     { name: 'observed at another head', work: { ...unproven, observation: { ...unproven.observation!, candidate: { ...unproven.observation!.candidate, sha: sha40('dd') } } } as Work },
-    { name: 'not mergeable', work: { ...unproven, observation: { ...unproven.observation!, mergeable: false } } as Work },
-    { name: 'unresolved review threads', work: { ...unproven, observation: { ...unproven.observation!, conversations: { required: true, unresolved: [{ id: 'PRRT_1', author: 'chatgpt-codex-connector', path: 'docs/a.md', line: 1, outdated: false }] } } } as Work },
     { name: 'a standing escalation', work: { ...unproven, escalations: [{ trigger: 'security-concern', reason: 'the candidate ships a credential', at: now.toISOString(), actor: 'reviewer' }] } as Work },
     { name: 'a slice lead hold', work: { ...unproven, leadHold: { action: 'send-back', rulingId: 'R-1', leadId: 'lead-a', slice: 'product', ruleId: 'R-1', reason: 'the slice is frozen for the release', at: now.toISOString() } } as Work },
   ];

@@ -68,8 +68,17 @@ export async function ensureDeployKey(installDir: string, repository: string, gh
   await chmod(privateKeyFile, 0o600);
   await chmod(publicKeyFile, 0o600);
 
-  const publicKey = await readFile(publicKeyFile, 'utf8');
-  const fingerprint = publicKeyFingerprint(publicKey);
+  await registerDeployKey(publicKeyFile, repository, gh, title);
+  return privateKeyFile;
+}
+
+/**
+ * Registers the OpenSSH public key in PUBLIC_KEY_FILE read-write on REPOSITORY under TITLE, unless a
+ * deploy key with its fingerprint is already listed. A self-contained host's key is generated on the
+ * host and only its public half reaches this machine for this (GY-2010).
+ */
+export async function registerDeployKey(publicKeyFile: string, repository: string, gh: GitHubCli, title: string) {
+  const fingerprint = publicKeyFingerprint(await readFile(publicKeyFile, 'utf8'));
   if (!fingerprint) throw new Error(`${publicKeyFile} holds no OpenSSH public key`);
   const listed = await gh(['repo', 'deploy-key', 'list', '-R', repository, '--json', 'id,key,title']);
   let registered: unknown;
@@ -77,5 +86,4 @@ export async function ensureDeployKey(installDir: string, repository: string, gh
   const keys = Array.isArray(registered) ? registered : [];
   const known = keys.some((entry: any) => publicKeyFingerprint(String(entry?.key ?? '')) === fingerprint);
   if (!known) await gh(['repo', 'deploy-key', 'add', publicKeyFile, '-R', repository, '--allow-write', '--title', title]);
-  return privateKeyFile;
 }

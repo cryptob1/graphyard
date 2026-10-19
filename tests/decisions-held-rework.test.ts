@@ -248,37 +248,20 @@ function loop(history: { current: any[] }) {
 const loopConfig = () => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard.mjs',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] }) as MasterConfig;
 
-test('unit:ci-rework-after-review-refusal — a refused capped review rework never holds back the failed-check rework the same head owes', async () => {
+test('unit:ci-rework-after-review-refusal — a stored failed check requests no rework beside a refused capped review rework (GY-2010), and a refusal judges only the grounds it named', async () => {
+  // Since GY-2010 a pull-request-era check result is history: over repeated cycles the loop requests
+  // no failed-check rework for it, before or after the capped review rework's refusal.
   const config = loopConfig();
-  // The order GY-1598 met: the failed check is first seen while the capped review rework stands requested, so the CI binding adopts it.
-  const history = { current: [cappedRework('requested')] as any[] };
-  const { decided, approvers, effects } = loop(history);
-  const state = emptyDaemonState(config);
-  let work = failingHead(clock);
-  await runCycle(config, state, { ...effects, snapshot: async () => ({ work: [work], now: new Date(clock).toISOString() }) }, () => clock);
-  assert.equal(decided.length, 0, 'the standing capped request is adopted, not requested twice');
-  assert.equal(Object.entries(state.approvals).find(([, watch]) => watch.decision === cappedId)?.[0].includes(':ci:test:'), true, 'adopted under the failed-check binding');
-  // Its approver refuses it as non-blocking; a fresh observation still shows the failed check on the head.
-  history.current = [cappedRework('refused')];
-  const later = clock + 90_000;
-  work = failingHead(later);
-  await runCycle(config, state, { ...effects, snapshot: async () => ({ work: [work], now: new Date(later).toISOString() }) }, () => later);
-  assert.deepEqual(decided.map(entry => entry.input.binding), [ciBinding], 'the failed-check rework is requested in the cycle the fresh observation reaches');
-  assert.match(decided[0].reason, /required CI check test failed on candidate aaaaaaaaaaaa/);
-  assert.doesNotMatch(decided[0].reason, new RegExp(cappedId), 'it rests on its own grounds, so it cites no refusal');
-  assert.equal(state.actions[`escalation:decision-refused:${cappedId}`], undefined, 'nobody is asked to answer the refusal by hand');
-  assert.match(state.actions[`approver:${cappedId}:refused`]!.detail, /judged capped:graphyard-reviewer\[bot\], not ci:test/);
-  // Applied by the risk lane: settled, and nothing more is asked of the head, least of all the refused review rework.
-  await runCycle(config, state, { ...effects, snapshot: async () => ({ work: [failingHead(later + 30_000)], now: new Date(later + 30_000).toISOString() }) }, () => later + 30_000);
-  assert.deepEqual(decided.map(entry => entry.input.binding), [ciBinding]);
-  assert.ok(!decided.some(entry => entry.input.binding === cappedBinding), 'the refused review-grounds request is never re-requested on that head');
-  assert.equal(approvers.filter(entry => entry !== cappedId).length, 0, 'no approver is launched for the failed-check rework');
-
-  // The other order (GY-1600's): the refusal is already recorded when the failed check is seen; the rework is requested at once.
-  const refusedFirst = { current: [cappedRework('refused')] as any[] };
-  const fresh = loop(refusedFirst), freshState = emptyDaemonState(config);
-  await runCycle(config, freshState, { ...fresh.effects, snapshot: async () => ({ work: [failingHead(clock)], now: new Date(clock).toISOString() }) }, () => clock);
-  assert.deepEqual(fresh.decided.map(entry => entry.input.binding), [ciBinding]);
+  for (const order of [['requested', 'refused'], ['refused', 'refused']] as const) {
+    const history = { current: [cappedRework(order[0])] as any[] };
+    const { decided, effects } = loop(history), state = emptyDaemonState(config);
+    for (const [index, at] of [clock, clock + 90_000, clock + 120_000].entries()) {
+      if (index) history.current = [cappedRework(order[1])];
+      await runCycle(config, state, { ...effects, snapshot: async () => ({ work: [failingHead(at)], now: new Date(at).toISOString() }) }, () => at);
+    }
+    assert.ok(!decided.some(entry => entry.input.binding === ciBinding), `no failed-check rework is requested: ${JSON.stringify(decided)}`);
+    assert.ok(!Object.keys(state.approvals).some(key => key.includes(':ci:')), 'nothing is watched under a failed-check binding');
+  }
 
   // A refusal judged only the checks it named: a refused `ci:test` rework does not judge `ci:lint` or `ci:lint,test`.
   assert.equal(refusedOnOtherGrounds(ciBinding, `${shaA}:ci:lint`), true);
@@ -286,18 +269,6 @@ test('unit:ci-rework-after-review-refusal — a refused capped review rework nev
   assert.equal(refusedOnOtherGrounds(`${shaA}:ci:lint,test`, ciBinding), false, 'a check it judged is not other grounds');
   assert.equal(refusedOnOtherGrounds(ciBinding, ciBinding), false);
   assert.equal(refusedOnOtherGrounds(`${shaA}:threads:1,2`, `${shaA}:threads:3`), false, 'a moved thread set is the same grounds');
-
-  // The failed check clears while the adopted capped request stands; its approver then refuses it. The watch comes back to the
-  // capped binding and the refusal is answered there: no second capped rework is requested on the head.
-  const cleared = { current: [cappedRework('requested')] as any[] };
-  const back = loop(cleared), backState = emptyDaemonState(config);
-  await runCycle(config, backState, { ...back.effects, snapshot: async () => ({ work: [failingHead(clock)], now: new Date(clock).toISOString() }) }, () => clock);
-  assert.ok(Object.keys(backState.approvals).some(key => key.includes(':ci:test:')), 'adopted under the failed-check binding');
-  cleared.current = [cappedRework('refused')];
-  for (const at of [later, later + 30_000]) await runCycle(config, backState, { ...back.effects, snapshot: async () => ({ work: [failingHead(at, 'success')], now: new Date(at).toISOString() }) }, () => at);
-  assert.deepEqual(back.decided, [], 'the refused capped rework is not requested again');
-  assert.ok(Object.entries(backState.approvals).some(([key, watch]) => key.includes(':capped:') && watch.decision === cappedId && watch.settledAt), 'its watch settled under the capped binding');
-  assert.equal(backState.actions[`escalation:decision-refused:${cappedId}`], undefined);
 });
 
 test('unit:ci-rework-after-review-refusal — master status names the failed-check rework, never the refused review rework, and asks nobody to answer the refusal by hand', async () => {
@@ -306,7 +277,7 @@ test('unit:ci-rework-after-review-refusal — master status names the failed-che
   assert.equal(action.kind, 'request-rework');
   assert.equal(action.gate, 'test', 'the failed required check is the rework named, not the review change request');
   assert.match(action.reason, /Required CI check test has not passed/);
-  assert.match(humanNeeded(action)!.resolve, /^the loop requests this rework for the failed required check itself/);
+  assert.match(humanNeeded(action)!.resolve, /^the loop requests this rework for the failed trial itself/);
   // A review change request alone is still named as before.
   const reviewOnly = { ...work, gates: work.gates.filter(gate => gate.name !== 'test') } as Work;
   assert.equal(nextAction(reviewOnly, [reviewOnly], now)?.gate, 'review');

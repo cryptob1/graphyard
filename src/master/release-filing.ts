@@ -167,14 +167,16 @@ async function recordHandoff(deps: ReleaseFilingDeps, gh: NonNullable<ReleaseFil
 
 /** The uat secret as GitHub records it (never its value): when it was last stored, or null when none is. */
 async function readSecret(gh: NonNullable<ReleaseFilingDeps['gh']>, repository: string): Promise<{ updatedAt: string } | null> {
-  const result = await gh(['api', `repos/${repository}/environments/${releaseFilingEnvironment}/secrets/${releaseFilingSecret}`]);
+  const result = await gh(['secret', 'list', '--repo', repository, '--env', releaseFilingEnvironment, '--json', 'name,updatedAt']);
   if (result.code !== 0) {
     if (/\b404\b|not found/i.test(`${result.stderr} ${result.stdout}`)) return null;
     throw new Error(`gh could not read the ${releaseFilingEnvironment} ${releaseFilingSecret} of ${repository} (exit ${result.code}): ${result.stderr.trim() || result.stdout.trim() || 'no output'}`);
   }
   let parsed: any;
-  try { parsed = JSON.parse(result.stdout); } catch { throw new Error(`gh printed no JSON for the ${releaseFilingEnvironment} ${releaseFilingSecret} of ${repository}`); }
-  const updatedAt = typeof parsed?.updated_at === 'string' ? parsed.updated_at : typeof parsed?.created_at === 'string' ? parsed.created_at : null;
+  try { parsed = JSON.parse(result.stdout); } catch { throw new Error(`gh printed no JSON for the ${releaseFilingEnvironment} secrets of ${repository}`); }
+  const entry = (Array.isArray(parsed) ? parsed : []).find((secret: any) => secret?.name === releaseFilingSecret);
+  if (!entry) return null;
+  const updatedAt = typeof entry.updatedAt === 'string' ? entry.updatedAt : null;
   if (!updatedAt) throw new Error(`gh reported the ${releaseFilingEnvironment} ${releaseFilingSecret} of ${repository} without a timestamp`);
   return { updatedAt };
 }

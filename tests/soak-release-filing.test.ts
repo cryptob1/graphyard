@@ -84,13 +84,13 @@ test('unit:soak-release-filing-invariants — over two simulated days the loop k
       plane.posts.push({ at: (now - start) / minute, action, body: { ...body, token: body.token ? fingerprint(body.token) : undefined } });
       return json(200, { ...document, credentials: undefined });
     }) as unknown as typeof fetch;
-    // ---- gh: the uat secret as GitHub records it, its updated_at to the second.
+    // ---- gh: the uat secret as GitHub records it, its updatedAt to the second.
     const github = { secret: { updatedAt: new Date(Math.floor((start - day + minute) / 1000) * 1000).toISOString(), fingerprint: fingerprint('t0'.repeat(32)) } as { updatedAt: string; fingerprint: string } | null, storeFails: false, sets: [] as { at: number; stored: boolean; fingerprint: string }[], reads: 0 };
     const gh: NonNullable<ReleaseFilingDeps['gh']> = async (args, input) => {
       assert.ok(!args.some(arg => arg.includes(admin)), 'the admin credential never reaches a gh argument');
-      if (args[0] === 'api') {
+      if (args[0] === 'secret' && args[1] === 'list') {
         github.reads++;
-        return github.secret ? { code: 0, stdout: JSON.stringify({ name: releaseFilingSecret, created_at: github.secret.updatedAt, updated_at: github.secret.updatedAt }), stderr: '' } : { code: 1, stdout: '', stderr: 'gh: Not Found (HTTP 404)' };
+        return { code: 0, stdout: JSON.stringify(github.secret ? [{ name: releaseFilingSecret, updatedAt: github.secret.updatedAt }] : []), stderr: '' };
       }
       assert.deepEqual(args, ['secret', 'set', releaseFilingSecret, '--repo', repository, '--env', 'uat'], `an unexpected gh call: ${args.join(' ')}`);
       assert.ok(input && input.length >= 64 && !args.includes(input), 'the token goes to gh over standard input, never as an argument');

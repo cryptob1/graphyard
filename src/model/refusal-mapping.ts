@@ -1,10 +1,10 @@
-import { checkRerunHeld, requiredCheck } from '../merge-queue.js';
 import { reviewNeed } from './dispatch.js';
 import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import type { Work } from './work.js';
 import type { NextActionKind } from './action-kinds.js';
-import { ciCheckName, ciCheckRefusalPattern } from './ci-refusal.js';
+import { checkRerunHeld, requiredCheck } from '../merge-queue.js';
+import { ciCheckName, mergeWriterPushPattern, mergeWriterTrialPattern } from './ci-refusal.js';
 import { requiredCheckFailurePattern } from './required-check-refusal.js';
 import { mechanicalHoldPattern } from './refusal-catalogue.js';
 
@@ -53,19 +53,14 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   // An approval whose mechanical nits await the worker bot's round (GY-971): that round is a rework.
   { gate: 'review', match: mechanicalHoldPattern, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
-  // test: a check that failed needs a new head; one that has not answered yet needs a fresh read.
-  { gate: 'test', match: ciCheckRefusalPattern, kind: 'resync' },
-  // A check only the base branch's protection requires (GY-430) is named only once it failed.
-  { gate: 'test', match: requiredCheckFailurePattern, kind: 'request-rework' },
+  // test and merge: the merge writer trials and pushes the head itself (GY-2010); its own merge step
+  // answers both. No GitHub check, mergeability or protection refuses a gate any more.
+  { gate: 'test', match: mergeWriterTrialPattern, kind: 'merge' },
+  { gate: 'test', match: /^GitHub has not been observed at the current candidate$/, kind: 'resync' },
+  { gate: 'merge', match: mergeWriterPushPattern, kind: 'merge' },
   // merge
   // Nothing gates the merge on the observation's age (GY-1235): only a reading of the current head.
   { gate: 'merge', match: /^GitHub has not been observed at the current candidate$/, kind: 'resync' },
-  // Mergeability not established: GitHub reports the head unmergeable, or has not finished
-  // computing it (GY-548). Either way only a fresh read answers it.
-  { gate: 'merge', match: /^(Pull request is not mergeable against the current base$|GitHub is computing mergeability against the current base)/, kind: 'resync' },
-  // Unresolved review threads never refuse a merge in Graphyard's gate; a branch that still requires
-  // conversation resolution is protection drift, reconciled with graphyard master protection --apply.
-  { gate: 'merge', match: /^Branch protection still requires conversation resolution, which Graphyard's review gate does not use: /, kind: 'escalate' },
   { gate: null, match: /.*/, kind: 'escalate' },
 ];
 
@@ -120,18 +115,20 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
 }
 
 /**
- * The single action kind a refusal maps to. `work` decides the three cases the refusal text cannot:
- * a CI check that reported a failure (rework) rather than one still to answer (re-read), a
- * merge-gate refusal raised by a standing escalation or lead hold rather than by the queue, and a
- * review refusal standing over a head no review can be asked for (`reviewStandstill`).
+ * The single action kind a refusal maps to. `work` decides the cases the refusal text cannot: a
+ * pull-request-era CI refusal, a merge-gate refusal raised by a standing escalation or lead hold rather than by the merge writer,
+ * and a review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
 export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
+  // A pull-request-era CI refusal: no gate words it since GY-2010, but a record the loop's
+  // failed-check rework still reads may carry one. A check that reported a failure needs a new
+  // head; one still to answer needs a re-read; a failure held by its owed rerun (GY-516) waits for it.
   const name = gate === 'test' ? ciCheckName(refusal) : null;
   if (name !== null) {
     const latest = requiredCheck(work, name);
-    // A failure held by its one owed or running rerun (GY-516) is answered by the rerun's reading.
     return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name) ? 'request-rework' : 'resync';
   }
+  if (gate === 'test' && requiredCheckFailurePattern.test(refusal)) return 'request-rework';
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);
     if (standstill) return standstill.kind;

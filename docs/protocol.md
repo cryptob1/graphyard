@@ -8,5 +8,4 @@
 2. [Read endpoints](protocol/read-endpoints.md) — status, events.
 3. [Leases and supervision](protocol/leases.md) — leases, `watch`.
 4. [Evidence and grants](protocol/evidence.md) — evidence, grants.
-5. [GitHub webhook](protocol/github-webhook.md) — webhook, dispatch.
-6. [Pipeline timeline](protocol/pipeline-speed.md) — `pipeline` field.
+5. [Pipeline timeline](protocol/pipeline-speed.md) — `pipeline` field.

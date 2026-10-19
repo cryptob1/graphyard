@@ -13,7 +13,7 @@ import { runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../m
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import { loadProjectDelivery } from '../project-applications.js';
 import { defaultMergeBatch, mergeBatch, type BatchResult } from '../merge-writer/batch.js';
-import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -413,8 +413,22 @@ export const mergeWriterReworkKey = (key: string, head: string) => `${mergeWrite
 export async function requestPendingReworks(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'snapshot' | 'performed'>): Promise<boolean> {
   const { state, effects, now, snapshot, performed } = cycle;
   const writer = state.mergeWriter;
-  if (!writer.reworks.length) return false;
   const at = () => new Date(now()).toISOString();
+  // GY-2166: the settlement that first owed a trial failure's rework lives only in memory, so the
+  // restart an upgrade delivered mid-settlement kept the refusal and lost the request: the head
+  // stayed out of the queue (mergeQueue drops a trial-refused head) with its rework unasked, and
+  // the item's test gate then refuses `merge writer has not trialled …` to no answerer — three
+  // owed-decision faults on 19 October 2026. The record re-derives the debt: every head the ledger
+  // still refuses with `trial failed` on its exact candidate is owed its rework here, whatever
+  // became of the flight, until the snapshot shows it applied.
+  for (const item of snapshot.work) {
+    const refused = trialRefusalHeld(item.candidate, item.mergeLedger);
+    if (!refused || item.reworkRequested) continue;
+    const head = item.candidate!.sha.toLowerCase();
+    if (writer.reworks.some(entry => entry.key === item.key && entry.head === head)) continue;
+    writer.reworks = [...writer.reworks, { key: item.key, id: item.id, head, reason: refused.reason.slice(0, 2000), refusedAt: at(), attempts: 0, lastError: null }].slice(-mergeWriterKeptReworks);
+  }
+  if (!writer.reworks.length) return false;
   const kept: PendingRework[] = [];
   for (const pending of writer.reworks) {
     const key = mergeWriterReworkKey(pending.key, pending.head);

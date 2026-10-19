@@ -9,7 +9,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store, storeConnectionTimeoutMs, storeStatementTimeoutMs } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { processJob } from '../src/github.js';
 import { invalidateFlowReports } from '../src/flow-analytics.js';
 import { evidenceIndependenceRefusals, type Evidence, type Work } from '../src/model.js';
 import { reconcileAutoDispatch, type DispatchRequest } from '../src/model/dispatch.js';
@@ -409,19 +408,9 @@ async function settledDocumentsRead<T>(run: () => Promise<T>) {
   };
   try { return { value: await run(), keys, bytes }; } finally { resultSink = null; }
 }
-/** One observation job run as the server's workers run it, against the real store: the claim order, the claim, and the landability publication with its peers. */
-function observationWorker() {
-  const peers: Work[][] = [];
-  const engine = Object.assign(Object.create(new Engine(hotStore, [], 120, 'owner/project')), { observe: async (id: string) => (await hotStore.workItem(id))!, reconcileLanded: async () => {} });
-  const github = {
-    observe: async (work: Work) => work.observation!, publish: async () => {},
-    publishLandable: async (_target: Work, fleet: Work[]) => { peers.push(fleet); return { skipped: true }; },
-  };
-  return { peers, run: () => processJob(engine, github as any) };
-}
 const flowDrilldownRead = () => { invalidateFlowReports(hotStore); return hotRead('analytics/flow/drilldown?window=30&metric=throughput'); };
 
-test('integration:hot-paths-read-no-settled-documents — the observation claim, landability peers, /api/status, /api/board and lookups by id or key read no settled delivery\'s document; GET /api/work serves the fleet, each settled delivery as its stored summary', async () => {
+test('integration:hot-paths-read-no-settled-documents — /api/status, /api/board and lookups by id or key read no settled delivery\'s document; GET /api/work serves the fleet, each settled delivery as its stored summary', async () => {
   await hotPaths();
   assert.equal(Number((await hotStore.pool.query('SELECT count(*) FROM work_index WHERE settled')).rows[0].count), HOT_SETTLED, 'every seeded delivery is settled');
   // GET /api/work is the bounded fleet read (GY-1778): every item answered, each settled delivery
@@ -437,13 +426,6 @@ test('integration:hot-paths-read-no-settled-documents — the observation claim,
   const control = await settledDocumentsRead(() => hotRead(`work/${encodeURIComponent(summaries[0].key)}`));
   assert.deepEqual([...control.keys], [summaries[0].key], 'the whole-document route reads its own document, which the scan sees');
   assert.equal(control.value.pipeline.attempts.length, SETTLED_HISTORY, 'the whole document keeps its history');
-  // The observation job: its claim order and the landability peers it publishes against.
-  const worker = observationWorker();
-  const job = await settledDocumentsRead(worker.run);
-  assert.equal(job.value, true, 'an open item\'s job was claimed and run');
-  assert.equal(worker.peers.length, 1, 'the landability verdict was published');
-  assert.equal(worker.peers[0].length, HOT_SETTLED + HOT_OPEN, 'against the whole fleet, settled deliveries as their summaries');
-  assert.deepEqual([...job.keys], [], `the observation job read settled documents: ${[...job.keys].slice(0, 5).join(', ')}`);
   for (const [name, path] of [['/api/status', 'status'], ['/api/board', 'board'], ['/api/actions', 'actions'], ['/api/delegation', 'delegation'], ['/api/principals', 'principals']] as const) {
     const read = await settledDocumentsRead(() => hotRead(path));
     assert.deepEqual([...read.keys], [], `${name} read ${read.keys.size} settled documents (${read.bytes} bytes)`);
@@ -491,16 +473,11 @@ test('integration:drilldown-reads-no-settled-documents — a flow drill-down rea
   assertTiming({ name: `drilldown-reads-no-settled-documents.latency`, test: 'integration:drilldown-reads-no-settled-documents', statistic: 'median', fraction: 0.5, budgetMs: Math.round(listMs * HOT_PATH_FRACTION), samples, warmup });
 });
 
-test('integration:hot-path-latency-bounded — an observation job claim, GET /api/status and GET /api/board each answer within a fraction of the full list\'s time on the same store', async () => {
+test('integration:hot-path-latency-bounded — GET /api/status and GET /api/board each answer within a fraction of the full list\'s time on the same store', async () => {
   await hotPaths();
   const listMs = await fullListMs(), budgetMs = Math.round(listMs * HOT_PATH_FRACTION);
-  // The claim alone: the fleet read its order is computed from, and the claim it orders. No job is
-  // due, so each sample is the claim every observation worker makes, not what one job then does.
-  await hotStore.pool.query("UPDATE jobs SET available_at = clock_timestamp() + interval '1 hour'");
-  const claim = async () => assert.equal(await observationWorker().run(), false, 'no job was due to claim');
-  for (const [name, read] of [['observation-claim', claim], ['status', () => hotRead('status')], ['board', () => hotRead('board')]] as const) {
+  for (const [name, read] of [['status', () => hotRead('status')], ['board', () => hotRead('board')]] as const) {
     const { warmup, samples } = await steadyState(read, { warmup: 2, samples: HOT_PATH_SAMPLES });
     assertTiming({ name: `hot-path-latency-bounded.${name}`, test: 'integration:hot-path-latency-bounded', statistic: 'median', fraction: 0.5, budgetMs, samples, warmup });
   }
-  await hotStore.pool.query('UPDATE jobs SET available_at = clock_timestamp()');
 });

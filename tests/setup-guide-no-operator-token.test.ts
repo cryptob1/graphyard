@@ -31,9 +31,10 @@ test('unit:setup-guide-no-operator-token — steps 3 and 10 use the master ident
   assert.match(step(3), /`--apply` records the master connection `\.graphyard\/master\.json`/);
   assert.match(step(3), /`gy doctor` reads as it/);
   assert.match(step(10), /--token-stdin < "\$\(node -p "require\('\.\/\.graphyard\/master\.json'\)\.credentialFile"\)"/);
-  // GY-2009: install and up register no App, so step 4 serves no App page.
-  assert.match(step(4), /install and `up` register no App and write no branch protection/);
-  assert.doesNotMatch(step(4), /127\.0\.0\.1:4311/);
+  // GY-2009/GY-2010: install and up register no App, so there is no App step and no App page.
+  assert.match(step(3), /No GitHub App, webhook or branch protection is set up/);
+  assert.equal(step(4), '', 'no App step');
+  assert.doesNotMatch(guide, /127\.0\.0\.1:4311/);
 });
 
 test('unit:setup-guide-no-operator-token — doctor reads with the recorded master credential and credentials-file passes with it', async () => {

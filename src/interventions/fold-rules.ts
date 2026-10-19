@@ -164,7 +164,7 @@ const mergeReconciliationRefused: FoldRule = ({ row, entry, details, stage }) =>
 
 /** A merge delivered past the record: a bypass, unless exempt. */
 const deliveredMerge: FoldRule = ({ row, entry, details, stage, source, emit }) => {
-  if (exemption({ at: 'merge', details })) { entry.bypass = null; return; }
+  if (exemption({ at: 'merge', kind: row.kind, details })) { entry.bypass = null; return; }
   const mergedAt = instant(details.mergedAt, row.at);
   const open = entry.bypass;
   const operator = row.kind === 'merge.operator-authorized';
