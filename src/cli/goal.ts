@@ -10,7 +10,7 @@ import type { CliContext } from './context.js';
  * goal's history. A reason is everything after `--`.
  */
 const usage = `Use goal FILE | goal list [--all] | goal show GOAL-N | goal draft GOAL-N DRAFT.json | goal approve|refuse GOAL-N -- REASON
-  | goal land GOAL-N | goal closed GOAL-N PR|change -- REASON | goal plan GOAL-N PLAN.json | goal plan-approve|plan-refuse GOAL-N -- REASON | goal release GOAL-N | goal deliver GOAL-N GY-N... -- REASON | goal case-change GOAL-N GY-N CASE... -- REASON | goal case-change-approve|case-change-refuse GOAL-N CHANGE_ID -- REASON`;
+  | goal land GOAL-N | goal closed GOAL-N PR|change -- REASON | goal plan GOAL-N PLAN.json | goal plan-approve|plan-refuse GOAL-N -- REASON | goal release GOAL-N | goal deliver GOAL-N GY-N... -- REASON | goal case-change GOAL-N GY-N CASE... -- REASON | goal case-change-approve|case-change-refuse GOAL-N CHANGE_ID -- REASON | goal amend GOAL-N --apply-decision REQUEST_ID`;
 /** The words before `--`, and the reason after it. */
 function split(args: string[]) {
   const at = args.indexOf('--');
@@ -31,7 +31,7 @@ async function goal(context: CliContext) {
   if (!sub || sub === 'help') throw new Error(usage);
   if (sub === 'list') return print((await api(`goals?view=summary${args.includes('--all') ? '' : '&open=1'}`)).goals);
   if (sub === 'show') return print(await api(`goals/${encodeURIComponent(ref ?? '')}`));
-  if (['draft', 'approve', 'refuse', 'deliver', 'land', 'closed', 'plan', 'plan-approve', 'plan-refuse', 'release', 'case-change', 'case-change-approve', 'case-change-refuse'].includes(sub) && !ref) throw new Error(usage);
+  if (['draft', 'approve', 'refuse', 'deliver', 'land', 'closed', 'plan', 'plan-approve', 'plan-refuse', 'release', 'case-change', 'case-change-approve', 'case-change-refuse', 'amend'].includes(sub) && !ref) throw new Error(usage);
   if (sub === 'draft') return print(await post('draft', await json(rest[0])));
   if (sub === 'approve' || sub === 'refuse') return print(await post(sub, { reason: needReason(reason) }));
   if (sub === 'deliver') return print(await post('deliver', { items: rest, reason: needReason(reason) }));
@@ -43,6 +43,11 @@ async function goal(context: CliContext) {
   if (sub === 'closed') return print(await post('closed', { pr: rest[0] === 'change' ? null : Number(rest[0]), reason: needReason(reason) }));
   if (sub === 'case-change') return print(await post('case-change', { work: rest[0], cases: rest.slice(1), reason: needReason(reason) }));
   if (sub === 'case-change-approve' || sub === 'case-change-refuse') return print(await post(sub, { change: rest[0], reason: needReason(reason) }));
+  if (sub === 'amend') {
+    const decision = rest[rest.indexOf('--apply-decision') + 1];
+    if (!rest.includes('--apply-decision') || !decision) throw new Error(usage);
+    return print(await post('amend', { decision }));
+  }
   // Anything else names the goal file to record.
   return print(await api('goals', await json(sub), process.env.GRAPHYARD_REQUEST_ID ?? randomUUID()));
 }
@@ -75,6 +80,9 @@ export const goalCommands = defineCommands([{
     '                                Ask to change protected cases for one item; judged by',
     '                                goal case-change-approve|case-change-refuse GOAL-N ID --',
     '                                REASON, never by the requester or an implementer',
+    '  goal amend GOAL-N --apply-decision REQUEST_ID',
+    '                                Retire the protected outcomes (and their cases) that the',
+    '                                operator\'s "Go ahead as asked" request says to retire',
   ],
   readsConnection: () => true,
   run: context => goal(context),

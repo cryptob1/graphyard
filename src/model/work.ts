@@ -158,6 +158,8 @@ export interface Observation {
   protected: boolean; files: string[]; at: string; requiredChecks?: { name: string; appId: number | null }[]; // base protection's and rulesets' required checks bar `Graphyard / merge` (GY-430); appId null = any source
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
+  /** The e2e/contract.json outcome bindings the head changes or drops against the base tip, read by the control plane's own observation when the head touches the contract (GY-2602); unset when no contents were read. */
+  contractMoved?: string[] | null;
   /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see merge-queue.ts LandingCheck. */
   landing?: LandingCheck;
   revertedDelivery?: RevertedDelivery; // merged PR whose content the base branch does not hold; see merge-queue.ts RevertedDelivery

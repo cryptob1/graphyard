@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process';
 import { demand, type Observation } from '../model.js';
 import type {} from '../model/gates.js'; // Observation.source
 import { parseLocalScopeDiff } from '../sync.js';
+import { contractFile, movedBindings } from '../e2e/case.js';
 
 /** What one git invocation returned; a non-zero exit is an answer here, never a throw. */
 export interface GitResult { status: number | null; stdout: string; stderr: string }
@@ -89,8 +90,11 @@ export async function observeHead(git: GitRunner, input: HeadObservationInput): 
       if (file.previousPath) file.previousBaseSha = blobs.get(file.previousPath) ?? null;
     }
   }
+  // The contract's contents, so a protected binding is judged by whether it moved, not by the file changing (GY-2602).
+  const contract = async (sha: string) => { const shown = await git(['show', `${sha}:${contractFile}`]); return shown.status === 0 ? shown.stdout : null; };
+  const contractMoved = scopeFiles.some(file => file.path === contractFile || file.previousPath === contractFile) ? movedBindings(await contract(baseTip), await contract(head)) : undefined;
   return {
-    source: 'control-plane',
+    source: 'control-plane', ...(contractMoved !== undefined ? { contractMoved } : {}),
     candidate: { sha: head, baseSha: baseTip, pr: 0, branch, author },
     files: scopeFiles.map(file => file.path), scopeFiles, baseTip, baseTipContained,
     protected: false, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true,
