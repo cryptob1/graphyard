@@ -77,6 +77,8 @@ export const masterCommands = defineCommands([
       '                                App and profile are independent of you and every worker; audited',
       '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE [--allow-broad-scope] REASON',
       '                                Own intent; a root-level directory scope needs the flag',
+      '  master goal-amend GOAL-N REQUEST_ID  Apply the operator\'s answered goals-and-priorities',
+      '                                request to the goal as the master\'s operator agent',
       '  master defer GY-N NOT-BEFORE REASON  Hold an unleased post-deploy follow-up until NOT-BEFORE',
       '                                (ISO, at most 30 days away) and clear its blocker; no worker launch',
       ...closeHelp,
