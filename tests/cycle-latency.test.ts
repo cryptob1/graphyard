@@ -35,10 +35,11 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 /**
  * The latencies measured on 2026-09-25, in real milliseconds. The fakes below sleep for them scaled
  * by `scale`, and the budgets are scaled the same way, so the proportions — and a serial pass's
- * failure to fit — are exactly those of the production host, in a tenth of the time.
+ * failure to fit — are exactly those of the production host, in a fifth of the time. The host's own
+ * work (the /tmp and worktree scans, git) is not scaled, so a finer scale would inflate it against the budget.
  */
 const measured = { snapshot: 1_960, status: 760, actions: 660, decisions: [390, 910, 270, 590, 220, 340, 420, 410], interventions: 58_760, context: 400, mutation: 300 };
-const scale = 1 / 10;
+const scale = 1 / 5;
 const cycleBudgetMs = 30_000 * scale, statusBudgetMs = 20_000 * scale;
 const scaled = (ms: number) => Math.round(ms * scale);
 
