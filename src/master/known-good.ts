@@ -4,13 +4,14 @@
 // merged its own broken change the loop that had to act was the broken one. The pin is a detached
 // linked worktree under `<installDir>/coordinator/<sha12>`, built there, and `coordinator/current` is a
 // symlink moved by rename only after production verified the SHA. The previous pin is kept so
-// `graphyard master recover` can repoint at it; the one before that is removed.
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+// `graphyard master recover` can repoint at it; the one before that is removed unless this process
+// (the running loop) loaded its modules from it (GY-2760).
+import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
-import { productionTagPrefix } from '../release-candidate.js';
 
 export const knownGoodDirectory = (installDir: string) => join(installDir, 'coordinator');
 /** The CLI the master unit runs while a pin exists. */
@@ -21,7 +22,9 @@ const short = (sha: string) => sha.slice(0, 12);
 
 export interface KnownGoodState { sha: string; pinnedAt: string; previous: string | null }
 /** Where the pin lives and which repository it is a worktree of. */
-export interface KnownGoodGit { installDir: string; repository: string; now?: () => Date }
+export interface KnownGoodGit { installDir: string; repository: string; now?: () => Date; loadedFrom?: string }
+/** This module's file: a loop running from a pin loaded it from inside that pin's directory. */
+const loadedModule = fileURLToPath(import.meta.url);
 
 /** The pin, or null when none was ever made (the unit then runs the checkout path). */
 export function knownGoodState(installDir: string): KnownGoodState | null {
@@ -86,11 +89,12 @@ export async function pinKnownGood(git: KnownGoodGit, sha: string, run: ChildRun
   renameSync(staging, join(directory, 'current'));
   writeFileSync(`${stateFile(git.installDir)}.tmp`, `${JSON.stringify(next, null, 2)}\n`);
   renameSync(`${stateFile(git.installDir)}.tmp`, stateFile(git.installDir));
-  // Everything but the new pin and the one it replaced goes, the older pin first.
+  // Everything but the new pin, the one it replaced and the one this process runs from goes, the older pin first.
   const keep = new Set([short(sha), next.previous ? short(next.previous) : '']);
+  const loaded = git.loadedFrom ?? loadedModule;
   for (const entry of readdirSync(directory)) {
     const path = join(directory, entry);
-    if (keep.has(entry) || !/^[0-9a-f]{12}$/.test(entry) || !lstatSync(path).isDirectory()) continue;
+    if (keep.has(entry) || !/^[0-9a-f]{12}$/.test(entry) || !lstatSync(path).isDirectory() || loaded.startsWith(realpathSync(path) + sep)) continue;
     await worktree('remove', '--force', path).catch(() => rmSync(path, { recursive: true, force: true }));
   }
   if (pendingPin(git.installDir)) writePending(git.installDir, null);
@@ -149,6 +153,8 @@ export function coordinatorDoctorLine(pinned: string | null, production: string 
   return { line: stale || failing ? `FAIL ${line}` : line, ok: !stale && !failing };
 }
 
+/** The tag prefix the retired release-candidate pipeline recorded each promotion under. */
+const productionTagPrefix = 'rc-production/';
 /** The promoted SHAs newest first, read from the repository's `rc-production/` tags; empty when unreadable. */
 export async function promotedShas(root: string, run: ChildRun = defaultChildRun): Promise<string[]> {
   try {

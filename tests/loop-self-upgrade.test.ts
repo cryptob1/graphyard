@@ -9,7 +9,6 @@ import type { Work } from '../src/model.js';
 import { daemonSummary, deploymentObservationSchema, emptyDaemonState, readDaemonState, runDaemon, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { describeSelfUpgrade, heldCliPointer, holdCliAt, checkoutState, performSelfUpgrade, recoverMovedHead, upgradeTouchesCode } from '../src/daemon/upgrade.js';
 import { releaseLag, promotionWait, readBaseTip, releaseLagGraceMs, upgradeRefusalAttention, type PromotionWait } from '../src/master/release-lag.js';
-import { owedUpgrade, readResources, resourceAttention } from '../src/master-resources.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { readRelease } from '../src/protocol-version.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -448,15 +447,15 @@ test('unit:release-lag-promotion-grace — deliveries inside one promotion windo
   assert.equal(unread.promotion, null);
   // An unavailable observation verified no release and lists every delivery as pending: it grants
   // no grace, however soon the promotion is due, so the lag is named exactly as with no cursor.
-  const unavailable = promotionWait({ deployment: { source: 'unavailable', sha: null, pending: ['GY-1365', 'GY-1385', 'GY-1398'] }, promotion: { nextDueAt: wait().nextDueAt, inFlight: true }, upgrade: { alignedRelease: hex('a') } });
+  const unavailable = promotionWait({ deployment: { source: 'unavailable', sha: null, pending: ['GY-1365', 'GY-1385', 'GY-1398'] }, upgrade: { alignedRelease: hex('a') } });
   assert.equal(unavailable, null);
   const unverified = await lagOf(unavailable);
   assert.ok(unverified.components.every(row => row.late && !row.awaitingPromotion.length));
   assert.equal(unverified.attention.length, 2);
-  assert.ok(promotionWait({ deployment: { source: 'endpoint', sha: hex('a'), pending: [] }, promotion: null }));
+  assert.ok(promotionWait({ deployment: { source: 'endpoint', sha: hex('a'), pending: [] } }));
 });
 
-test('unit:loop-lag-remedy-names-promotion — a loop aligned with the verified deployment is never told to restart: the lag text and the loaded-revision detail name the promotion and its due time', async () => {
+test('unit:loop-lag-remedy-names-promotion — a loop aligned with the verified deployment is never told to restart: the lag text names the promotion and its due time', async () => {
   // On schedule: nothing is raised at all, so nothing prescribes a restart.
   assert.deepEqual((await lagOf(wait())).attention, []);
   // Overdue: still named, but the remedy is the promotion, never a host restart onto the same release.
@@ -472,14 +471,6 @@ test('unit:loop-lag-remedy-names-promotion — a loop aligned with the verified 
   // Not aligned with the deployment: the loop has a release to load, and the restart stays its remedy.
   const unaligned = await lagOf(wait({ nextDueAt: '2026-10-07T03:00:00.000Z', deployedSha: hex('d'), pending: [] }));
   assert.match(unaligned.attention.find(item => item.subject === 'loop')!.next!, /systemctl --user restart graphyard-master/);
-
-  // The loaded-revision detail, from the same cursor, names the promotion and its due time.
-  const cursor = { upgrade: { alignedRelease: hex('a'), pending: null }, deployment: { sha: hex('a'), pending: wait().pending }, promotion: { nextDueAt: wait().nextDueAt, inFlight: false }, actions: {} };
-  const reading = readResources({ now: windowNow, reviews: [], producers: [], agents: [], work: [], plane: null, loop: null, disk: null, profiles: { workers: [], reviewers: [], producers: [] },
-    revision: { behind: 3, loaded: hex('a'), checkout: hex('d'), movedAt: windowNow - hour }, upgrade: owedUpgrade(cursor) }).find(entry => entry.id === 'loaded-revision')!;
-  assert.match(reading.detail!, /wait on the promotion due 2026-10-07T03:41:53\.113Z: no restart is owed/);
-  assert.doesNotMatch(reading.detail!, /systemctl --user restart/);
-  assert.deepEqual(resourceAttention([reading]), []);
 });
 
 /**

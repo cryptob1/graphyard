@@ -35,10 +35,12 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 /**
  * The latencies measured on 2026-09-25, in real milliseconds. The fakes below sleep for them scaled
  * by `scale`, and the budgets are scaled the same way, so the proportions — and a serial pass's
- * failure to fit — are exactly those of the production host, in a tenth of the time.
+ * failure to fit — are exactly those of the production host, in half the time. The host's own work
+ * (the fault observation, the /tmp and worktree scans, git) is not scaled, and on a loaded trial host it
+ * took 7 s: a finer scale inflates it past the budget.
  */
 const measured = { snapshot: 1_960, status: 760, actions: 660, decisions: [390, 910, 270, 590, 220, 340, 420, 410], interventions: 58_760, context: 400, mutation: 300 };
-const scale = 1 / 10;
+const scale = 1 / 2;
 const cycleBudgetMs = 30_000 * scale, statusBudgetMs = 20_000 * scale;
 const scaled = (ms: number) => Math.round(ms * scale);
 
@@ -158,23 +160,23 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     assert.deepEqual(timings.calls.map(call => [call.kind, call.name, call.step]), [['github', 'gh api repos/:repo/deployments', 'deployment verification'], ['account', 'GET api.anthropic.com/api/oauth/usage', 'credentials']],
       'both calls of a second or more, slowest first, each with the step it was made in; nothing faster is recorded');
     assert.ok(timings.calls[0].ms >= 1_400 && timings.calls[1].ms >= 1_100);
-    // The completion line names the three slowest steps and the slowest call, with durations.
+    // The completion line names the three slowest steps and the slowest call, with durations (their floors are asserted above; a loaded host only lengthens them).
     const complete = lines.find(line => / complete in /.test(line))!;
-    assert.match(complete, /slowest steps: deployment verification 1\.[4-9]s, credentials 1\.[1-9]s, \S[^,;]* \d+(\.\d)?s; slowest call: github gh api repos\/:repo\/deployments 1\.[4-9]s in deployment verification \(2 calls of 1s or more\)/, complete);
+    assert.match(complete, /slowest steps: deployment verification \d+(\.\d)?s, credentials \d+(\.\d)?s, \S[^,;]* \d+(\.\d)?s; slowest call: github gh api repos\/:repo\/deployments \d+(\.\d)?s in deployment verification \(2 calls of 1s or more\)/, complete);
 
-    // master status: the same recorder over its own phases, returned under `timings`, with the slow
-    // server read named by route and phase.
+    // master status: the same recorder over its own phases, returned under `timings`.
     const status = slowServer(() => work);
-    const slowActions = async (path: string, _credential?: string, timeoutMs?: number) => path === 'actions' ? (await sleep(1_250), { executors: undefined }) : status.read(path, timeoutMs);
-    const report = await masterStatusReport(root, master, slowActions, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
+    // Master status no longer reads GET actions; the board read is the one slow server read left to time.
+    const slowBoard = async (path: string, _credential?: string, timeoutMs?: number) => path === 'board' ? (await sleep(1_250), status.read(path, timeoutMs)) : status.read(path, timeoutMs);
+    const report = await masterStatusReport(root, master, slowBoard, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
     assert.ok(report.timings, 'master status reports its timings');
     const phases = report.timings.steps.map(step => step.step);
     for (const phase of ['herdr', 'credentials', 'snapshot', 'reconcile reviews', 'reconcile producers', 'setup', 'containment', 'worktrees', 'build status', 'attention: interventions', 'attention: decisions', 'attention: derived'])
       assert.ok(phases.includes(phase), `status times its ${phase} phase: ${phases.join(', ')}`);
     const statusSlowest = [...report.timings.steps].sort((a, b) => b.ms - a.ms)[0];
-    assert.equal(statusSlowest.step, 'attention: derived', `the executor read is the slowest phase: ${describeTimings(report.timings)}`);
+    assert.equal(statusSlowest.step, 'board', `the board read is the slowest phase: ${describeTimings(report.timings)}`);
     assert.ok(statusSlowest.ms >= 1_200);
-    assert.deepEqual(report.timings.calls.map(call => [call.kind, call.name, call.step]), [['server', 'GET actions', 'attention: derived']]);
+    assert.deepEqual(report.timings.calls.map(call => [call.kind, call.name, call.step]), [['server', 'GET board', 'board']]);
     assert.ok(report.timings.calls[0].ms >= 1_200 && report.timings.calls[0].ms < 5_000, JSON.stringify(report.timings.calls));
     assert.ok(report.timings.totalMs >= statusSlowest.ms);
   } finally { await cleanup(); }

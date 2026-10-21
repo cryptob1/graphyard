@@ -58,10 +58,10 @@ export function capacityLimitRedispatchRevision(createdAt = '1970-01-01T00:00:00
 
 /**
  * GY-1800: the fixture project's declared application cases. GOAL-1's required uat cases
- * (candidate-batches-five, candidate-gates-promotion, preview-serves-change, previews-for-declared-apps,
- * production-exact-verification) create work whose criteria cite `e2e:fixture-static-home` and
- * `e2e:fixture-compose-app`, and create refuses a proof naming a scenario the registry lacks, so
- * every candidate failed at its first create until revision 1 of each shipped here. They target
+ * (preview-serves-change, previews-for-declared-apps and preview-isolation-cleanup) create work whose
+ * criteria cite `e2e:fixture-static-home` and `e2e:fixture-compose-app`, and create refuses a proof
+ * naming a scenario the registry lacks, so each failed at its first create until revision 1 of each
+ * shipped here. They target
  * `any`: each runs against a change's preview of the fixture site or app, never UAT itself. The
  * matching files under `e2e/cases/` stay the source e2e sync revises later.
  */

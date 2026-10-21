@@ -8,7 +8,7 @@ import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
 import { credentialTrialVariable, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
-import { preMergeTestFiles } from '../scripts/ci-tests.mjs';
+import { listTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { processPidNamespace, processStartTicks, reclaimTmpDirectories, tempOwnerMarker, testTempPatterns, writeTempOwner } from '../src/tmp-reclaim.js';
@@ -549,7 +549,7 @@ test('integration:shadow-trial-bounded-test-groups — the selection runs in gro
   await assert.rejects(runTrial({ root: repo.root, base, mergeSha: await mergeOf(repo, crashOnly), changedFiles: crashFiles, timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, groupSize: 3 }),
     (error: unknown) => error instanceof TrialRunnerError && error.status === 3 && error.files.length === 3 && error.files.includes('tests/crash.test.ts') && error.finished === 3);
   // The bound itself: this repository's pre-merge suite, as scripts/ci-tests.mjs selects it, never runs in one process.
-  const suiteFiles = preMergeTestFiles();
+  const suiteFiles = listTestFiles();
   const groups = groupTestFiles(suiteFiles);
   assert.ok(suiteFiles.length > 400 && groups.length >= Math.ceil(suiteFiles.length / trialTestGroupSize) && groups.length > 1, `${suiteFiles.length} files run in ${groups.length} groups`);
   assert.ok(groups.every(group => group.length <= trialTestGroupSize && group.length > 0));

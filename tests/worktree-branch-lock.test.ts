@@ -321,7 +321,7 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
       if (command === 'git') return args[0] === 'rev-parse' ? `${base}\n` : '';
       if (args[1] === 'claim') return JSON.stringify({ epoch: 9, lease: { owner: 'worker-a' } });
       if (args[1] === 'worktree' && worktreeError) throw new Error(`Command failed: worktree GY-860 9 main\n${worktreeError}`);
-      if (args[1] === 'release' && releaseError) throw new Error(`Command failed: ${launcher} release GY-860 9\n${releaseError}`);
+      if (args[1] === 'unclaim' && releaseError) throw new Error(`Command failed: ${launcher} unclaim GY-860 9\n${releaseError}`);
       return JSON.stringify({ path: join(root, 'assigned') });
     };
     // A branch an earlier attempt still holds: the worktree command fails with the git message and
@@ -329,8 +329,8 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
     // and the original failure is what propagates.
     const held = 'Git worktree creation failed: fatal: \'graphyard/gy-860-9\' is already used by worktree at .graphyard/worktrees/GY-860-8. The claim was released as a workspace failure, so the attempt costs nothing; inspect the event and repair the host before it redispatches.';
     await assert.rejects(prepareWorkerLaunch(root, 'GY-860', 'launch', run(held, 'Lease missing, expired, or superseded; claim the task again')), /already used by worktree/);
-    assert.equal(calls.at(-1)![1], 'release');
-    assert.equal(calls.filter(entry => entry[1] === 'release').length, 1, 'one release, tolerated as already done');
+    assert.equal(calls.at(-1)![1], 'unclaim');
+    assert.equal(calls.filter(entry => entry[1] === 'unclaim').length, 1, 'one release, tolerated as already done');
     // Through the real child runner: the worktree command runs with the options the launcher
     // passes, and its git message — written to its stderr, as the CLI reports a failure — is in the
     // error the dispatch cycle classifies, so the failure is recognized as the workspace's.

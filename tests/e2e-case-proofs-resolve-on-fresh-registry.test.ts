@@ -14,7 +14,7 @@ import { runCases, substitute, summarize } from '../src/e2e/runner.js';
 
 // GY-1800 AC-1: GOAL-1's required cases create work whose criteria cite e2e:fixture-static-home
 // (and e2e:fixture-compose-app). Nothing registered either, so every release candidate's uat job
-// failed at candidate-batches-five step 1 with 409. Revision 1 of each now ships in
+// failed at its first create with 409. Revision 1 of each now ships in
 // src/scenarios.ts, so create resolves and pins it on a registry holding no such scenario.
 // The new exports are imported inside each test: on a tree without them the cases fail as cases.
 const shipped = () => import('../src/scenarios.js');
@@ -122,12 +122,8 @@ test('unit:e2e-case-proofs-resolve-on-fresh-registry — each shipped fixture re
   }
 });
 
-test('unit:e2e-case-proofs-resolve-on-fresh-registry — every POST /api/work step of a uat case under e2e/cases/ creates with the status the case expects, candidate-batches-five step 1 first', async () => {
+test('unit:e2e-case-proofs-resolve-on-fresh-registry — every POST /api/work step of a uat case under e2e/cases/ creates with the status the case expects', async () => {
   const cases = (await loadCases(root)).filter(entry => entry.definition.target === 'uat');
-  const batches = cases.find(entry => entry.definition.id === 'candidate-batches-five');
-  assert.ok(batches, 'GOAL-1 ships candidate-batches-five');
-  const first = batches.definition.steps[0];
-  assert.ok(first.kind === 'http' && first.name === 'create ready change 1' && first.path === '/api/work' && first.status === 200);
   let creates = 0;
   for (const entry of cases) for (const [index, step] of entry.definition.steps.entries()) {
     if (step.kind !== 'http' || step.method !== 'POST' || step.path !== '/api/work') continue;
@@ -138,32 +134,6 @@ test('unit:e2e-case-proofs-resolve-on-fresh-registry — every POST /api/work st
     assert.equal(answer.status, step.status, `${entry.file} step ${index + 1} (${step.name ?? 'POST /api/work'}): ${JSON.stringify(answer.body)}`);
     creates++;
   }
-  assert.ok(creates >= 10, `the required cases create through the shipped scenarios (${creates} creates)`);
+  assert.ok(creates >= 5, `the required cases create through the shipped scenarios (${creates} creates)`);
 });
 
-test('unit:e2e-case-proofs-resolve-on-fresh-registry — run through the release runner against the fresh registry, candidate-batches-five passes step 1 "create ready change 1" with 200, whatever a later step of the case does', async () => {
-  // GY-1800 AC-2's shape, pre-merge: the uat job's e2e report fails a candidate at this case's step 1 with
-  // 409 "Register E2E scenario fixture-static-home" since afa239de1334. With the fixture revisions shipped,
-  // the report shows step 1 answered 200 and the run past it; the steps that reach /api/candidates and
-  // the other GOAL-1 routes belong to GOAL-1's planned items, so whether and where a later step fails
-  // is not this item's to pin.
-  const batches = (await loadCases(root)).filter(entry => entry.definition.id === 'candidate-batches-five');
-  assert.equal(batches.length, 1, 'GOAL-1 ships candidate-batches-five');
-  // GY-1904: nothing delivers the case's changes here, so its waits for their delivery are cut to a second.
-  const report = await runCases(batches, { url, token, runId: 'gy-1800-fresh-registry', environment: 'uat', stopOnRequiredFailure: true, maxWaitSeconds: 1, waitPollMs: 200 });
-  const [outcome] = report.cases;
-  assert.equal(outcome.id, 'candidate-batches-five');
-  assert.equal(outcome.required, true);
-  assert.ok(outcome.executed >= 2, `step 1 passed and the run went on (executed ${outcome.executed}): ${JSON.stringify(outcome.failingStep)}`);
-  if (outcome.failingStep) {
-    assert.ok(outcome.failingStep.index >= 1, `the failing step is a later one, never step 1: ${JSON.stringify(outcome.failingStep)}`);
-    assert.notEqual(outcome.failingStep.name, 'create ready change 1');
-    assert.doesNotMatch(outcome.failingStep.reason, /409|Register E2E scenario/, 'no 409 asks to register a scenario');
-  }
-  assert.doesNotMatch(summarize(report), /Register E2E scenario|create ready change 1/);
-  // Step 1 created the change, pinned to the shipped revision, under the runner's own idempotency key.
-  const created = (await store.pool.query("SELECT document FROM work_items WHERE document->>'title' LIKE 'E2E case candidate-batches-five run gy-1800-fresh-registry-1 change %' ORDER BY document->>'title'")).rows.map(row => row.document as Work);
-  assert.ok(created.length >= 1, 'create ready change 1 persisted its item');
-  assert.equal(created[0].title, 'E2E case candidate-batches-five run gy-1800-fresh-registry-1 change 1');
-  assert.deepEqual(created[0].scenarioRequirements.map(pin => [pin.proof, pin.revision]), [['e2e:fixture-static-home', 1]]);
-});

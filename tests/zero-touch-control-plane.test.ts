@@ -15,8 +15,9 @@ import { deployKeySshCommand, type MergePorts, type MergeTrialRun, type runMerge
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { acceptanceEffects, acceptanceStep, clearDrafts, draftsSettled, type AcceptanceEffects } from '../src/daemon/acceptance.js';
 import { clearPlans, plannerStep, plansSettled, type PlannerEffects } from '../src/daemon/planner.js';
-import { cut, gitIn } from '../src/release-candidate.js';
-import { validateProjectCandidate } from '../src/release-project.js';
+import { serveStaticSite } from '../src/merge-writer/preview.js';
+import { projectCaseSuite } from '../src/release-project.js';
+import type { E2eReport } from '../src/e2e/runner.js';
 import type { Goal } from '../src/model/goal.js';
 import { masterConfigSchema } from '../src/master.js';
 import { completionBody } from '../src/cli/complete.js';
@@ -38,7 +39,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * writer lands it on the bare origin. Nothing in the run waits on a person, opens a browser or
  * touches GitHub. GY-1535: the goal's acceptance — its outcome, required case and contract binding —
  * is one change the merge writer lands on the bare origin before the first planned item is
- * dispatched, and the first release candidate runs that case against its (static) UAT.
+ * dispatched, and main's tip runs that case against its static site.
  */
 const repository = 'owner/project';
 const operatorAgent: Principal = { id: 'graphyard-master-operator', role: 'admin', sessionKind: 'ai' };
@@ -297,7 +298,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   assert.ok(!(await store.pool.query("SELECT 1 FROM events WHERE work_id=$1 AND kind ILIKE '%github%'", [first!.id])).rowCount, 'nothing about the item touched GitHub');
   assert.ok(!events.some(event => event.kind === 'handoff' || event.kind === 'waiting'), 'still no human step after the loop');
 
-  await t.test('unit:zero-touch-creates-e2e-first — the goal\'s required case and contract binding are merged onto the bare origin by the merge writer before the first planned item is dispatched, and the first release candidate runs them on its UAT', async () => {
+  await t.test('unit:zero-touch-creates-e2e-first — the goal\'s required case and contract binding are merged onto the bare origin by the merge writer before the first planned item is dispatched, and main\'s tip runs them on its static site', async () => {
     assert.ok(atDispatch, 'the first planned item was dispatched');
     assert.equal(atDispatch!.cases, 'e2e/cases/greeting.json', 'main held the goal\'s case when the first item was dispatched');
     assert.deepEqual(JSON.parse(atDispatch!.contract).outcomes.map((outcome: { id: string; cases: string[] }) => [outcome.id, outcome.cases]), [['greeting', ['greeting']]], 'and its contract binding');
@@ -305,15 +306,18 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
     assert.equal(atDispatch!.goal.acceptance!.pr, null, 'no pull request: the acceptance change went through the merge writer');
     assert.equal(atDispatch!.goal.merged!.mergeSha, acceptanceMerge);
     assert.deepEqual(atDispatch!.goal.protected.cases, ['greeting']);
-    // The first candidate: cut from main after the item merged, validated on the static UAT of its build output.
-    const ledger = gitIn(checkout);
-    const cutResult = cut(ledger, { base: 'main', trigger: 'manual', now: new Date(clock), push: true });
-    assert.ok(cutResult.cut, JSON.stringify(cutResult));
-    const candidateTree = join(fixtureRoot, 'first-candidate');
-    git(checkout, 'worktree', 'add', '-q', '--detach', candidateTree, cutResult.candidate.sha);
-    const validated = await validateProjectCandidate(ledger, cutResult.candidate.id, { checkout: candidateTree, uat: { static: { directory: 'public' } }, token: 'uat', base: 'main', push: true, timeoutMs: 30_000, stepTimeoutMs: 5_000 });
-    assert.equal(validated.record.result, 'passed', JSON.stringify(validated.record.suites));
-    assert.deepEqual(validated.record.e2e!.cases.map(entry => [entry.case, entry.verdict, entry.required]), [['greeting', 'passed', true]], 'the first candidate ran the goal\'s required case');
-    assert.equal(validated.record.e2e!.sha, cutResult.candidate.sha);
+    // Main's tip after the item merged, its required case run on the static site of its output.
+    const tip = git(origin, 'rev-parse', 'main');
+    const tree = join(fixtureRoot, 'main-tip');
+    git(checkout, 'fetch', '-q', 'origin', 'main');
+    git(checkout, 'worktree', 'add', '-q', '--detach', tree, tip);
+    const served = await serveStaticSite(join(tree, 'public'), tip);
+    try {
+      let report: E2eReport | null = null;
+      const result = await projectCaseSuite(tree, 'uat', { stepTimeoutMs: 5_000, report: value => { report = value; } }).run(served.url, null);
+      assert.equal(result.passed, true, result.detail);
+      assert.deepEqual(report!.cases.map(entry => [entry.id, entry.verdict, entry.required]), [['greeting', 'passed', true]], 'main\'s tip ran the goal\'s required case');
+      assert.equal(report!.sha, tip);
+    } finally { await served.close(); }
   });
 });

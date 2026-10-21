@@ -6,8 +6,8 @@ import { checkoutRelease, cliRelease, defaultImageFor } from '../release.js';
 import { localAdapter } from './local.js';
 
 /**
- * The release image an install defaults to: the image the promotion published under the CLI's own
- * date version (.github/workflows/release-candidate.yml), or the `stable` channel from an unreleased checkout.
+ * The release image an install defaults to: the image published under the CLI's own release, or
+ * under package.json's version (.github/workflows/release.yml, on a `vX.Y.Z` tag) from an unreleased checkout.
  */
 export const DEFAULT_IMAGE = defaultImageFor(cliRelease());
 

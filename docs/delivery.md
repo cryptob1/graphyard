@@ -11,7 +11,7 @@ A tip whose post-deploy E2E failed is not deployed again: the same commit fails 
 
 ### Release filing credential
 
-`GRAPHYARD_RELEASE_TOKEN` files holds/follow-ups; the loop's hourly `master setup --apply` keeps it. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.
+`GRAPHYARD_RELEASE_TOKEN` files release follow-ups; the loop's hourly `master setup --apply` keeps it. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.
 
 ### One delivery path
 
@@ -25,7 +25,7 @@ Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign]
 
 An environment registers `{"kind":"environment","services":[…]}`; an observer `{"kind":"registration","role":"observer"}`.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed `GRAPHYARD_REPOSITORY_POLICY`.
 
 `POST /api/delivery/build` records a build:
 
@@ -45,4 +45,4 @@ Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (
 
 ## Coordinator recovery
 
-Self-merge stalled the loop: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin.
+Self-merge stalled the loop: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin, keeping the new pin, the one it replaced and the one the running loop loaded from.

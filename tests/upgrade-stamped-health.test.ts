@@ -179,7 +179,7 @@ test('unit:upgrade-serves-stamped-release — graphyard upgrade of an installed 
   assert.doesNotMatch(dirtyPlan.find(action => action.id === 'provider.image')?.command ?? '', /--build-arg/);
 });
 
-test('unit:upgrade-gate-still-refuses-wrong-health — health-reports-candidate fails an upgrade whose /healthz does not report the candidate\'s version and commit, and promote still needs the gate', async () => {
+test('unit:upgrade-gate-still-refuses-wrong-health — health-reports-candidate fails an upgrade whose /healthz does not report the candidate\'s version and commit', async () => {
   const sha = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const healthCheck = (health: unknown) => judge({}, { health }, { version, sha }).find((check: { name: string }) => check.name === 'health-reports-candidate');
   for (const health of [{ version: 'unreleased unknown', commit: null }, { version, commit: null }, { version, commit: 'f'.repeat(40) }, { version: '2026.10.18.1', commit: sha }, {}]) {
@@ -189,7 +189,4 @@ test('unit:upgrade-gate-still-refuses-wrong-health — health-reports-candidate 
   }
   assert.equal(healthCheck({ version, commit: sha.toUpperCase() }).ok, true);
 
-  const workflow = await readFile(new URL('../.github/workflows/release-candidate.yml', import.meta.url), 'utf8');
-  assert.match(workflow, /\n {2}upgrade:\n[\s\S]*?run: node --import tsx scripts\/upgrade-from-stable\.mjs --previous stable --candidate "\$CANDIDATE_SHA"/);
-  assert.match(workflow, /\n {2}promote:\n[\s\S]*?needs: \[[^\]]*\bupgrade\b[^\]]*\]\n\s*if: [^\n]*needs\.upgrade\.result == 'success'/);
 });

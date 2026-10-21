@@ -31,7 +31,7 @@ export const spentTipLine = (prior: DeployFailure) => `${deployLine(prior)}; it 
 
 /** The cursor's release reading with `fields` set; a fresh one when the cursor holds none. */
 export const promotionReading = (previous: PromotionState | null | undefined, at: string, fields: Partial<PromotionState>): PromotionState => ({
-  mainSha: null, promotedSha: null, promotedAt: null, behind: null, ledgerReadAt: null, inFlight: false, runsReadAt: null, dispatchedAt: null, lastDispatchAt: null, nextDueAt: null, reason: null,
+  mainSha: null, promotedSha: null, promotedAt: null, behind: null, reason: null,
   ...previous, checkedAt: at, ...fields });
 
 /** The one master status line about a failed deploy (GY-1982); null when none failed. */

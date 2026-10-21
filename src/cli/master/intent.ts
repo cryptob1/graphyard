@@ -1,4 +1,4 @@
-// Concern: `graphyard master` intent and two-party decision subcommands — autonomy, promote, scope, close, withdraw, refuse.
+// Concern: `graphyard master` intent and two-party decision subcommands — autonomy, promote, goal-amend, scope, close, withdraw, refuse.
 import { randomUUID } from 'node:crypto';
 import { agentToken, autonomySubcommands, runAutonomyCommand, listHerdrAgents, readCredentialFile, promoteToAutonomy, assertPromotionRoute } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
@@ -39,6 +39,13 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
     // GY-1502: the operator's one audited transition to autonomy, with the admin credential read once from stdin; there is no demotion.
     if (args.some(arg => arg !== '--admin-token-stdin')) throw new Error('Use master promote --admin-token-stdin; it takes no other argument and there is no demotion');
     return print(await promoteToAutonomy(root, args.includes('--admin-token-stdin') ? await readSecretFromStdin(10_000) : undefined));
+  }
+  if (id === 'goal-amend') {
+    // GY-2705: apply the operator's answered goals-and-priorities request to a goal under the master's
+    // operator-agent identity; the repository connection's worker credential is refused this route.
+    const [goal, decision, ...extra] = args;
+    if (!goal || !decision || extra.length) throw new Error('Use master goal-amend GOAL-N REQUEST_ID');
+    return print(await masterMutation(`goals/${encodeURIComponent(goal)}/amend`, { decision }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
   }
   if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
   if (id === 'adopt') {

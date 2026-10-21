@@ -53,11 +53,10 @@ export function installationOwner(source: typeof installationSources[number], te
     : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
   if (source === 'held-jobs') return agentOwner('control plane', 'Nothing to run: held jobs resume once graphyard master browser installation-accept grants the permission');
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
-  // Production may track a release branch only `graphyard release promote` moves: the fix is the
-  // deployment of what production tracks, never a deploy of main past the release gates (GY-1207).
-  // The branch is the one the watch reported (GRAPHYARD_PRODUCTION_BRANCH when set), never a fixed name (GY-1256).
+  // Production may track a release branch of its own: the fix is the deployment of what production
+  // tracks (GY-1207). The branch is the one the watch reported (GRAPHYARD_PRODUCTION_BRANCH when set), never a fixed name (GY-1256).
   return agentOwner('master', productionBranch
-    ? `Fix the failing deployment of ${productionBranch}, the branch production tracks, with the configured provider, never deploying main past graphyard release`
+    ? `Fix the failing deployment of ${productionBranch}, the branch production tracks, with the configured provider`
     : 'Fix the failing deployment of the base branch, which production tracks, with the configured provider');
 }
 /** Why a work item raises attention; each cause is also its fault kind. */

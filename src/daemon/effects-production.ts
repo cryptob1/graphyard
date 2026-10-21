@@ -3,7 +3,6 @@ import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { worktreeReclaimPass } from './worktree-reclaim.js';
-import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { DecisionSituation } from '../model/approval.js';
@@ -110,7 +109,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const config = current();
     const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(timeoutMs) });
     const result = await response.json();
-    // The status travels with the refusal: promotion reads a 404 from a server without the import route as no hold (GY-1860).
+    // The status travels with the refusal, so a caller can tell a 404 from any other refusal.
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
     return result;
   };
@@ -334,7 +333,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator), ...readingEffects(current, mutate, asCoordinator, { root, run }), // GY-1779: the loop's own post-deploy readings
+    ...throughputEffects(root, current, run, asCoordinator), ...readingEffects(current, mutate, asCoordinator), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
     readWork: async work => await asCoordinator(`work/${encodeURIComponent(work.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),

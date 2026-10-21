@@ -13,7 +13,6 @@ import type { ProductionWatch } from '../production-watch.js';
 import type { Principal } from '../model.js';
 import type { Responder } from '../closed-question.js';
 import type { InterventionPolicy } from '../model/interventions.js';
-import { candidateRoutes } from './routes/candidates.js';
 
 /** Everything the assembled control plane owns, handed to every route. */
 export interface Services {
@@ -80,7 +79,7 @@ export function defineRoutes(name: string, routes: Route[]): RouteModule { retur
  * so the registered module's binding is initialized when it is read.
  */
 export function registerApiRoutes(modules: readonly RouteModule[]): readonly RouteModule[] {
-  return [candidateRoutes, ...modules];
+  return modules;
 }
 
 /** Match one route against a request; `null` when it does not apply. */

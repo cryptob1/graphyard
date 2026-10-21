@@ -5,8 +5,6 @@ export const defaultShardCount: number;
 export const repositoryRoot: string;
 export const speculativeTipSubject: RegExp;
 export function listTestFiles(root?: string): string[];
-export const releaseCandidateTests: Record<string, 'soak' | 'timing-budget'>;
-export function isReleaseCandidateTest(file: string): boolean;
 export const advisoryTests: string[];
 export function isAdvisoryTest(file: string): boolean;
 export function preMergeTestFiles(root?: string): string[];

@@ -388,7 +388,7 @@ test('worker preparation claims and creates the assigned worktree from the curre
       if (args[1] === 'worktree') throw new Error('checkout failed');
       return '{}';
     }), /checkout failed/);
-    assert.equal(failed.at(-1)![1], 'release'); assert.equal(failed.at(-1)![3], '6');
+    assert.equal(failed.at(-1)![1], 'unclaim'); assert.equal(failed.at(-1)![3], '6');
     const changedIdentity: string[][] = [];
     await assert.rejects(prepareWorkerLaunch(root, 'GY-42', 'launch', (command, args) => {
       changedIdentity.push(args);
@@ -396,7 +396,7 @@ test('worker preparation claims and creates the assigned worktree from the curre
       if (args[1] === 'claim') return JSON.stringify({ epoch: 7, lease: { owner: 'rotated-worker' } });
       return '{}';
     }), /unexpected assignment identity/);
-    assert.equal(changedIdentity.at(-1)![1], 'release'); assert.equal(changedIdentity.at(-1)![3], '7');
+    assert.equal(changedIdentity.at(-1)![1], 'unclaim'); assert.equal(changedIdentity.at(-1)![3], '7');
     execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/other/project.git'], { cwd: root });
     await assert.rejects(prepareWorkerLaunch(root, 'GY-42', 'launch'), /different repositories/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }

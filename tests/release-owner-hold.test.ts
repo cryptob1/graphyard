@@ -93,11 +93,14 @@ test('unit:release-normal-backlog-applies — an ordinary backlog item still rel
   assert.equal(ownerHoldRefusal(work, { id: master.id, role: 'operator-agent' }), null);
   const released = await release(master.token, work);
   assert.equal(released.status, 200, JSON.stringify(released.body));
-  assert.equal((await reload(work.id)).ready, true);
+  const after = await reload(work.id);
+  assert.equal(after.ready, true); assert.equal(after.stage, 'ready');
 });
 
 test('unit:release-loop-owned-refused — a loop-owned measure item is still refused as loop-owned', async () => {
   const work = await created({ title: 'Measure throughput on the serving release', plannedFiles: [], criteria: [{ id: 'AC-1', text: 'Claim verified', proofs: ['manual:throughput-claim-verified'] }], reason: 'Measure' });
   const refused = await release(master.token, work);
-  assert.equal(refused.status, 409); assert.match(refused.body.error, /is loop-owned/);
+  assert.equal(refused.status, 409); assert.match(refused.body.error, /is loop-owned/); assert.doesNotMatch(refused.body.error, /owner hold/);
+  const after = await reload(work.id);
+  assert.equal(after.stage, 'backlog'); assert.equal(after.ready, false);
 });

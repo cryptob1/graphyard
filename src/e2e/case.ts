@@ -264,11 +264,3 @@ export function checkContract(contract: ReleaseContract, inspected: Awaited<Retu
     refusals.push(`required case ${entry.definition.id} (${entry.file}) is bound to no outcome`);
   return { passed: refusals.length === 0, outcomes: contract.outcomes.map(outcome => ({ id: outcome.id, cases: outcome.cases })), refusals };
 }
-
-/** The pre-cut check as the workflow's cut step runs it, from a checkout: a malformed contract is itself a refusal. */
-export async function checkRepositoryContract(root: string) {
-  let contract: ReleaseContract;
-  try { contract = await loadContract(root); }
-  catch (error) { return { passed: false, outcomes: [], refusals: [(error as Error).message.startsWith(contractFile) ? (error as Error).message : `${contractFile}: ${(error as Error).message}`] }; }
-  return checkContract(contract, await inspectCases(root));
-}

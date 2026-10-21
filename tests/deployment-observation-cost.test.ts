@@ -385,7 +385,6 @@ test('unit:deployment-observation-reuse-expiry — the reuse expires at the wind
   assert.equal(masterConfigSchema.parse({ ...config('/outside/coordinator.token'), run: { deploymentReuseMinutes: 5 } }).run.deploymentReuseMinutes, 5);
 });
 
-
 test('unit:deployment-step-idle-cycle-cost — on a two-cycle replay with an unchanged release the second cycle\'s deployment bucket is under 5s and the whole cycle under 30s, while a cycle whose newest delivery is pending still reads live', async () => {
   const master = config('/outside/coordinator.token', { run: { intervalSeconds: 300 } as Partial<MasterRun> });
   const state = emptyDaemonState(master);

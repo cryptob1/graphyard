@@ -155,7 +155,6 @@ export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
  * deploy's line, `reason` why no deploy ran. The other fields are the retired promotion drive's
  * (GY-1302), kept so a cursor written before still parses; nothing sets or reads them now.
  */
-const sealCheckSchema = z.object({ mayseal: z.boolean(), role: z.string().max(64), needed: z.array(z.string().max(64)).max(8), at: z.string().max(64), secret: z.string().max(100), environment: z.string().max(100) }).strict();
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
   mainSha: z.string().nullable(),
@@ -163,42 +162,10 @@ export const promotionStateSchema = z.object({
   promotedAt: z.string().nullable(),
   /** First-parent merges on the base branch production does not run yet; null when unknown. */
   behind: z.number().int().min(0).nullable(),
-  /** When the base branch tip and the promotion record were last fetched; reused for `promotionLedgerReadMs`. */
-  ledgerReadAt: z.string().nullable().default(null),
-  inFlight: z.boolean(),
-  runsReadAt: z.string().nullable(),
-  dispatchedAt: z.string().nullable(),
-  lastDispatchAt: z.string().nullable(),
-  cutSha: z.string().nullable().optional(),
-  candidateAtDispatch: z.string().max(100).nullable().optional(),
-  candidates: z.array(z.object({
-    id: z.string().max(100),
-    sha: z.string().max(64),
-    cutAt: z.string().max(64),
-    prs: z.number().int().min(0).nullable(),
-    queued: z.number().int().min(0).nullable(),
-    /** GY-1513: the advisory soak's verdict as the candidate's record (rc-soak/ID) keeps it, once its run recorded one. */
-    soak: z.object({ result: z.string().max(32), at: z.string().max(64), run: z.string().max(500).nullable() }).strict().nullable().optional(),
-    /** GY-1882: the candidate's newest seal check (rc-seal-check/ID.AT): whether the uat release credential may seal its imports. */
-    sealCheck: sealCheckSchema.optional(),
-  }).strict()).max(5).optional(),
-  /** GY-1882: the newest candidates' seal checks, read on their own while the drive reads no ledger (promotion off, or no local ports). */
-  sealChecks: z.array(z.object({ id: z.string().max(100), sealCheck: sealCheckSchema.optional() }).strict()).max(5).optional(),
-  sealChecksReadAt: z.string().nullable().optional(),
-  /** GY-1513: the newest advisory soak runs (release-candidate-soak.yml), by the SHA each soaks; never holds promotion back. */
-  soaks: z.array(z.object({
-    sha: z.string().max(64),
-    status: z.string().max(32),
-    conclusion: z.string().max(32).nullable(),
-    createdAt: z.string().max(64),
-    url: z.string().max(500).nullable(),
-  }).strict()).max(10).optional(),
-  soaksReadAt: z.string().nullable().optional(),
-  nextDueAt: z.string().nullable(),
   reason: z.string().max(500).nullable(),
   /** GY-1982: the base tip whose continuous deploy failed, the step and why, and what the loop did about it. */
   deployFailed: z.object({ sha: z.string().max(64), step: z.string().max(32), reason: z.string().max(40000), rolledBackTo: z.string().max(64).nullable(), kept: z.boolean(), attempts: z.number().int().min(1), at: z.string().max(64) }).strict().nullable().optional(),
-}).strict();
+});
 export type PromotionState = z.infer<typeof promotionStateSchema>;
 
 /** What one reclamation did, kept on the cursor so `master status` reports it without rescanning. */
