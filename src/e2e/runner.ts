@@ -93,7 +93,7 @@ export interface RunOptions {
   stepTimeoutMs?: number; retries?: number;
   /** How often a step with `waitSeconds` asks again (`httpWaitPollMs` by default), and the longest any step waits (its own `waitSeconds` by default); tests shorten both. */
   waitPollMs?: number; maxWaitSeconds?: number;
-  /** GY-1938: the one instant, on `now`'s clock, at which every waiting step of the run stops asking again, whatever its own `waitSeconds`: all cases, steps and attempts share it, so their waits together never pass it. None by default. */
+  /** GY-1938: the one instant, on `now`'s clock, by which the run's waits end, whatever each step's own `waitSeconds`. GY-2603: what is left of it is shared out case by case — each case that may wait gets an equal share of the remainder, its attempts each waiting within an equal share of what it has left — so an earlier case never leaves a later one 0 s. None by default. */
   waitUntil?: number;
   /** How a waiting step pauses between asks (a real timer by default); tests pair it with `now` as a fake clock. */
   sleep?: (ms: number) => Promise<void>;
@@ -160,6 +160,15 @@ export function substitute<T>(value: T, vars: Record<string, string>): T {
   return value;
 }
 
+/** Why a path reads nothing (GY-2603): unset, with the nearest value above it as the answer holds it, e.g. `unset (delivery is null)`. */
+const unsetAt = (body: unknown, path: string) => {
+  const keys = path.split('.');
+  for (let length = keys.length - 1; length >= 0; length--) {
+    const parent = keys.slice(0, length).join('.'), value = valueAt(body, parent);
+    if (value !== undefined) return `unset (${parent || '(body)'} is ${JSON.stringify(value)?.slice(0, 200)})`;
+  }
+  return 'unset (the answer has no body)';
+};
 /** Why an http step's answer fails its checks, or null when it passes. */
 export function checkAnswer(step: Extract<E2eStep, { kind: 'http' }>, status: number, body: unknown, text: string): string | null {
   if (status !== step.status) return `expected status ${step.status}, got ${status}${text ? `: ${text.slice(0, 200)}` : ''}`;
@@ -167,7 +176,7 @@ export function checkAnswer(step: Extract<E2eStep, { kind: 'http' }>, status: nu
     const actual = valueAt(body, check.path), at = check.path || '(body)';
     if ('equals' in check && !matches(actual, check.equals) ) return `${at} is ${JSON.stringify(actual)?.slice(0, 200)}, expected ${JSON.stringify(check.equals)}`;
     if (check.exists !== undefined && (actual !== undefined) !== check.exists) return `${at} ${check.exists ? 'is missing' : 'is present'}`;
-    if (check.type && typeOf(actual) !== check.type) return `${at} is ${typeOf(actual)}, expected ${check.type}`;
+    if (check.type && typeOf(actual) !== check.type) return `${at} is ${actual === undefined ? unsetAt(body, check.path) : typeOf(actual)}, expected ${check.type}`;
     if ('includes' in check) {
       const found = Array.isArray(actual) ? actual.some(entry => matches(entry, check.includes)) : typeof actual === 'string' && typeof check.includes === 'string' && actual.includes(check.includes);
       if (!found) return `${at} does not include ${JSON.stringify(check.includes)}`;
@@ -194,7 +203,7 @@ const createdWork = (parsed: unknown): { id: string; key: string | null } | null
   return body && typeof body === 'object' && typeof body.id === 'string' ? { id: body.id, key: typeof body.key === 'string' ? body.key : null } : null;
 };
 
-interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; pollMs: number; maxWaitSeconds: number; waitUntil: number; now: () => number; sleep: (ms: number) => Promise<void>; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
+interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; pollMs: number; maxWaitSeconds: number; waitUntil: number; waitBudgetMs: number; now: () => number; sleep: (ms: number) => Promise<void>; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
   /** GY-2216: remembers each work item the case's steps created, so the run can close them when it ends. */
   created: (item: { id: string; key: string | null }) => void;
   secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string; signal?: AbortSignal } }
@@ -202,7 +211,7 @@ interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: nu
 /** A step's own timeout: a command or agent step declares one; the request and browser steps share the run's, a waiting GET's widened by the wait it may still take. */
 const timeoutOf = (step: E2eStep, context: Pick<CaseContext, 'timeoutMs' | 'maxWaitSeconds' | 'waitUntil' | 'now'>) => step.kind === 'command' || step.kind === 'agent' ? step.timeoutSeconds * 1000
   : step.kind === 'http' && step.waitSeconds ? waitMs(step.waitSeconds, context) + context.timeoutMs : context.timeoutMs;
-/** How long a waiting GET may still wait: its own `waitSeconds`, capped by the run's per-step cap and by what is left before the run's shared deadline (GY-1938). */
+/** How long a waiting GET may still wait: its own `waitSeconds`, capped by the run's per-step cap and by what is left of its case's share of the run's wait budget (GY-1938, GY-2603). */
 const waitMs = (waitSeconds: number, context: Pick<CaseContext, 'maxWaitSeconds' | 'waitUntil' | 'now'>) =>
   Math.max(0, Math.min(Math.min(waitSeconds, context.maxWaitSeconds) * 1000, context.waitUntil - context.now()));
 /** How often a waiting GET step asks again. */
@@ -219,9 +228,9 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
     const path = substitute(step.path, context.vars);
     const body = step.body === undefined ? undefined : JSON.stringify(substitute(step.body, context.vars));
     const target = onTarget(path, context.url);
-    // A waiting GET asks again until its answer holds, `waitSeconds` pass or the run's shared deadline comes; the last answer's failure is the step's.
+    // A waiting GET asks again until its answer holds, `waitSeconds` pass or its case's wait budget is spent; the last answer's failure is the step's.
     const waitSeconds = Math.min(step.waitSeconds ?? 0, context.maxWaitSeconds), allowed = waitMs(step.waitSeconds ?? 0, context), deadline = context.now() + allowed;
-    const waited = !waitSeconds ? '' : allowed < waitSeconds * 1000 ? ` (still, at the run's shared wait deadline after ${Math.round(allowed / 1000)} s)` : ` (still, after waiting ${waitSeconds} s)`;
+    const waited = !waitSeconds ? '' : allowed < waitSeconds * 1000 ? ` (still, after waiting ${Math.round(allowed / 1000)} s, all that remained of case ${context.vars.case}'s ${Math.round(context.waitBudgetMs / 1000)} s wait budget for this attempt)` : ` (still, after waiting ${waitSeconds} s)`;
     let parsed: unknown = undefined;
     for (;;) {
       const response = await context.fetcher(target, { method: step.method, signal: AbortSignal.timeout(context.timeoutMs),
@@ -258,7 +267,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
 }
 
 /** Run one case once: its declared secrets resolved first, then its steps in order, stopping at the first that fails. */
-async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number; waitUntil?: number; now: () => number; sleep: (ms: number) => Promise<void>; created: (item: { id: string; key: string | null }) => void }) {
+async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number; waitUntil?: number; waitBudgetMs?: number; now: () => number; sleep: (ms: number) => Promise<void>; created: (item: { id: string; key: string | null }) => void }) {
   const { definition } = entry;
   const steps: StepRecord[] = [];
   let secrets: Record<string, string>;
@@ -271,7 +280,7 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
   const pageErrors: string[] = [];
   let browser: E2eBrowser | null = null, page: E2ePage | null = null;
   const session = (index: number) => `graphyard-e2e-${options.runId}-${definition.id}-${options.attempt}-${index + 1}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 120);
-  const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, maxWaitSeconds: options.maxWaitSeconds ?? Infinity, waitUntil: options.waitUntil ?? Infinity, now: options.now, sleep: options.sleep, fetcher: options.fetcher, pageErrors, secrets, created: options.created,
+  const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, maxWaitSeconds: options.maxWaitSeconds ?? Infinity, waitUntil: options.waitUntil ?? Infinity, waitBudgetMs: options.waitBudgetMs ?? Infinity, now: options.now, sleep: options.sleep, fetcher: options.fetcher, pageErrors, secrets, created: options.created,
     general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session, signal: options.signal },
     idempotency: index => `e2e:${definition.id}:${options.runId}:${options.attempt}:${index}`,
     page: async () => {
@@ -329,17 +338,20 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
   const outcomes: CaseOutcome[] = [];
   const created: CreatedWork[] = [];
   let stoppedBy: string | null = null;
+  // GY-2603: the run's wait budget is shared out case by case: each case that may wait gets an equal share of what is left, and gives back what it did not use, so no case is left 0 s however long earlier ones waited.
+  let waitLeft = (options.waitUntil ?? Infinity) - now(), waitingLeft = cases.filter(entry => !pendingCases.includes(entry.definition.id)).length;
   for (const entry of cases) {
     const { id, title, required } = entry.definition;
     if (!stoppedBy && signal?.aborted) stoppedBy = cancelledRun;
     if (stoppedBy) { outcomes.push({ id, title, file: entry.file, outcome: null, verdict: 'unrun', required, stoppedBy, durationMs: 0, attempts: 0, attemptResults: [], executed: 0, failingStep: null }); continue; }
-    const started = now();
+    const started = now(), waits = !pendingCases.includes(id), waitBudgetMs = waits ? waitLeft / Math.max(1, waitingLeft) : 0;
     const attemptResults: AttemptResult[] = [];
     do {
-      const began = now();
+      // Each attempt waits within an equal share of what is left of its case's budget, so a retry is never left 0 s either.
+      const began = now(), attemptBudgetMs = Math.max(0, started + waitBudgetMs - began) / (retries + 1 - attemptResults.length);
       const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs, created: item => created.push({ ...item, case: id }),
         // A case whose outcome nothing can serve — pending on the candidate (GY-1938) or suspended because this install cannot serve it at all (GY-2217) — asks once and never holds the run on a wait, required or not.
-        maxWaitSeconds: pendingCases.includes(id) ? 0 : options.maxWaitSeconds, waitUntil: options.waitUntil, now, sleep, ...general });
+        maxWaitSeconds: pendingCases.includes(id) ? 0 : options.maxWaitSeconds, waitUntil: began + attemptBudgetMs, waitBudgetMs: attemptBudgetMs, now, sleep, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });
     } while (attemptResults.at(-1)!.outcome === 'fail' && attemptResults.length <= retries && !signal?.aborted);
     const last = attemptResults.at(-1)!;
@@ -348,6 +360,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     const pending = required && pendingCases.includes(id) && (verdict === 'failed' || verdict === 'flaky');
     outcomes.push({ id, title, file: entry.file, outcome: last.outcome, verdict, required, durationMs: Math.max(0, now() - started), attempts: attemptResults.length, attemptResults,
       executed: last.executed, failingStep: last.failingStep ?? attemptResults.find(attempt => attempt.failingStep)?.failingStep ?? null, ...(pending ? { pending: true } : {}) });
+    if (waits) { waitLeft -= Math.min(now() - started, waitBudgetMs); waitingLeft--; }
     if (verdict === 'failed' && required && options.stopOnRequiredFailure && !pendingCases.includes(id)) stoppedBy = id;
   }
   const tally = (verdict: CaseVerdict) => outcomes.filter(outcome => outcome.verdict === verdict).length;
@@ -512,9 +525,9 @@ export const failureDetail = (report: E2eReport, pendingCases: readonly string[]
  * pends them and names them, instead of failing on waits nothing can answer.
  */
 export const releaseRetries = 1;
-/** How long after a release run starts its one shared wait deadline falls (GY-1938): every waiting step of every case and attempt stops asking again by then, half the suite's one-hour command timeout, so the suite reports instead of being killed however many steps wait. */
+/** How long a release run's waits may take together (GY-1938), shared out among its cases (GY-2603): half the suite's one-hour command timeout, so the suite reports instead of being killed however many steps wait. */
 export const releaseWaitBudgetSeconds = 1800;
-/** The shared wait deadline of a release run starting at `start` (ms). */
+/** The wait deadline of a release run starting at `start` (ms). */
 export const releaseWaitUntil = (start: number) => start + releaseWaitBudgetSeconds * 1000;
 /** Whether a case's steps exercise the install's delivery surface — the candidates, delivery and production routes whose expectations only an install that delivers changes can satisfy (GY-1938). */
 export const exercisesDelivery = (definition: Pick<CaseFile['definition'], 'steps'>): boolean =>

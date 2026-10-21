@@ -69,3 +69,5 @@ export function noteDispatchFailure(state: DaemonState, item: Pick<Work, 'id' | 
 /** The blocker a run at the bound records: the count, since when, and the cause in git's words. */
 export const dispatchFailureBlocker = (run: DispatchFailureRun) =>
   `Dispatch failed ${run.count} consecutive times with the same cause since ${run.firstAt}, so the master loop stopped redispatching ${run.key}: ${run.cause}`.slice(0, 2000);
+/** Whether TEXT is Herdr's workspace_not_found refusal of WORKSPACE (GY-2600). */
+export const workspaceGone = (text: string, workspace: string) => /"code"\s*:\s*"workspace_not_found"/.test(text) && text.includes(`workspace ${workspace} not found`);

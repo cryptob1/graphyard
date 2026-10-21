@@ -12,7 +12,7 @@ import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSu
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { APP_PENDING, checkoutLauncherOf, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
-import { scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
+import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
 import { writeFailure } from './worktrees.js';
@@ -473,15 +473,34 @@ export async function recordHerdrInstance(root: string, instance: HerdrInstance,
   await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), next);
   return true;
 }
-export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string }
-export function liveMasterConfig(root: string, initial: MasterConfig, load: (root: string) => Promise<MasterConfig> = loadMasterConfig, clock: () => number = Date.now) {
+/**
+ * GY-2600: replaces a configured Herdr workspace Herdr no longer lists with a live one in
+ * .graphyard/master.json, changing nothing else; the switch, or null when none was needed or possible.
+ */
+export async function reresolveHerdrWorkspace(root: string, config: Pick<MasterConfig, 'herdrWorkspace' | 'masterAgentName'>, resolveLive: typeof liveHerdrWorkspace = liveHerdrWorkspace) {
+  const switched = await resolveLive(config);
+  if (!switched) return null;
+  const stored = await readMasterConfig(root);
+  await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), masterConfigSchema.parse({ ...stored, herdrWorkspace: switched.to }));
+  return switched;
+}
+export type WorkspaceSwitch = NonNullable<Awaited<ReturnType<typeof reresolveHerdrWorkspace>>>;
+export interface ConfigReload { config: MasterConfig; changed: string[]; refused: string | null; at: string; workspace?: WorkspaceSwitch | null }
+export function liveMasterConfig(root: string, initial: MasterConfig, load: (root: string) => Promise<MasterConfig> = loadMasterConfig, clock: () => number = Date.now,
+  reresolve: (root: string, config: MasterConfig) => Promise<WorkspaceSwitch | null> = reresolveHerdrWorkspace) {
+  // A switch a dispatcher reload made waits here for the cycle's reload, which records it.
+  let pending: WorkspaceSwitch | null = null;
   const live = {
     current: initial,
-    async reload(): Promise<ConfigReload> {
+    /** CYCLE (the loop's own reload) first re-resolves a dead Herdr workspace and returns any switch; any reload does after a launch refused with workspace_not_found (GY-2600). */
+    async reload(cycle = false): Promise<ConfigReload> {
       const at = new Date(clock()).toISOString();
+      if (live.current.herdrWorkspace && (cycle || herdrWorkspaceRefused())) pending = await reresolve(root, live.current).catch(() => null) ?? pending;
+      const workspace = cycle ? pending : null;
+      if (cycle) pending = null;
       // A refused reload keeps every loaded setting, the Herdr scope included: loading applies the
       // file's workspace, so the scope the loop runs under is put back whenever the reload is refused (GY-1441).
-      const keep = (refused: string): ConfigReload => { applyHerdrConfig(live.current); return { config: live.current, changed: [], at, refused }; };
+      const keep = (refused: string): ConfigReload => { applyHerdrConfig(live.current); return { config: live.current, changed: [], at, refused, workspace }; };
       let next: MasterConfig;
       try { next = await load(root); }
       catch (error) { return keep(`.graphyard/master.json could not be reloaded (${error instanceof Error ? error.message : String(error)}); the loop keeps the settings it last loaded`); }
@@ -489,7 +508,7 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
       if (bound.length) return keep(`.graphyard/master.json changes ${bound.join(', ')}, which a running master loop is bound to; restart master run to adopt ${bound.length === 1 ? 'it' : 'them'}. Until then the loop keeps its loaded settings, including every other change`);
       live.current = next;
       applyHerdrConfig(next);
-      return { config: next, changed, refused: null, at };
+      return { config: next, changed, refused: null, at, workspace };
     },
   };
   return live;
