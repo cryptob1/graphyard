@@ -2,7 +2,6 @@
 import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync } from 'node:fs';
 import { worktreeReclaimPass } from './worktree-reclaim.js';
 import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
@@ -14,7 +13,6 @@ import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, disposableWorktrees, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
-import { servingStage } from '../release-pending.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -40,11 +38,8 @@ import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
 import { currentBaseTree } from '../cli/planned-files-intent.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
-import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
+import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
-import { exactCandidatePorts, localReleasePorts } from './release-ports.js';
-import { revertRecordKey } from '../release-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { readingEffects } from './reading-effect.js';
@@ -184,9 +179,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     alignUnit: () => alignRunningLoopUnit(root, current()),
     persist: persistLoop,
     // GY-1982: continuous deploy, through the install's own adapter; imported when first used, as the CLI's upgrade module loads the installer.
-    // GY-2167: the deploy's e2e cases authenticate as the install's own e2e identity, read from its
-    // roster token file inside deployPorts — never with this loop's coordinator credential, whose
-    // principal may create no item and whose use failed every create-step case with 403.
     deploy: async () => (await import('../cli/upgrade.js')).deployPorts({ cliRoot: loopCodeRoot(current().cliPath, root), repoRoot: root, repository: current().repository, url: current().url, run, keepAlive }),
   });
   return Object.defineProperties({
@@ -318,25 +310,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         return revision ? asOperatorAgent('POST', `work/${work.id}/requirements`, revision) : undefined;
       } : undefined;
     },
-    requestProof: async work => {
-      const config = current();
-      await run('gh', ['workflow', 'run', config.run.proofWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
-        '-f', `pr=${work.submission!.pr}`, '-f', `work_id=${work.id}`, '-f', `policy_revision=${work.policyRevision}`]);
-    },
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
-    // GY-1526: under a control-plane merger (read afresh each cycle, as the merge step reads it) the drive runs candidates through the local ports — the release functions in this checkout, pushes through the deploy key, the revert recorded as the coordinator — and dispatches no workflow; the ports are null while the environment names no UAT.
-    get promotion() { const config = current(); return promotionReads(config, root, run, existsSync(join(root, '.github', 'workflows', promotionWorkflow)), undefined, { merger: recordedMerger, local: localReleasePorts(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, revertRecordKey(work, event)),
-      file: async (item, requestId) => ((await mutate('work', item, requestId)) as Work).key,
-      plane: { goals: async () => (await asCoordinator('goals?open=1')).goals, stage: async key => servingStage((await asCoordinator(`work/${encodeURIComponent(key)}`)) as Work | undefined), read: path => asCoordinator(path),
-        // GY-1874: sealing a released hold is a write the coordinator credential cannot make: the loop
-        // seals through its operator-agent identity (an admin or an operator agent seals), when one is
-        // provisioned; without it the promotion keeps its read alone.
-        ...(config.operatorAgent ? { seal: (path: string, data: unknown) => asOperatorAgent('POST', path, data) } : {}),
-        // GY-1904: the loop cuts the plane's exact candidates and records their verdicts as the coordinator.
-        candidates: exactCandidatePorts(mutate, path => asCoordinator(path)) } }) }); },
-    // GY-1519: the watch reads history from this checkout and its policy from the control plane; the freeze is the environment's ask.
-    get mainWatch() { return mainWatchReads(current(), root, run, { policy: () => asCoordinator('main-watch'), freeze: mainWatchFreezeFromEnv() }); },
     // GY-1524: the executor merges in this checkout's object store, pushes with the install's deploy key alone, records each step as the coordinator under one key per (step, commits), and acts only while the recorded merger is control-plane (read before every merge decision).
     get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger, hold: recordedHold }); },
     publishProductionEnvironment: async () => {
@@ -367,11 +342,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
     // GY-1814: the read also names the approvals the ledger answered (planned, follow-ups filed, a fresh read, a fallback), so a plan still owed is reported only until the answer lands. A ledger that cannot be read answers everything: the requests-only read carries no `answered`, and the gate never holds what nothing backs.
     mechanicalFixes: async () => { try { const reviews = (await readReviewLedger(root)).reviews; return { ...mechanicalFixState(reviews), answered: answeredMechanicalReviews(reviews) }; } catch { return readMechanicalFixState(root); } }, recordMechanicalPlan: (work, plan, answered) => mutate(`work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: answered?.reviewId ?? work.mechanicalPlan?.reviewId ?? 1, head: answered?.head ?? work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }),
-    requestSmoke: async work => {
-      const config = current();
-      await run('gh', ['workflow', 'run', config.run.smokeWorkflow!, '--repo', config.repository, '--ref', config.baseBranch,
-        '-f', `work_id=${work.id}`, '-f', `deployed_sha=${work.delivery!.deployment!.sha}`, '-f', `merge_sha=${work.delivery!.mergeSha}`, '-f', `policy_revision=${work.policyRevision}`]);
-    },
     // The idle bound comes from the live configuration, so a host under pressure can shorten it
     // (or a slow repository lengthen it) without restarting the loop.
     // The same pass takes back every ephemeral checkout no live session owns, under the managed root.

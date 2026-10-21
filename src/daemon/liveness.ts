@@ -381,6 +381,6 @@ export function progressAttention(work: readonly Work[], release: Pick<Promotion
   if (oldest && now - oldest.at > releaseLagMs)
     items.push({ subject: 'release', faultless: true,
       text: `${unreleased.length} merged change(s) have not reached the running release for ${Math.round((now - oldest.at) / 60_000)} minutes; the oldest is ${oldest.key} merged at ${new Date(oldest.at).toISOString()}; ${promotedAt === null ? 'no release has been observed' : `the release last moved at ${new Date(promotedAt).toISOString()}`}`,
-      ...agentOwner('master', 'graphyard master status shows the promotion drive under promotion; judge why the release has not moved onto the merged heads and unblock it — the merges themselves are delivered') });
+      ...agentOwner('master', 'graphyard master status shows the continuous deploy under promotion; judge why the release has not moved onto the merged heads and unblock it — the merges themselves are delivered') });
   return items;
 }

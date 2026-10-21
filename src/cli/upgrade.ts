@@ -7,16 +7,13 @@ import { createBackup } from '../backup.js';
 import { Store } from '../store.js';
 import { checkoutRelease, compareDateVersions, datedVersionPattern, imageRepository, installationRoot, stableChannel, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
-import { installDirectory, readInstallRecord, readToken, type InstallRecord } from '../install/secrets.js';
-import { e2ePrincipalId } from '../install/secrets.js';
+import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
 import type { DeployPorts } from '../daemon/upgrade.js';
 import { pinKnownGood } from '../master/known-good.js';
-import { localReleaseVariables } from '../daemon/release-ports.js';
-import { deployedE2e, e2eSuite } from '../e2e/runner.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -187,11 +184,9 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
 /**
  * GY-1982: the ports the loop's continuous deploy runs a commit through on this install, the checkout
  * already moved onto it: the upgrade sequence's npm ci, backup (with DATABASE_URL) and redeploy as
- * child processes, the health step until it passes or three minutes pass, and every end-to-end case;
- * or the one line naming why an install on neither compose nor local has none. `keepAlive` feeds the
- * loop's watchdog while a step runs. The end-to-end cases run as the install's e2e identity
- * (GY-2167), the roster principal whose credential may do what the cases do — a case's first step
- * creates an item — never as the loop's own coordinator, which may create none.
+ * child processes, and the health step until it passes or three minutes pass; or the one line naming
+ * why an install on neither compose nor local has none. `keepAlive` feeds the loop's watchdog while
+ * a step runs.
  */
 export async function deployPorts(input: { cliRoot: string; repoRoot: string; repository: string; url: string; run: ChildRun; keepAlive?: () => Promise<void> }): Promise<DeployPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
@@ -224,11 +219,6 @@ export async function deployPorts(input: { cliRoot: string; repoRoot: string; re
         try { return await healthVerdict(await fetch(`${url}/healthz?strict`, { signal: AbortSignal.timeout(10_000) }), version); }
         catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
       }
-    }),
-    e2e: () => beating(async () => {
-      // GY-2217: the loop reads its own environment for the UAT the cases' release-candidate outcomes need: an install whose merger is the control plane but whose environment names no UAT (GRAPHYARD_UAT_URL or a static site's GRAPHYARD_UAT_STATIC) can never serve them, so those cases run as pending instead of failing every deploy.
-      const uat = !!(process.env[localReleaseVariables.uatUrl] || process.env[localReleaseVariables.uatStatic]);
-      await deployedE2e(cliRoot, url, await readToken(directory, e2ePrincipalId(install.installId)), e2eSuite, { uat });
     }),
     schemas: async commit => ({ target: schemaAt(await run('git', ['show', `${commit}:src/release.ts`], cliRoot).catch(() => '')), database: await databaseSchemaOf(url) }),
     pin: commit => pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run),

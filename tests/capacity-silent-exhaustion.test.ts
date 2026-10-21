@@ -212,10 +212,8 @@ async function silentApproverLoop(label: string) {
     persist: async () => {},
     credentials: async () => ({}),
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     idleScreenPauseMs: 0,
   } as unknown as DaemonEffects;
   const filed = await ok(operator, 'POST', 'work', definition(`silent ${label}`)) as Work;

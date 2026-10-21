@@ -207,8 +207,8 @@ test('integration:harness-contract-apply — a loop run (runDaemon, research rew
   await writeFile(join(units, serving), unitText('/srv/another/graphyard'));
   const run = async (wired: Partial<DaemonEffects>, state = emptyDaemonState(master)) => {
     const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date().toISOString() }),
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
-      observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: new Date().toISOString(), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+      closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
+      observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: new Date().toISOString(), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {},
       research: { cwd: own.root }, ...wired } as unknown as DaemonEffects;
     await runDaemon(master, state, effects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], repository: own.root, checkout: () => ({ root: own.root, commit: null, modified: [], untracked: [] }) as never, log: () => {} });
     return state;

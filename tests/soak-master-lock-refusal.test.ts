@@ -53,9 +53,9 @@ test('unit:soak-lock-refusal-visible — over two simulated days the real loop h
   let cursor: DaemonState | null = null;
   const effects = (persist: DaemonEffects['persist'], snapshot: DaemonEffects['snapshot']): DaemonEffects => ({
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-    snapshot, closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    snapshot, closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist,
+    recordDeployment: async () => {}, persist,
   });
   const cleanCheckout = () => ({ root: '/', commit: null, modified: [], untracked: [] });
   /** One unit restart: `master run` reads the cursor, and its runDaemon is refused on the holder's lock. */

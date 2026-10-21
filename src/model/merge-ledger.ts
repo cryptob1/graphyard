@@ -4,7 +4,7 @@ import { z } from 'zod';
 /**
  * The merge ledger: every merge Graphyard intends, pushes, reconciles or refuses leaves an event
  * here, so main's history can be read against what the control plane meant to land. The fold
- * gives each item's latest ledger state; the main watch (daemon/main-watch.ts) calls a commit on
+ * gives each item's latest ledger state; a reader of main's history calls a commit on
  * main that matches a state's merge commit `ledger`, and one nothing explains `unknown`.
  */
 export const mergeLedgerKinds = {

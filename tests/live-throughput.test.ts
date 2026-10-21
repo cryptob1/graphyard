@@ -623,9 +623,9 @@ test('unit:throughput-recorded-by-loop — after a verified deployment the loop 
     let answer: () => Promise<LoopThroughputOutcome> = async () => ({ outcome: 'recorded', revision: observed.sha, detail: `Recorded for ${observed.sha}` });
     const effects: DaemonEffects = {
       agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-      snapshot: async () => ({ work: [delivered], now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      snapshot: async () => ({ work: [delivered], now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {},
       observeDeployment: async () => ({ ...observed, at: new Date().toISOString(), reason: observed.sha ? null : 'not configured', deployed: observed.sha ? [delivered.key] : [], pending: observed.sha ? [] : [delivered.key], requests: 0 }) as any,
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      recordDeployment: async () => {}, persist: async () => {},
       measureThroughput: async (_work, sha) => { asked.push(sha); return answer(); },
     };
     await runCycle(master, state, effects, () => Date.now());
@@ -768,9 +768,9 @@ async function throughputCycle(directory: string) {
 }
 const cycleEffects = (delivered: () => Work[], sha: string, measure: DaemonEffects['measureThroughput']): DaemonEffects => ({
   agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-  snapshot: async () => ({ work: delivered(), now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+  snapshot: async () => ({ work: delivered(), now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {},
   observeDeployment: async () => ({ source: 'endpoint', sha, at: new Date().toISOString(), reason: null, deployed: delivered().map(item => item.key), pending: [], requests: 0 }) as any,
-  recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, measureThroughput: measure,
+  recordDeployment: async () => {}, persist: async () => {}, measureThroughput: measure,
 });
 
 test('integration:throughput-remeasure-unverified — while the serving release\'s newest measurement is unverified and deliveries have merged since, the loop measures that same revision again instead of answering current forever; the ask stays budgeted and once per cycle', async () => {

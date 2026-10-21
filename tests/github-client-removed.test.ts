@@ -166,9 +166,9 @@ const config = () => masterConfigSchema.parse({ version: 1, url, credentialFile:
 const baseEffects = (work: () => Promise<Work[]>, at: () => number) => ({
   agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
   snapshot: async () => ({ work: await work(), now: new Date(at()).toISOString() }),
-  closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+  closeSession: () => {}, dispatch: async () => {},
   observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at()).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-  recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+  recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
   github: trap('the GitHub client'), merge: trap('GitHub\'s merge'), shadow: trap('the shadow gate'),
 });
 

@@ -107,9 +107,9 @@ async function loop(effects: Partial<DaemonEffects>, snapshot: () => Work[]) {
     agents: () => [], herdr: () => ({ agents: [], available: true }),
     credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: snapshot(), now: iso(0) }),
-    dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    dispatch: async () => {}, merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, closeSession: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, closeSession: () => {}, persist: async () => {},
     ...effects,
   } as DaemonEffects;
   // Every cycle's faults pass observes afresh, so a fence left standing is seen on the cycle it stands.

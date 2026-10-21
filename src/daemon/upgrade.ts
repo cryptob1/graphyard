@@ -491,7 +491,7 @@ export async function performSelfUpgrade(config: MasterConfig, state: DaemonStat
   // deployed first; only a deployed (or kept) tip goes on to the alignment and the restarts below.
   // GY-2344: the deploy runs off the cycle: the pass starts it (or reports the one in flight) and
   // returns, so the loop keeps cycling — heartbeat, dispatch, the merge writer — while the deploy's
-  // end-to-end run proceeds; the result is recorded when it settles, and the pass after that
+  // build and health check proceed; the result is recorded when it settles, and the pass after that
   // restarts onto the deployed (or kept) tip.
   if (ports && typeof ports !== 'string' && checkout.dirty === false && checkout.detached === true) {
     const offCycle = deployTipOffCycle(state, to, checkout.commit, ports, { git, at, persist, note: (detail, failure) => note(detail, failure, deployKey) });

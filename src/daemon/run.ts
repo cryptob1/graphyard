@@ -26,7 +26,6 @@ import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
 import { divergedHead } from '../cli/checkout-restore-act.js';
 import { describeTimings } from '../master/timings.js';
 import { stopDoctorRuns, doctorReport } from './doctor.js';
-import { mainWatchSummary } from './main-watch.js';
 import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
 import { deployInFlight } from './continuous-deploy.js';
 import { stallNeedsMaster, wakeMasterForStalls } from './cycle-master.js';
@@ -68,8 +67,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     // The cycle's usual wall time, p50 and p95 over the last 30 minutes (GY-616).
     cycleTime: cycleTimes(state.metrics, now),
     deployment: state.deployment,
-    // The main watch (GY-1519): unknown commits on main, the newest, and whether promotion is frozen on one.
-    mainWatch: mainWatchSummary(state.mainWatch),
     // The control-plane merge executor (GY-1524): the heads queued oldest first, the merge in flight, the last delivery and the newest refusals.
     mergeWriter: mergeWriterSummary(state.mergeWriter),
     // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).

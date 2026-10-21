@@ -32,9 +32,9 @@ function effects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
     agents: () => [],
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: iso(0) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     persist: async () => {},
     ...overrides,
   };
@@ -185,9 +185,9 @@ test('unit:detached-rejection-survived — an unhandled rejection or uncaught ex
       const state = emptyDaemonState(master);
       let cycles = 0;
       const effects = {
-        agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+        agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-        recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+        recordDeployment: async () => {}, persist: async () => {},
         snapshot: async () => {
           cycles += 1;
           // A detached promise, as an approver watch or a Herdr read nobody awaited would leave behind.

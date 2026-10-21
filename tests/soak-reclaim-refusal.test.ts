@@ -56,8 +56,8 @@ test('unit:soak-invariants-hold — over three days a standing worktree refusal 
       await writeWorktreeInventoryCache(root, { at: removal.at, entries: removal.entries, held: removal.held });
       return { ...await reclaimWorktrees(root, snapshot, { idleMs: reclaimIdleMs(master), entries: removal.entries }), trees: removal };
     };
-    const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: items, now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: items, now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, persist: async () => {},
       reclaim } as unknown as DaemonEffects;
 
     const state = emptyDaemonState(master), violations: string[] = [];

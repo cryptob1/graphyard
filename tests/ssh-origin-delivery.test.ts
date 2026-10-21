@@ -336,9 +336,9 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
   const mergeTick = async () => {
     const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
       snapshot: async () => ({ work: [await document()], now: new Date(clock).toISOString() }),
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      closeSession: () => {}, dispatch: async () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+      recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
       github: new Proxy({}, { get: (_, name) => { throw new Error(`the delivery called GitHub (${String(name)})`); } }),
       merge: new Proxy({}, { get: (_, name) => { throw new Error(`the delivery called GitHub's merge (${String(name)})`); } }),
       mergeWriter: writerReads } as unknown as DaemonEffects;

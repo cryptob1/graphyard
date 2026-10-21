@@ -91,10 +91,8 @@ test('unit:soak-invariants-hold — across the real loop\'s cycles a withdrawn p
     snapshot: async () => { const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: snapshot.now }; },
     closeSession: () => {},
     dispatch: launch,
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this soak', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
   } as unknown as DaemonEffects;
   const state = emptyDaemonState(loopConfig()), violations: string[] = [];

@@ -29,7 +29,7 @@ A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deplo
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup`, `db verify`, `db fence` before move. **Upgrade:** [upgrade](install.md#upgrading-an-existing-installation); the loop rolls failed deploys back. **Restore:** `db migrate`, `db restore`.
+**Backup:** `graphyard db backup`, `db verify`, `db fence` before move. **Upgrade:** [upgrade](install.md#upgrading-an-existing-installation); the loop's continuous deploy is build, restart, `/healthz?strict` reporting the deployed commit, and it rolls a failed deploy or health check back. **Restore:** `db migrate`, `db restore`.
 
 ## Manual fallback
 

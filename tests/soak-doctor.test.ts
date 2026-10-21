@@ -94,9 +94,9 @@ test('unit:soak-invariants-hold — over a simulated day the doctor drops and cl
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work.map(entry => structuredClone(entry)), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
     // Production serves the base all day: the deployment step has nothing to fault, so every instance the day opens is the doctor's.
-    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {},
     faultClassPolicy: policy, doctor,
   } as unknown as DaemonEffects;
 
@@ -193,8 +193,8 @@ test('unit:soak-refused-filing-outlives-the-ledger-count — over more than a we
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [structuredClone(control)], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
-    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {},
     faultClassPolicy: policy, doctor,
   } as unknown as DaemonEffects;
   const violations: string[] = [];
@@ -241,8 +241,8 @@ test('unit:soak-refused-filing-outlives-any-gap — a refusal create gave once i
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [structuredClone(control)], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
-    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {},
     faultClassPolicy: policy, doctor,
   } as unknown as DaemonEffects;
   const violations: string[] = [];

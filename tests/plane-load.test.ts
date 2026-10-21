@@ -374,7 +374,7 @@ async function masterLoop(end: number, failures: string[]) {
   }), {
     agents: async () => [], herdr: async () => ({ agents: [], available: true }), credentials: async () => ({}), roleHealth: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    requestProof: async () => {}, requestSmoke: async () => {}, closeSession: async () => {}, dispatch: async () => ({ pane: null }),
+ closeSession: async () => {}, dispatch: async () => ({ pane: null }),
   }) as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   let cycles = 0;

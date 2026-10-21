@@ -592,8 +592,8 @@ test('integration:mechanical-plan-report-surfaced — a refused plan report is a
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {},
     mechanicalFixes: async () => ({ requests: [{ key: 'GY-1761', pr: 1169, head, reviewId: 5499583025, epoch: 1, at: iso(start - 35 * minute), mechanical: [], substantive: [], paths: ['src/widget.ts'] }] }),
     recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
@@ -644,8 +644,8 @@ test('integration:mechanical-plan-report-blocks-decision — an item whose plann
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {},
     mechanicalFixes: async () => ({ requests: [{ key: 'GY-1761', pr: 1169, head, reviewId: 5499583025, epoch: 1, at: iso(start - 35 * minute), mechanical: [], substantive: [], paths: ['src/widget.ts'] }] }),
     recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
@@ -690,8 +690,8 @@ test('integration:mechanical-plan-report-clear-blocks-decision — a held plan t
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {},
     mechanicalFixes: async () => ({ requests: [] }),
     recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
@@ -726,8 +726,8 @@ test('integration:scope-evidence-gate-failed-read — a failed tree read decides
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {}, reviewFindings: async () => [], basePaths: async (paths: string[]) => new Set(paths),
     repositoryFiles: async () => { reads++; throw new Error('git is unavailable'); },
     decideScope: async (item: Work) => { decided.push(true); return item; },
@@ -770,8 +770,8 @@ test('integration:scope-evidence-gate-repeated-cycles — the loop reads the tre
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [...plane.values()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {}, basePaths: async (paths: string[]) => new Set(paths),
     // A finding naming each offender would ground an automatic widening; a terminal non-repository refusal must never reach it.
     reviewFindings: async () => [{ ground: 'review finding', text: 'daemon.relea upgrade.align and .graphyard/master.json need changes' }],
@@ -889,8 +889,8 @@ async function timedOutClearReplay(state: ReturnType<typeof emptyDaemonState>, c
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {},
     mechanicalFixes: async () => ({ requests: [] }),
     recordMechanicalPlan: async (_item: Work, plan: { reviewId: number; head: string } | null) => { attempts.push(plan); throw new Error('The operation was aborted due to timeout'); },
@@ -1017,9 +1017,9 @@ function instanceItem(key: string, reworkRequested: boolean, verdict: boolean): 
 const instanceEffects = (work: () => Work, overrides: Partial<DaemonEffects>): DaemonEffects => ({
   agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
   snapshot: async () => ({ work: [work()], now: instanceIso(0), jobs: [] }),
-  closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+  closeSession: () => {}, dispatch: async () => {},
   observeDeployment: async () => ({ source: 'unavailable', sha: null, at: instanceIso(0), reason: 'not configured', deployed: [], pending: [] }),
-  recordDeployment: async () => {}, requestSmoke: () => {},
+  recordDeployment: async () => {},
   decide: async () => ({ id: 'unused' }), decisions: async () => ({ decisions: [] }),
   approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-1' }), persist: async () => {},
   ...overrides,

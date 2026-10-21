@@ -132,10 +132,8 @@ async function daemon(work: (cycle: number) => Work[], overrides: Partial<Daemon
     snapshot: async () => ({ work: work(cycle++), now: observedAt }),
     closeSession: () => {},
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     ...overrides,
   };

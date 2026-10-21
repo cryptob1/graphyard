@@ -264,9 +264,9 @@ test('unit:workspace-failure-spares-profile — the loop cools off no profile fo
   const effectsWith = (failure: () => Promise<never>): DaemonEffects => ({
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: new Date().toISOString() }),
-    closeSession: () => {}, dispatch: failure, requestProof: () => {},
+    closeSession: () => {}, dispatch: failure,
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
   });
   const cycle = async (effects: DaemonEffects, items: Work[]) => {
     const state = emptyDaemonState(config);

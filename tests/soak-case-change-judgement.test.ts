@@ -68,9 +68,9 @@ test('unit:soak-case-change-judgement — a simulated day of the real loop: ever
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [], now: new Date(now).toISOString() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'endpoint', sha: 'ba607f8a809ed20fea15387e1934425cacbfef9f', at: new Date(now).toISOString(), reason: null, deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, acceptance,
+    recordDeployment: async () => {}, acceptance,
   } as unknown as DaemonEffects;
   const state = emptyDaemonState(config());
   const violations: string[] = [];

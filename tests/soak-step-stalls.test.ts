@@ -179,9 +179,8 @@ async function runDay(options: { dispatchFailure?: string; mergeRecordFailure?: 
       if (options.reclaimLands?.(now - start)) return { root: '/outside/repo', at: new Date(now).toISOString(), applied: true, scanned: 0, idleMs: 0, removed: [], kept: [], freeBefore: null, freeAfter: null, freedBytes: 0, errors: [] };
       throw new Error(options.reclaimFailure);
     } } : {}),
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     ...(options.withMergeWriter ? {
       mergeWriter: {
         baseBranch: 'main', retrials: 1, now: () => now,
@@ -566,7 +565,7 @@ async function snapshotDay(state: DaemonState, from: number, span: number) {
       if (standing) admitted.push((JSON.parse(cursor) as DaemonState).stepStalls[standing.signature]?.attemptAt === standing.attemptAt);
       throw new Error('Graphyard refused /api/work (503): upstream unavailable');
     },
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     persist: async (written: DaemonState) => { cursor = JSON.stringify(written); },

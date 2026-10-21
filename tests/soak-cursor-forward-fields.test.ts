@@ -53,9 +53,9 @@ test('unit:soak-cursor-forward-fields — over a simulated day of loop restarts,
     const effects: DaemonEffects = {
       agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
       snapshot: async () => { if (++cycles >= cyclesPerRun) process.emit('SIGUSR2' as NodeJS.Signals); return { work: [], now: iso() }; },
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      closeSession: () => {}, dispatch: async () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist, loadedRelease: release,
+      recordDeployment: async () => {}, persist, loadedRelease: release,
     };
     // Every other reload adopts a change, so the reload record is rewritten with a new declared reading.
     const reload = async () => { reloads++; return { config: master, changed: reloads % 2 ? ['maxWorkers'] : [], at: iso(), refused: null }; };

@@ -48,9 +48,9 @@ function cycle(work: Work[], overrides: Partial<Omit<Cycle, 'effects'>> & { doct
     agents: () => overrides.agents ?? [],
     credentials: async () => ({}),
     snapshot: async () => ({ work, now: observedAt }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
   };
   const state: DaemonState = overrides.state ?? emptyDaemonState(master);
   const effects = { ...base, ...effectOverrides, ...(doctor === null || doctor === undefined ? {} : { doctor }) } as DaemonEffects;

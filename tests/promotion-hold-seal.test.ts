@@ -13,30 +13,24 @@ import type { Principal } from '../src/model.js';
 import { cutAsync, deployToUatAsync, gitIn, releaseFilingIdentity, validateAndRecord, type CandidateBuild, type ReleaseCandidate } from '../src/release-candidate.js';
 import { handedImportsVariable } from '../src/validation-import.js';
 import { releaseCommands } from '../src/cli/release.js';
-import { localReleasePorts } from '../src/daemon/release-ports.js';
-import { masterConfigSchema } from '../src/master.js';
-import { defaultChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { releaseLedgerGit } from './helpers/release-ledger-git.js';
 
-// GY-1874: a direct promotion — `release promote` with a plane credential, and the loop's local
-// promotion port — reads the candidate's imported-run hold and then deploys. The read alone does not
-// bind the deploy: before any deployer runs, the direct paths seal the hold they read (an admin or
-// an operator agent seals; the workflows' release-filing identity and the loop's operator-agent
-// identity both are), so a required failure imported after the read is seen and refused, and once
-// the seal stands no import can bind before the deploy. A held candidate is never sealed, so a
-// passing import can still release it and promotion retries.
+// GY-1874: a direct promotion — `release promote` with a plane credential — reads the candidate's
+// imported-run hold and then deploys. The read alone does not bind the deploy: before any deployer
+// runs, the direct path seals the hold it read (an admin or an operator agent seals; the workflows'
+// release-filing identity is one), so a required failure imported after the read is seen and
+// refused, and once the seal stands no import can bind before the deploy. A held candidate is never
+// sealed, so a passing import can still release it and promotion retries.
 
 // Importing needs the external-runs:import grant (GY-1879) beside the producer role.
 const producer: Principal = { id: 'huck-producer', role: 'producer', grants: ['external-runs:import'] };
 const reader: Principal = { id: 'coordinator-reader', role: 'reader' };
 // The identity GRAPHYARD_RELEASE_TOKEN is provisioned as (src/master/release-filing.ts): the credential a direct `release promote` holds in the uat environment.
 const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['owner/project'], workItems: [] } };
-// The loop's own operator-agent identity: the credential the daemon's plane connection seals through (scoped to the repository, as it is provisioned).
-const loopOperator: Principal = { id: 'graphyard-master-operator', role: 'operator-agent', scope: { repositories: ['owner/project'], workItems: [] } };
 // A producer without that grant: its import is refused 403 for the grant, before any seal is read.
 const ungranted: Principal = { id: 'unit-producer', role: 'producer', proofs: ['unit:*'] };
-const principals = [producer, ungranted, reader, releaseFiler, loopOperator];
+const principals = [producer, ungranted, reader, releaseFiler];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 
 let database: InstanceType<typeof EmbeddedPostgres>, store: Store, http: ReturnType<typeof server>, url: string, scratch: string, work: string;
@@ -114,7 +108,7 @@ async function cutCandidate(n: number) {
   return candidate;
 }
 
-test('unit:promotion-hold-sealed-before-production — a required failure imported after a direct promotion read its hold and before the deployer is called refuses promotion through the CLI and the daemon port, naming the failure, with the deployer uncalled; without the import an all-passing candidate deploys once', async () => {
+test('unit:promotion-hold-sealed-before-production — a required failure imported after a direct promotion read its hold and before the deployer is called refuses promotion through the CLI, naming the failure, with the deployer uncalled; without the import an all-passing candidate deploys once', async () => {
   delete process.env[handedImportsVariable];
 
   // ——— The CLI path (`release promote` with a plane credential): ———
@@ -159,41 +153,6 @@ test('unit:promotion-hold-sealed-before-production — a required failure import
     const afterSeal = await call('validation/import', producer, requiredFailure(x.sha, 'cli-late-3'));
     assert.equal(afterSeal.status, 409, 'the retried promotion sealed the candidate too');
   } finally { savedDeploy === undefined ? delete process.env.GRAPHYARD_DEPLOY_DIGESTS : process.env.GRAPHYARD_DEPLOY_DIGESTS = savedDeploy; }
-
-  // ——— The daemon path (the loop's local promotion port): ———
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [],
-    run: { candidates: { everyMerges: 1, idleMinutes: 15 }, mergeWriter: { deployKeyFile: join('/keys', 'deploy'), retrials: 2 } } });
-  let daemonInterleave: (() => Promise<void>) | null = null;
-  const ports = localReleasePorts(config, work, defaultChildRun, {
-    base: scratch, record: async () => ({}),
-    environment: { ...process.env, GRAPHYARD_UAT_URL: 'https://uat.example.test', GRAPHYARD_DEPLOY_DIGESTS: deployCommand(deployLog('daemon')) },
-    plane: { goals: async () => [], stage: async () => undefined,
-      read: (path: string) => readAs(reader)(path),
-      seal: async (path: string, data: unknown) => {
-        if (daemonInterleave) { const hook = daemonInterleave; daemonInterleave = null; await hook(); }
-        return readAs(loopOperator)(path, data);
-      } },
-  })!;
-
-  // No interleaved import: the daemon promotion deploys once.
-  const y = await cutCandidate(3);
-  assert.deepEqual(await ports.promote(y.id), { promoted: true, sha: y.sha });
-  assert.equal(await readFile(deployLog('daemon'), 'utf8'), `${y.sha}\n`, 'the daemon deployer was called exactly once');
-  const daemonLate = await call('validation/import', producer, requiredFailure(y.sha, 'daemon-late-1'));
-  assert.equal(daemonLate.status, 409, 'the daemon promotion sealed the candidate');
-
-  // The interleaving under test, through the daemon port.
-  const z = await cutCandidate(4);
-  daemonInterleave = () => imported(requiredFailure(z.sha, 'daemon-late-2'));
-  const refusedDaemon = await ports.promote(z.id);
-  assert.equal(refusedDaemon.promoted, false, 'the interleaved required failure holds the daemon promotion');
-  assert.match(refusedDaemon.refusals.join('\n'), new RegExp(`held by imported external runs at ${z.sha}: pay \\(failed in run daemon-late-2\\)`));
-  assert.equal(await readFile(deployLog('daemon'), 'utf8'), `${y.sha}\n`, 'the recording deployer received no call');
-
-  await imported(passingRun(z.sha, 'daemon-fix'));
-  assert.deepEqual(await ports.promote(z.id), { promoted: true, sha: z.sha }, 'a released hold promotes through the daemon port');
-  assert.equal(await readFile(deployLog('daemon'), 'utf8'), `${y.sha}\n${z.sha}\n`, 'the released retry deployed once');
 });
 
 test('unit:sealed-import-grant-and-seal-refusals-distinct — against the promoted candidate a producer holding external-runs:import is refused 409 because its hold was sealed at promotion, and a producer without the grant importing the same run is refused 403 for the grant before the seal is consulted', async () => {

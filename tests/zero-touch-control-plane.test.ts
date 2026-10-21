@@ -248,9 +248,9 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
     const document = async () => (await store.workDocument(item.id))!;
     const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
       snapshot: async () => ({ work: [await document()], now: new Date(clock).toISOString() }),
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      closeSession: () => {}, dispatch: async () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+      recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
       github: githubDouble, merge: githubDouble, mergeWriter: reads } as unknown as DaemonEffects;
     await runCycle(config, state, effects, () => clock);
     await mergeWriterIdle(state);

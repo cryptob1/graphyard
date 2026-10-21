@@ -325,10 +325,8 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       }
       recompute(target);
     },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(clockStart), reason: 'No deployment endpoint is configured in this exercise', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     decide: async (item, action, reason) => {
       const target = find(item.id);
       const entries = decisions.get(target.id) ?? [];

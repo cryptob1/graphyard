@@ -116,10 +116,8 @@ test('unit:soak-invariants-hold — over two days, every reviewer and approver s
       panes = panes.filter(agent => agent.pane_id !== pane);
     },
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'no deployment endpoint in this soak', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     idleScreenPauseMs: 0,
     sessionOutput: agent => output.get(agent.pane_id ?? '') ?? `● Judging as ${agent.name}…\n`,

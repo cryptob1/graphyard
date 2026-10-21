@@ -82,10 +82,8 @@ function loop(config: MasterConfig, herdr: Herdr) {
       herdr.agents = [...herdr.agents.filter(agent => agent.name !== profile.agentName), { name: profile.agentName, pane_id: `pane-${profile.name}-${calls.dispatch.length}`, agent_status: 'working' }];
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now()).toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     sessionOutput: agent => herdr.output[agent.name!] ?? '',
     reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,

@@ -12,14 +12,13 @@ export const deployKey = 'upgrade:deploy';
 /**
  * GY-1982: what continuous deploy runs a commit through, each throwing its failure's reason:
  * `deploy` the upgrade sequence after the checkout move (npm ci, database backup, redeploy through
- * the install adapter), `health` the served revision's /healthz, `e2e` every case under e2e/cases/
- * against the install's own URL. `schemas` reads, before the deploy, the commit's schema generation
- * and the database's; `pin` marks a deployed commit known good.
+ * the install adapter), `health` the served revision's /healthz reporting the deployed commit.
+ * `schemas` reads, before the deploy, the commit's schema generation and the database's; `pin`
+ * marks a deployed commit known good.
  */
 export interface DeployPorts {
   deploy(commit: string): Promise<void>;
   health(commit: string): Promise<void>;
-  e2e(commit: string): Promise<void>;
   schemas(commit: string): Promise<{ target: number | null; database: number | null }>;
   pin?(commit: string): Promise<unknown>;
 }
@@ -42,35 +41,34 @@ export const deployLine = (failed: DeployFailure | null | undefined) => !failed 
 /**
  * GY-1982: one continuous deploy of the base tip, between cycles. The release already recorded is
  * no deploy, and a tip that failed twice waits for the base branch to move. Otherwise the checkout
- * moves onto the tip, which is deployed, health-checked and run end to end; passing, the release
- * reading names it, it is pinned known good, and 'deployed' has the alignment restart onto it. Failing,
- * the recorded release is redeployed the same way (end to end excepted), the checkout returned and
- * the failure recorded — unless the tip migrated the database past what the older release accepts:
- * then it is kept, and the restart onto it goes ahead.
+ * moves onto the tip, which is deployed and health-checked; passing, the release reading names it,
+ * it is pinned known good, and 'deployed' has the alignment restart onto it. Failing, the recorded
+ * release is redeployed the same way, the checkout returned and the failure recorded — unless the
+ * tip migrated the database past what the older release accepts: then it is kept, and the restart
+ * onto it goes ahead.
  */
 export async function deployTip(state: DaemonState, tip: string, from: string, ports: DeployPorts, ctx: { git: (...args: string[]) => Promise<string> | string; at: () => string; persist: () => Promise<void>; note: (detail: string, failure: boolean) => Promise<void> }): Promise<SelfUpgradeOutcome | 'deployed' | null> {
   const recorded = state.promotion?.promotedSha ?? state.release?.commit ?? null;
   if (sameCommit(recorded, tip)) return null;
   const prior = state.promotion?.deployFailed, attempts = prior && sameCommit(prior.sha, tip) ? prior.attempts + 1 : 1;
   if (attempts > 2) return { outcome: 'skipped', reason: spentTipLine(prior!) };
-  const sequence = async (commit: string, steps: readonly ('deploy' | 'health' | 'e2e')[]) => {
+  const sequence = async (commit: string) => {
     try { await ctx.git('checkout', '--detach', '--quiet', commit); } catch (error) { return { step: 'checkout', reason: message(error) }; }
-    for (const step of steps) try { await ports[step](commit); } catch (error) { return { step, reason: message(error) }; }
+    for (const step of ['deploy', 'health'] as const) try { await ports[step](commit); } catch (error) { return { step, reason: message(error) }; }
     return null;
   };
   const schemas = await ports.schemas(tip).catch(() => ({ target: null, database: null }));
-  const failure = await sequence(tip, ['deploy', 'health', 'e2e']);
+  const failure = await sequence(tip);
   if (!failure) {
     state.promotion = promotionReading(state.promotion, ctx.at(), { mainSha: tip, promotedSha: tip, promotedAt: ctx.at(), deployFailed: null });
     await ctx.persist();
     await ports.pin?.(tip).catch(() => {});
-    await ctx.note(`Deployed base tip ${shortCommit(tip)}: health and end to end passed`, false);
+    await ctx.note(`Deployed base tip ${shortCommit(tip)}: health passed`, false);
     return 'deployed';
   }
   const kept = schemas.target !== null && schemas.database !== null && schemas.target > schemas.database;
-  const back = kept || !recorded ? null : await sequence(recorded, ['deploy', 'health']);
+  const back = kept || !recorded ? null : await sequence(recorded);
   if (!kept) await Promise.resolve().then(() => ctx.git('checkout', '--detach', '--quiet', from)).catch(() => '');
-  // GY-2217: the reason is never cut: an end-to-end failure names every failing case id and its failing step, and master status shows the whole list.
   const deployFailed: DeployFailure = { sha: tip, step: failure.step, reason: back ? `${failure.reason}; redeploying ${shortCommit(recorded)} failed at ${back.step}: ${back.reason}` : failure.reason,
     rolledBackTo: kept || back ? null : recorded, kept, attempts, at: ctx.at() };
   state.promotion = promotionReading(state.promotion, ctx.at(), { mainSha: tip, ...(kept ? { promotedSha: tip, promotedAt: ctx.at() } : {}), deployFailed });
@@ -92,9 +90,9 @@ export const deployInFlight = (): { tip: string; from: string } | null => runnin
 
 /**
  * GY-2344: starts the deploy of the base tip off the cycle and answers at once the line the
- * alignment's pass reports while it runs: deploy, health and the end-to-end suite — and the
- * rollback on failure — proceed while the loop keeps cycling, instead of holding every dispatch,
- * merge and heartbeat behind them for as long as the suite takes. While a deploy runs, no second
+ * alignment's pass reports while it runs: deploy and health — and the rollback on failure —
+ * proceed while the loop keeps cycling, instead of holding every dispatch, merge and heartbeat
+ * behind them for as long as the build takes. While a deploy runs, no second
  * is started: every pass until it settles reports the one in flight. Null when `deployTip` has
  * nothing to run — the recorded release already names the tip — so the pass proceeds as before,
  * and the spent line when the tip failed its two attempts, so the pass never checks it out. The
@@ -109,5 +107,5 @@ export function deployTipOffCycle(state: DaemonState, tip: string, from: string,
   if (running) return `a deploy of base tip ${shortCommit(running.tip)} is running off the cycle: the loop keeps cycling meanwhile and starts no second deploy`;
   running = { tip, from };
   void deployTip(state, tip, from, ports, ctx).finally(() => { running = null; }).catch(() => {});
-  return `deploying base tip ${shortCommit(tip)} off the cycle: deploy, health and the end-to-end run proceed while the loop keeps cycling, and the result is recorded when it settles`;
+  return `deploying base tip ${shortCommit(tip)} off the cycle: deploy and health proceed while the loop keeps cycling, and the result is recorded when it settles`;
 }

@@ -8,7 +8,7 @@ import { Refusal, demand } from './model/refusal.js';
 import type { Store } from './store.js';
 import { importExternalRun, type ExternalRunResult } from './runner-report.js';
 import { importedRunVerdict, type FlakyAcceptance, type ImportedBlockingCase } from './e2e/runner.js';
-import { candidateAtHead, candidateTagPrefix, releaseFilingIdentity, type PromotionImports, type ReleaseCandidate } from './release-candidate.js';
+import { candidateAtHead, candidateTagPrefix, type PromotionImports, type ReleaseCandidate } from './release-candidate.js';
 import { externalRunsImportGrant } from './server/principals.js';
 import type { GitRunner } from './merge-writer/local-observation.js';
 
@@ -243,32 +243,6 @@ export function sealCheckRecord(candidate: Pick<ReleaseCandidate, 'id' | 'sha'>,
   return { id: candidate.id, sha: candidate.sha, at: now.toISOString(), mayseal: answer.mayseal, role: answer.role, needed: answer.mayseal ? [] : answer.needed, ...sealCredential };
 }
 export const sealCheckTag = (record: SealCheckRecord) => `${sealCheckTagPrefix}${record.id}.${record.at.replace(/[-:]/g, '')}`;
-/**
- * The one attention item (owned by the master) master status raises while the newest seal check, by its
- * time across every listed candidate, was refused: an older candidate checked again after a newer one
- * passed is the current answer. It names the secret, its environment, the role it holds and the role it
- * needs; null when no candidate was checked, or the newest check may seal.
- */
-export function sealRefusalLine(candidates: readonly { id: string; sealCheck?: Omit<SealCheckRecord, 'id' | 'sha'> | null }[], repository = 'OWNER/REPO') {
-  const at = (check?: { at: string } | null) => { const ms = check ? Date.parse(check.at) : NaN; return Number.isFinite(ms) ? ms : -Infinity; };
-  const checked = candidates.reduce<(typeof candidates)[number] | null>((newest, candidate) => candidate.sealCheck && (!newest || at(candidate.sealCheck) > at(newest.sealCheck)) ? candidate : newest, null);
-  const check = checked?.sealCheck;
-  if (!checked || !check || check.mayseal) return null;
-  // `master setup --apply` reads a secret newer than its credential as current whatever it holds, so the remedy rotates and re-stores it outright.
-  const store = `TOKEN=$(openssl rand -hex 32); printf %s "$TOKEN" | graphyard operator-agent rotate ${releaseFilingIdentity.id} 600 "seal check refused" --token-stdin; printf %s "$TOKEN" | gh secret set ${check.secret} --repo ${repository} --env ${check.environment}; unset TOKEN`;
-  return { subject: 'installation', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, text: `Promotion of candidate ${checked.id} was refused for seal authority at ${check.at}: ${check.secret} in the ${check.environment} environment authenticates as ${check.role}, and sealing a candidate's imports needs ${check.needed.join(' or ')}`,
-    next: `replace ${check.secret} in the ${check.environment} environment with a fresh ${releaseFilingIdentity.id} (operator agent) token, as admin: ${store} (a revoked identity is reinstated by graphyard master setup --apply instead); the next candidate's seal check then passes` };
-}
-type SealChecked = Parameters<typeof sealRefusalLine>[0];
-/**
- * The loop cursor's promotion state as master status reads it: the refused seal check's item, or none. The checks come from
- * whichever read was later: the ledger's candidates, or the seal checks read on their own while the drive reads no ledger.
- */
-export function sealRefusalAttention(promotion?: { candidates?: SealChecked; ledgerReadAt?: string | null; sealChecks?: SealChecked; sealChecksReadAt?: string | null } | null, repository?: string) {
-  const own = promotion?.sealChecksReadAt && promotion.sealChecks && !(Date.parse(promotion.ledgerReadAt ?? '') >= Date.parse(promotion.sealChecksReadAt));
-  const line = sealRefusalLine((own ? promotion.sealChecks : promotion?.candidates) ?? [], repository);
-  return line ? [line] : [];
-}
 
 /**
  * Read candidate `id`'s hold at `sha` for promotion and, when it is released, seal it in the same

@@ -94,9 +94,9 @@ test('unit:soak-held-requirements-wait — over three simulated days matching qu
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: items.map(view), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decisions: async (work: Work) => {
       // First cold-start read for a quarantined ask (scope discovery) fails; the decisions-step retry succeeds.
       const item = items.find(entry => entry.key === work.key);
@@ -249,9 +249,9 @@ test('unit:soak-approved-resume-race — over three simulated days a still-appro
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: items.map(view), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decisions: async (work: Work) => ({ decisions: structuredClone(decisions.get(work.key) ?? []) }),
     decide: async (work: Work, action: string) => { requested.push(`${work.key}|${action}|${now}`); return { id: randomUUID(), state: 'requested' }; },
     withdraw: async () => {},

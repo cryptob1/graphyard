@@ -127,8 +127,8 @@ test('unit:soak-doctor-unblock-prose — over two simulated days every stuck-gat
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [...work.values()].map(entry => structuredClone(entry)), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
-    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
+    observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {},
     doctor,
   } as unknown as DaemonEffects;
 

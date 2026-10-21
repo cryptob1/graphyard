@@ -11,12 +11,8 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { cutAsync, gitIn, releaseFilingIdentity, type ReleaseCandidate } from '../src/release-candidate.js';
-import { sealRefusalAttention, sealRefusalLine, sealCheckTagPrefix } from '../src/validation-import.js';
+import { sealCheckTagPrefix } from '../src/validation-import.js';
 import { releaseCommands } from '../src/cli/release.js';
-import { promotionReads } from '../src/daemon/deployment.js';
-import { promotionStateSchema } from '../src/daemon/state.js';
-import { masterConfigSchema } from '../src/master.js';
-import { defaultChildRun } from '../src/child-runner.js';
 import { deliveryPolicySchema } from '../src/model/delivery-policy.js';
 import { renderPromotionWorkflow } from '../src/install/release-pipeline.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -25,8 +21,7 @@ import { releaseLedgerGit } from './helpers/release-ledger-git.js';
 // GY-1882: the uat GRAPHYARD_RELEASE_TOKEN seals a candidate's imports only after soak and UAT have
 // run, so a credential without the role failed promotion twenty minutes in. The plane answers whether
 // a caller may seal without sealing (GET /api/validation/import/seal-authority); `release seal-check`
-// runs it first in the uat imports job, records the answer on the candidate, and master status names
-// the secret and the role it needs when the newest check was refused.
+// runs it first in the uat imports job and records the answer on the candidate.
 
 const admin: Principal = { id: 'install-admin', role: 'admin' };
 const releaseFiler: Principal = { id: releaseFilingIdentity.id, role: 'operator-agent', capabilities: [...releaseFilingIdentity.capabilities], scope: { repositories: ['owner/project'], workItems: [] } };
@@ -117,7 +112,7 @@ test('unit:seal-authority-check-read-only — the route answers who may seal, wr
   assert.equal(await events(), before);
 });
 
-test('unit:seal-authority-preflight-and-attention — both workflows run release seal-check first in the uat imports job, and a refused check on the candidate raises one master status line naming GRAPHYARD_RELEASE_TOKEN in uat and the role it needs', async () => {
+test('unit:seal-authority-preflight-and-attention — both workflows run release seal-check first in the uat imports job, and a refused check is recorded on the candidate naming the role GRAPHYARD_RELEASE_TOKEN in uat authenticates as', async () => {
   // The rendered promotion workflow and Graphyard's own: the check precedes the step that seals.
   const policy = deliveryPolicySchema.parse({ mode: 'release-candidate', candidateSchedule: '0 */6 * * *',
     mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fast' }], perCandidate: [{ check: 'test:e2e', command: 'npm run test:e2e', source: 'script', reason: 'long' }] },
@@ -135,9 +130,11 @@ test('unit:seal-authority-preflight-and-attention — both workflows run release
   }
 
   const candidate = cutCandidates[0];
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
-  const ledger = () => promotionReads(config, work, defaultChildRun, true, false)!.ledger();
+  /** The candidate's newest seal check, read from its `rc-seal-check/ID.AT` records (newest first by check time). */
+  const newestCheck = () => {
+    const listed = gitIn(work)(['for-each-ref', '--sort=-refname', '--count=1', '--format=%(contents)', `refs/tags/${sealCheckTagPrefix}${candidate.id}.*`]).trim();
+    return listed ? JSON.parse(listed) as { id: string; mayseal: boolean; role: string; secret: string; environment: string } : null;
+  };
 
   // A stale token the plane does not accept at all, and one with the wrong role, are both refused and recorded.
   const revoked = await sealCheck(async () => { throw Object.assign(new Error('{"error":"Unauthorized"}'), { status: 401 }); }, [candidate.id, '--base', 'main']);
@@ -145,34 +142,16 @@ test('unit:seal-authority-preflight-and-attention — both workflows run release
   assert.equal(revoked.printed.mayseal, false);
   const stale = await sealCheck(apiAs(reader), [candidate.id, '--base', 'main']);
   assert.equal(stale.exitCode, 1);
-  let read = await ledger();
-  assert.equal(read.candidates![0].id, candidate.id);
-  assert.equal(read.candidates![0].sealCheck?.mayseal, false);
-  assert.equal(read.candidates![0].sealCheck?.role, 'reader', 'the newest check of the candidate is the one read');
-  // The loop's cursor keeps the check (its promotion candidates schema is strict).
-  const state = promotionStateSchema.parse({ checkedAt: new Date().toISOString(), mainSha: null, promotedSha: null, promotedAt: null, behind: null, inFlight: false, runsReadAt: null, dispatchedAt: null, lastDispatchAt: null,
-    candidates: read.candidates, nextDueAt: null, reason: null });
-  const line = sealRefusalLine(state.candidates!);
-  assert.ok(line, 'a refused check raises an attention line');
-  assert.match(line.text, new RegExp(`Promotion of candidate ${candidate.id} was refused for seal authority`));
-  assert.match(line.text, /GRAPHYARD_RELEASE_TOKEN in the uat environment authenticates as reader/);
-  assert.match(line.text, /needs admin or operator-agent/);
-  const owned = sealRefusalLine(state.candidates!, 'owner/project')!;
-  assert.match(owned.next, /graphyard operator-agent rotate graphyard-release-follow-up \d+ .* --token-stdin; .*gh secret set GRAPHYARD_RELEASE_TOKEN --repo owner\/project --env uat/, 'the remedy replaces the secret outright, whatever its stored time');
-  assert.equal(line.role, 'master'); assert.equal(line.human, false);
+  let read = newestCheck();
+  assert.equal(read?.id, candidate.id);
+  assert.equal(read?.mayseal, false);
+  assert.equal(read?.role, 'reader', 'the newest check of the candidate is the one read');
+  assert.deepEqual([read?.secret, read?.environment], ['GRAPHYARD_RELEASE_TOKEN', 'uat'], 'the record names the secret and its environment');
 
-  // Once the secret holds the release-filing identity, the next check passes and the line clears.
+  // Once the secret holds the release-filing identity, the next check passes.
   const fixed = await sealCheck(apiAs(releaseFiler), [candidate.id, '--base', 'main']);
   assert.equal(fixed.exitCode, 0);
-  read = await ledger();
-  assert.equal(read.candidates![0].sealCheck?.mayseal, true);
-  assert.equal(sealRefusalLine(read.candidates!), null);
-  assert.equal(sealRefusalLine([{ id: candidate.id }]), null, 'a candidate never checked raises nothing');
-  // The newest check by time decides across candidates: an older candidate re-checked after a newer one passed.
-  const check = (mayseal: boolean, hour: number) => ({ mayseal, role: mayseal ? 'operator-agent' : 'reader', needed: mayseal ? [] : needed, at: new Date(1_760_000_000_000 + hour * 3_600_000).toISOString(), secret: 'GRAPHYARD_RELEASE_TOKEN', environment: 'uat' });
-  const later = [{ id: 'rc-B', sealCheck: check(true, 9) }, { id: 'rc-A', sealCheck: check(false, 10) }];
-  assert.match(sealRefusalLine(later)?.text ?? '', /candidate rc-A was refused/, 'the later refusal of the older candidate stands');
-  assert.equal(sealRefusalLine([later[0], { id: 'rc-A', sealCheck: check(false, 8) }]), null, 'a refusal a later check passed is cleared');
+  assert.equal(newestCheck()?.mayseal, true);
 
   // A plane that predates the route: 404, or the operator-agent guard's 403; nothing is checked, recorded or failed.
   const tagsBefore = gitIn(work)(['tag', '--list', `${sealCheckTagPrefix}*`]);
@@ -190,16 +169,7 @@ test('unit:seal-authority-preflight-and-attention — both workflows run release
   const outOfScope = await sealCheck(apiAs(otherRepoFiler), [candidate.id, '--base', 'main']);
   assert.equal(outOfScope.exitCode, 1);
   assert.deepEqual(outOfScope.printed, { mayseal: false, role: outOfScopeRole, needed });
-  read = await ledger();
-  assert.equal(read.candidates![0].sealCheck?.mayseal, false);
-  assert.equal(read.candidates![0].sealCheck?.role, outOfScopeRole);
-  const scopeLine = sealRefusalLine(read.candidates!)!;
-  assert.match(scopeLine.text, /GRAPHYARD_RELEASE_TOKEN in the uat environment authenticates as operator-agent \(other repository\)/);
-  assert.match(scopeLine.text, /needs admin or operator-agent/);
-  assert.deepEqual(sealRefusalAttention({ candidates: read.candidates }), [scopeLine]);
-
-  // master status adds exactly that one line to its attention list.
-  const status = await readFile(fileURLToPath(new URL('../src/cli/master-status.ts', import.meta.url)), 'utf8');
-  assert.match(status, /lag\.attention\.push\(.*\.\.\.sealRefusalAttention\(cursor\?\.promotion, master\.repository\)\)/);
-  assert.deepEqual(sealRefusalAttention({ candidates: state.candidates }), [line], 'one item from the cursor, owned by the master');
+  read = newestCheck();
+  assert.equal(read?.mayseal, false);
+  assert.equal(read?.role, outOfScopeRole);
 });

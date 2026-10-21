@@ -146,9 +146,9 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
 });
 
 function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
-  return { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+  return { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }), closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, ...overrides };
+    recordDeployment: async () => {}, persist: async () => {}, ...overrides };
 }
 
 test('unit:system-invariants-checked — the loop checks every invariant each cycle, a violation is one standing fault of its class, and master status prints a line per invariant', async () => {
