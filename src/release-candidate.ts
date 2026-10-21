@@ -22,7 +22,7 @@ import type { ReleaseContract } from './e2e/case.js';
  * and nothing else, so merges to main never pause while a candidate is under test.
  *
  * UAT and production are Railway environments whose service tracks a branch of its own
- * (`release/uat`, `release/production`; see .railway/railway.ts), never main. Deploying a
+ * (`release/uat`, `release/production`), never main. Deploying a
  * candidate moves that branch to the candidate SHA. UAT validation is recorded as the tag
  * `rc-uat/ID` and only a passing record whose deployment served the candidate SHA lets
  * `release/production` move to it, recorded as `rc-production/ID`. A failed candidate files one

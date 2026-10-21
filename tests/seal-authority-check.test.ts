@@ -18,7 +18,6 @@ import { promotionStateSchema } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { deliveryPolicySchema } from '../src/model/delivery-policy.js';
-import { renderPromotionWorkflow } from '../src/install/release-pipeline.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { releaseLedgerGit } from './helpers/release-ledger-git.js';
 
@@ -118,12 +117,9 @@ test('unit:seal-authority-check-read-only — the route answers who may seal, wr
 });
 
 test('unit:seal-authority-preflight-and-attention — both workflows run release seal-check first in the uat imports job, and a refused check on the candidate raises one master status line naming GRAPHYARD_RELEASE_TOKEN in uat and the role it needs', async () => {
-  // The rendered promotion workflow and Graphyard's own: the check precedes the step that seals.
-  const policy = deliveryPolicySchema.parse({ mode: 'release-candidate', candidateSchedule: '0 */6 * * *',
-    mergeGate: { preMerge: [{ check: 'test', command: 'npm run test', source: 'script', reason: 'fast' }], perCandidate: [{ check: 'test:e2e', command: 'npm run test:e2e', source: 'script', reason: 'long' }] },
-    deploy: { adapter: 'railway', project: 'orders', uat: null, production: null } });
+  // Graphyard's own promotion workflow: the check precedes the step that seals.
   const own = await readFile(fileURLToPath(new URL('../.github/workflows/release-candidate.yml', import.meta.url)), 'utf8');
-  for (const [name, workflow] of [['rendered', renderPromotionWorkflow(policy, { cli: 'graphyard' })], ['own', own]] as const) {
+  for (const [name, workflow] of [['own', own]] as const) {
     const job = workflow.slice(workflow.indexOf('\n  imports:\n'), workflow.indexOf('\n  promote:\n'));
     assert.match(job, /environment: uat/, `${name}: the imports job runs in the uat environment`);
     const steps = job.slice(job.indexOf('steps:')).split('\n      - ').slice(1);

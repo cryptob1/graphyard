@@ -28,8 +28,6 @@ export interface UpgradeInputs {
   install: InstallRecord | null; url: string | null; backupFile: string;
   /** Tracked files modified in the CLI checkout: checkout keeps them, so the target would run mixed source. */
   cliChanges: string[];
-  /** The Railway workspace the redeploy names, for an account that belongs to several (--workspace). */
-  workspace: string | null;
   /** The image the redeploy names instead of the target's published one: a compose install's own build (GY-1982). */
   image?: string;
 }
@@ -60,7 +58,7 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
   // GY-2168: the redeploy builds the image from this checkout — the one the checkout step moved to
   // the target (or deployTip moved to the deployed commit) — never from whatever root the running
   // CLI's own code was loaded from, which a held pin may hold at another commit.
-  const install = inputs.install && redeployArguments(inputs.install, image, inputs.workspace, inputs.cliRoot);
+  const install = inputs.install && redeployArguments(inputs.install, image, inputs.cliRoot);
   const redeploy = install ? `${cli(cliRoot, 'install', ...install.slice(0, -1), '--plan')} && ${cli(cliRoot, 'install', ...install)}` : `no install record for this repository: redeploy ${image} by hand`;
   const url = inputs.url ? ['--url', inputs.url] : [];
   const steps: UpgradeStep[] = [
@@ -204,7 +202,7 @@ export async function deployPorts(input: { cliRoot: string; repoRoot: string; re
   };
   const inputsFor = (commit: string): UpgradeInputs => {
     const current = checkoutRelease(cliRoot);
-    return { cliRoot, repoRoot, current, target: { version: current.version, revision: commit, schema: null }, databaseSchema: null, install, url, workspace: null, cliChanges: [],
+    return { cliRoot, repoRoot, current, target: { version: current.version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
       image: install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
   };
   return {
@@ -241,7 +239,7 @@ export const renderPlan = (plan: UpgradePlan) => [`upgrade ${plan.from.version} 
 export const upgradeCommands = defineCommands([{
   name: 'upgrade',
   help: [
-    '  upgrade [--to VERSION|stable] [--workspace NAME] [--plan]',
+    '  upgrade [--to VERSION|stable] [--plan]',
     '                                Move the CLI checkout (then npm ci), back up the database,',
     '                                redeploy the server, restart loop and executors, refresh the',
     '                                generated files, and check /healthz, to one dated release;',
@@ -251,9 +249,6 @@ export const upgradeCommands = defineCommands([{
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
     const toIndex = flags.indexOf('--to');
     const to = toIndex >= 0 ? flags[toIndex + 1] ?? '' : stableChannel;
-    const workspaceIndex = flags.indexOf('--workspace');
-    const workspace = workspaceIndex >= 0 ? flags[workspaceIndex + 1] ?? '' : null;
-    if (workspace === '') throw new Error('Use upgrade --workspace NAME-OR-ID (railway whoami --json lists them)');
     const cliRoot = installationRoot, repoRoot = context.repositoryRoot();
     if (!flags.includes('--plan')) git(cliRoot, 'fetch', '--tags', '--force', 'origin');
     const repository = repositoryFromRemote(git(repoRoot, 'remote', 'get-url', 'origin'));
@@ -261,7 +256,7 @@ export const upgradeCommands = defineCommands([{
     const url = process.env.GRAPHYARD_URL || context.connection?.url ? context.base : null;
     const current = checkoutRelease(cliRoot);
     const target = resolveTarget(cliRoot, to);
-    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), workspace, databaseSchema: await databaseSchemaOf(url), url,
+    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), databaseSchema: await databaseSchemaOf(url), url,
       install: directory ? await readInstallRecord(directory) : null,
       backupFile: join(directory ?? join(repoRoot, '.graphyard'), 'backups', `before-${target.version}-${Date.now()}.json`) };
     const plan = upgradePlan(inputs);

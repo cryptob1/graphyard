@@ -19,9 +19,7 @@ Node 24, an `OWNER/REPO` checkout, `GRAPHYARD_CLI` exported, `gh` scope `repo` a
 
 ### Providers
 
-- `railway`: `npm i -g @railway/cli`, `railway login`.
-- `hetzner`: `brew install hcloud`, `hcloud context create graphyard`.
-- `docker-host`, `compose`: `curl -fsSL https://get.docker.com | sh`.
+- `compose`: `curl -fsSL https://get.docker.com | sh`.
 - `local` (`graphyard up --local`): no Docker; embedded Postgres.
 
 ## Step 1: plan and approve
@@ -52,25 +50,22 @@ Writes credentials, [variables](deployment.md#variables); deploys; registers the
 
 Dispatch a [small item](onboarding.md#4-prove-the-first-change); the merge writer trials and pushes it.
 
-## Roster and self-contained host
+## Roster
 
-`principal add ID --role ROLE [--grant …] [--proof …]` writes only `GRAPHYARD_PRINCIPALS`. `--target host` (or `--target hetzner`) puts server, Postgres, loop, Herdr and runtimes on one systemd machine; the host generates the deploy key (never copied off). Price: `--confirm-price`/`--max-monthly`.
+`principal add ID --role ROLE [--grant …] [--proof …]` writes only `GRAPHYARD_PRINCIPALS`.
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--workspace RAILWAY] [--plan]`: needs a clean checkout with `DATABASE_URL` and `GRAPHYARD_URL`; backs up, redeploys a build stamped from the target (`install --source-root DIR`), restarts the loop, waits for a healthy `/healthz`; refuses older schemas; failures name step and rollback (migrated: roll-forward).
+`graphyard upgrade [--to VERSION|stable] [--plan]`: needs a clean checkout with `DATABASE_URL` and `GRAPHYARD_URL`; backs up, redeploys a build stamped from the target (`install --source-root DIR`), restarts the loop, waits for a healthy `/healthz`; refuses older schemas; failures name step and rollback (migrated: roll-forward).
 
 ## Failure handling
 
 | Symptom | Action
 | --- | ---
 | `Preflight is incomplete` | run its `fix`
-| `Railway workspace` `false` | `--workspace`
 | `did not become healthy` | `install --logs`
 | `gh repo deploy-key` fails | `gh auth login --scopes repo` as a repository admin
 | `Another install --apply` … `holds the lock` | let it finish, apply again
-| `Generating the merge writer's deploy key` (host) | install `openssh-client`, rerun
-| `Cloning OWNER/REPO` (host) | `gh repo deploy-key list`, rerun
 | `inside the managed repository` | `GRAPHYARD_CONFIG_HOME` outside worktrees
 
 ## Agent execution contract

@@ -3,7 +3,7 @@
 
 ## 1. Install the control plane
 
-[Install](install.md): `install --provider railway --repo OWNER/REPO --workers 1 --apply` after `--plan`.
+[Install](install.md): `install --provider compose --repo OWNER/REPO --workers 1 --apply` after `--plan`.
 
 ## 2. Add machines
 

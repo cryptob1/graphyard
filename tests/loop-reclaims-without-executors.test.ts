@@ -9,8 +9,6 @@ import { daemonEffects, emptyDaemonState, runCycle, type DaemonEffects } from '.
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { apiRoutes } from '../src/server/index.js';
 import { matchRoute } from '../src/server/routes.js';
-import { supervisedUnits } from '../src/install/host.js';
-import { perInstallUnits } from '../src/install/units.js';
 import type { Work } from '../src/model.js';
 
 /**
@@ -107,9 +105,6 @@ test('unit:executor-fleet-removed — the executor process, fleet, presence mode
   // What remains: the read-only action rows and the resync the loop's reclaim sends.
   assert.equal(routed('GET', '/api/actions'), true);
   assert.equal(routed('POST', '/api/work/work-1984/resync'), true);
-  const layout = { userUnitDirectory: '/home/graphyard/.config/systemd/user' } as Parameters<typeof supervisedUnits>[0];
-  assert.deepEqual(supervisedUnits(layout, perInstallUnits('owner/project')).map(unit => unit.role), ['master loop']);
-  assert.doesNotMatch(readFileSync(join(root, 'src/install/host.ts'), 'utf8'), /graphyard-executor\.mjs/, 'the host install runs no executor installer');
   // Nothing in the loop posts to the removed remedy route: the action-row remedy consumer went with it.
   assert.equal(existsSync(join(root, 'src/daemon/cycle-remedies.ts')), false, 'the loop runs no stall-remedy step');
   for (const file of ['src/daemon/effects-production.ts', 'src/daemon/cycle.ts'])

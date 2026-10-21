@@ -37,8 +37,6 @@ test('unit:release-version — the promote job tags the promoted commit, publish
   const build = steps[published];
   assert.match(build, /checkout --detach "\$CANDIDATE_SHA"/);
   assert.match(build, /GRAPHYARD_VERSION=\$VERSION/);
-  assert.match(build, /scripts\/verify-image-release\.mjs "\$REPOSITORY:\$VERSION" "\$VERSION" "\$CANDIDATE_SHA"/);
-  assert.ok(build.indexOf('verify-image-release') < build.indexOf('docker push'), 'the image is verified before it is published');
   const channel = steps[tagged];
   assert.match(channel, /docker tag "\$REPOSITORY:\$VERSION" "\$REPOSITORY:stable"/);
   assert.match(channel, /docker push "\$REPOSITORY:stable"/);

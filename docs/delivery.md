@@ -11,8 +11,6 @@ The deploy runs off the cycle: the loop cycles on, starts no second meanwhile an
 
 `GRAPHYARD_RELEASE_TOKEN` files holds/follow-ups; the loop's hourly `master setup --apply` keeps it. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.
 
-`deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
-
 ### One delivery path
 
 Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)).

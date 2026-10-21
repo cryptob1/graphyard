@@ -543,15 +543,6 @@ test('integration:principal-rotation-safety — rotation merges into the live ro
   // Rotating again on the rerun supersedes the owed token rather than setting both.
   const again = mergeRoster(staged, [generatedProducer(staged, 'trusted-acceptance', { role: 'producer', proofs: ['integration:claim-safety'] }, ['trusted-acceptance'], () => secret('third'))]);
   assert.deepEqual(secretsDue(staged, again, record).map((entry: any) => entry.token), [secret('third')]);
-  // The script wires these together: it reads the live roster, refuses before any write, and deploys before any secret.
-  const script = await readFile(new URL('../scripts/configure-integrations.mjs', import.meta.url), 'utf8');
-  const order = ['variable\', \'list\'', 'assertRosterSafe(live, roster, options)', 'rerun with --deploy', 'variable\', \'set\'', '\'redeploy\'', 'await awaitServedTokens(url', '\'secret\', \'set\''].map(fragment => script.indexOf(fragment));
-  assert.ok(order.every(index => index > 0), 'every step is present'); assert.deepEqual([...order].sort((x, y) => x - y), order, 'live read, safety check, staging, deploy, serve check, then secret');
-  assert.doesNotMatch(script, /--skip-deploys[^\n]*\n[^\n]*gh\(\['secret'/, 'no secret is set straight after a skip-deploys stage');
-  const recorded = ['secretsDue(live, roster, record)', 'await saveRecord(secrets)', 'variable\', \'set\'', '\'secret\', \'set\'', 'await saveRecord(secrets.filter'].map(fragment => script.indexOf(fragment));
-  assert.ok(recorded.every(index => index > 0)); assert.deepEqual([...recorded].sort((x, y) => x - y), recorded, 'the owed sync is recorded before staging and cleared only after its secret is set');
-  const docs = await readFile(new URL('../docs/deployment.md', import.meta.url), 'utf8');
-  for (const fragment of ['--rotate', '--remove', '--deploy', 'live roster']) assert.ok(docs.includes(fragment), `docs/deployment.md documents ${fragment}`);
 });
 
 test('unit:autonomous-session-prompts — reviewer, producer and worker sessions are told to decide and act on their own, and one that ends waiting on input is recorded as failed with the reason', async () => {

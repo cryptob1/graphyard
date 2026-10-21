@@ -139,7 +139,7 @@ test('unit:upgrade-serves-stamped-release — graphyard upgrade of an installed 
       deployment: { sshHost: null, sshUser: 'root', local: false, port, image: `${imageRepository}:${previousVersion}` } } as unknown as InstallRecord;
     const target = resolveTarget(cliRoot, version);
     const inputs: UpgradeInputs = { cliRoot, repoRoot: cliRoot, current: checkoutRelease(cliRoot), target, databaseSchema: target.schema, install: record, url,
-      backupFile: join(workdir, 'backup.json'), cliChanges: cliChangesOf(cliRoot), workspace: null };
+      backupFile: join(workdir, 'backup.json'), cliChanges: cliChangesOf(cliRoot) };
     assert.equal(inputs.current.revision, previous);
     const plan = upgradePlan(inputs);
     const live = liveEffects(inputs, join(workdir, 'upgrade.json'));

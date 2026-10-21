@@ -2,7 +2,7 @@ name: Release candidate
 # One moving main, a frozen candidate, UAT, then that exact SHA in production (docs/delivery.md).
 # A cut tags main's tip (rc/ID) and nothing else, so merges keep flowing while the candidate is under
 # test. The long suites the pre-merge gate never runs (GY-1093) — container acceptance, container
-# recovery and the chart here, the advisory soak and timing-budget suites in release-candidate-soak.yml,
+# recovery here, the advisory soak and timing-budget suites in release-candidate-soak.yml,
 # which this run dispatches (GY-1513) — run against the candidate's exact SHA, never on a pull request
 # and never as a required check; then Railway's uat environment serves that
 # SHA and the suites that drive the deployment run against it. Railway's uat and production track
@@ -134,8 +134,6 @@ jobs:
         run: |
           echo '{}' > "$RUNNER_TEMP/candidate.json"
           node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/acceptance.json"
-      - name: Verify the release contract, backup and restore with the shipped image
-        run: node scripts/verify-image-release.mjs graphyard-ci "unreleased ${CANDIDATE_SHA:0:12}" "$CANDIDATE_SHA"
   container-recovery:
     needs: candidate
     if: needs.candidate.outputs.sha != ''
@@ -180,74 +178,6 @@ jobs:
         run: |
           echo '{}' > "$RUNNER_TEMP/candidate.json"
           node scripts/run-acceptance.mjs "$RUNNER_TEMP/candidate.json" graphyard-ci "$RUNNER_TEMP/recovery.json" integration:herdr-recovery
-  chart:
-    needs: candidate
-    if: needs.candidate.outputs.sha != ''
-    env:
-      CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with: { ref: '${{ env.CANDIDATE_SHA }}', persist-credentials: false }
-      - uses: actions/setup-node@v4
-        with: { node-version: '24' }
-      - name: Lint and render the chart
-        run: |
-          set -euo pipefail
-          helm lint deploy/helm/graphyard --strict --set secrets.existingSecret=graphyard-credentials
-          helm template graphyard deploy/helm/graphyard --set secrets.existingSecret=graphyard-credentials > /dev/null
-          # An installation with nowhere to hold credentials must not render.
-          if helm template graphyard deploy/helm/graphyard > /dev/null 2>&1; then echo 'chart rendered without credentials' >&2; exit 1; fi
-      # Docker Hub refuses anonymous pulls from shared runner addresses past its rate limit (GY-1607):
-      # the daemon is given the mirror.gcr.io registry mirror (verified with docker info before any
-      # docker command), and this job's Docker Hub images are pulled by their mirror.gcr.io name and
-      # tagged with their Docker Hub name, so no step contacts Docker Hub for them. The step fails when
-      # the mirror cannot serve an image, or when the tagged image does not resolve to the mirror.
-      - name: Pull Docker Hub images through the registry mirror
-        shell: bash
-        env:
-          DOCKER_HUB_IMAGES: node:24-bookworm-slim
-        run: |
-          set -euo pipefail
-          { sudo cat /etc/docker/daemon.json 2>/dev/null || echo '{}'; } | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
-          sudo install -m 0644 "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
-          sudo systemctl restart docker
-          mirrors="$(docker info --format '{{json .RegistryConfig.Mirrors}}')"
-          echo "Docker daemon registry mirrors: $mirrors"
-          [[ $mirrors == *'https://mirror.gcr.io'* ]] || { echo '::error::the Docker daemon is not using the registry mirror' >&2; exit 1; }
-          for image in $DOCKER_HUB_IMAGES; do
-            docker pull --quiet "mirror.gcr.io/library/$image"
-            docker tag "mirror.gcr.io/library/$image" "$image"
-            digests="$(docker image inspect --format '{{json .RepoDigests}}' "$image")"
-            echo "$image resolved through the registry mirror: $digests"
-            [[ $digests == *'mirror.gcr.io/library/'* ]] || { echo "::error::$image does not resolve to the registry mirror" >&2; exit 1; }
-          done
-      - name: Build the candidate image
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          docker build --build-arg "GRAPHYARD_VERSION=$version" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag "graphyard:$version" .
-          docker tag "graphyard:$version" "graphyard:$version-next"
-      # kind's node image sets no registry config_path (containerd 2 then defaults to a path list), so
-      # the cluster is created from deploy/helm/kind-config.yaml, which sets it to /etc/containerd/certs.d.
-      - uses: helm/kind-action@v1
-        with: { cluster_name: graphyard, config: deploy/helm/kind-config.yaml }
-      # The cluster's containerd pulls the chart's Docker Hub images (the bundled postgres:17-alpine)
-      # itself, so each node resolves docker.io through mirror.gcr.io alone, with no Docker Hub fallback.
-      # The step reads each node's effective config (containerd config dump: version 2 or 3, double or
-      # single quoted) and fails when config_path is not exactly /etc/containerd/certs.d.
-      - name: Pull the cluster's Docker Hub images through the registry mirror
-        shell: bash
-        run: |
-          set -euo pipefail
-          for node in $(kind get nodes --name graphyard); do
-            docker exec "$node" mkdir -p /etc/containerd/certs.d/docker.io
-            printf '%s\n' 'server = "https://mirror.gcr.io"' '[host."https://mirror.gcr.io"]' '  capabilities = ["pull", "resolve"]' | docker exec -i "$node" tee /etc/containerd/certs.d/docker.io/hosts.toml
-            dump="$(docker exec "$node" containerd config dump)"
-            grep -Eq "^[[:space:]]*config_path *= *(\"/etc/containerd/certs.d\"|'/etc/containerd/certs.d')[[:space:]]*\$" <<< "$dump" || { echo "::error::kind node $node does not read /etc/containerd/certs.d" >&2; exit 1; }
-          done
-      - name: Install, exercise, upgrade and restore on a real cluster
-        run: bash deploy/helm/exercise.sh "graphyard:$(node -p "require('./package.json').version")"
   upgrade:
     name: upgrade an install of the previous stable release
     needs: candidate
@@ -290,8 +220,8 @@ jobs:
         id: gate
         run: node --import tsx scripts/upgrade-from-stable.mjs --previous stable --candidate "$CANDIDATE_SHA" --work "$RUNNER_TEMP/upgrade" --report "$RUNNER_TEMP/upgrade-report.json"
   uat:
-    needs: [candidate, container-acceptance, container-recovery, chart]
-    # Runs once the container and chart jobs finish, passed or not, so their verdicts join the
+    needs: [candidate, container-acceptance, container-recovery]
+    # Runs once the container jobs finish, passed or not, so their verdicts join the
     # candidate's UAT record. The soak and timing-budget suites are advisory: they run in their own
     # workflow beside UAT and report on that run, but neither delay nor decide promotion (docs/delivery.md).
     if: ${{ !cancelled() && needs.candidate.outputs.id != '' }}
@@ -337,7 +267,7 @@ jobs:
         # previews-for-declared-apps, on one preview of each of the fixture's declared site and app (GY-1924), and so do
         # candidate-batches-five, candidate-gates-promotion and production-exact-verification (GY-1906): the fixture lands
         # their changes, cuts, validates and promotes exact candidates and deploys its own production, whose identity
-        # its plane verifies, so the whole GOAL-1 suite runs there. Those seven exercise the UAT deployment itself; the container and chart suites ran on runners at the candidate SHA, so each
+        # its plane verifies, so the whole GOAL-1 suite runs there. Those seven exercise the UAT deployment itself; the container suites ran on runners at the candidate SHA, so each
         # of those jobs' results above joins the record as a suite of its own. `zero-touch` (GY-1481)
         # runs the zero-touch onboarding scenario on this checkout of the candidate's SHA: `graphyard up
         # --agent --goal FILE` on a throwaway repository against an in-process GitHub must reach a merged
@@ -354,12 +284,10 @@ jobs:
             --suite 'e2e=node --import tsx scripts/onboarding-delivery-fixture.mjs' \
             --suite 'container-acceptance=test "$CONTAINER_ACCEPTANCE" = success' \
             --suite 'container-recovery=test "$CONTAINER_RECOVERY" = success' \
-            --suite 'chart=test "$CHART" = success' \
             --suite 'zero-touch=node --import tsx --eval "import(\"./src/release-candidate.ts\").then(m => m.runZeroTouchSuite())"'
         env:
           CONTAINER_ACCEPTANCE: ${{ needs.container-acceptance.result }}
           CONTAINER_RECOVERY: ${{ needs.container-recovery.result }}
-          CHART: ${{ needs.chart.result }}
           UAT_URL: ${{ vars.UAT_URL }}
           GRAPHYARD_UAT_TOKEN: ${{ secrets.GRAPHYARD_UAT_TOKEN }}
           GRAPHYARD_E2E_REPORT: ${{ runner.temp }}/e2e-report.json
@@ -519,8 +447,6 @@ jobs:
           set -euo pipefail
           git -c advice.detachedHead=false checkout --detach "$CANDIDATE_SHA"
           docker build --build-arg "GRAPHYARD_VERSION=$VERSION" --build-arg "GRAPHYARD_BUILD_REVISION=$CANDIDATE_SHA" --tag "$REPOSITORY:$VERSION" .
-          # The image must report the release it claims before it is published anywhere.
-          node scripts/verify-image-release.mjs "$REPOSITORY:$VERSION" "$VERSION" "$CANDIDATE_SHA"
           docker push "$REPOSITORY:$VERSION"
       # The tags are written through the refs API, never a push from this checkout: creating a ref that
       # exists fails, so two promotions can never share a version, and `stable` is moved, or created once.

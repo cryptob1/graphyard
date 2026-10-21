@@ -57,13 +57,13 @@ test('docs/install.md is an agent-executable runbook with commands, verification
   // A missing provider CLI is not a fourth thing to ask a human for: every provider row carries
   // the command that installs it, so a live install stops only for the account behind it.
   const providers = runbook.slice(runbook.indexOf('### Providers'), runbook.indexOf('## Step 1'));
-  for (const command of ['npm i -g @railway/cli', 'brew install hcloud', 'get.docker.com']) {
+  for (const command of ['get.docker.com']) {
     assert.ok(providers.includes(command), `the provider table must give the command that installs the CLI: ${command}`);
   }
 
   // Failure handling is a symptom-to-action table, not prose.
   const failures = runbook.slice(runbook.indexOf('## Failure handling'));
-  assert.ok((failures.match(/^\| `/gm) ?? []).length >= 8, 'the failure table must cover the real refusals');
+  assert.ok((failures.match(/^\| `/gm) ?? []).length >= 5, 'the failure table must cover the real refusals');
   for (const symptom of ['Preflight is incomplete', 'did not become healthy', 'gh repo deploy-key', 'inside the managed repository']) {
     assert.ok(failures.includes(symptom), `failure handling must cover "${symptom}"`);
   }
@@ -74,10 +74,10 @@ test('the check fails when a guide leads with a manual provisioning step', async
   try {
     const onboarding = join(directory, 'docs/onboarding.md');
     const content = await readFile(onboarding, 'utf8');
-    await writeFile(onboarding, content.replace('## 1. Install the control plane', '## 1. Install the control plane\n\nFirst run `railway init --name graphyard`.\n'));
+    await writeFile(onboarding, content.replace('## 1. Install the control plane', '## 1. Install the control plane\n\nFirst run `docker compose --profile full up -d`.\n'));
     const result = run(directory);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /docs\/onboarding\.md: "railway init" precedes the one-command install path/);
+    assert.match(result.stderr, /docs\/onboarding\.md: "docker compose --profile full" precedes the one-command install path/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -86,10 +86,10 @@ test('the check fails when a manual step escapes the labelled fallback', async (
   try {
     const deployment = join(directory, 'docs/deployment.md');
     const content = await readFile(deployment, 'utf8');
-    await writeFile(deployment, content.replace('## The one command', '## The one command\n\n```sh\nrailway add --database postgres\n```\n'));
+    await writeFile(deployment, content.replace('## The one command', '## The one command\n\n```sh\ndocker compose --profile full up -d\n```\n'));
     const result = run(directory);
     assert.equal(result.status, 1);
-    assert.match(result.stderr, /"railway add" appears outside the labelled manual fallback/);
+    assert.match(result.stderr, /"docker compose --profile full" appears outside the labelled manual fallback/);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -140,8 +140,8 @@ test('the install rules bind only a repository that ships the installer', async 
   try {
     const onboarding = join(directory, 'docs/onboarding.md');
     const content = await readFile(onboarding, 'utf8');
-    await writeFile(onboarding, content.replace('## 1. Install the control plane', '## 1. Install the control plane\n\nFirst run `railway init --name graphyard`.\n'));
-    assert.match(run(directory).stderr, /"railway init" precedes the one-command install path/);
+    await writeFile(onboarding, content.replace('## 1. Install the control plane', '## 1. Install the control plane\n\nFirst run `docker compose --profile full up -d`.\n'));
+    assert.match(run(directory).stderr, /"docker compose --profile full" precedes the one-command install path/);
     await rm(join(directory, 'src/install'), { recursive: true });
     // The copy omits unrelated link targets, so only the install rules are asserted absent.
     assert.doesNotMatch(run(directory).stderr, /one-command install path|install runbook|manual fallback/);
