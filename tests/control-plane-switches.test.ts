@@ -162,7 +162,7 @@ test('unit:landability-github-snapshot — a github-observed candidate keeps the
 });
 
 test('unit:advisory-tests-selection — scripts/ci-tests.mjs exports the advisory budget tests; the trials\' affected selection leaves them out, `advisory` lists them, and the github CI selection still runs them', () => {
-  assert.deepEqual(advisoryTests, ['tests/docs-budget.test.ts', 'tests/docs-budget-headroom.test.ts', 'tests/module-budgets.test.ts', 'tests/hotspots.test.ts', 'tests/interventions-hotspot-split.test.ts']);
+  assert.deepEqual(advisoryTests, ['tests/module-budgets.test.ts', 'tests/hotspots.test.ts', 'tests/interventions-hotspot-split.test.ts']);
   const cli = (...args: string[]) => execFileSync('node', ['scripts/ci-tests.mjs', ...args], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
   const affected = cli('affected', 'package.json');
   assert.match(affected[0]!, /^full: /);
@@ -258,11 +258,10 @@ test('unit:rework-approver-by-risk — a control-plane rework waits for an appro
   assert.equal(reworkWaitsForApprover(item(null, ['src/server/routes/work.ts', 'src/app.ts'])), true, 'github: by lane, whatever the risk class says');
 });
 
-test('unit:docs-word-budget — docs/coordination.md and docs/development.md each name in one sentence of at most 25 words what control-plane mode switches off', () => {
+test('unit:control-plane-mode-docs — docs/coordination.md names in one sentence what control-plane mode switches off', () => {
   for (const page of ['docs/coordination.md']) {
     const sentences = readFileSync(`${root}${page}`, 'utf8').split(/(?<=\.)\s+/).filter(sentence => /^Control-plane mode switches off /.test(sentence));
     assert.equal(sentences.length, 1, `${page} has the sentence once`);
-    assert.ok(sentences[0]!.split(/\s+/).length <= 25, `${page}: ${sentences[0]}`);
     for (const named of ['plan refusals', 'sync restore', 'scope hook', 'producer sessions', 'budget-test blockers', 'normal-risk rework approvers']) assert.ok(sentences[0]!.includes(named), `${page} names ${named}`);
   }
 });

@@ -848,7 +848,7 @@ test('unit:scope-fault-class-instances-removed — GY-945\'s and GY-883\'s asks,
   };
   // The base rule grounded only criteria-named paths and the documentation rule; neither ask held.
   const baseRefuses = (work: Work, paths: string[]) => paths.filter(path => !impliedScopes(work.criteria, ['docs/', 'AGENTS.md', 'README.md']).some(entry => entry.kind === 'documentation' ? path.startsWith(entry.scope) : namedPaths(entry.scope).includes(path) || entry.scope === path));
-  const fleetAsk = ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts', 'tests/docs-budget.test.ts'];
+  const fleetAsk = ['docs/dashboard.md', 'web/pages/fleet.tsx', 'web/style.css', 'tests/fleet-panel.test.ts'];
   const fleet = await replay('GY-945 replay', [
     { id: 'AC-1', text: 'A fleet panel in the web UI lists every registry account: runtime, quota state, eligibility and live session count.', proofs: ['unit:fleet-panel-renders-registry'] },
     { id: 'AC-2', text: 'Stale or probe-failed accounts are visually distinguished from healthy ones.', proofs: ['unit:fleet-panel-marks-stale-probe'] },

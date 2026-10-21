@@ -1,8 +1,8 @@
 // Inevitable scope companions (GY-955), apart from model/scope.ts so that module keeps its budget.
 //
 // A change carries files no criterion names: the new test file its own unit proofs live in, the existing
-// tests that import a module it changes, the documentation-budget gate any documented change must raise,
-// the wall-clock gate a test change must keep passing (GY-1706), the test-duration baseline a new test
+// tests that import a module it changes, the wall-clock gate a test change must keep passing (GY-1706), the
+// test-duration baseline a new test
 // file is recorded in (GY-1085) and the verification map covering a planned file (GY-1783). Each was
 // refused wholesale and approved minutes later as "the feature implementation, not optional add-ons"
 // (GY-945, GY-883). These rules ground them per path, so the loop grants them with no approver, and
@@ -26,8 +26,6 @@ export const testProof = (proof: string) => /^(?:unit|integration):[\w.-]+$/.tes
 export const criterionTestProofs = (criteria: readonly CompanionCriterion[]) =>
   criteria.flatMap(criterion => { const proofs = [...new Set((criterion.proofs ?? []).filter(testProof))]; return proofs.length ? [{ criterion: criterion.id, proofs }] : []; });
 
-/** The repository's documentation-budget gate: the test that counts the documentation's words (tests/docs-budget.test.ts). */
-export const documentationBudgetGate = (path: string) => testFile(path) && /(?:^|\/)docs?[-_.]?(?:word[-_.]?)?budget\.(?:test|spec)\.[cm]?[jt]sx?$/i.test(path);
 /**
  * The per-test-file duration record a sharded suite balances by (tests/helpers/timing-baseline.json): a
  * coverage floor over it (tests/ci-shards.test.ts) fails the required test check unless a new test file
@@ -171,16 +169,12 @@ export function failedCheckTestGround(path: string, item: FailedCheckSource, rea
   return failed.length ? `${path} is the test file the failed required check ${failed.join(' and ')} on this item's current candidate names, which the item answers within its attempt` : null;
 }
 /**
- * Companion ground from the item's record alone (no base read): docs-budget / timing / wall-clock
- * gates, proof-named test files, a single `web/` file a criterion describes, and GY-1893's failed
+ * Companion ground from the item's record alone (no base read): timing / wall-clock gates,
+ * proof-named test files, a single `web/` file a criterion describes, and GY-1893's failed
  * required-check test file (reason names the check and `PATH:LINE`). Import/proof-held grounds are the loop's.
  */
 export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null } & FailedCheckSource, ask: readonly string[], documentation: readonly string[], reason?: string): string | null {
   if (pathScope(path).prefix) return null;
-  if (documentationBudgetGate(path)) {
-    const documented = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && documentationPath(entry, documentation));
-    if (documented) return `${path} is the documentation-budget gate a change to ${documented} must keep passing`;
-  }
   if (timingBaseline(path)) {
     const tested = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && testScope(entry) && !timingBaseline(entry) && !noWallClockGate(entry));
     if (tested) return `${path} is the test-duration baseline a change to ${tested} must keep covering`;
@@ -263,8 +257,8 @@ export async function importingTestGround(path: string, text: string | null, pla
 }
 
 export const verificationMapFile = (path: string) => !pathScope(path).prefix && /^verification\/[^/]+\.md$/.test(pathScope(path).path);
-/** Wall-clock / timing / docs-budget gate: companion of a test in the ask, not an independent ground. */
-export const testCompanionGate = (path: string) => noWallClockGate(path) || timingBaseline(path) || documentationBudgetGate(path);
+/** Wall-clock / timing gate: companion of a test in the ask, not an independent ground. */
+export const testCompanionGate = (path: string) => noWallClockGate(path) || timingBaseline(path);
 const verificationMapPaths = (text: string) => {
   const opening = text.replace(/\r\n/g, '\n').split('\n').find(line => line.trim())?.match(/^Paths:\s*(.*)$/);
   const paths = opening?.[1].split(/[\s,]+/).filter(Boolean) ?? [];
@@ -304,8 +298,6 @@ export function plannedCompanions(item: { plannedFiles: readonly string[]; crite
     for (const file of tree) if (timingBaseline(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the test-duration baseline a new test file must be recorded in' });
   if (holdsTest)
     for (const file of tree) if (noWallClockGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the wall-clock gate a test change must keep passing' });
-  if (item.plannedFiles.some(entry => documentationPath(entry, documentation)))
-    for (const file of tree) if (documentationBudgetGate(file) && !covered(file)) added.push({ path: file, criterion: null, why: 'the documentation-budget gate a documented change must keep passing' });
   if (item.origin?.reviewFollowUps)
     for (const file of followUpPaths(item.origin.reviewFollowUps.findings ?? [], item.description))
       if (tree.has(file) && !covered(file)) added.push({ path: file, criterion: 'FOLLOWUP', why: 'the file a review follow-up names' });

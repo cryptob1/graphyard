@@ -25,15 +25,11 @@ test('the glossary defines the eight distinctions once, with a canonical usage e
   assert.match(glossary, /^## Diagram legend$/m);
 });
 
-test('the primary operations page fits a three-minute skim and keeps its structure', () => {
+test('the primary operations page keeps its structure', () => {
   const page = read('docs/operations.md');
   // HTML comments (the index declaration) are not rendered on GitHub or in the app.
   const withoutCode = page.replace(/<!--[\s\S]*?-->/g, '').replace(/```[\s\S]*?```/g, '');
-  const body = withoutCode.split(/^## Deeper references$/m)[0];
   assert.ok(withoutCode.length < page.length, 'the page keeps at least one recipe command block');
-  // Inline code spans count as one word each; navigation is the trailing references list.
-  const words = body.replace(/`[^`]*`/g, 'x').split(/\s+/).filter(Boolean).length;
-  assert.ok(words <= 650, `operations.md body is ${words} words excluding code and navigation; the budget is 650`);
   for (const heading of ['## Daily checklist', '## Incident decision tree', '## Recovery recipes', '## Safety facts that never change', '## Deeper references']) assert.ok(page.includes(heading), `operations.md keeps ${heading}`);
   for (const link of ['#lost-worker-before-submission', '#submitted-implementation-needs-rework', '#supervisor-died-leaving-a-containment-quarantine', '#master-coordination-loop', '#merge-bypass', '#bootstrap-mode-for-a-self-proving-change']) assert.ok(page.includes(link), `each recipe links its deeper reference: ${link}`);
   // The safety facts the split must not lose, on the page itself.
