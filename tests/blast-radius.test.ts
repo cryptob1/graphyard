@@ -49,7 +49,7 @@ test('unit:candidate-blast-radius-summary a code-only change reads as a low-dang
 
 test('unit:candidate-blast-radius-summary the merge guard is described by what it checks, with what is still missing, never by raw gate reasons', () => {
   const radius = blastRadius(subject());
-  assert.equal(radius.guard, 'Before it merges, the merge guard checks that the builder has handed the work in, the automated checks test and typecheck pass on this exact code, someone other than the builder approves this exact code, the proof its requirements name passes on it and it merges cleanly onto main and puts back no file outside its plan. Still missing: approval, proof and clean merge.');
+  assert.equal(radius.guard, 'Before it merges, the merge guard checks that the builder has handed the work in, the automated checks test and typecheck pass on this exact code, someone other than the builder approves this exact code, the proof its requirements name passes on it and it merges cleanly onto main. Still missing: approval, proof and clean merge.');
   const all = radius.sentences.join(' ');
   for (const reason of Object.values(reasons)) assert.ok(!all.includes(reason), `no raw reason: ${reason}`);
   assert.doesNotMatch(all, /needs trusted passing evidence|epoch|policy revision|\bPR\b|\bCI\b|[0-9a-f]{40}/);
@@ -69,9 +69,7 @@ test('unit:candidate-blast-radius-summary schema, deployment and workflow change
   assert.match(infra.reverts, /but not infrastructure a deploy has already applied and anything the workflows published/);
 });
 
-test('unit:candidate-blast-radius-summary scope beyond the plan, carried work, deletions, size and conflicts raise the danger', () => {
-  const outside = blastRadius(subject({}, { scopeFiles: [file('src/model/gates.ts'), file('src/engine.ts')] }));
-  assert.equal(outside.danger, 'high'); assert.match(outside.touches, /One of them is outside its plan\.$/);
+test('unit:candidate-blast-radius-summary carried work, deletions, size and conflicts raise the danger', () => {
   const carried = blastRadius(subject({}, { landing: { base: 'main', foreign: [{ key: 'GY-5', pr: 5, head: 'd'.repeat(40) }] } }));
   assert.equal(carried.danger, 'high'); assert.match(carried.reverts, /carries unfinished work from GY-5, which a revert would take out too\.$/);
   const deleting = blastRadius(subject({}, { scopeFiles: [file('tests/old.test.ts', 0, 40, 'removed')] }));

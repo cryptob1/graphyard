@@ -70,7 +70,7 @@ export const masterCommands = defineCommands([
       '                                Record by hand a loop-owned observation reading the loop could not take',
       '  master run [--once] [--interval SECONDS]',
       '                                The durable coordination loop: launches reviewers and producers',
-      '                                for every submitted head and decides open scope requests',
+      '                                for every submitted head',
       '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
       '  master promote --admin-token-stdin  Promote a supervised install to autonomy once its reviewer',
       '                                App and profile are independent of you and every worker; audited',

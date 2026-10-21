@@ -183,13 +183,6 @@ test('unit:requirements-decision-held-on-live-attempt — an approved revision r
   const settledFence = await decided(fence);
   assert.equal(settledFence.state, 'held');
   assert.equal(settledFence.outcome, `${quarantinedRevisionRefusal(1)}; the approved decision is held and applied when the attempt ends`);
-  // A refusal for any other reason still fails the decision: a widening grounded on findings read for a head the item never had.
-  const other = await claimed('refused-for-another-reason');
-  const requested = await send(master.token, `work/${other.key}/decide`, { action: 'requirements', input: { ...revision(other), criteria: other.criteria, answers: { epoch: 1, at: new Date().toISOString(), sha: 'a'.repeat(40) } }, reason: 'A widening answering nothing' });
-  assert.equal(requested.status, 200, JSON.stringify(requested.body));
-  const failed = await send(approver.token, `work/${other.key}/approve`, { decision: requested.body.id, reason: 'Approved' });
-  assert.equal(failed.body.state, 'failed', JSON.stringify(failed.body));
-  assert.match(failed.body.outcome, /scope request this widening answers is no longer open/);
 });
 
 // ---- AC-2: applied by the transaction that ends the attempt -------------------------------------
@@ -245,12 +238,12 @@ test('unit:held-requirements-decision-applies-at-attempt-end — a blocked repor
   const { item: containedItem } = await appliedOn(contained, /^Requirements revised to policy revision 2 when settle ended attempt 1; the submitted head is re-reviewed on revision 2$/);
   assert.deepEqual([containedItem.submission, containedItem.reworkRequested, containedItem.formalReviewResetRequired], [{ epoch: 1, pr: 1688 }, false, true], 'the submitted head stands for re-review; it is not sent back');
   assert.equal((await ledger(contained)).find(row => row.kind === 'requirements')!.payload.details.heldDecision.resume, 'rereview');
-  // A held decision whose policy revision moved first (a live widening) settles stale with the race recorded, as today.
+  // A held decision whose policy revision moved first (a review-policy revision under the live attempt) settles stale with the race recorded, as today.
   const widened = await claimed('held-then-widened');
   await decided(widened);
-  await engine.execute(operator, 'requirements', widened.id, { expectedPolicyRevision: 1, reason: 'Widened while the worker runs', criteria: widened.criteria, dependencies: [], exclusiveResources: [] }, randomUUID());
+  await engine.execute(operator, 'reviewpolicy', widened.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Reviewer changed while the worker runs' }, randomUUID());
   assert.equal((await current(widened)).policyRevision, 2);
-  assert.ok((await current(widened)).lease, 'the widening kept the attempt');
+  assert.ok((await current(widened)).lease, 'the review-policy revision kept the attempt');
   await engine.execute(implementer, 'release', widened.id, { epoch: widened.epoch }, randomUUID());
   const [stale] = await decisions(widened.key);
   assert.equal(stale.state, 'stale');
@@ -373,9 +366,9 @@ test('unit:held-requirements-decision-applies-at-attempt-end — an approved clo
   const raced = await claimed('held-then-closed-stale');
   const racedHold = await decided(raced);
   assert.equal(racedHold.state, 'held');
-  await engine.execute(operator, 'requirements', raced.id, { expectedPolicyRevision: 1, reason: 'Widened while the worker runs, before close', criteria: raced.criteria, dependencies: [], exclusiveResources: [] }, randomUUID());
+  await engine.execute(operator, 'reviewpolicy', raced.id, { provider: 'codex', expectedPolicyRevision: 1, reason: 'Reviewer changed while the worker runs, before close' }, randomUUID());
   assert.equal((await current(raced)).policyRevision, 2);
-  assert.ok((await current(raced)).lease, 'the widening kept the attempt');
+  assert.ok((await current(raced)).lease, 'the review-policy revision kept the attempt');
   const raceClose = await call(master.token, `work/${raced.key}/decide`, { action: 'close', input: { kind: 'obsolete', expectedRevision: (await current(raced)).revision }, reason: 'Close after the held revision raced' });
   const raceClosed = await call(approver.token, `work/${raced.key}/approve`, { decision: raceClose.id, reason: 'Nothing left under the moved revision' }) as { state: string };
   assert.equal(raceClosed.state, 'applied', JSON.stringify(raceClosed));

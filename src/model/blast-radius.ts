@@ -55,7 +55,7 @@ function guardClauses(work: Pick<Work, 'policy' | 'criteria'>, base: string): { 
     ...(checks.length ? [{ gate: 'test', text: `the automated ${checks.length === 1 ? 'check' : 'checks'} ${list(checks)} ${checks.length === 1 ? 'passes' : 'pass'} on this exact code` }] : []),
     ...(work.policy?.review ? [{ gate: 'review', text: 'someone other than the builder approves this exact code' }] : []),
     ...(proofs ? [{ gate: 'acceptance', text: `${proofs === 1 ? 'the proof its requirements name passes' : `all ${proofs} proofs its requirements name pass`} on it` }] : []),
-    { gate: 'merge', text: `it merges cleanly onto ${base} and puts back no file outside its plan` },
+    { gate: 'merge', text: `it merges cleanly onto ${base}` },
   ];
 }
 const gateWords: Record<string, string> = { build: 'hand-in', test: 'automated checks', review: 'approval', acceptance: 'proof', merge: 'clean merge' };

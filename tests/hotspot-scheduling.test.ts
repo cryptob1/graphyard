@@ -11,11 +11,11 @@ import { dispatchSchedule, masterConfigSchema, type MasterConfig, type WorkerPro
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
 
-// GY-882: hot-spot-aware scheduling. Dispatch stays optimistic — planned-file overlap never holds
-// an item — but within one operator priority an item that touches no file two or more live
-// attempts are already changing is offered before one that does, and every ready item still
-// dispatches in the same cycle. Heat comes from in-flight items only, over their declared
-// plannedFiles, and the dispatch record names the contention so master status can show it.
+// GY-882: hot-spot-aware scheduling. Dispatch stays optimistic — file overlap never holds an
+// item — but within one operator priority an item that touches no file two or more live attempts
+// are already changing is offered before one that does, and every ready item still dispatches in
+// the same cycle. Heat comes from in-flight items only, over the files each candidate was observed
+// to change (GY-1992), and the dispatch record names the contention so master status can show it.
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const workerToken = 'worker-token-'.padEnd(40, 'x');
@@ -32,17 +32,19 @@ function work(key: string, overrides: Partial<Work> = {}): Work {
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
   } as Work;
 }
-const claimed = (key: string, plannedFiles: string[], overrides: Partial<Work> = {}) => work(key, { stage: 'build', epoch: 1, lease: { owner: `${key}-worker`, epoch: 1, expiresAt: later }, ...overrides });
-const submitted = (key: string, plannedFiles: string[], sha = 'a'.repeat(40), overrides: Partial<Work> = {}) => work(key, { stage: 'review', epoch: 1, submission: { epoch: 1, pr: 7 },
+/** The files an item's candidate was observed to change: what heat reads. */
+const observed = (files: string[]) => ({ observation: { files } as unknown as Work['observation'] });
+const claimed = (key: string, files: string[], overrides: Partial<Work> = {}) => work(key, { stage: 'build', epoch: 1, lease: { owner: `${key}-worker`, epoch: 1, expiresAt: later }, ...observed(files), ...overrides });
+const submitted = (key: string, files: string[], sha = 'a'.repeat(40), overrides: Partial<Work> = {}) => work(key, { stage: 'review', epoch: 1, submission: { epoch: 1, pr: 7 }, ...observed(files),
   candidate: { sha, baseSha: 'b'.repeat(40), pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' }, ...overrides });
 
-test('unit:dispatch-prefers-non-overlapping — hotspots name the files two or more live attempts plan; ready peers, expired leases, done work and rework peers heat nothing', () => {
+test('unit:dispatch-prefers-non-overlapping — hotspots name the files two or more live attempts change; ready peers, expired leases, done work and rework peers heat nothing', () => {
   const one = claimed('GY-hotA', [hotFile]);
   const two = claimed('GY-hotB', ['src/daemon/']);
   const docWide = submitted('GY-docA', ['docs/']);
   const docNarrow = submitted('GY-docB', ['docs/protocol/leases.md']);
-  const ready = work('GY-ready', {  });
-  const readyPeer = work('GY-readyPeer', {  });
+  const ready = work('GY-ready', observed([hotFile]));
+  const readyPeer = work('GY-readyPeer', observed([hotFile]));
   const expired = claimed('GY-expired', [hotFile], { lease: { owner: 'gone', epoch: 1, expiresAt: earlier } });
   const delivered = work('GY-done', { stage: 'done', submission: { epoch: 1, pr: 1 } });
   const rework = submitted('GY-rework', [hotFile], 'c'.repeat(40), { reworkRequested: true });
@@ -57,22 +59,22 @@ test('unit:dispatch-prefers-non-overlapping — hotspots name the files two or m
   assert.deepEqual(hotspots([one, expired, delivered], clock), [], 'an expired lease and done work are not claimants');
   assert.deepEqual([...hotFileSet(all, clock)].sort(), ['docs/protocol/leases.md', hotFile], 'hotFileSet is the set of hot files dispatchOrder reads');
   assert.deepEqual(hotBeside(ready, hotspots(all, clock)), { file: hotFile, beside: ['GY-hotA', 'GY-hotB'] }, 'hotBeside names the first hot file the item touches and its claimants');
-  assert.equal(hotBeside(work('GY-cold', {  }), hotspots(all, clock)), null, 'an item touching no hot file records no contention');
+  assert.equal(hotBeside(work('GY-cold', observed(['src/cold.ts'])), hotspots(all, clock)), null, 'an item touching no hot file records no contention');
 });
 
 test('unit:dispatch-prefers-non-overlapping — dispatchOrder offers items touching no hot file first within one priority; priority dominates; an empty hot set reproduces the old order', () => {
   const heat = hotFileSet([claimed('GY-hotA', [hotFile]), claimed('GY-hotB', [hotFile])], clock);
-  const coldOld = work('GY-coldOld', { createdAt: iso(-7_200_000) });
+  const coldOld = work('GY-coldOld', { createdAt: iso(-7_200_000), ...observed(['src/cold.ts']) });
   const coldNew = work('GY-coldNew', { createdAt: iso(-120_000) });
-  const hotOld = work('GY-hotOld', { createdAt: iso(-3_600_000) });
-  const hotNew = work('GY-hotNew', { createdAt: iso(-60_000) });
+  const hotOld = work('GY-hotOld', { createdAt: iso(-3_600_000), ...observed([hotFile]) });
+  const hotNew = work('GY-hotNew', { createdAt: iso(-60_000), ...observed([hotFile, 'src/other.ts']) });
   const withoutHeat = [coldNew, hotOld, hotNew, coldOld].sort(dispatchOrder).map(item => item.key);
-  assert.deepEqual(withoutHeat, ['GY-coldOld', 'GY-hotOld', 'GY-hotNew', 'GY-coldNew'], 'the empty hot set is the previous order: fewest files, then age');
+  assert.deepEqual(withoutHeat, ['GY-coldOld', 'GY-hotOld', 'GY-coldNew', 'GY-hotNew'], 'the empty hot set is the age order');
   const withHeat = [coldNew, hotOld, hotNew, coldOld].sort((a, b) => dispatchOrder(a, b, heat)).map(item => item.key);
-  assert.deepEqual(withHeat, ['GY-coldOld', 'GY-coldNew', 'GY-hotOld', 'GY-hotNew'], 'cold before hot within one priority; breadth then age within each group');
-  const directory = work('GY-dir', { createdAt: iso(-7_200_000) });
+  assert.deepEqual(withHeat, ['GY-coldOld', 'GY-coldNew', 'GY-hotOld', 'GY-hotNew'], 'cold before hot within one priority; age within each group');
+  const directory = work('GY-dir', { createdAt: iso(-7_200_000), ...observed(['src/daemon/']) });
   assert.ok(dispatchOrder(coldOld, directory, heat) < 0, 'a directory scope that contains the hot file touches it, by scope overlap and not exact equality');
-  const urgentHot = work('GY-urgentHot', { priority: 0, createdAt: iso(-60_000) });
+  const urgentHot = work('GY-urgentHot', { priority: 0, createdAt: iso(-60_000), ...observed([hotFile]) });
   assert.ok(dispatchOrder(urgentHot, coldOld, heat) < 0, 'priority dominates: a hot P0 is still offered before a cold P2');
   const rework = submitted('GY-rework', [hotFile], 'd'.repeat(40), { reworkRequested: true });
   assert.ok(dispatchOrder(coldOld, rework, heat) < 0, 'a rework peer heats nothing but is still ordered after a cold item by others\' heat');
@@ -106,16 +108,16 @@ test('unit:dispatch-prefers-non-overlapping — the durable loop offers the cold
   try {
     const heat = [claimed('GY-hotA', [hotFile]), claimed('GY-hotB', [hotFile])];
     const cold = work('GY-cold', { createdAt: iso(-60_000) });
-    const warm = work('GY-warm', { createdAt: iso(-7_200_000) });
+    const warm = work('GY-warm', { createdAt: iso(-7_200_000), ...observed([hotFile]) });
     loop.set([...heat, cold, warm]);
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
     assert.deepEqual(loop.log, ['GY-cold→one', 'GY-warm→two'], 'the cold item is offered first though the hot one has waited far longer; both dispatch in one cycle — nothing idled');
 
-    const onlyHotA = work('GY-onlyA', { createdAt: iso(-60_000) });
-    const onlyHotB = work('GY-onlyB', { createdAt: iso(-7_200_000) });
+    const onlyHotA = work('GY-onlyA', { createdAt: iso(-60_000), ...observed([hotFile]) });
+    const onlyHotB = work('GY-onlyB', { createdAt: iso(-7_200_000), ...observed([hotFile]) });
     loop.set([...heat, onlyHotA, onlyHotB]);
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
-    assert.deepEqual(loop.log.slice(2), ['GY-onlyA→one', 'GY-onlyB→two'], 'every ready item touches the hot file, so breadth decides — and they all still dispatch in one cycle');
+    assert.deepEqual(loop.log.slice(2), ['GY-onlyB→one', 'GY-onlyA→two'], 'every ready item touches the hot file, so age decides — and they all still dispatch in one cycle');
   } finally { await loop.cleanup(); }
 });
 
@@ -124,7 +126,7 @@ test('unit:hotspot-overlap-recorded — the dispatch record names the hot file a
   try {
     const heat = [claimed('GY-hotA', [hotFile]), claimed('GY-hotB', [hotFile])];
     const cold = work('GY-cold', { createdAt: iso(-60_000) });
-    const warm = work('GY-warm', { createdAt: iso(-7_200_000) });
+    const warm = work('GY-warm', { createdAt: iso(-7_200_000), ...observed([hotFile]) });
     loop.set([...heat, cold, warm]);
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
     const warmRecord = loop.state.actions[dispatchKey(warm)];
@@ -138,17 +140,17 @@ test('unit:hotspot-overlap-recorded — the dispatch record names the hot file a
   } finally { await loop.cleanup(); }
 });
 
-test('unit:dispatch-ages-starving-items — a same-priority item waiting past the starvation bound is offered first, whatever its scope or heat', () => {
+test('unit:dispatch-ages-starving-items — a same-priority item waiting past the starvation bound is offered first, whatever its heat', () => {
   const now = Date.parse('2026-10-01T04:00:00Z');
-  const item = (key: string, plannedFiles: string[], enteredMinutesAgo: number, priority = 0) => ({ key, priority, createdAt: new Date(now - enteredMinutesAgo * 60_000).toISOString(), stageEnteredAt: new Date(now - enteredMinutesAgo * 60_000).toISOString() } as unknown as Work);
+  const item = (key: string, files: string[], enteredMinutesAgo: number, priority = 0) => ({ key, priority, createdAt: new Date(now - enteredMinutesAgo * 60_000).toISOString(), stageEnteredAt: new Date(now - enteredMinutesAgo * 60_000).toISOString(), observation: { files } } as unknown as Work);
   const broadStarving = item('GY-1023', ['src/', 'tests/', 'docs/'], 200);
   const smallFresh = item('GY-2001', ['src/one.ts'], 5);
   const hot = new Set(['docs/master-agent.md']);
-  // Without a clock the old order holds: the smaller, cold item first.
+  // Without a clock the old order holds: the cold item first.
   assert.deepEqual([broadStarving, smallFresh].sort((a, b) => dispatchOrder(a, b, hot)).map(w => w.key), ['GY-2001', 'GY-1023']);
-  // With the clock, the item past the bound goes first even though it is broader and hot.
+  // With the clock, the item past the bound goes first even though it is hot.
   assert.deepEqual([smallFresh, broadStarving].sort((a, b) => dispatchOrder(a, b, hot, now)).map(w => w.key), ['GY-1023', 'GY-2001']);
-  // Among starving items the usual order decides (the narrower GY-0900 first); priority still outranks starvation.
+  // Among starving items the usual order decides (the older, cold GY-0900 first); priority still outranks starvation.
   const olderStarving = item('GY-0900', ['src/two.ts'], 300);
   const urgentFresh = item('GY-3000', ['src/three.ts'], 1, -1);
   assert.deepEqual([broadStarving, olderStarving, urgentFresh, smallFresh].sort((a, b) => dispatchOrder(a, b, hot, now)).map(w => w.key), ['GY-3000', 'GY-0900', 'GY-1023', 'GY-2001']);
@@ -167,17 +169,17 @@ test('unit:dispatch-ages-malformed-rows — an item whose stage time is unreadab
   assert.equal(stageWaitMs(row('GY-c', 'garbage', 'garbage'), now), Infinity, 'neither readable: the wait is unbounded, never NaN');
   const fresh = { ...row('GY-fresh', new Date(now).toISOString(), new Date(now).toISOString()) } as Work;
   const malformed = row('GY-bad', 'garbage', 'garbage');
-  assert.deepEqual(dispatchSort([fresh, malformed], new Set(), now).map(w => w.key), ['GY-bad', 'GY-fresh'], 'the malformed row is aged ahead of a fresh, narrower item');
+  assert.deepEqual(dispatchSort([fresh, malformed], new Set(), now).map(w => w.key), ['GY-bad', 'GY-fresh'], 'the malformed row is aged ahead of a fresh item');
   assert.equal(dispatchOrder(malformed, malformed, new Set(), now), 0, 'the comparator stays defined (never NaN) on a malformed row');
 });
 
 test('unit:dispatch-schedule-follows-loop-order — master status reports the order the loop offers, with the hot set and the clock (GY-1040)', () => {
   const live = claimed('GY-liveA', [hotFile]), other = claimed('GY-liveB', [hotFile]);
-  const hotSmall = work('GY-hotSmall', {  });
-  const coldBroad = work('GY-coldBroad', {  });
+  const hotSmall = work('GY-hotSmall', observed([hotFile]));
+  const coldBroad = work('GY-coldBroad', observed(['tests/', 'docs/']));
   const starvingBroad = work('GY-starving', { stageEnteredAt: iso(-2 * dispatchStarvationMs) });
   const all = [live, other, hotSmall, coldBroad, starvingBroad];
   const loopOrder = dispatchSort([hotSmall, coldBroad, starvingBroad], hotFileSet(all, clock), clock).map(w => w.key);
-  assert.deepEqual(loopOrder, ['GY-starving', 'GY-coldBroad', 'GY-hotSmall'], 'starving first, then cold before hot, whatever the scope');
+  assert.deepEqual(loopOrder, ['GY-starving', 'GY-coldBroad', 'GY-hotSmall'], 'starving first, then cold before hot, whatever the breadth');
   assert.deepEqual(dispatchSchedule(all, clock).order.map(entry => entry.key), loopOrder);
 });

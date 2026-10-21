@@ -128,7 +128,7 @@ test('unit:sync-resolves-timing-baseline-conflict \u2014 the base and the branch
 test('unit:sync-timing-baseline-keeps-other-conflicts \u2014 sync resolves only the baseline: a line altered for another test file keeps the base tip\u2019s value, and every other conflict is reported as today', async () => {
   const { root, main, branch, git, addTest } = await fixtureRepository();
   const item = { id: 'w1', key: 'GY-1', stage: 'build', ready: true, dependencies: [], workspaces: [{ epoch: 1, host: 'h', path: branch, branch: 'graphyard/gy-1-1' }], observation: null, submission: null } as unknown as Work;
-  const shipped = { id: 'w9', key: 'GY-9', stage: 'done', workspaces: [], delivery: { mergeSha: '', mergedAt: '' } } as unknown as Work;
+  const shipped = { id: 'w9', key: 'GY-9', stage: 'done', observation: { files: ['docs/notes.md'] }, workspaces: [], delivery: { mergeSha: '', mergedAt: '' } } as unknown as Work;
   const server = await fakeServer(() => [item, shipped]);
   try {
     // The branch adds its own test file and line, alters a foreign line (alpha, a file it does not

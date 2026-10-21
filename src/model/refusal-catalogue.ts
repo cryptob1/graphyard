@@ -46,8 +46,6 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   { gate: 'build', id: 'no-workspace', match: /^No workspace registered$/, example: 'No workspace registered', kinds: ['dispatch'] },
   { gate: 'build', id: 'base-conflict', match: /cannot be brought onto base branch tip .* without resolving a conflict/, kinds: ['request-rework'],
     example: 'Candidate aaaaaaaaaaaa cannot be brought onto base branch tip bbbbbbbbbbbb without resolving a conflict, which is content nobody reviewed or proved: merge conflict. Run graphyard sync GY-1, resolve it and push; the approval and proofs bound to aaaaaaaaaaaa do not survive the resolution.' },
-  { gate: 'build', id: 'diff-not-compared', match: /^Candidate diff has not been compared against the base branch tip/, kinds: ['resync'],
-    example: 'Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required' },
   // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
   { gate: 'build', id: 'mechanical-proof-failed', match: /the head returns to its worker before review$/, kinds: ['request-rework'],
     example: 'AC-1: integration:claim failed on aaaaaaaaaaaa (trusted evidence from producer-a); the head returns to its worker before review' },

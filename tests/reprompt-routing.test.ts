@@ -193,7 +193,7 @@ test('unit:reprompt-pane-gone — a recorded pane gone from the runtime ends the
     // Still its own pane, the re-prompt reaches it once.
     await runCycle(master, state, effects, () => clock + minutes(31));
     assert.deepEqual(log.targets, ['w1:pMine'], 'the idle re-prompt reaches the recorded pane');
-    assert.match(log.texts[0], /holds GY-252 \(epoch 1\) with no open blocker or scope request/);
+    assert.match(log.texts[0], /holds GY-252 \(epoch 1\) with no open blocker/);
 
     // The pane dies, and the profile's agent name is taken by another item's live session — the
     // shape the GY-589 incident delivered: the idle re-prompt resolved by name would paste there.

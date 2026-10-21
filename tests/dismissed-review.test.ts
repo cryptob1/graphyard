@@ -150,7 +150,7 @@ test('unit:unsatisfied-settled-request-visible — master status names a request
   // `master status` reports them beside its other attention and counts them apart from what runs.
   const report = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
   assert.match(report, /const unanswered = unansweredRequestAttention\(status\.work\);/);
-  assert.match(report, /attentionItems = \[\.\.\.diskAttention, \.\.\.scopeRequests, \.\.\.unanswered,/);
+  assert.match(report, /attentionItems = \[\.\.\.diskAttention, \.\.\.requests, \.\.\.unanswered,/);
   assert.match(report, /dispatchUnanswered: unanswered\.length/);
   assert.match(report, /attention: status\.counts\.attention \+ diskAttention\.length \+ generatedFiles\.length \+ unanswered\.length/);
 });

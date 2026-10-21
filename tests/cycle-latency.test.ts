@@ -151,7 +151,7 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     const timings = state.metrics.at(-1)!.timings!;
     assert.ok(timings, 'the cycle recorded its timings on the cursor');
     const steps = timings.steps.map(step => step.step);
-    for (const step of ['snapshot', 'observe', 'credentials', 'close', 'scope', 'reclaim', 'dispatch', 'launches', 'decisions', 'reviews and proofs', 'merges', 'deployment verification', 'faults', 'measure'])
+    for (const step of ['snapshot', 'observe', 'credentials', 'close', 'reclaim', 'dispatch', 'launches', 'decisions', 'reviews and proofs', 'merges', 'deployment verification', 'faults', 'measure'])
       assert.ok(steps.includes(step), `the cycle records its ${step} step: ${steps.join(', ')}`);
     const slowest = [...timings.steps].sort((a, b) => b.ms - a.ms);
     assert.equal(slowest[0].step, 'deployment verification');

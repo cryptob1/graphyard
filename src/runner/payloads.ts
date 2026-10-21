@@ -62,6 +62,8 @@ export type DecompositionPayload = z.infer<typeof decompositionPayloadSchema>;
 export const decompositionSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   maxCriteria: z.number().int().min(1).max(50).default(4),
+  // Retired with plannedFiles (GY-1992): an installation that still sets either loads, and they bound nothing.
+  maxBroadScopes: z.unknown().transform(() => undefined).optional(), maxPlannedFiles: z.unknown().transform(() => undefined).optional(),
   maxEstimatedLines: z.number().int().min(100).max(100_000).default(600),
   timeoutMinutes: z.number().int().min(1).max(60).default(10),
   concurrency: z.number().int().min(1).max(16).default(4),

@@ -303,8 +303,6 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
   // Checking, and the label names the gate it waits on. A merge the release does not serve yet is Done.
   const cases: [string, Work, string, string, string][] = [
     ['worker building', find('GY-14', work), 'doing', 'Doing · the builder is writing the code', 'Builder agent'],
-    ['scope check', withReasons(handedIn, { build: ['Candidate diff has not been compared with the planned files'] }), 'checking', 'Checking · checking which files it changes', 'Graphyard (automatic)'],
-    ['out of scope', withReasons(handedIn, { build: ['Candidate changes 2 files outside plannedFiles: a, b'] }), 'checking', 'Checking · it changes files outside its plan', 'Builder agent'],
     ['CI running', handedIn, 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
     ['CI failed', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1 }, { name: 'typecheck', result: 'success', appId: 1 }] } } as Work, 'checking', 'Checking · the check test failed', 'Builder agent'],
     ['CI re-run after a failure', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'in_progress', appId: 1, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],

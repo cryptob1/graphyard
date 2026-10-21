@@ -10,15 +10,16 @@ import type { Work } from '../src/model.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 stamps are work/cache fixture fields and the explicit status now; nothing dates them against the clock (the probe cache has no TTL) and Date.now() measures elapsed budget.
 
 function workWithFiles(key: string, files: string[], sha: string): Work {
+  const candidate = { sha, baseSha: 'base', pr: 1, branch: 'main', author: 'test' };
   return {
     id: `id-${key}`, key, title: `Work ${key}`, description: '', type: 'feature',
     priority: 1, dependencies: [], criteria: [], policy: { checks: [], review: false },
     stage: 'build', revision: 1, policyRevision: 1,
     createdAt: '2030-01-01T00:00:00Z', updatedAt: '2030-01-01T00:00:00Z',
     stageEnteredAt: '2030-01-01T00:00:00Z', ready: true, epoch: 1, lease: null,
-    workspaces: [], candidate: { sha, baseSha: 'base', pr: 1, branch: 'main', author: 'test' },
+    workspaces: [], candidate,
     submission: { epoch: 1, pr: 1 }, reworkRequested: false, scenarioRequirements: [],
-    evidence: [], observation: null, blocker: null, gates: [],
+    evidence: [], observation: { candidate, files } as unknown as Work['observation'], blocker: null, gates: [],
     violations: [],
   } as Work;
 }

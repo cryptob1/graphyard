@@ -1,4 +1,5 @@
 import { servingReleaseProof, loopObservationProofs, type Work } from './work.js';
+import { namedPaths } from './documentation-glob.js';
 
 /**
  * GY-1760: the proofs only the master side of the house records. A throughput owner
@@ -21,8 +22,9 @@ export const loopRecordedProofs: readonly string[] = ['manual:throughput-claim-v
  */
 export const masterRoleObservation = (proof: string) => /checkout-restore|master[.-](status|role)|\.graphyard\/master\.json/i.test(proof);
 
-/** Whether nothing of the item is a worker's to do: every proof it owes is recorded by the master side, so releasing it would only dispatch a worker that must block. One criterion that a worker can serve keeps the whole item dispatchable (GY-1762). */
+/** Whether nothing of the item is a worker's to do: no criterion names a file to change, and every proof it owes is recorded by the master side, so releasing it would only dispatch a worker that must block. An item with code work keeps its worker (GY-1762), and one criterion that a worker can serve keeps the whole item dispatchable. */
 export const loopOwned = (work: Pick<Work, 'criteria'>) => {
+  if (work.criteria.some(criterion => namedPaths(criterion.text).length)) return false;
   const proofs = work.criteria.flatMap(criterion => criterion.proofs);
   return proofs.length > 0 && proofs.every(proof => loopRecordedProofs.includes(proof)
     || servingReleaseProof(proof) && masterRoleObservation(proof));
@@ -30,7 +32,7 @@ export const loopOwned = (work: Pick<Work, 'criteria'>) => {
 
 /** Why such an item is never released or dispatched, or null: the refusal names who closes it. */
 export const loopOwnedRefusal = (work: Pick<Work, 'key' | 'criteria'>) => loopOwned(work)
-  ? `${work.key} is loop-owned: every proof it owes is recorded by the master side (the loop's own throughput measurement, or a master-role session's observation of the master checkout), so a worker has nothing to build, no observation it can take, and no pull request to submit. It stays off the dispatch board; a master-role session records the observation and the item closes without a worker. Releasing or dispatching it would only end in a worker's blocked report`
+  ? `${work.key} is loop-owned: no criterion names a file to change and every proof it owes is recorded by the master side (the loop's own throughput measurement, or a master-role session's observation of the master checkout), so a worker has nothing to build, no observation it can take, and no pull request to submit. It stays off the dispatch board; a master-role session records the observation and the item closes without a worker. Releasing or dispatching it would only end in a worker's blocked report`
   : null;
 
 /**

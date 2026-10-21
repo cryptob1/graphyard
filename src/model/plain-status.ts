@@ -50,7 +50,6 @@ export function plainReason(reason: string, gate: string, now = Date.now(), work
     [/^Worker has not submitted implementation for this attempt$/, () => 'The work has not been handed in yet'],
     [/^Pull request has not been independently observed$/, () => 'Graphyard has not seen the pull request on GitHub yet'],
     [/^No workspace registered$/, () => 'The builder has not said where the code lives yet'],
-    [/^Candidate diff has not been compared/, () => 'Graphyard is checking which files the pull request changes'],
     [/^Verified clean Codex review/, () => 'Waiting for the Codex reviewer to approve the latest code'],
     [/^Every configured reviewer profile is exhausted/, () => 'No reviewer is available — more reviewers are needed', true],
     [/^Verified approval from reviewer profile (\S+) is required/, m => `Waiting for reviewer ${m[1]} to approve the latest code`],

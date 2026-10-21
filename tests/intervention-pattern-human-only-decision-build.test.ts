@@ -16,8 +16,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 //   - GY-1070 (a6485107) and GY-1292 (0ae1de16), goals-and-priorities: the loop's docs-trim item
 //     demanded both its target and full retention. Removed by GY-1366; the whole budget behind that
 //     item is gone since GY-2515, so no docs-trim ask can stand again.
-//   - GY-1113 (a8b29a21), goals-and-priorities: "master scope to widen plannedFiles…". A scope
-//     widening is an approver's decision through scope-request, never a human's. The park is refused.
+//   - GY-1113 (a8b29a21), goals-and-priorities: "master scope to widen plannedFiles…". No file
+//     needs permission, so a scope widening is never a human's decision. The park is refused.
 //   - GY-1384 (6097f31f) and GY-1365 (b9b064b3), money-or-accounts: necessary account actions, each
 //     answered within seconds with the bare default "Approve", which recorded "provided" while
 //     nothing had been set up. GY-1384's resumed worker found the repository still 404 and asked
@@ -35,7 +35,7 @@ const asked = {
 } as const;
 
 test('manual:intervention-pattern-human-only-decision-build — each request is judged: a scope widening and a deferred ask are refused, and (GY-1416) so are the account actions the host could do itself', () => {
-  assert.match(parkRefusal({ needed: asked['GY-1113'] })!, /scope widening is not a human-only decision: plannedFiles is a plan, not a lock/);
+  assert.match(parkRefusal({ needed: asked['GY-1113'] })!, /scope widening is not a human-only decision: no file needs permission/);
   assert.match(parkRefusal({ needed: asked['GY-1384-2'] })!, /every human step the item still needs in this one request/);
   // GY-1416: re-scoping a criterion is no scope widening, but the repository is the host's gh login's to make reachable,
   // and the revert approver variables are derived from the reviewer App saved on the host: both are the master's.

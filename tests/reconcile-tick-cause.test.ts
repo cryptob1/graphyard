@@ -177,10 +177,8 @@ test('unit:slow-tick-names-cause — a tick past the bound names the keys and fa
 test('unit:own-write-no-full-pass — a face the tick\'s own write moved and a face a request moved both make the next pass evaluate only the moved item and its readers', { timeout: 120_000 }, async () => {
   const leased = await create({ exclusiveResources: ['printer'] });
   const dependent = await create({ dependencies: [leased.id] });
-  // Readers the engine defines without a reference: one waits on the exclusive resource the leased
-  // item holds (`resourceConflicts`), one plans a file in its scope (`fileConflicts`, `landingRegressions`).
+  // A reader the engine defines without a reference: it waits on the exclusive resource the leased item holds (`resourceConflicts`).
   const sharer = await create({ exclusiveResources: ['printer'] });
-  const neighbour = await create({  });
   const others: Work[] = [];
   for (let n = 0; n < 3; n++) others.push(await create());
   await engine.execute(operator, 'ready', leased.id, {}, randomUUID());
@@ -204,7 +202,6 @@ test('unit:own-write-no-full-pass — a face the tick\'s own write moved and a f
     const evaluated = new Set(recorder.evaluated);
     assert.ok(evaluated.has(dependent.id), 'the item that depends on the moved face is evaluated against it');
     assert.ok(evaluated.has(sharer.id), 'the item sharing the exclusive resource the lapsed lease held is evaluated against the release');
-    assert.ok(evaluated.has(neighbour.id), 'the item whose planned files overlap the moved item\'s is evaluated against it');
     for (const other of others) assert.ok(!evaluated.has(other.id), `${other.key} reads nothing of the moved face and is not evaluated`);
     assert.match(next.line, /candidate\(s\) whose inputs moved/, 'the warning calls the pass incremental');
     recorder.evaluated.length = 0;
@@ -218,7 +215,7 @@ test('unit:own-write-no-full-pass — a face the tick\'s own write moved and a f
     assert.deepEqual(outside.tick.faces.map(move => move.key), [others[0].key]);
     const saw = new Set(recorder.evaluated);
     assert.ok(saw.has(others[0].id), 'the moved item is evaluated against its moved face');
-    assert.ok(!saw.has(dependent.id) && !saw.has(sharer.id) && !saw.has(neighbour.id), `nothing reads others[0] and no reader is evaluated: ${recorder.evaluated.join(', ')}`);
+    assert.ok(!saw.has(dependent.id) && !saw.has(sharer.id), `nothing reads others[0] and no reader is evaluated: ${recorder.evaluated.join(', ')}`);
     recorder.evaluated.length = 0;
     await settle();
 

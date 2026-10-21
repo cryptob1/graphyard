@@ -27,8 +27,7 @@ export interface MainOptions { port?: number; host?: string }
 /** Process entry: configuration, migration, the HTTP server and the reconciliation tick. */
 export async function main(options: MainOptions = {}) {
   try { process.loadEnvFile(); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  // An unparseable generated-files declaration refuses start-up with a clear message instead of
-  // silently exempting nothing; the regression guard runs with exactly this parsed set.
+  // An unparseable generated-files declaration refuses start-up with a clear message.
   const generatedFiles = configuredGeneratedFiles();
   const credentials = principalSchema.parse(JSON.parse(process.env.GRAPHYARD_PRINCIPALS ?? '[]'));
   demand(new Set(credentials.map(p => p.id)).size === credentials.length && new Set(credentials.map(p => p.token)).size === credentials.length, 'Principal IDs and tokens must be unique');
@@ -61,7 +60,7 @@ export async function main(options: MainOptions = {}) {
   // runs with against the managed repository's manifest and name the command that fixes it.
   http.services.delegationLimits.deployed[generatedFilesVariable] = process.env.GRAPHYARD_GENERATED_FILES ?? null;
   for (const line of http.services.delegationLimits.attention) console.error(`Delegation limits: ${line}`);
-  console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared; the regression guard exempts nothing'}`);
+  console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared'}`);
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); ${observationLine(provider, build)}`);
 
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), process.env.GITHUB_REPOSITORY ?? '');

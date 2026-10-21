@@ -35,7 +35,7 @@ const observed = (paths: string[]): Observation => ({
   scopeFiles: paths.map(path => ({ path, status: 'modified' as const, sha: 'a'.repeat(40), additions: 1, deletions: 1, binary: false })),
 });
 
-const item = (paths: string[], proofs: string[] = ['unit:core-flow', 'manual:safety-attestation'], planned: string[] = []): Work => ({
+const item = (paths: string[], proofs: string[] = ['unit:core-flow', 'manual:safety-attestation']): Work => ({
   id: 'w', key: 'GY-1', title: 'lane fixture', type: 'feature', description: '', priority: 2,
   dependencies: [], criteria: [{ id: 'AC-1', text: 'The core flow is proven.', proofs }], policy: { checks: ['test'], review: true },
   stage: 'review', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
@@ -191,7 +191,7 @@ test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap 
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(),
   } as unknown as Work;
-  const work = item(['src/model/gates.ts'], ['unit:core-flow'], ['src/model/policy.ts']);
+  const work = item(['src/model/policy.ts'], ['unit:core-flow']);
   const result = evaluate(work, [work, source], new Date(), [15368]);
   const gate = acceptance(work, [work, source]);
   assert.equal(result.lane, 'low');
@@ -485,7 +485,7 @@ test('unit:lanes-feed-verdict — the producer decision follows the lane’s req
 });
 
 test('unit:lanes-feed-verdict — the verdict reads the observed diff, and an unobserved change keeps the full high path', () => {
-  const work = item(['src/model/policy.ts'], ['unit:core-flow', 'manual:safety-attestation'], ['migrations/schema/003.sql']);
+  const work = item(['src/model/policy.ts'], ['unit:core-flow', 'manual:safety-attestation']);
   assert.equal(verdict(work).lane, 'low', 'the observed diff decides the lane');
   work.observation = null;
   assert.equal(verdict(work).lane, 'high', 'with no observation, the change is unknown and nothing is waived');

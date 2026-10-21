@@ -67,7 +67,7 @@ test('unit:allowlist-grammar-only-scanning — the allowlist judges the command 
   const context = { cwd: process.cwd(), cli, env: {} };
   // Prose naming refused programs and subcommands is still prose, for every sanctioned command.
   for (const prose of ['most recent', 'last attempt', 'requirements revised', 'policy revision', 'merge dispatch evidence claim', 'rm -rf src then git push']) {
-    for (const name of ['unblock', 'scope', 'settle-containment', 'release']) {
+    for (const name of ['unblock', 'settle-containment', 'release']) {
       const verdict = pi.doctorCommandVerdict(`node ${cli} master ${name} GY-1652 "${prose} (as of 14:47); see 'GY-1649'"`, context);
       assert.equal(verdict.allow, true, `master ${name} with reason "${prose}" is accepted`);
     }

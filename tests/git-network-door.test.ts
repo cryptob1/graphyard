@@ -180,7 +180,6 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'scripts/prepare-acceptance.mjs': { subcommands: ['fetch'], runs: 'the trusted acceptance job preparing the exact candidate head and base', credential: 'none stored: an anonymous https fetch of a public repository inside the candidate build context', door: 'it runs inside the trusted acceptance job on a CI runner, which must build from the exact head and base it reads itself; the merge writer lives in the loop on another machine and no port reaches it from CI' },
   'src/cli/checkout-restore-release.ts': { subcommands: ['clone', 'fetch'], runs: 'the serving release\'s own CLI answering `master checkout-restore --serve` (the base-tip read and the local snapshot clone)', credential: 'the loop checkout\'s own git credential for the fetch; the --shared clone is local and needs none', door: 'the clone is a --shared local copy of the checkout\'s own object store and never reaches the remote; the base-tip fetch serves a restore that runs when the loop, and so its merge writer, may be down or wedged, so it cannot wait on the merge writer\'s queue' },
   'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)', door: 'the push exists only in the PR form, which the engine accepts only while GitHub is the merger (GY-1523) — exactly when the control plane is not the merge writer, so there is no writer queue to hand the push to; the writer\'s one push door (sync-push) carries only a pure base sync of the worker\'s own assigned branch, and the answer to a sandbox that cannot push is `complete --head`, which pushes nothing (GY-1925)' },
-  'src/cli/planned-files-intent.ts': { subcommands: ['fetch'], runs: 'the worker CLI reading the planned-files intent (`sync`)', credential: 'the worker checkout\'s own git credential', door: 'the best-effort fetch refreshes origin/BASE in the coordinator checkout before plannedFiles is derived against its tree — on `master create`, `master requirements` and the loop\'s scope and diagnosis reads; the merge writer runs as a serial queue step and publishes no base read other processes can await, and a failed fetch falls back to the last fetched base' },
   'src/cli/workspace-worktree.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s workspace tools (`handoff`, `restore-branch`)', credential: 'the workspace checkout\'s own git credential', door: 'the fetch refreshes the workspace checkout\'s own remote-tracking refs for `restore-branch`\'s lease push and for an adopted pull request\'s branch, which the merge writer neither holds nor pushes; a rework workspace reads the registered local head and fetches nothing (GY-2017), and `restore-branch`\'s lease push replaces a worker branch the merge writer has no lease on' },
   'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential', door: 'it reads the open candidates\' worker branches, which the merge writer never fetches (its one read is the base tip), synchronously inside the status probe\'s time budget; the writer has no port for branch reads and is not wired under the github merger' },
   'src/daemon/acceptance.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s acceptance step opening a goal\'s acceptance pull request under the github merger (base read, acceptance-branch push); under control-plane its base read is the merge writer\'s fetch', credential: 'the coordinator checkout\'s own git credential',
@@ -196,7 +195,6 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/master/autonomy.ts': { subcommands: ['clone', 'fetch'], runs: 'the master cloning the approver\'s own copy (approverClone) and fetching its bound sha', credential: 'the coordinator checkout\'s own git credential for the bound-sha fetch; the clone itself is local', door: 'the clone is local (the approver\'s own unshared copy of the coordinator checkout) and never reaches the remote; the fetch reads a worker\'s bound sha into that copy, a branch the merge writer never handles, and a miss is tolerated' },
   'src/master/worktrees.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s cycle preparation (cycleBaseTip, one fetch per cycle)', credential: 'the coordinator checkout\'s own git credential', door: 'the worker launcher prepares worktrees from the base tip in the coordinator\'s own object store, once per cycle; the merge writer runs as a serial queue step and publishes no base read other processes can await, so routing it there would serialize every launch behind merges' },
   'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on', door: 'it is the merge writer: pushArgs is the door\'s own leased push, defined here and executed only by the writer\'s ports' },
-  'src/review-scope.ts': { subcommands: ['fetch'], runs: 'the loop\'s review-scope reads', credential: 'the coordinator checkout\'s own git credential', door: 'the review-scope, cycle-scope and deployment reads need the base tip under either merger, and under the github merger no merge writer cycle runs; it is the same loop process and credential as the writer\'s own base fetch, with the contended-ref retry the writer lacks (GY-1893)' },
   'src/server/routes/goals.ts': { subcommands: ['fetch'], runs: 'the server\'s land route judging a merge-writer landing', credential: 'none of its own: a compose container holds no SSH credential (GY-1922), so a failed fetch answers retryable 503 and records nothing', door: 'it runs in the server process, which cannot call the loop\'s merge writer; the fetch is best-effort and a failure falls back to the origin ref the writer\'s own post-push fetch leaves, so dropping it is a change to the land route\'s judgement, not a move' },
   'src/up.ts': { subcommands: ['fetch', 'push'], runs: '`graphyard up` publishing onboarding and moving the host checkout to the installed ref', credential: 'the operator\'s own git credential on the installing machine', door: '`graphyard up` runs on the operator\'s machine while onboarding a repository, before any loop or merge writer serves it, and pushes only its own onboarding branch, never the base the merge writer owns' },
 };
@@ -217,14 +215,13 @@ export const allowlist: Record<string, AllowlistEntry> = {
  * GY-1943: the acceptance and planner cluster. Each file either leaves both lists, its calls moved
  * behind the merge writer, or keeps an entry stating why its call cannot go through it.
  */
-export const acceptanceAndPlannerCluster = ['src/daemon/acceptance.ts', 'src/review-scope.ts', 'src/conflicts.ts', 'src/server/routes/goals.ts', 'scripts/prepare-acceptance.mjs', 'scripts/ci-tests.mjs'];
+export const acceptanceAndPlannerCluster = ['src/daemon/acceptance.ts', 'src/conflicts.ts', 'src/server/routes/goals.ts', 'scripts/prepare-acceptance.mjs', 'scripts/ci-tests.mjs'];
 
 export const baseline = [
   'scripts/ci-tests.mjs',
   'scripts/prepare-acceptance.mjs',
   'src/cli/checkout-restore-release.ts',
   'src/cli/complete.ts',
-  'src/cli/planned-files-intent.ts',
   'src/cli/workspace-worktree.ts',
   'src/conflicts.ts',
   'src/daemon/acceptance.ts',
@@ -239,7 +236,6 @@ export const baseline = [
   'src/master/autonomy.ts',
   'src/master/worktrees.ts',
   'src/merge-writer/executor.ts',
-  'src/review-scope.ts',
   'src/server/routes/goals.ts',
   'src/up.ts',
 ];
@@ -305,13 +301,12 @@ test('unit:git-network-door — every file that spawns a git network subcommand 
  * GY-1944: the worker CLI cluster. `sync --push-via-control-plane`'s trailing fetch moved behind
  * that push — the worker already holds the exact commit the route lands (it validates the
  * fast-forward and patches the branch with force:false), so its remote-tracking ref follows
- * locally and the entry left the allowlist and the baseline in the same commit. The other three
+ * locally and the entry left the allowlist and the baseline in the same commit. The other two
  * could not move, and each keeps its entry with `door`, the reason it cannot; a later move leaves
  * both lists too.
  */
 export const workerCliCluster = [
   'src/cli/complete.ts',
-  'src/cli/planned-files-intent.ts',
   'src/cli/sync-push.ts',
   'src/daemon/blocker-probes.ts',
 ];
