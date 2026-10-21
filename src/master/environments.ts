@@ -101,7 +101,13 @@ const healthCache = new Map<string, { at: number; health: EnvironmentHealth }>()
  * (null when none), and the account's named key file and variable. Typed here rather than smuggled through `as any`,
  * so a caller that drops one of them fails to compile instead of silently probing the wrong key (GY-1210).
  */
-export type ProbedEnvironment = AgentEnvironment & { plan?: string | null; declaredPlan?: string | null; keyFile?: string; keyVariable?: string };
+export type ProbedEnvironment = AgentEnvironment & { plan?: string | null; declaredPlan?: string | null; keyFile?: string; keyVariable?: string; model?: string };
+/**
+ * The newest Z.AI quota reading any account's key answered with windows. A Pi account on a `zai/` model runs on the
+ * operator's shared Z.AI credit, which its own key may not report (GY-2871: pi-a's key answered with no limits while
+ * opencode-a's showed the credit spent), so with no windows of its own it reads this one.
+ */
+let latestZaiReading: PlanReading | null = null;
 export async function checkAgentEnvironment(environment: ProbedEnvironment, probe: EnvironmentProbe = {}): Promise<EnvironmentHealth> {
   const now = probe.now?.() ?? Date.now(), ceiling = probe.ceilingPercent ?? defaultQuotaCeilingPercent;
   const planId = environment.plan ?? (
@@ -120,6 +126,9 @@ export async function checkAgentEnvironment(environment: ProbedEnvironment, prob
     : environment.kind === 'opencode' || (environment.kind as string) === 'pi' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe, { id: planId, now }))
     : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
 
+  if (/^zai\//i.test(environment.model ?? '') && !account.usage.length && latestZaiReading)
+    Object.assign(account, { loggedIn: true, usage: latestZaiReading.windows, note: latestZaiReading.reason, reached: latestZaiReading.reached, shared: true });
+  else if (account.plan?.windows.length) latestZaiReading = account.plan;
   if (account.loggedIn && planId && !account.shared) {
     // A reading taken from the plan cache is not re-stamped, so the cache still expires. A provider
     // call that answered caches its own plan reading; only an account without one stamps its windows.
