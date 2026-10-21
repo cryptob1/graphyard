@@ -1,5 +1,7 @@
 import { z } from 'zod';
-import type { BaseRefresh, BaseRefreshRequest, LandingCheck, MergeRefusal, RevertedDelivery } from '../merge-queue.js';
+import type { BaseRefresh, BaseRefreshRequest } from './base-refresh.js';
+import type { LandingCheck, RevertedDelivery } from './landing-check.js';
+import type { MergeRefusal } from './merge-authorization.js';
 import { criteriaSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
 import type { EvaluationAttempt, Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
@@ -138,32 +140,30 @@ export interface ScopeFile {
 }
 export interface Observation {
   clockOffset?: { min: number; max: number };
-  reviewIds?: number[];
-  /** Every review on the pull request GitHub reports as dismissed, whoever posted it and whatever they posted since; unset on observations recorded before GY-486. */
-  dismissedReviewIds?: number[];
+  /** The ids of the reviews recorded on this head (server/review-verdict.ts appends each verdict's), and those withdrawn. */
+  reviewIds?: number[]; dismissedReviewIds?: number[];
   agentReview?: AgentReview;
+  /** Pull-request-era fields (GY-2010): a document observed before the control plane became the merge writer still loads; the control plane writes neither. */
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
-  candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[]; // `status`: a required context's commit status, app 0 (GY-1060)
+  /** Pull-request-era check runs; the control plane records none (`checks: []`) and no gate reads them. */
+  candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[];
   reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; mechanical?: number; source?: string }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); mechanical: an approval's nits classified mechanical, which hold the review gate for their bot round (GY-971)
-  merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean; mergeableState?: string; // GitHub's `mergeable_state` as last read (clean, unstable, blocked, behind, dirty, unknown, ...); unset before GY-1231
-  // GitHub computed a merge conflict with the base (`pr.mergeable === false`), not merely still computing it;
-  // a conflicting head is withheld and sent back (GY-191). `disproved` keeps GitHub's raw reading a test merge disproved (GY-390).
-  conflicting?: boolean; disproved?: { mergeable: boolean; conflicting: boolean; reading: string };
-  // The real base-branch head and its tree, read from refs/heads/<base> (never from the pull
-  // request's cached base) and recorded separately from the candidate's bound base so a held
-  // binding never hides where the managed branch actually points.
+  merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
+  /** A pull-request-era conflict reading; the control plane's own test merge decides conflicts (model/base-refresh.ts). */
+  conflicting?: boolean;
+  // The real base-branch head and its tree, recorded separately from the candidate's bound base
+  // so a held binding never hides where the managed branch actually points.
   baseTip?: string; baseTree?: string;
   // The head contains that base tip by ancestry. A review is only requested for a head that does.
   baseTipContained?: boolean;
-  protected: boolean; files: string[]; at: string; requiredChecks?: { name: string; appId: number | null }[]; // base protection's and rulesets' required checks bar `Graphyard / merge` (GY-430); appId null = any source
+  protected: boolean; files: string[]; at: string;
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
   /** The e2e/contract.json outcome bindings the head changes or drops against the base tip, read by the control plane's own observation when the head touches the contract (GY-2602); unset when no contents were read. */
   contractMoved?: string[] | null;
   /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see model/landing-check.ts. */
   landing?: LandingCheck;
-  revertedDelivery?: RevertedDelivery; // merged PR whose content the base branch does not hold; see merge-queue.ts RevertedDelivery
-  mergeVerdict?: { id: number; conclusion: string | null } | null; // merged PR only: the App's latest `Graphyard / merge` run at the merged head, null when none (GY-1917)
+  revertedDelivery?: RevertedDelivery; // a merged change whose content the base branch does not hold; see model/landing-check.ts
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
 /** `decision`: the approved two-party decision whose application raised it, when the item's ledger records it approved (GY-1347). */
@@ -226,7 +226,7 @@ export interface Work extends Create {
    */
   humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[]; /** The loop's last probe of the blocker's cause (GY-1008). */ blockerProbe?: import('./blocker-class.js').BlockerProbe | null;
   /** What the research step found before build, and the product questions it asked (src/research.ts); the decomposition run before first dispatch and the split relation it recorded, set only by the control plane (src/decomposition.ts). */
-  researchBrief?: ResearchRecord | null; decomposition?: DecompositionRecord | null; parent?: string | null; children?: string[]; /** GY-1849: the one pull request adopted into this item at its own branch and head, source kept (model/pr-adoption.ts). */ prAdoption?: import('./pr-adoption.js').PrAdoption | null;
+  researchBrief?: ResearchRecord | null; decomposition?: DecompositionRecord | null; parent?: string | null; children?: string[];
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
   closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it shipped (GY-845), stored before GY-1249 and never written now, model/machine-backlog.ts
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
@@ -234,9 +234,11 @@ export interface Work extends Create {
   /**
    * The last time the control plane brought this candidate onto a base branch that had moved
    * under it, or refused to because the merge conflicts. Decided and written by Graphyard
-   * alone; see merge-queue.ts for the rule and model/carry.ts for what the refresh carries.
+   * alone; see model/base-refresh.ts for the rule and model/carry.ts for what the refresh carries.
    */
   baseRefresh?: BaseRefresh | null; baseRefreshRequest?: BaseRefreshRequest | null; mergeRefusal?: MergeRefusal | null; // baseRefreshRequest: the standing request to merge a repaired base in (GY-528); mergeRefusal: the guarded merge's refusal (GY-831)
+  /** GY-1927: the automatic-merging hold over the item's candidate, as the coordination view serves it (merger-mode.ts `mergeHolds`); absent when nothing holds it. */
+  mergeHold?: string | null;
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
