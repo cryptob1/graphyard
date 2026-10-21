@@ -307,7 +307,7 @@
     "tests/coordinator-os-confinement.test.ts": 1273,
     "tests/cursor-tolerates-nested-undeclared-keys.test.ts": 1000,
     "tests/cycle-failure.test.ts": 3296,
-    "tests/cycle-latency.test.ts": 19567,
+    "tests/cycle-latency.test.ts": 45000,
     "tests/daemon-state-unknown-keys.test.ts": 1355,
     "tests/daemon-unsubmitted-bound.test.ts": 4071,
     "tests/dashboard-design.test.ts": 172,
