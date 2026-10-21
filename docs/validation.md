@@ -43,7 +43,7 @@ Container writes; attestor, collector read; never add the runner account. Collec
 
 One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun**; **blocked**; **pending** (blocks only if a delivered outcome shares it or `e2e.pendingOutcomes: blocking`). Only failed or unaccepted flaky required cases block; promotion waits on an `evidence` decision. `POST /api/validation/import` (`external-runs:import` producers) binds external runs to a `sha`, idempotent per `producer`+`runId`; the `imports` job seals released holds.
 
-`e2e/contract.json` lists required customer outcomes; `release contract` refuses a release whose bound case is missing/invalid/optional/not `uat`-targeted or proves nothing.
+`e2e/contract.json` lists required customer outcomes, each bound to required `uat`-targeted cases.
 
 ## Goals and acceptance
 
