@@ -410,7 +410,7 @@ export async function mergeAcceptanceChange(writer: AcceptanceWriterPorts, goal:
   const allowed = new Set(draftFiles({ outcomes: acceptance.outcomes }, null).map(file => file.path));
   for (let tries = 0; tries <= writer.retrials; tries++) {
     const tip = await writer.fetch();
-    const merged = await writer.merge(acceptance.head, tip);
+    const merged = await writer.merge(acceptance.head, tip, { key: goal.key, title: named });
     if ('conflict' in merged) return { state: 'conflicting', mergeSha: null, detail: `${named} conflicts with ${writer.baseBranch} at ${tip.slice(0, 12)} in ${merged.conflict.slice(0, 20).join(', ')}` };
     const stray = merged.files.filter(path => !allowed.has(path));
     if (stray.length) return { state: 'unapproved', mergeSha: null, detail: `${named} changes ${stray.slice(0, 20).join(', ')}, which are not its cases or contract; no approver judged them` };
@@ -460,11 +460,11 @@ async function commitDraft<T>(run: ChildRun, root: string, scratch: string, conf
 export const commitAcceptanceChange = (run: ChildRun, root: string, scratch: string, config: { baseBranch: string }, goal: Goal, draft: AcceptanceDraft, writer: Pick<MergeWriterReads, 'fetch'>) =>
   commitDraft(run, root, scratch, config, goal, draft, () => writer.fetch(), async ({ branch, head }) => ({ branch, head }));
 
-/** The merge commit on `ref`'s first-parent history whose second parent is `head`, or null when the base holds none. */
+/** The commit on `ref`'s first-parent history that landed `head`: `head` itself (fast-forwarded) or the merge commit whose second parent it is; null when the base holds none. */
 export async function mergedOnBase(git: (...args: string[]) => Promise<string>, ref: string, head: string): Promise<string | null> {
   try { await git('merge-base', '--is-ancestor', head, ref); } catch { return null; }
   const lines = (await git('rev-list', '--first-parent', '--parents', ref)).split('\n');
-  for (const line of lines) { const [sha, , second] = line.trim().toLowerCase().split(' '); if (second === head.toLowerCase()) return sha!; }
+  for (const line of lines) { const [sha, , second] = line.trim().toLowerCase().split(' '); if (sha === head.toLowerCase() || second === head.toLowerCase()) return sha!; }
   return null;
 }
 

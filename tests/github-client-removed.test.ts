@@ -262,7 +262,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   assert.equal(done.stage, 'done', `the PR-era item is delivered by the merge writer: ${JSON.stringify(done.gates)} ${JSON.stringify(state.mergeWriter.refusals ?? null)}`);
   assert.ok(trials.length >= 1, 'the writer ran its trial');
   assert.equal(git(origin, 'rev-parse', 'refs/heads/main'), done.delivery!.mergeSha, 'origin main is the delivered merge commit');
-  assert.equal(git(origin, 'rev-parse', `${done.delivery!.mergeSha}^2`), head, 'whose second parent is the submitted head');
+  assert.equal(done.delivery!.mergeSha, head, 'the submitted head itself: it sat on the base tip, so main fast-forwarded to it');
   const kinds = (await store.pool.query("SELECT kind FROM events WHERE work_id=$1 AND kind LIKE 'merge.%' ORDER BY seq", [work.id])).rows.map((row: { kind: string }) => row.kind);
   assert.deepEqual(kinds, ['merge.intent', 'merge.trial', 'merge.pushed', 'merge.reconciled'], 'the merge ledger records the whole delivery');
   assert.deepEqual(requested.filter(target => !target.startsWith(url)), [], 'no request left for anywhere but the control plane');

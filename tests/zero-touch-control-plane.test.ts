@@ -286,9 +286,9 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   const mergeSha = done.delivery!.mergeSha;
   assert.equal(git(origin, 'rev-list', '--first-parent', 'main').split('\n')[0], mergeSha, 'main\'s first parent on the bare origin is the delivered merge commit');
   const acceptanceMerge = goal.merged!.mergeSha!;
-  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), acceptanceMerge, 'the item merged onto the acceptance change');
+  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), acceptanceMerge, 'the item landed on the acceptance change');
   assert.equal(git(origin, 'rev-parse', `${acceptanceMerge}^1`), baseTip);
-  assert.equal(git(origin, 'rev-parse', `${mergeSha}^2`), submittedHead);
+  assert.equal(mergeSha, submittedHead, 'the worker\'s head sat on the tip, so main fast-forwarded to it');
   assert.match(git(origin, 'show', `${mergeSha}:src/greeting.ts`), /Hello/, 'the worker\'s file is on main');
   assert.equal(pushes.length, 2, 'two pushes: the acceptance change, then the item');
   for (const push of pushes) assert.equal(push.env?.GIT_SSH_COMMAND, deployKeySshCommand(deployKeyFile), 'every push used the deploy key `up` placed, and no other credential');

@@ -75,6 +75,13 @@ test('unit:main-watch-classify — every first-parent commit is labelled github-
     ['ledger', 'GY-10'], ['github-delivery', 'GY-13'], ['github-delivery', 'GY-12'], ['revert', 'GY-14'], ['candidate-revert', 'rc-7'], ['direct-merge', 'direct-merge window since 2030-01-15T00:00:00.000Z'], ['unknown', null], ['unknown', null]]);
   assert.equal(labelled[1].sha, sha('f1'));
   assert.deepEqual(classifyMainCommits([], { ledger: {}, deliveries: [], mainGuardReverts: [], candidateReverts: [], directMergeWindows: [] }), []);
+  // A head the merge writer fast-forwarded main to brought its earlier commits onto the first-parent chain: the ledger's merge sha
+  // with its base tip explains them down to that tip, each the first parent of the one above; a commit off the chain, or below the tip, is not explained.
+  const chain = (seed: string, parent: string, subject: string): MainWatchCommit => ({ ...commit(seed, subject), parents: [sha(parent)] });
+  const forwarded = classifyMainCommits([chain('g0', 'g1', 'GY-20: second commit'), chain('g1', 'g2', 'GY-20: first commit'), chain('g2', 'g3', 'Merge GY-21: earlier delivery'), chain('g3', 'g4', 'below the earlier delivery'), chain('h0', 'hx', 'GY-22: fast-forwarded alone'), commit('h1', 'off the chain')], {
+    ledger: { 'GY-20': { mergeSha: sha('g0'), baseTip: sha('g2') }, 'GY-21': { mergeSha: sha('g2'), baseTip: sha('g3') }, 'GY-22': { mergeSha: sha('h0'), baseTip: sha('h3') } },
+    deliveries: [], mainGuardReverts: [], candidateReverts: [], directMergeWindows: [] });
+  assert.deepEqual(forwarded.map(entry => [entry.label, entry.by]), [['ledger', 'GY-20'], ['ledger', 'GY-20'], ['ledger', 'GY-21'], ['unknown', null], ['ledger', 'GY-22'], ['unknown', null]]);
 });
 
 test('unit:main-watch-step — the step runs after deployment verification, stores state.mainWatch (checkedAt, tip, unknown, frozen) in the daemon state schema from what the snapshot and the reads explain, skips a loop without reads, and lets a settling commit age before judging it', async () => {

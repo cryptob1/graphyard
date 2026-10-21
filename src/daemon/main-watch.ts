@@ -102,8 +102,8 @@ export function mainWatchReads(config: Pick<MasterConfig, 'baseBranch'>, root: s
 export type MainCommitLabel = 'ledger' | 'github-delivery' | 'revert' | 'candidate-revert' | 'direct-merge' | 'unknown';
 export interface ClassifiedMainCommit extends MainWatchCommit { label: MainCommitLabel; /** The item or record that explains it, when one does. */ by: string | null }
 export interface MainWatchInputs {
-  /** The folded merge ledger (`foldMergeLedger`), by item key. */
-  ledger: Readonly<Record<string, Pick<MergeLedgerState, 'mergeSha'>>>;
+  /** The folded merge ledger (`foldMergeLedger`), by item key; `baseTip` bounds the commits a fast-forwarded merge sha explains below it. */
+  ledger: Readonly<Record<string, Pick<MergeLedgerState, 'mergeSha'> & { baseTip?: string | null }>>;
   /** Every delivery GitHub merged: the item's merge commit, and its split children's. */
   deliveries: readonly { key?: string | null; mergeSha: string }[];
   /** The main guard's reverts, by the revert's merge commit once it merged. */
@@ -118,20 +118,28 @@ export interface MainWatchInputs {
  * Label every first-parent commit by what explains it, in this order: a delivery's merge commit
  * (`github-delivery`, whether or not the ledger names it too), a merge commit the ledger names, a
  * main guard revert, a candidate revert, a commit inside a direct-merge window; a commit nothing
- * explains is `unknown`.
+ * explains is `unknown`. A merge sha the ledger names with its base tip explains, as `ledger`, the
+ * commits below it on the first-parent chain down to that tip (each the first parent of the one
+ * above): a head the merge writer fast-forwarded main to brought its own earlier commits with it.
  */
 export function classifyMainCommits(history: readonly MainWatchCommit[], inputs: MainWatchInputs): ClassifiedMainCommit[] {
   const ledger = ledgerMergeShas(inputs.ledger);
   const ledgerKey = new Map(Object.entries(inputs.ledger).flatMap(([key, state]) => state.mergeSha ? [[state.mergeSha.toLowerCase(), key] as const] : []));
+  const ledgerBase = new Map(Object.values(inputs.ledger).flatMap(state => state.mergeSha && state.baseTip ? [[state.mergeSha.toLowerCase(), state.baseTip.toLowerCase()] as const] : []));
   const deliveries = new Map(inputs.deliveries.map(delivery => [delivery.mergeSha.toLowerCase(), delivery.key ?? null]));
   const reverts = new Map(inputs.mainGuardReverts.flatMap(revert => revert.revertSha ? [[revert.revertSha.toLowerCase(), revert.key ?? null] as const] : []));
   const candidateReverts = new Map(inputs.candidateReverts.map(revert => [revert.sha.toLowerCase(), revert.id ?? null]));
   const window = (at: string) => { const time = Date.parse(at); return Number.isFinite(time) ? inputs.directMergeWindows.find(entry => Date.parse(entry.since) <= time && (!entry.until || time < Date.parse(entry.until))) ?? null : null; };
+  // The fast-forwarded delivery whose range the next commit may fall in: its item, its base tip, and the commit it expects next (the first parent of the last one).
+  let range: { key: string | null; baseTip: string; next: string | undefined } | null = null;
   return history.map(commit => {
     const sha = commit.sha.toLowerCase();
-    const label: MainCommitLabel = deliveries.has(sha) ? 'github-delivery' : ledger.has(sha) ? 'ledger' : reverts.has(sha) ? 'revert' : candidateReverts.has(sha) ? 'candidate-revert' : window(commit.at) ? 'direct-merge' : 'unknown';
-    const by = label === 'github-delivery' ? deliveries.get(sha) ?? null : label === 'ledger' ? ledgerKey.get(sha) ?? null : label === 'revert' ? reverts.get(sha) ?? null
+    const within = range !== null && range.next === sha && sha !== range.baseTip ? range : null;
+    const label: MainCommitLabel = deliveries.has(sha) ? 'github-delivery' : ledger.has(sha) || within ? 'ledger' : reverts.has(sha) ? 'revert' : candidateReverts.has(sha) ? 'candidate-revert' : window(commit.at) ? 'direct-merge' : 'unknown';
+    const by = label === 'github-delivery' ? deliveries.get(sha) ?? null : label === 'ledger' ? ledgerKey.get(sha) ?? within?.key ?? null : label === 'revert' ? reverts.get(sha) ?? null
       : label === 'candidate-revert' ? candidateReverts.get(sha) ?? null : label === 'direct-merge' ? `direct-merge window since ${window(commit.at)!.since}` : null;
+    const baseTip = ledgerBase.get(sha);
+    range = baseTip ? { key: ledgerKey.get(sha) ?? null, baseTip, next: commit.parents[0]?.toLowerCase() } : within ? { ...within, next: commit.parents[0]?.toLowerCase() } : null;
     return { ...commit, sha, label, by };
   });
 }
