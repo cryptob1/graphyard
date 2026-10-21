@@ -67,7 +67,10 @@ export async function deployTip(state: DaemonState, tip: string, from: string, p
   const schemas = await ports.schemas(tip).catch(() => ({ target: null, database: null }));
   const failure = await sequence(tip, ['deploy', 'health', 'e2e']);
   if (!failure) {
-    state.promotion = promotionReading(state.promotion, ctx.at(), { mainSha: tip, promotedSha: tip, promotedAt: ctx.at(), deployFailed: null });
+    // GY-2844: the deploy is recorded with its commit's committer date, so merged→production counts every merge it contains as served from now.
+    const committedAt = await Promise.resolve().then(() => ctx.git('show', '-s', '--format=%cI', tip)).then(out => out.trim(), () => '');
+    const deploys = committedAt ? { deploys: [...state.promotion?.deploys ?? [], { sha: tip, committedAt, at: ctx.at() }].slice(-200) } : {};
+    state.promotion = promotionReading(state.promotion, ctx.at(), { mainSha: tip, promotedSha: tip, promotedAt: ctx.at(), deployFailed: null, ...deploys });
     await ctx.persist();
     await ports.pin?.(tip).catch(() => {});
     await ctx.note(`Deployed base tip ${shortCommit(tip)}: health and end to end passed`, false);
