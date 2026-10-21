@@ -10,6 +10,7 @@ import { profileHealth } from './sessions.js';
 import { boundedPersist, progressAttention } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
+import { e2eFixtureStep } from './e2e-fixtures.js';
 import { masterSessionStep } from './cycle-master.js';
 import { scopeStep, successorStep } from './cycle-scope.js';
 import { blockerStep } from './cycle-blockers.js';
@@ -205,6 +206,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, heldDecisions, closedPanes };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
   const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
+  await timings.step('e2e fixtures', () => e2eFixtureStep(cycle));
   await timings.step('close', () => closeStep(cycle));
   await settleLaunches();
 
