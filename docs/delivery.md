@@ -43,7 +43,7 @@ An environment registers `{"kind":"environment","services":[…]}`; an observer 
 
 ## Main watch
 
-`graphyard master main-watch status` prints the unexplained commits; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. `GRAPHYARD_MAIN_WATCH_FREEZE=true` freezes promotion until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`).
+`graphyard master main-watch status` prints the unexplained commits; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. The watch only reports: each unexplained commit raises one attention item until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`); nothing freezes promotion.
 
 ## Rollback
 
@@ -51,4 +51,4 @@ Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (
 
 ## Coordinator recovery
 
-Self-merge stalled the loop, or main-watch froze: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin, keeping the new pin, the one it replaced and the one the running loop loaded from.
+Self-merge stalled the loop: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin, keeping the new pin, the one it replaced and the one the running loop loaded from.
