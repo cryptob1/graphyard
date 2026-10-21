@@ -52,7 +52,7 @@ export async function buildPipelineStatus(
   for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
   // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
   // breach attention (GY-1232) and the stage holding each item's time (GY-1382); a failed read marks its section.
-  const delivery = await speedSections(status.speed, masterApi, snapshot, { root, targets: master.deliverySpeed, sections });
+  const delivery = await speedSections(status.speed, masterApi, snapshot, { root, targets: master.deliverySpeed, deploys: daemonState?.promotion?.deploys, sections });
   // The one speed number (GY-1989): median released→merged over the last 10 merges with the previous
   // 10 beside it, read from the items' own release records; a failed read marks its section and the
   // report carries no line, rather than a figure guessed from what did read.
