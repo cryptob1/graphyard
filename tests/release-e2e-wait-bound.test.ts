@@ -90,7 +90,7 @@ test('unit:release-e2e-wait-bound — seven waiting GET steps of 3600 s each, in
   assert.ok(took < hour, `the suite took ${took / 1000} fake s against a ${hour / 1000} s timeout`);
   assert.ok(took <= releaseWaitBudgetSeconds * 1000 + 120_000, `waits past the shared deadline cost only single asks: ${took / 1000} fake s`);
   assert.equal(result.passed, false, 'an unmet required case still blocks');
-  assert.match(result.detail, /after waiting \d+ s, all that remained of case candidate-batches-five's \d+ s wait budget for this attempt/);
+  assert.match(result.detail, /after waiting \d+ s, all that remained of case delivery-waits's \d+ s wait budget for this attempt/);
   assert.match(result.detail, /delivery\.mergeSha is unset \(delivery is null\), expected string/, 'the failure names the delivery state the install answered, not an undefined-typed value');
   assert.doesNotMatch(result.detail, /after 0 s|shared wait deadline|is undefined/);
 
