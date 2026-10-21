@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { Store, save } from '../src/store.js';
-import { applyCandidateRevert } from '../src/release-revert.js';
+import { recordRework } from '../src/pipeline-speed.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 
 type Review = Observation['reviews'][number];
@@ -54,16 +54,25 @@ async function revisedOnFirstPullRequest(first: number) {
   assert.deepEqual(w.formalReviewBaseline, { pr: first, policyRevision: w.policyRevision, reviewIds: [100, 101] });
   return w;
 }
+/** A delivered item reopened for rework after its merge was reverted (the retired candidate revert did this). */
+function reopenReverted(work: Work, now: Date) {
+  recordRework(work, now);
+  work.stage = 'ready'; work.stageEnteredAt = now.toISOString();
+  delete work.delivery;
+  work.submission = null; work.candidate = null; work.observation = null;
+  work.mergeAuthorization = null; work.mergeExecution = null; work.reviewRequest = null;
+  work.reworkRequested = false;
+}
 /**
  * The same item moved to `second`, as GY-1394 was: its first pull request merged, a revert
- * reopened the item (applyCandidateRevert), and a new attempt submitted another pull request.
+ * reopened the item (reopenReverted), and a new attempt submitted another pull request.
  */
 async function moved(w: Work, second: number) {
   await store.transaction(async db => {
     const current: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [w.id])).rows[0].document;
     const mergeSha = 'c'.repeat(40);
     current.stage = 'done'; current.delivery = { mergeSha } as Work['delivery'];
-    assert.ok(applyCandidateRevert(current, { mergeSha, revertSha: 'd'.repeat(40) } as Parameters<typeof applyCandidateRevert>[1], new Date()).reopened);
+    reopenReverted(current, new Date());
     await save(db, current, operator.id, 'test.reverted', new Date());
   });
   w = await submit(w, second);

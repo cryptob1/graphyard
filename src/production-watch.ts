@@ -16,8 +16,7 @@ import { productionEnvironmentEvent, productionEnvironmentName } from './flow-an
  * visible as lag until the provider serves the merge, at which point the incident is
  * recorded as recovered. Nothing here rewrites a delivery snapshot.
  *
- * When production tracks a release branch (`release/production`, moved only by `graphyard release
- * promote`; docs/delivery.md#release-candidates) the watch is measured against that branch, never
+ * When production tracks a release branch (GRAPHYARD_PRODUCTION_BRANCH) the watch is measured against that branch, never
  * main (GY-1207): a merge no promoted release contains yet is pipeline lag, pending and never an
  * incident, and only a promoted release production has not served within the grace period is a
  * deployment fault. Without the branch, production deploys the base branch and main is the measure.

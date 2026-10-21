@@ -15,7 +15,6 @@ import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
 import type { DeployPorts } from '../daemon/upgrade.js';
 import { pinKnownGood } from '../master/known-good.js';
-import { localReleaseVariables } from '../daemon/release-ports.js';
 import { deployedE2e, e2eSuite } from '../e2e/runner.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
@@ -226,8 +225,8 @@ export async function deployPorts(input: { cliRoot: string; repoRoot: string; re
       }
     }),
     e2e: () => beating(async () => {
-      // GY-2217: the loop reads its own environment for the UAT the cases' release-candidate outcomes need: an install whose merger is the control plane but whose environment names no UAT (GRAPHYARD_UAT_URL or a static site's GRAPHYARD_UAT_STATIC) can never serve them, so those cases run as pending instead of failing every deploy.
-      const uat = !!(process.env[localReleaseVariables.uatUrl] || process.env[localReleaseVariables.uatStatic]);
+      // GY-2217: the loop reads its own environment for a UAT: an install whose merger is the control plane but whose environment names none (GRAPHYARD_UAT_URL or a static site's GRAPHYARD_UAT_STATIC) serves no delivered outcome there, so those cases run as pending instead of failing every deploy.
+      const uat = !!(process.env.GRAPHYARD_UAT_URL || process.env.GRAPHYARD_UAT_STATIC);
       await deployedE2e(cliRoot, url, await readToken(directory, e2ePrincipalId(install.installId)), e2eSuite, { uat });
     }),
     schemas: async commit => ({ target: schemaAt(await run('git', ['show', `${commit}:src/release.ts`], cliRoot).catch(() => '')), database: await databaseSchemaOf(url) }),

@@ -387,59 +387,19 @@ test('unit:deployment-observation-reuse-expiry — the reuse expires at the wind
   assert.equal(masterConfigSchema.parse({ ...config('/outside/coordinator.token'), run: { deploymentReuseMinutes: 5 } }).run.deploymentReuseMinutes, 5);
 });
 
-test('unit:promotion-reads-scale-with-interval — the ledger window is max(5 min, 3 intervals) and the runs window max(60 s, one interval): a 300s loop reads neither every cycle, and a move of main is still dispatched inside its cadence', async () => {
-  assert.deepEqual(deploymentModule.promotionReadWindows(20_000), { ledgerMs: 5 * 60_000, runsMs: 60_000 });
-  assert.deepEqual(deploymentModule.promotionReadWindows(300_000), { ledgerMs: 15 * 60_000, runsMs: 300_000 });
-  assert.deepEqual(deploymentModule.promotionReadWindows(900_000), { ledgerMs: 45 * 60_000, runsMs: 900_000 });
-  const intervalMs = 300_000, every = 120, T0 = clock;
-  // Production serves main's tip until main moves at the second hour; a release candidate cut ten hours ago is still in validation.
-  const movedAt = T0 + 2 * 3_600_000;
-  let ledgerReads = 0, runReads = 0, dispatchedAt: number | null = null, now = T0;
-  const reads = {
-    ledger: async () => { ledgerReads++; return { mainSha: now >= movedAt ? 'b'.repeat(40) : 'a'.repeat(40), promotedSha: 'a'.repeat(40), promotedAt: new Date(T0).toISOString(), behind: now >= movedAt ? 1 : 0 }; },
-    runs: async () => { runReads++; return [{ status: dispatchedAt === null && now < movedAt + 3_600_000 ? 'in_progress' : 'completed', createdAt: new Date(T0 - 10 * 3_600_000).toISOString(), event: 'workflow_dispatch' }]; },
-    dispatch: async () => { dispatchedAt ??= now; },
-  };
-  let state: Parameters<typeof deploymentModule.promotionCycle>[0] = null, cycles = 0, runCycles = 0;
-  // Idle cycles at the interval, with stretches at the 30s actionable cadence a 300s loop also runs at.
-  for (; now < T0 + 6 * 3_600_000; now += (Math.floor((now - T0) / 3_600_000) % 2 ? 30_000 : intervalMs)) {
-    const before = runReads;
-    state = (await deploymentModule.promotionCycle(state, reads, { now, everyMinutes: every, intervalMs })).state;
-    cycles++;
-    if (now >= movedAt && dispatchedAt === null) runCycles += runReads > before ? 1 : 0;
-  }
-  assert.ok(ledgerReads < cycles / 3, `${ledgerReads} ledger fetches over ${cycles} cycles`);
-  assert.ok(ledgerReads <= Math.ceil(6 * 3_600_000 / (15 * 60_000)) + 1, `at most one fetch per 15-minute window: ${ledgerReads}`);
-  assert.ok(runReads < cycles / 2, `${runReads} run reads over ${cycles} cycles`);
-  assert.ok(dispatchedAt !== null, 'the move of main is dispatched');
-  assert.ok(dispatchedAt! - movedAt <= 3_600_000 + 15 * 60_000, `once the candidate concludes, within one ledger window plus its run window: ${(dispatchedAt! - movedAt) / 60_000} min`);
-  assert.ok(runCycles >= 1);
-  // The existing 20s cadence keeps its windows exactly.
-  let fast = 0;
-  let fastState: Parameters<typeof deploymentModule.promotionCycle>[0] = null;
-  const fastReads = { ...reads, ledger: async () => { fast++; return { mainSha: 'a'.repeat(40), promotedSha: 'a'.repeat(40), promotedAt: null, behind: 0 }; } };
-  for (let at = T0; at < T0 + 3_600_000; at += 20_000) fastState = (await deploymentModule.promotionCycle(fastState, fastReads, { now: at, everyMinutes: every, intervalMs: 20_000 })).state;
-  assert.equal(fast, 12, 'a 20s loop fetches once every five minutes, as before');
-});
-
 test('unit:deployment-step-idle-cycle-cost — on a two-cycle replay with an unchanged release the second cycle\'s deployment bucket is under 5s and the whole cycle under 30s, while a cycle whose newest delivery is pending still reads live', async () => {
   const master = config('/outside/coordinator.token', { run: { intervalSeconds: 300 } as Partial<MasterRun> });
   const state = emptyDaemonState(master);
   state.lock = { id: 'lock', pid: process.pid, host: master.hostId, startedAt: iso(0), heartbeatAt: iso(0) };
-  let running = clock, observations = 0, ledgerReads = 0, runReads = 0;
+  let running = clock, observations = 0;
   const now = () => running;
   let work = [delivery('GY-1', 'a'.repeat(40), iso(-120_000)), delivery('GY-2', 'b'.repeat(40), iso(-60_000))];
-  // The measured costs of cycle 12874: the listing and GraphQL status read ~9s, the ledger's git fetch ~3s, the run list ~2s.
+  // The measured cost of cycle 12874: the listing and GraphQL status read ~9s.
   const effects = cycleEffects({
     snapshot: async () => ({ work, now: new Date(running).toISOString() }),
     observeDeployment: async delivered => { observations++; running += 9_000;
       const deployed = delivered.filter(item => item.key !== 'GY-3').map(item => item.key), pending = delivered.filter(item => item.key === 'GY-3').map(item => item.key);
       return { ...verifiedAt(new Date(running).toISOString(), deployed), pending }; },
-    promotion: {
-      ledger: async () => { ledgerReads++; running += 3_000; return { mainSha: 'b'.repeat(40), promotedSha: 'b'.repeat(40), promotedAt: iso(0), behind: 0 }; },
-      runs: async () => { runReads++; running += 2_000; return []; },
-      dispatch: async () => {},
-    },
   });
   const first = await runCycle(master, state, effects, now);
   assert.equal(observations, 1);
@@ -447,7 +407,6 @@ test('unit:deployment-step-idle-cycle-cost — on a two-cycle replay with an unc
   running += 300_000;
   const second = await runCycle(master, state, effects, now);
   assert.equal(observations, 1, 'the unchanged release is not read again');
-  assert.equal(ledgerReads, 0, 'nor any promotion ledger: the loop drives no promotion (GY-1982)');
   assert.ok(second.metrics.steps!.deployment.ms < 5_000, `deployment bucket ${second.metrics.steps!.deployment.ms}ms`);
   assert.ok(second.metrics.durationMs < 30_000, `the whole cycle stays under the 30s cycle-p90 bound: ${second.metrics.durationMs}ms`);
   assert.ok(Object.values(second.metrics.steps!).reduce((sum, step) => sum + step.ms, 0) < 30_000);
@@ -460,5 +419,4 @@ test('unit:deployment-step-idle-cycle-cost — on a two-cycle replay with an unc
   running += 300_000;
   await runCycle(master, state, effects, now);
   assert.equal(observations, 3, 'a pending delivery keeps the read live');
-  assert.equal(runReads, 0, 'production runs main: no run list was read');
 });

@@ -105,8 +105,6 @@ export interface InstallInputs {
   maxMonthly?: number;
   /** Spend consent for a created server: the exact monthly price the plan showed (`--confirm-price`). */
   confirmPrice?: number;
-  /** Create the cost-bearing UAT and production resources the plan marks as human decisions (GY-1102). */
-  createEnvironments?: boolean;
 }
 
 export function installIdFor(repository: string) {

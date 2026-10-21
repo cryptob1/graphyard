@@ -1,13 +1,13 @@
 // Concern: the merge preview (GY-1718) — a passing trial merge built and served as a throwaway static site, the repository's required and uat E2E cases run against it before the merge lands.
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm } from 'node:fs/promises';
-import { extname, join } from 'node:path';
+import { createServer } from 'node:http';
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { extname, join, resolve, sep } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { loadCases, type CaseFile } from '../e2e/case.js';
 import { releaseVerdict, type E2eLauncher, type E2eReport } from '../e2e/runner.js';
 import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
-import { serveStaticSite, type ReleaseCandidate, type StaticUat } from '../release-candidate.js';
 import { hostPassthrough } from '../e2e/steps.js';
 import { buildStaticSite, projectCaseSuite, type StaticBuildShell } from '../release-project.js';
 import { composeBounds, composeLeftovers, composeProjectName, composeStack, dockerEnvironment, snapshotComposeSite, sweepComposePreviews, type ComposeBounds, type Docker } from '../compose-preview.js';
@@ -16,11 +16,51 @@ import type { Application, ProjectDelivery } from '../project-applications.js';
 import type { Work } from '../model/work.js';
 import { heldEntries, heldOpenPaths, readTempOwner, tempOwnerGone, tempOwnerJudgeable, tempOwnerMarker, tmpReclaimMinAgeMs, treeLastWritten, writeTempOwner } from '../tmp-reclaim.js';
 
-/** The static UAT a managed repository names (`GRAPHYARD_UAT_STATIC`, `GRAPHYARD_UAT_BUILD`, release-ports.ts): its build output in the checkout and the command that builds it. */
+/** The static UAT a managed repository names (`GRAPHYARD_UAT_STATIC`, `GRAPHYARD_UAT_BUILD`): its build output in the checkout and the command that builds it. */
 export interface PreviewSite { directory: string; build: string | null }
 /** The site the loop's environment names, or null when it names no static UAT. */
 export const previewSiteOf = (environment: NodeJS.ProcessEnv): PreviewSite | null =>
   environment.GRAPHYARD_UAT_STATIC ? { directory: environment.GRAPHYARD_UAT_STATIC, build: environment.GRAPHYARD_UAT_BUILD || null } : null;
+
+/** What the loopback static site serves each extension as; anything else is application/octet-stream. */
+const staticTypes: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8', '.htm': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8', '.json': 'application/json', '.map': 'application/json', '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.ico': 'image/x-icon', '.txt': 'text/plain; charset=utf-8', '.wasm': 'application/wasm',
+  '.woff': 'font/woff', '.woff2': 'font/woff2', '.mp3': 'audio/mpeg', '.ogg': 'audio/ogg', '.wav': 'audio/wav',
+};
+export interface StaticUat { url: string; close(): Promise<void> }
+
+/**
+ * GY-1535: a static site's build output `directory` served on loopback, so its cases drive it in a
+ * browser like any deployment. `/healthz` answers `sha` as `commit`; a directory serves its
+ * `index.html`; nothing outside `directory` is ever read, and a missing build output answers 404
+ * rather than failing the server. Only GET and HEAD are answered.
+ */
+export async function serveStaticSite(directory: string, sha: string): Promise<StaticUat> {
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`static UAT must be a full 40-character commit SHA, got ${JSON.stringify(sha)}`);
+  const root = resolve(directory);
+  const inside = (path: string) => path === root || path.startsWith(`${root}${sep}`);
+  const server = createServer(async (request, response) => {
+    const send = (status: number, type: string, body: string | Buffer) => { response.writeHead(status, { 'Content-Type': type, 'Cache-Control': 'no-store' }); response.end(request.method === 'HEAD' ? undefined : body); };
+    if (request.method !== 'GET' && request.method !== 'HEAD') return send(405, 'text/plain; charset=utf-8', 'Method not allowed\n');
+    let pathname: string;
+    try { pathname = decodeURIComponent(new URL(request.url ?? '/', 'http://uat.invalid').pathname); } catch { return send(400, 'text/plain; charset=utf-8', 'Bad path\n'); }
+    if (pathname === '/healthz') return send(200, 'application/json', JSON.stringify({ ok: true, commit: sha }));
+    let path = resolve(root, `.${pathname}`);
+    if (!inside(path)) return send(404, 'text/plain; charset=utf-8', 'Not found\n');
+    try {
+      if ((await stat(path)).isDirectory()) path = resolve(path, 'index.html');
+      // A symbolic link out of the build output is not served.
+      const real = await realpath(path), realRoot = await realpath(root);
+      if (real !== realRoot && !real.startsWith(`${realRoot}${sep}`)) return send(404, 'text/plain; charset=utf-8', 'Not found\n');
+      return send(200, staticTypes[extname(path).toLowerCase()] ?? 'application/octet-stream', await readFile(path));
+    } catch { return send(404, 'text/plain; charset=utf-8', 'Not found\n'); }
+  });
+  await new Promise<void>((accept, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', () => accept()); });
+  const { port } = server.address() as { port: number };
+  return { url: `http://127.0.0.1:${port}`, close: () => new Promise<void>(accept => { server.closeAllConnections?.(); server.close(() => accept()); }) };
+}
 
 /** One case's result on the preview; an `unrun` case names why in `reason` (a declared install secret the preview withholds). */
 export interface PreviewCase { case: string; verdict: 'passed' | 'failed' | 'flaky' | 'unrun'; required: boolean; reason?: string }
@@ -288,7 +328,7 @@ export async function openPreview(input: PreviewInput, options: PreviewOptions &
       // The cases come from the merge itself, so they run with a token minted for this preview, never the UAT principal's, and never read the install's secrets; the runner keeps their requests on the served origin.
       const suite = projectCaseSuite(checkout, `preview-${randomUUID()}`, { fetcher: input.fetcher, launcher: input.launcher, stepTimeoutMs: input.stepTimeoutMs, signal, hostEnvironment: environment,
         cases: runnable, select: () => true, withholdSecrets: true, report: value => { report = value; } });
-      const result = await suite.run(origin, { id: `preview-${input.mergeSha.slice(0, 12)}` } as ReleaseCandidate);
+      const result = await suite.run(origin, { id: `preview-${input.mergeSha.slice(0, 12)}` });
       cancelled();
       const ran = report as E2eReport | null;
       const cases = [...(ran?.cases ?? []).map(outcome => ({ case: outcome.id, verdict: outcome.verdict, required: options.cases ? true : outcome.required })), ...withheld];

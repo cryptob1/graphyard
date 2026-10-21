@@ -89,42 +89,6 @@
       "cases": [
         "previews-for-declared-apps"
       ]
-    },
-    {
-      "id": "small-exact-candidates",
-      "title": "Ready changes batch into a small exact candidate — at most five — that names exactly what it contains",
-      "criteria": [
-        "A candidate names each change it contains by work item and by that change's merge commit, and carries one exact source identity for the whole batch",
-        "A batch never contains more than five changes",
-        "A change that becomes ready after a full batch waits for the next candidate and is the whole of it"
-      ],
-      "cases": [
-        "candidate-batches-five"
-      ]
-    },
-    {
-      "id": "candidate-gates-promotion",
-      "title": "Only a candidate whose combined required cases pass is promoted; a failed candidate never promotes and its failure stays on record",
-      "criteria": [
-        "A candidate whose combined required end-to-end cases pass is promoted, and the delivery view shows production expecting that candidate's release bound to its member's exact merge commit",
-        "A candidate whose combined required cases fail is not promoted, and the candidate record names the failed cases",
-        "Production keeps the previous passing candidate's release, and the failed candidate's record with its failure stays readable afterwards"
-      ],
-      "cases": [
-        "candidate-gates-promotion"
-      ]
-    },
-    {
-      "id": "production-verified-exact",
-      "title": "Production is verified to run exactly the promoted candidate, and drift is caught",
-      "criteria": [
-        "The delivery view shows the live production environment observed running the promoted candidate's release id and exact source, not just that some release is out there",
-        "Verification reads 'verified' only while the live environment runs that exact release",
-        "When the live environment serves something else, verification turns to a mismatch that says so, while the expected release still names the promoted candidate"
-      ],
-      "cases": [
-        "production-exact-verification"
-      ]
     }
   ]
 }

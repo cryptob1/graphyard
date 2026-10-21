@@ -641,7 +641,7 @@ export async function releaseWorkerLaunch(root: string, key: string, epoch: numb
   const config = await loadMasterConfig(root); const profile = config.workers.find(worker => worker.name === profileName);
   if (!profile || profile.mode !== 'launch' || !profile.kind || !profile.credentialFile) throw new Error('A complete launch profile is required');
   await readWorkerCredential(root, profile.credentialFile);
-  await run(process.execPath, [config.cliPath, 'release', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
+  await run(process.execPath, [config.cliPath, 'unclaim', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
 }
 
 /**
@@ -691,7 +691,7 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     if (claimedEpoch !== null) {
       // The keep-alive stops before the release, so no renewal races the claim being handed back.
       await stopKeeping?.();
-      try { await run(process.execPath, [config.cliPath, 'release', key, String(claimedEpoch)], { cwd: root, env }); }
+      try { await run(process.execPath, [config.cliPath, 'unclaim', key, String(claimedEpoch)], { cwd: root, env }); }
       catch (releaseError) {
         // GY-860: the worktree command releases its own claim as a workspace failure when git
         // could not build the workspace, which hands the epoch back; a release refused because
