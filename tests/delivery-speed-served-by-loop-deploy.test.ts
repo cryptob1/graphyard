@@ -15,7 +15,7 @@ const iso = (minutes: number) => new Date(start + minutes * 60_000).toISOString(
 const merged = (key: string, minutes: number, sha: string) => ({ id: key, key, stage: 'done', createdAt: iso(-60), closure: null,
   delivery: { mergeSha: sha, mergedAt: iso(minutes) } }) as unknown as Work;
 
-const ports: DeployPorts = { deploy: async () => {}, health: async () => {}, e2e: async () => {}, schemas: async () => ({ target: 1, database: 1 }) };
+const ports: DeployPorts = { deploy: async () => {}, health: async () => {}, schemas: async () => ({ target: 1, database: 1 }) };
 
 /** One loop deploy of `tip`, committed at `committedAt` minutes, passing at `at` minutes. */
 async function deploy(state: DaemonState, tip: string, committedAt: number, at: number) {
