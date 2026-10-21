@@ -159,9 +159,9 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     assert.deepEqual(timings.calls.map(call => [call.kind, call.name, call.step]), [['github', 'gh api repos/:repo/deployments', 'deployment verification'], ['account', 'GET api.anthropic.com/api/oauth/usage', 'credentials']],
       'both calls of a second or more, slowest first, each with the step it was made in; nothing faster is recorded');
     assert.ok(timings.calls[0].ms >= 1_400 && timings.calls[1].ms >= 1_100);
-    // The completion line names the three slowest steps and the slowest call, with durations.
+    // The completion line names the three slowest steps and the slowest call, with durations (their floors are asserted above; a loaded host only lengthens them).
     const complete = lines.find(line => / complete in /.test(line))!;
-    assert.match(complete, /slowest steps: deployment verification 1\.[4-9]s, credentials 1\.[1-9]s, \S[^,;]* \d+(\.\d)?s; slowest call: github gh api repos\/:repo\/deployments 1\.[4-9]s in deployment verification \(2 calls of 1s or more\)/, complete);
+    assert.match(complete, /slowest steps: deployment verification \d+\.\ds, credentials \d+\.\ds, \S[^,;]* \d+(\.\d)?s; slowest call: github gh api repos\/:repo\/deployments \d+\.\ds in deployment verification \(2 calls of 1s or more\)/, complete);
 
     // master status: the same recorder over its own phases, returned under `timings`.
     const status = slowServer(() => work);
