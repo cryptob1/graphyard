@@ -264,14 +264,18 @@ export const reworkBoundHead = (input: unknown): string | null => {
 /**
  * GY-2605: an item whose own record reserves its release to the owner (GY-1857): an `Owner hold:` title,
  * a description or criterion saying it leaves the backlog only when the owner releases it, or a manual
- * proof that records the owner scheduling it. Only the owner, a declared human admin session, releases it.
+ * proof that records the owner scheduling it. Only the owner, a declared human admin session, releases it,
+ * or anyone once the item carries an owner-recorded decision (GY-2606).
  */
 const ownerHoldWording = /\b(?:leaves the backlog only when|stays in the backlog until) the owner releases it\b/i;
 export const ownerHeld = (work: Pick<Work, 'title' | 'description' | 'criteria'>) => /^owner hold:/i.test(work.title)
   || ownerHoldWording.test([work.description ?? '', ...work.criteria.map(criterion => criterion.text)].join('\n'))
   || work.criteria.some(criterion => criterion.proofs.some(proof => proof.startsWith('manual:owner-schedules')));
-export const ownerHoldRefusal = (work: Pick<Work, 'key' | 'title' | 'description' | 'criteria'>, actor?: Pick<Principal, 'id' | 'role' | 'sessionKind'>) =>
-  !ownerHeld(work) || (actor?.role === 'admin' && actor.sessionKind === 'human') ? null
+/** GY-2606: a provided answer to a human-only request on the item, which only a declared human session records (human-request.ts `parkRule`). */
+export const ownerRecordedDecision = (work: Pick<Work, 'humanRequest' | 'humanRequests'>) =>
+  [work.humanRequest, ...work.humanRequests ?? []].some(request => request?.answer?.outcome === 'provided');
+export const ownerHoldRefusal = (work: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'humanRequest' | 'humanRequests'>, actor?: Pick<Principal, 'id' | 'role' | 'sessionKind'>) =>
+  !ownerHeld(work) || ownerRecordedDecision(work) || (actor?.role === 'admin' && actor.sessionKind === 'human') ? null
     : `${work.key} is under an owner hold: its record reserves the release to the owner, so ${actor?.id ?? 'an agent decision'} may not release it. It stays in the backlog until the owner releases it with their own human admin session`;
 /** The item must still be in the state the decision was requested against. */
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
