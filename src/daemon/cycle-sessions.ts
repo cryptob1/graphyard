@@ -135,10 +135,11 @@ async function closeStepWithin(cycle: Cycle) {
     // A session Herdr still reports working counts only when its runtime prints its retry marker
     // beside the notice (GY-973): OpenCode retries a spent account forever and never stops.
     // A working session's screen is read at most once per workingOutputReadMs (GY-1223).
-    const notice = async (agent: HerdrAgent, runtime: string | null | undefined) => {
+    // A worker is also judged by the runtime its selected account launched (GY-2871: a claude profile's registry Pi session).
+    const notice = async (agent: HerdrAgent, ...runtimes: (string | null | undefined)[]) => {
       const isStopped = stoppedStates.includes(agent.agent_status ?? '');
       if (!outputReadDue(state, agents, agent, isStopped, clock)) return null;
-      try { const output = await effects.sessionOutput!(agent); return output ? sessionExhaustion(output, isStopped, runtime, clock) : null; } catch (error) { if (stepCallCarried(error)) throw error; return null; } // GY-1774: a carried read is the session's carried handling
+      try { const output = await effects.sessionOutput!(agent); return output ? runtimes.reduce<ExhaustionSignal | null>((found, runtime) => found ?? sessionExhaustion(output, isStopped, runtime, clock), null) : null; } catch (error) { if (stepCallCarried(error)) throw error; return null; } // GY-1774: a carried read is the session's carried handling
     };
     const onNotice = (agent: HerdrAgent) => stoppedStates.includes(agent.agent_status ?? '') ? 'stopped on' : 'is retrying on';
     /** The runtime a launched role's profile names, for the notice the loop reads off its pane. */
@@ -159,7 +160,7 @@ async function closeStepWithin(cycle: Cycle) {
       if (!agent || !item || item.submission?.epoch === item.lease!.epoch) return;
       const key = failoverKey('worker', item, item.lease!.epoch), previous = state.actions[key];
       if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) { if (previous) failedOver.add(item.id); return; }
-      const signal = await notice(agent, profile.kind);
+      const signal = await notice(agent, profile.kind, (await effects.selectedAccount?.('worker', profile.name, { work: item.key, epoch: item.lease!.epoch }))?.kind);
       if (!signal) return;
       failedOver.add(item.id);
       const epoch = item.lease!.epoch, attempts = (previous?.attempts ?? 0) + 1;

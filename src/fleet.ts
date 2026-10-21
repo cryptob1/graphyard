@@ -240,12 +240,12 @@ const builtinProbe = (runtime: FleetRuntime): EnvironmentKind | null =>
  * read a login and a quota from, the contract's login file for any other runtime, and nothing
  * (unknown, which is launchable) when the account names no home.
  */
-export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}, allAccounts: readonly FleetAccount[] = [account]): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
+export async function observeAccount(account: FleetAccount, runtime: FleetRuntime, probe: EnvironmentProbe = {}, allAccounts: readonly FleetAccount[] = [account], model = account.model): Promise<{ quota: QuotaObservation; health: EnvironmentHealth | null }> {
   const home = account.credential.home, kind = builtinProbe(runtime);
   if (!home) return { quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null };
   if (kind) {
     const planInfo = deriveAccountPlan(account, allAccounts);
-    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, declaredPlan: account.plan ?? null, keyFile: account.credential.key?.file, keyVariable: account.credential.key?.variable }, probe);
+    const health = await checkAgentEnvironment({ name: account.name, kind, home, plan: planInfo.planId, declaredPlan: account.plan ?? null, keyFile: account.credential.key?.file, keyVariable: account.credential.key?.variable, model }, probe);
     const resets = health.usage.map(entry => entry.resetsAt).filter((value): value is string => !!value).sort();
     // No Z.AI credential found for a Pi account is not proof it is logged out: Pi may hold another provider's login,
     // so the smoke test it gets before first selection decides, with Pi's own error (GY-515, GY-1158).
@@ -285,7 +285,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
   const ceiling = probe.ceilingPercent ?? config.run?.quotaCeilingPercent;
   const observed = await Promise.all(local.map(async account => {
     const runtime = registry.runtimes.find(entry => entry.name === account.runtime);
-    return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }, registry.accounts) } : null;
+    return runtime ? { account: account.name, ...await observeAccount(account, runtime, { ...probe, ceilingPercent: ceiling }, registry.accounts, registry.models.find(model => model.name === account.model)?.id ?? undefined) } : null;
   }));
   const observations: { account: string; quota: QuotaObservation; health: EnvironmentHealth | null; smoke?: SmokeObservation }[] = observed.filter((entry): entry is NonNullable<typeof entry> => !!entry);
   // An account is smoke-tested before it is first chosen and again after any registry change to it
