@@ -1491,7 +1491,7 @@ export class Engine {
       demandWork(work);
       // GY-1760: an item only the master side can satisfy — the loop's own measurement, or a
       // master-role session's observation of the master checkout — is never released to a worker, whoever asks.
-      // GY-2605: nor is an owner-held item, unless the owner's own human admin session asks.
+      // GY-2605: nor is an owner-held item, unless the owner's own human admin session asks or the item carries an owner-recorded decision (GY-2606).
       if (command === 'ready') { const owned = loopOwnedRefusal(work!) ?? ownerHoldRefusal(work!, actor); demand(!owned, owned!, 409); }
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
       await this.renewalGrace(db, work, now);

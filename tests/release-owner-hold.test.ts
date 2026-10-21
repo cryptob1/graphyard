@@ -68,11 +68,24 @@ test('integration:release-owner-hold-guard — master release and a release deci
   assert.deepEqual(after.actionQueue?.actions ?? [], []);
 });
 
-test('unit:release-owner-hold-owner-path — the owner\'s own release applies as today', async () => {
+test('unit:release-owner-hold-owner-path — the owner\'s own release, or one carrying an owner-recorded decision, applies as today', async () => {
   const work = await created({ ...heldInput, title: 'Owner hold: owner releases it' });
   const released = await release(credentials[0].token, work);
   assert.equal(released.status, 200, JSON.stringify(released.body));
   assert.equal((await reload(work.id)).ready, true);
+  // GY-2606: once the owner's answer to a human-only request on the item is recorded, the master's release applies too.
+  const decided = await created({ ...heldInput, title: 'Owner hold: owner decided it' });
+  const answered = [{ id: 'request-1', kind: 'goals-and-priorities', needed: 'Schedule it', reason: 'Owner hold', requestedBy: master.id, at: new Date(0).toISOString(),
+    answer: { by: owner.id, at: new Date(0).toISOString(), outcome: 'provided', text: 'Schedule it now', waitedMs: 0 } }];
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{humanRequests}',$2::jsonb) WHERE id=$1", [decided.id, JSON.stringify(answered)]);
+  const carried = await reload(decided.id);
+  assert.equal(ownerHoldRefusal(carried, { id: master.id, role: 'operator-agent' }), null);
+  assert.equal(decisionPrecondition('release', { expectedRevision: carried.revision }, carried), null);
+  const releasedByMaster = await release(master.token, carried);
+  assert.equal(releasedByMaster.status, 200, JSON.stringify(releasedByMaster.body));
+  assert.equal((await reload(decided.id)).ready, true);
+  // A declined answer records no decision to release it.
+  assert.match(ownerHoldRefusal({ ...carried, humanRequests: [{ ...answered[0], answer: { ...answered[0].answer, outcome: 'declined' } }] } as unknown as Work, { id: master.id, role: 'operator-agent' }) ?? '', /owner hold/);
 });
 
 test('unit:release-normal-backlog-applies — an ordinary backlog item still releases', async () => {
