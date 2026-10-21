@@ -29,6 +29,8 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
     // server answers with whole documents). GitHub merges; the loop runs no merge of its own.
     const live = liveMasterConfig(root, master), current = () => live.current, reload = () => live.reload();
+    // GY-2600: each cycle checks the configured Herdr workspace still exists and adopts a live one if not.
+    const cycleReload = () => live.reload(true);
     // Each read also names the loop to the control plane (GY-916), which then knows the merger lives,
     // and who reviews and merges (GY-1501), which the dashboard's Setup checklist reads.
     const loopInterval = () => values.interval ? intervalSeconds : current().run.intervalSeconds;
@@ -46,7 +48,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const exit = exitWhenStopped();
     const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;
     // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
-    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload, repository: root, wake }))
+    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload: cycleReload, repository: root, wake }))
       .finally(() => stopping.abort());
     const dispatching = { ...dispatchEffects(root, current, { snapshot: (timeoutMs = dispatchReadTimeoutMs) => coordinationSnapshot(timeoutMs) }),
       observeLoopSubjects: (work: Parameters<typeof loopWakeSubjects>[0], agents: Parameters<typeof loopWakeSubjects>[3], clock: number) => { wake.observe(loopWakeSubjects(work, current(), clock, agents)); } };

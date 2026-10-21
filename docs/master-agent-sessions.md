@@ -21,6 +21,10 @@ Launches take the first account under `run.quotaCeilingPercent`, else fail over;
 
 `master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it.
 
+### A closed Herdr workspace is replaced
+
+Each cycle checks `herdrWorkspace` against `herdr workspace list`, as does the next reload after any launch refused with `workspace_not_found`. A workspace Herdr no longer lists is replaced in `.graphyard/master.json` by the one `masterAgentName` runs in (else the first listed), recorded as a `config` action with its reason, and items blocked on dispatches into the closed workspace are unblocked.
+
 ### The request is the session's first message
 
 Never pasted.
