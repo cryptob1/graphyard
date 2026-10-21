@@ -87,21 +87,17 @@ function iso(value: Date | string | null | undefined) { return value instanceof 
 function time(value: string | null | undefined) { const parsed = Date.parse(value ?? ''); return Number.isFinite(parsed) ? parsed : null; }
 
 // A delivery slice is the top-level area of the repository a work item changes.
-// Observed changed files (trusted GitHub observation) win; declared planned scope is a
-// labelled intent fallback so pre-PR work is still groupable without inventing facts.
+// It is read from the observed changed files alone; work with no observed candidate is unclassified.
 // An item is bounded to `sliceLimit` roots (sorted, so the retained set is deterministic);
 // `truncated` reports that bound so a slice filter's coverage can say what it may miss.
 export const sliceLimit = 12;
-export function workSlices(work: Pick<Work, 'plannedFiles' | 'observation'>): { slices: string[]; provenance: 'observed' | 'declared' | 'unclassified'; truncated: boolean } {
+export function workSlices(work: Pick<Work, 'observation'>): { slices: string[]; provenance: 'observed' | 'unclassified'; truncated: boolean } {
   const roots = (paths: string[]) => [...new Set(paths.map(p => {
     const clean = p.replace(/^\.\//, '').replace(/\*+$/, '');
     return clean.includes('/') ? clean.split('/')[0] : clean ? 'root' : '';
   }).filter(Boolean))].sort();
-  const bounded = (all: string[], provenance: 'observed' | 'declared') => ({ slices: all.slice(0, sliceLimit), provenance, truncated: all.length > sliceLimit });
   const observed = roots(work.observation?.files ?? []);
-  if (observed.length) return bounded(observed, 'observed');
-  const declared = roots(work.plannedFiles ?? []);
-  if (declared.length) return bounded(declared, 'declared');
+  if (observed.length) return { slices: observed.slice(0, sliceLimit), provenance: 'observed', truncated: observed.length > sliceLimit };
   return { slices: [], provenance: 'unclassified', truncated: false };
 }
 
@@ -1324,7 +1320,7 @@ export function computeFlow(dataset: FlowDataset, query: FlowQuery) {
     unclassified: classified.filter(entry => !entry.category).map(entry => entry.key),
   };
 
-  const sliceSummary = { observed: 0, declared: 0, unclassified: 0, truncated: 0, limit: sliceLimit };
+  const sliceSummary = { observed: 0, unclassified: 0, truncated: 0, limit: sliceLimit };
   for (const item of stageScope) { const classified = workSlices(item); sliceSummary[classified.provenance]++; if (classified.truncated) sliceSummary.truncated++; }
   // A slice filter cannot see roots beyond an item's bound, so items truncated anywhere in
   // the repository are part of the filter's coverage, not only those already selected.

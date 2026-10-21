@@ -48,13 +48,6 @@ export const gateRefusalCatalogue: RefusalShape[] = [
     example: 'Candidate aaaaaaaaaaaa cannot be brought onto base branch tip bbbbbbbbbbbb without resolving a conflict, which is content nobody reviewed or proved: merge conflict. Run graphyard sync GY-1, resolve it and push; the approval and proofs bound to aaaaaaaaaaaa do not survive the resolution.' },
   { gate: 'build', id: 'diff-not-compared', match: /^Candidate diff has not been compared against the base branch tip/, kinds: ['resync'],
     example: 'Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required' },
-  { gate: 'build', id: 'out-of-scope-count', match: /^Candidate changes \d+ files? outside its planned files/, kinds: ['request-rework'],
-    example: 'Candidate changes 2 files outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-1, restore each file from origin/<base>, and push again' },
-  { gate: 'build', id: 'out-of-scope-file', match: /^Out-of-scope regression: /, example: 'Out-of-scope regression: src/other.ts reverts GY-2', kinds: ['request-rework'] },
-  { gate: 'build', id: 'landing-count', match: /^Landing the candidate on /, kinds: ['request-rework'],
-    example: 'Landing the candidate on cccccccccccc, the commit it would merge onto, would revert 2 files outside its planned files; run graphyard sync GY-1, restore each file as its owner shipped it, and push again' },
-  { gate: 'build', id: 'landing-file', match: /^Landing regression: /, kinds: ['request-rework'],
-    example: 'Landing regression: src/a.ts: deleted; that commit still holds it (owned by GY-A, ahead of it and not yet landed)' },
   // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
   { gate: 'build', id: 'mechanical-proof-failed', match: /the head returns to its worker before review$/, kinds: ['request-rework'],
     example: 'AC-1: integration:claim failed on aaaaaaaaaaaa (trusted evidence from producer-a); the head returns to its worker before review' },

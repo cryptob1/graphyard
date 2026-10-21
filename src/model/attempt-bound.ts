@@ -17,7 +17,7 @@ export const submissionProgressCadenceMs = 15 * 60_000;
 
 export interface UnsubmittedAttempt {
   key: string; epoch: number; owner: string; claimedAt: string;
-  /** Where the bound runs from: the claim, or the answer to or withdrawal of the attempt's own scope request when that came later (GY-1472). */
+  /** Where the bound runs from: the claim. */
   boundFrom: string;
   /** How far past the worker bound the attempt is. */
   pastBoundMs: number;
@@ -37,29 +37,6 @@ function attemptClaimedAt(work: Work, epoch: number): string | null {
   const claimed = (work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : null) ?? attempts.find(attempt => attempt.epoch === epoch)?.claimedAt ?? null;
   return claimed && Number.isFinite(Date.parse(claimed)) ? claimed : null;
 }
-/**
- * GY-1472: an attempt waiting on its own scope request — undecided, or refused by the widening rule
- * (`decidedBy` graphyard) and so with the independent approver or left open for the master, its
- * escalation standing — is waiting on that decision, not stalled, so the bound does not run (null).
- * Ending it would only launch an attempt that asks the same paths again, deciding the one request
- * twice. An independent approver's refusal is the final answer the worker acts on, though it stays
- * on the request: like any answer, the bound runs from it. A withdrawal ends the wait too, so the
- * bound runs from it rather than counting the exempted wait again. The bound runs from the latest
- * of the claim, the answer and the withdrawal.
- */
-function boundStartedAt(work: Work, epoch: number, claimedAt: string): string | null {
-  const own = work.scopeRequest?.epoch === epoch ? work.scopeRequest : null;
-  if (own && (!own.decision || own.decision.decidedBy === 'graphyard')) return null;
-  const claimed = Date.parse(claimedAt);
-  const answered = own?.decision ?? work.scopeDecision;
-  const withdrawn = work.scopeWithdrawn?.epoch === epoch ? work.scopeWithdrawn.at : null;
-  const starts = [answered && Date.parse(answered.requestedAt) >= claimed ? answered.at : null, withdrawn]
-    .filter((at): at is string => !!at && Date.parse(at) > claimed);
-  return starts.sort((a, b) => Date.parse(a) - Date.parse(b)).at(-1) ?? claimedAt;
-}
-/** When the attempt holding `epoch` withdrew its scope request (GY-1472): set by the `scope` command's withdrawal, where the worker bound restarts. */
-export interface ScopeWithdrawn { epoch: number; at: string }
-declare module './work.js' { interface Work { scopeWithdrawn?: ScopeWithdrawn } }
 /**
  * When the loop first observed the candidate's current head (GY-1460): set by the observation
  * write only when the pull request or its head differs from the one recorded, so a routine poll of
@@ -96,8 +73,8 @@ export function unsubmittedAttempt(work: Work, now: number): UnsubmittedAttempt 
   const lease = work.lease;
   if (!lease || work.stage === 'done' || isClosed(work) || work.submission?.epoch === lease.epoch) return null;
   const claimedAt = attemptClaimedAt(work, lease.epoch);
-  const boundFrom = claimedAt && boundStartedAt(work, lease.epoch, claimedAt);
-  if (!claimedAt || !boundFrom) return null;
+  const boundFrom = claimedAt;
+  if (!boundFrom) return null;
   const pastBoundMs = now - Date.parse(boundFrom) - workerSubmissionBoundMs;
   if (pastBoundMs <= 0) return null;
   // A lease that lapsed inside the bound was never held past it: the lapse and containment path owns that attempt.
@@ -132,7 +109,7 @@ export function lapsedAtNoSubmissionBound(work: Pick<Work, 'submission'> & Parti
   const assignment = work.lastAssignment?.epoch === lease.epoch ? work.lastAssignment.claimedAt : null;
   const claimedAt = assignment ?? work.pipeline?.attempts?.find(attempt => attempt.epoch === lease.epoch)?.claimedAt ?? null;
   const expiresAt = Date.parse(lease.expiresAt);
-  const boundFrom = claimedAt && Number.isFinite(Date.parse(claimedAt)) ? boundStartedAt(work as Work, lease.epoch, claimedAt) : null;
+  const boundFrom = claimedAt && Number.isFinite(Date.parse(claimedAt)) ? claimedAt : null;
   if (!claimedAt || !boundFrom || expiresAt - Date.parse(boundFrom) < workerNoSubmissionRefusalMs) return false;
   const progressAt = submissionProgressAt(work as Work, lease.epoch, lease.owner ?? '', claimedAt);
   return !progressAt || expiresAt - Date.parse(progressAt) > submissionProgressCadenceMs;

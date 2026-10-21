@@ -1,12 +1,11 @@
 // Concern: the interventions report — the window's counts, trend, costliest items and the recurring kind-at-stage patterns.
-import { masterOperatorCapabilities, approverAgentCapabilities } from '../master/harness.js';
 import type pg from 'pg';
 import type { Stage, Work } from '../model.js';
 import { handFiledPatterns, interventionKinds, interventionWindows, patternCause, patternHoldDays, patternInstancesShown, type Intervention, type InterventionKind, type InterventionPolicy, type InterventionReport, type InterventionWindow, type Judgement, type PatternCause, type PatternOwner, type PatternRow, type UnderThreshold } from '../model/interventions.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import type { Store } from '../store.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
-import { readAbsorbedPlans, readInterventionLedger } from './ledger.js';
+import { readInterventionLedger } from './ledger.js';
 import { foldInterventions } from './fold.js';
 
 const day = 86_400_000;
@@ -197,23 +196,6 @@ export function detectPatterns(interventions: Intervention[], work: readonly Wor
 export const windowStart = (now: string, days: number) => new Date(Date.parse(now) - days * day).toISOString();
 
 /**
- * Whether the loop can route a refused scope ask (GY-1755). The daemon routes when it holds the decision
- * effects (`effects.decide` and `effects.approver`), which exist only with the two identities `master autonomy`
- * provisions: the master operator (every `masterOperatorCapabilities`) and a separate approver holding
- * `approverAgentCapabilities` alone. The server sees them as two distinct live operator-agent records of
- * those shapes; one agent that both requests and approves, or an agent lacking the operator set, does not
- * make an ask routable, and without a routable pair the report counts it as the fault pass does.
- */
-export async function readLoopRoutes(pool: Pick<pg.Pool, 'query'>) {
-  const { rows } = await pool.query(`SELECT EXISTS (SELECT 1 FROM operator_agents r JOIN operator_agents a ON a.id <> r.id
-    WHERE r.document->>'revokedAt' IS NULL AND a.document->>'revokedAt' IS NULL
-      AND r.document->'capabilities' @> $1::jsonb AND NOT (r.document->'capabilities' ? 'decision:approve')
-      AND a.document->'capabilities' @> $2::jsonb AND NOT (a.document->'capabilities' ? 'decision:rework')) AS routes`,
-  [JSON.stringify(masterOperatorCapabilities), JSON.stringify(approverAgentCapabilities)]);
-  return rows[0]?.routes === true;
-}
-
-/**
  * The read behind the API and the CLI: the ledger folded against the current snapshot, then
  * reported over the window. It is bounded by its window in SQL (GY-422): the ledger rows are those
  * written inside the report window or the recurrence policy's, whichever reaches further back, and
@@ -227,9 +209,8 @@ export async function readInterventionReport(store: Store, policy: InterventionP
   const snapshot = await boundedSnapshot(store.reportPool);
   const since = windowStart(snapshot.now, Math.max(days, policy.windowDays));
   const { rows, truncated, retainedFrom } = await readInterventionLedger(store.reportPool, { limit: options.limit, since });
-  await readAbsorbedPlans(store.reportPool, rows);
   const reach = ledgerReach(retainedFrom, truncated, since, snapshot.now);
-  const folded = foldInterventions(rows, snapshot.work, snapshot.now, { routes: await readLoopRoutes(store.reportPool) });
+  const folded = foldInterventions(rows, snapshot.work, snapshot.now);
   const report = computeInterventionReport(folded, snapshot.work, policy, { days, now: snapshot.now, kind: options.kind, stage: options.stage, work: options.work, reach });
   return { ...report, ledger: { rows: rows.length, truncated, oldest: rows[0]?.at ?? null, since, reach }, kinds: interventionKinds, windows: interventionWindows };
 }

@@ -47,7 +47,7 @@ Role | Held by | May | Never
 
 ## Who decides
 
-Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, ungrounded [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, and merges with automatic merging off; human-only decisions [park](master-agent-reference.md#items-scope-and-human-waits).
+Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, ungrounded [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, and merges with automatic merging off; human-only decisions [park](master-agent-reference.md#items-and-human-waits).
 
 ## Diagram legend
 

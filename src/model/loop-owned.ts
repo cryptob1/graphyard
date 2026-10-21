@@ -7,8 +7,7 @@ import { servingReleaseProof, loopObservationProofs, type Work } from './work.js
  * itself (`manual:checkout-restore-…-on-serving-release`, GY-1696 and GY-1674) reads state only a
  * master-role identity holds — the coordinator checkout's `.graphyard/master.json`, a master
  * command — and a worker token holds no master role by design. Neither leaves anything a worker
- * can do; with no planned files there is no diff and no pull request to submit either, so a
- * released item of this class can only end in a worker's blocked report.
+ * can do, so a released item of this class can only end in a worker's blocked report.
  */
 export const loopRecordedProofs: readonly string[] = ['manual:throughput-claim-verified'];
 
@@ -22,17 +21,16 @@ export const loopRecordedProofs: readonly string[] = ['manual:throughput-claim-v
  */
 export const masterRoleObservation = (proof: string) => /checkout-restore|master[.-](status|role)|\.graphyard\/master\.json/i.test(proof);
 
-/** Whether nothing of the item is a worker's to do: it plans no files, and every proof it owes is recorded by the master side, so releasing it would only dispatch a worker that must block. An item with code work keeps its worker (GY-1762: an item with a code criterion is dispatched as before), and one criterion that a worker can serve keeps the whole item dispatchable. */
-export const loopOwned = (work: Pick<Work, 'criteria' | 'plannedFiles'>) => {
-  if ((work.plannedFiles ?? []).length) return false;
+/** Whether nothing of the item is a worker's to do: every proof it owes is recorded by the master side, so releasing it would only dispatch a worker that must block. One criterion that a worker can serve keeps the whole item dispatchable (GY-1762). */
+export const loopOwned = (work: Pick<Work, 'criteria'>) => {
   const proofs = work.criteria.flatMap(criterion => criterion.proofs);
   return proofs.length > 0 && proofs.every(proof => loopRecordedProofs.includes(proof)
     || servingReleaseProof(proof) && masterRoleObservation(proof));
 };
 
 /** Why such an item is never released or dispatched, or null: the refusal names who closes it. */
-export const loopOwnedRefusal = (work: Pick<Work, 'key' | 'criteria' | 'plannedFiles'>) => loopOwned(work)
-  ? `${work.key} is loop-owned: it plans no files and every proof it owes is recorded by the master side (the loop's own throughput measurement, or a master-role session's observation of the master checkout), so a worker has nothing to build, no observation it can take, and no pull request to submit. It stays off the dispatch board; a master-role session records the observation and the item closes without a worker. Releasing or dispatching it would only end in a worker's blocked report`
+export const loopOwnedRefusal = (work: Pick<Work, 'key' | 'criteria'>) => loopOwned(work)
+  ? `${work.key} is loop-owned: every proof it owes is recorded by the master side (the loop's own throughput measurement, or a master-role session's observation of the master checkout), so a worker has nothing to build, no observation it can take, and no pull request to submit. It stays off the dispatch board; a master-role session records the observation and the item closes without a worker. Releasing or dispatching it would only end in a worker's blocked report`
   : null;
 
 /**
@@ -50,6 +48,6 @@ const workerCannotServe = /\bnot a worker(?:'s)?(?=\s*(?:[(,;:]|\.(?:\s|$)|$|to\
  * a master unblocks it by hand; the loop clears it instead, and the item's own next action (`escalate`, the loop's reading owed) names who records the reading. Only such a report on
  * such an item qualifies: a human's decision wait stays, and so does any actionable fault the item's shape does not make moot.
  */
-export const loopHeldBlocker = (work: Pick<Work, 'systemDriven' | 'criteria' | 'plannedFiles' | 'stage' | 'description' | 'lease'>, blocker: string, blockerClass: string, now: number) =>
+export const loopHeldBlocker = (work: Pick<Work, 'systemDriven' | 'criteria' | 'stage' | 'description' | 'lease'>, blocker: string, blockerClass: string, now: number) =>
   (blockerClass === 'genuine' || blockerClass === 'master-role') && workerCannotServe.test(blocker) && (!work.lease || Date.parse(work.lease.expiresAt) <= now)
   && (loopOwned(work) || !!loopObservationProofs(work));

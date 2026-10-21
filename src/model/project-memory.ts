@@ -10,9 +10,9 @@ export const recentChangesWindowMs = 24 * 3_600_000;
 export const projectMemoryWordBudget = 500;
 
 export const sanctionedRemedies: Record<string, string> = {
-  'scope': 'Request scope widening before editing files outside plannedFiles (graphyard request-scope); never edit unapproved files or rebase.',
+  'scope': 'Change only what the criteria need; never weaken requirements, revert shipped work or rebase.',
   'configuration': 'Worker tokens cannot edit .github/workflows; do not touch workflow files or request changes to them.',
-  'merge': 'Do not guess at blocked merges or force-push; use graphyard sync GY-N --restore to reconcile cleanly with base.',
+  'merge': 'Do not guess at blocked merges or force-push; use graphyard sync GY-N to reconcile cleanly with base.',
   'session-liveness': 'Avoid commands triggering interactive prompts (no unresolvable rm/mv globs); keep work within lease time.',
   'proof': 'Ensure test titles start with the exact proof name; verify with graphyard verify GY-N before completing.',
   'review-convergence': 'Address review findings directly with code commits or explanations; do not dismiss reviews manually.',
@@ -22,7 +22,7 @@ export const sanctionedRemedies: Record<string, string> = {
   'resources': 'Clean up unneeded temporary files under managed root; do not exceed disk and ledger bounds.',
   'containment': 'Ensure previous session processes are stopped and containment fences settled before proceeding.',
   'deployment': 'Verify deployed commits match release expectations; follow rollback guidance on smoke failure.',
-  'overlap-hold': 'Wait for overlapping work items to complete or adjust plannedFiles to eliminate overlap.',
+  'overlap-hold': 'Wait for the item holding the same exclusive resource to complete.',
   'observation': 'Wait for GitHub observation updates; do not proceed on stale PR status readings.',
   'loop': 'Ensure master daemon is running and cycling within interval; restart if stuck.',
   'stalled-gate': 'Check gate failure reasons and address the blocking requirement instead of waiting.',
@@ -172,7 +172,7 @@ export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonl
       const mergedAt = item.delivery?.mergedAt ?? item.observation?.mergedAt;
       const mergeSha = item.delivery?.mergeSha ?? item.observation?.mergeSha;
       if (mergedAt && mergeSha && Date.parse(mergedAt) >= recentCutoff) {
-        recordChangeInMemory(memory, { key: item.key, sha: mergeSha, baseSha: item.candidate?.baseSha ?? null, files: item.observation?.files ?? item.plannedFiles ?? [], mergedAt });
+        recordChangeInMemory(memory, { key: item.key, sha: mergeSha, baseSha: item.candidate?.baseSha ?? null, files: item.observation?.files ?? [], mergedAt });
       }
     }
   }

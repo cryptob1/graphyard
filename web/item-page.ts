@@ -8,7 +8,7 @@ import { noRelease, type ReleaseView } from '../src/model/release';
 /**
  * The item page below its first screen (GY-171), as plain data the page renders: what is left,
  * grouped by the item state that owns it (GY-1979: Todo, Doing, Checking — Done has nothing left)
- * and naming who clears it; the latest activity in plain words; and planned-file overlaps as one
+ * and naming who clears it; the latest activity in plain words; and file overlaps as one
  * line. Every gate reason reaches the reader through `plainReason`; the raw text stays under
  * Technical details.
  */
@@ -101,7 +101,7 @@ export function activityLabel(kind: string): string {
     rework: 'Sent back for changes', resolve: 'A decision was recorded', recover: 'Recovered after a builder stopped', claim: 'Picked up by a builder',
     rereview: 'Asked for a fresh review', mechanicalplan: 'A planned fix round was recorded for the review', heartbeat: 'The builder is still working', quarantine: 'A stopped builder was fenced off', launch: 'A session was started',
     settle: 'A builder’s attempt ended', autosettle: 'A builder’s attempt ended', release: 'A builder stopped working on it', workspace: 'The builder said where the code lives',
-    submit: 'Handed in', blocked: 'The builder reported it blocked', defer: 'The builder found its reading cannot exist yet and set it to wait', window: 'Set to wait until its reading can exist', dispatchblock: 'Graphyard stopped starting it after the same launch failure repeated', scope: 'The builder asked to change the planned files', autoscope: 'The planned files were changed',
+    submit: 'Handed in', blocked: 'The builder reported it blocked', defer: 'The builder found its reading cannot exist yet and set it to wait', window: 'Set to wait until its reading can exist', dispatchblock: 'Graphyard stopped starting it after the same launch failure repeated',
     evidence: 'Proof recorded', deployment: 'Deployment recorded', reading: 'The loop recorded its reading', revoke: 'A proof was withdrawn', session: 'A session was recorded', request: 'An agent asked for a decision',
     repair: 'Asked to repair the branch', mergerefused: 'The merge kept being refused, so a fresh review or rework was asked for',
     refresh: 'Asked to merge the repaired base in', adopt: 'An existing pull request was adopted into it',
@@ -143,7 +143,7 @@ export function historyLabel(loaded: number): string {
 }
 
 /**
- * Planned-file overlaps as one line: every overlapping item and the paths this item shares with
+ * File overlaps as one line: every overlapping item and the paths this item shares with
  * them — "Shares files with GY-166, GY-167 (tests/)" — never one box per item.
  */
 export function overlapLine(work: Work, all: Work[]): string | null {

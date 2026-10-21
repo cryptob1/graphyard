@@ -9,7 +9,7 @@ import { reviewConflictAttention } from './model/review-conflict.js';
 import type { SettledReviewSession } from './model/dispatch.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from './auto-dispatch.js';
 import { agentRequestAttention } from './cli/loop-report.js';
-import { owedAttention, scopeRequestAttention } from './cli/owed-report.js';
+import { owedAttention } from './cli/owed-report.js';
 import type { MergeWriterSummary } from './daemon/cycle-merge-writer.js';
 import { stuckRequestReport } from './cli/stuck-requests.js';
 import { stalledItemAttention } from './cli/status-attention.js';
@@ -183,7 +183,7 @@ export function faulted(items: AttentionItem[]) {
 
 /**
  * The lines `master status` builds from the snapshot, the session ledgers and the host after
- * `buildMasterStatus` (GY-173): scope and agent requests, consent holds, review conflicts, stuck and
+ * `buildMasterStatus` (GY-173): agent requests, consent holds, review conflicts, stuck and
  * unanswered requests, reviews no session can obtain, stalled items and actions, overlong sessions, the
  * GitHub budget and owed judgments. The report and the loop both read them from
  * here, so every class the report shows is one the loop counts. The report passes the rows and
@@ -191,7 +191,7 @@ export function faulted(items: AttentionItem[]) {
  * the setup and the dispatcher, which the report reads before everything else.
  */
 export async function derivedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
-  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof scopeRequestAttention>[1];
+  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof actorlessAttention>[1];
     /** GY-2015: the merge writer's own summary, so the owed lines it holds read as its motion; absent, the readers behave as before. */
     mergeWriter?: MergeWriterSummary | null }) {
   const reviews = summarizeReviews(observed.reviews), now = Date.parse(snapshot.now);
@@ -199,7 +199,7 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     // The retry schedule of every settled session (GY-533): without it a failed session whose next
     // attempt is already scheduled reads as a request nothing will answer.
     { producers: summarizeProducers(observed.producers), failures: [], retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] }).work;
-  const scopeRequests = [...scopeRequestAttention(snapshot, observed.approvals), ...agentRequestAttention(snapshot), ...consentHoldItems(observed.trees ?? await inventoryWorktrees(root).catch(() => []), snapshot)];
+  const requests = [...agentRequestAttention(snapshot), ...consentHoldItems(observed.trees ?? await inventoryWorktrees(root).catch(() => []), snapshot)];
   const unobtainable = unobtainableReviewAttention(rows, reviews.completed as SettledReviewSession[]);
   const unanswered = unansweredRequestAttention(rows);
   const stalledItems = stalledItemAttention(snapshot);
@@ -211,7 +211,7 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const stalled = stalledActionAttention(snapshot);
   // What waits on a judgment rather than on capacity, named once and counted apart (GY-104); the
   // merge writer's own summary lets a trial refusal it holds read as its motion (GY-2015).
-  const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], scopeRequests, observed.mergeWriter);
+  const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], requests, observed.mergeWriter);
   const overlong = overlongSessionAttention(snapshot, { ...observed.runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   const stuck = stuckRequestReport({ reviews: observed.reviews, producers: observed.producers }, now).attentionItems;
   // A machine-filed item no triage has judged within a day of filing (GY-402).
@@ -234,6 +234,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
       .map(item => ({ ...item, ...classified('concurrency-starved') })));
   }
   // GY-2010: no GitHub budget attention — the App request budget is gone with the API client.
-  return { scopeRequests, unobtainable, unanswered, stalledItems, actorless, conflicted, stalled, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
-    items: [...host, ...scopeRequests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...triage, ...owed.items] };
+  return { requests, unobtainable, unanswered, stalledItems, actorless, conflicted, stalled, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
+    items: [...host, ...requests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...triage, ...owed.items] };
 }

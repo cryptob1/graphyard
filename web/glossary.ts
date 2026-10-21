@@ -29,7 +29,6 @@ export const glossary = {
   'proof authority': 'Which agents may submit a passing result for which proofs. Builders never can.',
   'operator automation': 'Limited agent identities that can create and release work on the operator’s behalf.',
   'delivery slice': 'An area of the codebase with its own coordinating lead.',
-  'planned files': 'The files and folders the work says it will change. A change anywhere else is flagged so someone looks at it.',
   'exclusive resource': 'Something only one work item may use at a time, such as a shared test account. It is held only while someone is working on the item.',
   'review provider': 'Who does the code review: a person approving on GitHub, or a reviewing agent.',
   dependency: 'Another work item that has to ship before this one can start moving.',

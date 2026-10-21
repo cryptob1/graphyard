@@ -1,8 +1,7 @@
 import { z } from 'zod';
-import { caseDirectory, caseId, contractFile } from '../e2e/case.js';
+import { caseDirectory, caseId } from '../e2e/case.js';
 import { criteriaSchema } from './policy.js';
 import { demand } from './refusal.js';
-import { pathScopesOverlap } from './scope.js';
 import type { Work } from './work.js';
 import type { Goal, GoalContext } from './goal.js';
 
@@ -30,7 +29,7 @@ export const maxPlanRounds = 3;
 const planRef = z.string().regex(/^[a-z][a-z0-9-]{0,39}$/, 'A plan item ref is lower-case letters, digits and -, starting with a letter');
 /** Plain sentences: split on . ! ? followed by space or end; empty text is zero sentences. */
 export const plainSentences = (text: string) => text.trim().split(/(?<=[.!?])(?:\s+|$)/).map(part => part.trim()).filter(Boolean);
-/** One planned work item: the outcomes it serves, the required cases it must make pass, its criteria, its file boundary and the items it lands after. */
+/** One planned work item: the outcomes it serves, the required cases it must make pass, its criteria and the items it lands after. */
 export const planItemSchema = z.object({
   ref: planRef,
   title: line(200),
@@ -42,7 +41,8 @@ export const planItemSchema = z.object({
   outcomes: z.array(caseId).min(1).max(30),
   cases: z.array(caseId).min(1).max(30),
   criteria: criteriaSchema(20),
-  plannedFiles: z.array(line(500)).min(1).max(100),
+  // GY-1992: plannedFiles is retired; a plan drafted before then still parses, and the field is dropped.
+  plannedFiles: z.unknown().optional().transform(() => undefined),
   dependsOn: z.array(planRef).max(20).default([]),
 }).strict();
 export type PlanItem = z.infer<typeof planItemSchema>;
@@ -70,8 +70,7 @@ function reaches(plan: Pick<GoalPlan, 'items'>) {
  * Pure: every reason a plan cannot go to approval, each naming what to change. The note is at most
  * planNoteMaxWords words; every approved outcome is served by at least one item; each item names
  * the goal's required cases it must make pass (at least the case of every outcome it serves);
- * each item's criterion ids are unique; dependencies name items of the plan without a cycle; two items neither of which lands after the
- * other share no planned file; and no item plans a change to a protected case or the contract.
+ * each item's criterion ids are unique; and dependencies name items of the plan without a cycle.
  */
 export function planRefusals(goal: Pick<Goal, 'key' | 'protected' | 'acceptance'>, plan: GoalPlan): string[] {
   const refusals: string[] = [];
@@ -99,19 +98,12 @@ export function planRefusals(goal: Pick<Goal, 'key' | 'protected' | 'acceptance'
     if (repeated.length) refusals.push(`item ${item.ref} names criterion ${repeated.join(', ')} twice: each criterion id is unique within its item`);
     const missing = item.dependsOn.filter(ref => !refs.includes(ref) || ref === item.ref);
     if (missing.length) refusals.push(`item ${item.ref} depends on ${missing.join(', ')}, which ${missing.length === 1 ? 'is' : 'are'} not another item of this plan`);
-    const guarded = item.plannedFiles.filter(path => pathScopesOverlap(path, contractFile) || goal.protected.cases.some(id => pathScopesOverlap(path, `${caseDirectory}/${id}.json`)));
-    if (guarded.length) refusals.push(`item ${item.ref} plans ${guarded.join(', ')}: no item edits or weakens a required case or its contract binding`);
   }
   const uncovered = goal.protected.outcomes.filter(id => !plan.items.some(item => item.outcomes.includes(id)));
   if (uncovered.length) refusals.push(`no item serves approved outcome${uncovered.length === 1 ? '' : 's'} ${uncovered.join(', ')}; every outcome is covered by at least one item`);
   const closure = reaches(plan);
   const cyclic = plan.items.filter(item => closure.get(item.ref)!.has(item.ref)).map(item => item.ref);
   if (cyclic.length) refusals.push(`items ${cyclic.join(', ')} depend on each other in a cycle`);
-  for (const [index, a] of plan.items.entries()) for (const b of plan.items.slice(index + 1)) {
-    if (a.ref === b.ref || closure.get(a.ref)!.has(b.ref) || closure.get(b.ref)!.has(a.ref)) continue;
-    const shared = a.plannedFiles.filter(path => b.plannedFiles.some(other => pathScopesOverlap(path, other)));
-    if (shared.length) refusals.push(`items ${a.ref} and ${b.ref} may run in parallel yet both plan ${shared.join(', ')}: give them separate files or make one depend on the other`);
-  }
   return refusals;
 }
 /** The plan's items in dependency order: each after every item it depends on, otherwise as planned. Throws on a cycle. */
@@ -184,7 +176,7 @@ export function planNext(goal: Goal): { who: string; command: string } | null {
 export const mergedItem = (work: Work | undefined) => !!work && work.stage === 'done' && !work.closure && !!work.delivery;
 /** The first line of a released plan item's description: the durable mark a retried release finds it by, whatever receipts expired. */
 export const planItemMark = (goal: Pick<Goal, 'key'>, plan: { draftedAt: string }, item: Pick<PlanItem, 'ref'>) => `Plan item ${item.ref} of ${goal.key}'s plan drafted ${plan.draftedAt}.`;
-/** What creating one approved plan item sends: its criteria and file boundary, the dependencies already created, and the goal, outcomes, required cases and architecture note it serves. */
+/** What creating one approved plan item sends: its criteria, the dependencies already created, and the goal, outcomes, required cases and architecture note it serves. */
 export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance'> & { plan: GoalPlan & { author: string; draftedAt: string }; planApproval: { by: string } }, item: PlanItem, created: ReadonlyMap<string, { id: string }>) {
   const outcomes = (goal.acceptance?.outcomes ?? []).filter(outcome => item.outcomes.includes(outcome.id));
   const description = [planItemMark(goal, goal.plan, item), item.description, '',
@@ -195,7 +187,7 @@ export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance
     title: `${goal.key}: ${item.title}`.slice(0, 200), description: description.length > 20000 ? `${description.slice(0, 19999)}…` : description,
     // The item page opens on this plain sentence (GY-2011); master create may set the same field by hand.
     summary: item.plain,
-    type: item.type, priority: item.priority, criteria: item.criteria, plannedFiles: item.plannedFiles,
+    type: item.type, priority: item.priority, criteria: item.criteria,
     dependencies: item.dependsOn.map(ref => { const dependency = created.get(ref); if (!dependency) throw new Error(`${item.ref} depends on ${ref}, which is not created yet`); return dependency.id; }),
     reason: `${goal.key}'s approved plan item ${item.ref}`,
   };

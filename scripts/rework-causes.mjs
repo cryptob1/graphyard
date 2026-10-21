@@ -77,7 +77,7 @@ export function filingPayload(cause, label, count, share) {
   return {
     title: `Fix the ${label.toLowerCase()} rework rounds (${count} round${count === 1 ? '' : 's'}, ${share === null ? 'share n/a' : `${Math.round(share * 100)}% of rounds`})`,
     description: `Filed by scripts/rework-causes.mjs (GY-643): ${label.toLowerCase()} is one of the largest causes of rework rounds over the last 100 delivered items, and no open item already names it. Reduce the rounds this cause produces without weakening any requirement.`,
-    type: 'bug', priority: 1, plannedFiles: [],
+    type: 'bug', priority: 1,
     criteria: [{ id: 'AC-1', text: `Rework rounds classified as ${cause} over the last 100 delivered items fall below the share this item was filed for, measured by scripts/rework-causes.mjs`, proofs: ['manual:rework-cause-fix'] }],
   };
 }

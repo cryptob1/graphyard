@@ -10,7 +10,6 @@ import type { NextAction } from './next-action.js';
 import type { ActionQueue } from './actions.js';
 import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
-import { companionGround, itemDocumentationPaths, namedPaths, pathScopeContains, plannedFilesMax, type ItemDocumentation, type ScopeDecision, type ScopeRequestState } from './scope.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
 import type { ResearchRecord } from '../research.js';
@@ -59,7 +58,6 @@ export const createSchema = z.object({
   dependencies: z.array(z.string().uuid()).max(50).default([]),
   criteria: criteriaSchema(50),
   policy: policySchema.default({ checks: ['test', 'typecheck'], review: true }),
-  plannedFiles: z.array(z.string().min(1).max(500)).max(plannedFilesMax).default([]),
   exclusiveResources: resourcesSchema.optional(),
   slice: z.enum(sliceIds).optional(),
   // Manual proofs a launched producer session may run on the item's behalf. Unit and
@@ -199,29 +197,6 @@ export interface Work extends Create {
   containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string; scope?: ContainmentScope } | null;
   submission: { epoch: number; pr: number } | null;
   /**
-   * A worker's open ask to widen plannedFiles, bound to the lease epoch that raised it. It is
-   * structured state, not free text: the master loop asks the control plane to decide it on the
-   * cycle it appears, and the decision it carries — applied, or refused with the reason — is the
-   * audit of that. The attempt keeps its lease either way; `master scope` remains the operator's
-   * override for what the item does not already imply (see model/scope.ts).
-   */
-  scopeRequest?: ScopeRequestState | null;
-  /** An ask still with the approver when its attempt ended (GY-1484): the next claim adopts it; a widening covering it clears it. */
-  carriedScopeRequest?: ScopeRequestState | null;
-  /**
-   * GY-1726: each live widening a held requirements decision grounded (`autoscope` deciding the ask on
-   * its criteria), by decision: the policy revision it was approved against (`from`), the one the
-   * widening moved the item to (`to`) and the planned entries it added. The widening does not make
-   * that decision stale, and the decision applies when the attempt ends with those entries kept.
-   */
-  heldGroundings?: { decision: string; from: number; to: number; paths: string[] }[] | null;
-  /**
-   * The last scope decision the control plane took for this item, applied or refused, with the
-   * request it answered and how long that request waited. An approved request is applied and
-   * cleared; a refused one stays open, carrying the same decision, for the operator to decide.
-   */
-  scopeDecision?: ScopeDecision | null;
-  /**
    * The open decision only a human may make, recorded by the attempt that reached it. Recording it
    * ended that attempt's lease and parked the item; the answer clears it, and answered requests
    * are kept in `humanRequests` (see model/human-request.ts).
@@ -298,28 +273,4 @@ export function operatorCapability(actor: Principal, capability: OperatorCapabil
 }
 export function activeLease(work: Work, actor: Principal, epoch: number, now: Date) {
   demand(work.lease && work.lease.owner === actor.id && work.lease.epoch === epoch && Date.parse(work.lease.expiresAt) > now.getTime(), 'Lease missing, expired, or superseded; claim the task again');
-}
-
-export { derivePlannedFiles, describedAsNew, plannedFilesRefusal, scopeExists, type PlannedFilesDerivation } from './planned-files.js';
-
-/**
- * GY-140 AC-3: per open item, every scope request — open, or the last one decided — whose paths a
- * criterion already names, or that is a companion the item's record implies (GY-955). Such a request should never have been needed: the file belonged in
- * plannedFiles at authoring time. Counted, so the authoring fault is measured rather than recalled.
- */
-export function impliedScopeRequests(work: readonly (Pick<Work, 'key' | 'stage' | 'criteria' | 'scopeRequest' | 'scopeDecision'> & Partial<Pick<Work, 'plannedFiles' | 'documentation'>>)[]) {
-  const items = work.filter(item => item.stage !== 'done').flatMap(item => {
-    const requests = [
-      ...(item.scopeRequest ? [{ state: 'open' as const, paths: item.scopeRequest.paths, requestedBy: item.scopeRequest.requestedBy, requestedAt: item.scopeRequest.at }] : []),
-      ...(item.scopeDecision && !(item.scopeRequest && item.scopeRequest.at === item.scopeDecision.requestedAt) ? [{ state: item.scopeDecision.state, paths: item.scopeDecision.paths, requestedBy: item.scopeDecision.requestedBy, requestedAt: item.scopeDecision.requestedAt }] : []),
-    ];
-    return requests.flatMap(request => {
-      const named = request.paths.flatMap(path => {
-        const criterion = item.criteria.find(entry => namedPaths(entry.text).some(scope => pathScopeContains(scope, path)))?.id ?? (companionGround(path, item, request.paths, itemDocumentationPaths(item)) ? 'companion' : null);
-        return criterion ? [{ path, criterion }] : [];
-      });
-      return named.length ? [{ key: item.key, ...request, named }] : [];
-    });
-  });
-  return { count: items.length, items };
 }

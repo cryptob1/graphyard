@@ -1,10 +1,7 @@
 import { humanRequestBlocker } from './human-request.js';
 import { userBusRefusal } from './user-bus.js';
 import { RefusedResponse, planeUnavailable, planeUnavailableStatus } from './refusal.js';
-import { blockedAttemptMarker } from './capacity.js';
-import { namedPaths, pathScopeContains, scopeRefusalBlocker, unplannedPaths } from './scope.js';
-import { widenedPlannedFiles } from './scope-collapse.js';
-import { blockerPaths, githubOutage, runtimeDenial, runtimeExhaustion } from './runtime-blockers.js';
+import { githubOutage, runtimeDenial, runtimeExhaustion } from './runtime-blockers.js';
 // Types only from work.ts: work.ts reaches this module through its own field types.
 import type { Work } from './work.js';
 
@@ -12,18 +9,17 @@ import type { Work } from './work.js';
 // Blocker classes (GY-1008).
 //
 // On 2026-09-30 the board showed 19 blocked items and the master cleared every one by hand: eight
-// were a GitHub credential failure fixed hours earlier, four were environment faults, six needed
-// one named file added to plannedFiles and one needed its already-requested approver launched.
-// Nothing re-checked a blocker once it was recorded. Here each recorded blocker is read into one
-// named class from its own text; the loop probes the cause of every environmental class each
-// cycle and clears the blocker once the probe passes, turns a planned-file-scope blocker into a
-// widening decision for the independent approver, launches a needs-decision blocker's approver,
+// were a GitHub credential failure fixed hours earlier, four were environment faults and one needed
+// its already-requested approver launched. Nothing re-checked a blocker once it was recorded. Here
+// each recorded blocker is read into one named class from its own text; the loop probes the cause
+// of every environmental class each cycle and clears the blocker once the probe passes, launches a
+// needs-decision blocker's approver,
 // and only a genuine or human-only blocker counts as needing someone. Browser-safe: the board
 // classifies with it too, and the control plane re-classifies before it lets a probe clear.
 // ---------------------------------------------------------------------------
 
 export const blockerClasses = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure',
-  'dispatch-failure', 'host-supervisor', 'runtime-denial', 'runtime-exhaustion', 'github-outage', 'master-role', 'planned-file-scope', 'needs-decision', 'human-only', 'genuine'] as const;
+  'dispatch-failure', 'host-supervisor', 'runtime-denial', 'runtime-exhaustion', 'github-outage', 'master-role', 'needs-decision', 'human-only', 'genuine'] as const;
 export type BlockerClass = typeof blockerClasses[number];
 
 /** The classes whose cause lies outside the item: the loop probes each, every cycle, and clears the blocker once its probe passes. */
@@ -41,14 +37,13 @@ export const blockerClassMeaning: Record<BlockerClass, string> = {
   'control-plane-error': 'the Graphyard server failed a command (a 5xx, an internal error, a dropped connection); cleared once the server reports healthy',
   'sandbox-path': 'a path the worker must write was read-only or denied; cleared once the path is writable inside the worker confinement',
   'worktree-mismatch': "the session ran in another item's worktree or the wrong checkout; cleared once the attempt has ended, since the next one gets its own worktree",
-  'outside-scope-test-failure': "a suite failed in files outside the item's plannedFiles; cleared once the base branch has moved past the tip it failed on",
+  'outside-scope-test-failure': "a suite failed in files the item does not change; cleared once the base branch has moved past the tip it failed on",
   'dispatch-failure': "the master loop stopped redispatching the item after repeated launches no worker profile could take; cleared once a profile can take a launch again",
   'host-supervisor': "a host check failed only from the worker's sandbox, where the systemd user bus is masked; cleared once the loop, on the host, reaches the user manager and finds its own unit active",
   'runtime-denial': "the worker's runtime refused git push or gh pr at its permission prompt, which a fresh session does not carry; cleared once the attempt has ended, since the next launch is a fresh session",
   'runtime-exhaustion': "the worker's runtime account reached its usage limit; cleared once a worker profile can take a launch on an account dispatch would choose (configured, not held, under its provider quota, or the agent registry's pick), which resumes the kept work",
   'github-outage': 'GitHub answered a git or gh operation with its own server error; cleared once githubstatus.com reports Git Operations, API Requests and Pull Requests operational and git ls-remote and a dry-run push pass inside the worker confinement',
   'master-role': 'a step only the master role can take (a master command, or the doctor-issued checkout-restore) recorded from a worker token; a master-role identity — the master session or a doctor run, from the coordinator checkout — takes the step itself and unblocks the item (GY-1761)',
-  'planned-file-scope': 'the change needs named files outside plannedFiles; becomes an additive widening decision for the independent approver, cleared once plannedFiles cover them',
   'needs-decision': 'the item waits on a requested two-party decision; its approver is launched, and the blocker is cleared once the decision is judged',
   'human-only': 'one of the three decisions only a human may make',
   genuine: 'anything the classes above do not recognise: the master reads it and acts',
@@ -56,10 +51,6 @@ export const blockerClassMeaning: Record<BlockerClass, string> = {
 
 export interface BlockerClassification {
   class: BlockerClass;
-  /** Planned-file scope: the files the blocker names. */
-  paths: string[];
-  /** Planned-file scope: the commit the blocker names, which the files are needed for. */
-  commit: string | null;
   /** Needs-decision: the decision id the blocker names, when it names one. */
   decision: string | null;
   /** Sandbox path: the path the blocker says could not be written. */
@@ -130,7 +121,6 @@ const fileRefusal = /\bEACCES\b|\bEPERM\b|Operation not permitted|Permission den
 const worktree = /\bworktree\b[^.]*\b(?:another|other|different|wrong|mismatch|belongs to|not (?:this|the) item|instead of)\b|\b(?:another|other|different|wrong) (?:item's )?(?:worktree|checkout)\b|attached to (?:the )?\S+ worktree|worktree mismatch/i;
 const suiteFailure = /\b(?:tests?|suites?|specs?|checks?|typecheck)\b[^.]*\b(?:fail\w*|red|broken)\b|\b(?:fail\w*|red|broken)\b[^.]*\b(?:tests?|suites?|specs?)\b/i;
 const outsideScope = /\boutside (?:(?:the|its|this item's|my) )?(?:plannedFiles|planned files|scope|item)|\bnot in (?:the |its )?(?:plannedFiles|planned files|scope)|\bunrelated\b|\bon (?:main|the base(?: branch)?)\b|\bpre-?existing\b/i;
-const scopeWords = /SCOPE NEEDED|\bplannedFiles\b|\bplanned[- ]files?\b|\bneeds? (?:the )?(?:file|files|scope)\b|\bscope (?:widening|request)\b|\boutside (?:the |its )?scope\b/i;
 const decisionWords = /\b(?:decision|approver|approval)\b/i;
 const decisionWait = /\b(?:needs?|await\w*|waits?|waiting|requested|pending|launch\w*|judge\w*|unanswered)\b/i;
 /**
@@ -140,9 +130,6 @@ const decisionWait = /\b(?:needs?|await\w*|waits?|waiting|requested|pending|laun
  * the role, so the class is a hand-off: a master-role identity takes the step itself, then unblocks the item.
  */
 export const masterRoleBlocker = /\.graphyard\/master\.json does not exist|\bno master role\b|\bmaster-role session\b/i;
-const commitToken = /\b(?=[0-9a-f]*[a-f])(?=[0-9a-f]*\d)[0-9a-f]{7,40}\b/g;
-// After the word "commit" any abbreviation is one, all digits or all letters included.
-const namedCommit = /\bcommit\s+([0-9a-f]{7,40})\b/gi;
 const uuidToken = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
 /** How every blocker the loop records for repeated dispatch failures opens (dispatchFailureBlocker, src/daemon/dispatch-failures.ts). */
@@ -179,13 +166,12 @@ function refusedPath(text: string): string | null {
 
 /**
  * The class a recorded blocker belongs to, read from its text and whether the item waits on a
- * human. Unrecognised text is `genuine`; so is a scope ask that names no file or no commit, which
- * no widening can be derived from. A decision wait that names no decision id is still
+ * human. Unrecognised text is `genuine`. A decision wait that names no decision id is still
  * `needs-decision`: the loop acts on whichever decision stands requested on the item.
  */
 export function classifyBlocker(text: string | null | undefined, context: { humanRequest?: boolean } = {}): BlockerClassification {
   const blocker = (text ?? '').trim();
-  const none = { paths: [], commit: null, decision: null, path: null };
+  const none = { decision: null, path: null };
   if (context.humanRequest || blocker.startsWith(humanRequestBlocker) || /^A human declined /.test(blocker)) return { class: 'human-only', ...none };
   if (!blocker) return { class: 'genuine', ...none };
   // The loop's own record of repeated launch failures on a fleet-idle cause (GY-1322), whatever else its cause quotes.
@@ -205,60 +191,14 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   if (controlPlane.test(blocker)) return { class: 'control-plane-error', ...none };
   const path = refusedPath(blocker);
   if (readOnlyFileSystem.test(blocker) || (fileRefusal.test(blocker) && path)) return { class: 'sandbox-path', ...none, path };
-  if (blocker.startsWith(scopeRefusalBlocker) || scopeWords.test(blocker)) {
-    const unlinked = unlinkedText(blocker);
-    const paths = blockerPaths(unlinked, namedPaths(unlinked), scopeWords);
-    const unclaimed = (token: string) => !paths.some(path => path.includes(token));
-    const commit = [...unlinked.matchAll(namedCommit)].map(match => match[1].toLowerCase()).find(unclaimed) ?? unlinked.match(commitToken)?.find(unclaimed) ?? null;
-    return paths.length && commit ? { class: 'planned-file-scope', ...none, paths, commit } : { class: 'genuine', ...none };
-  }
   if (decisionWords.test(blocker) && decisionWait.test(blocker)) return { class: 'needs-decision', ...none, decision: uuidToken.exec(blocker)?.[0].toLowerCase() ?? null };
   return { class: 'genuine', ...none };
 }
 
-// A URL is a reference, not a file: its host and path never become planned paths or a commit.
-const unlinkedText = (text: string) => text.replace(/\b(?:https?:\/\/|www\.)\S+/gi, ' ');
-/**
- * The files a text asks for in scope words, outside `plannedFiles` (GY-1396): a park or a blocker
- * that is a scope request in other words. Empty when the text uses no scope words or every file it
- * names is already planned.
- */
-export const scopeAskPaths = (text: string, plannedFiles: readonly string[] | undefined) =>
-  scopeWords.test(text) ? unplannedPaths(plannedFiles, namedPaths(unlinkedText(text))) : [];
-
-/**
- * The head a blocked attempt kept on the record (GY-1396): `blocked` ends its attempt and the CLI
- * records the attempt's commit as its partial work, so a scope blocker that names its files but no
- * commit was written for that one.
- */
-function blockedAttemptCommit(work: Partial<Pick<Work, 'epoch' | 'capacity'>>) {
-  const marker = `${blockedAttemptMarker}${work.epoch}:`;
-  return work.capacity?.exhaustions.findLast(entry => entry.role === 'worker' && entry.epoch === work.epoch && entry.reason.startsWith(marker) && entry.partialWork.commit)?.partialWork.commit ?? null;
+/** The class of an item's standing blocker, or null when it has none. */
+export function itemBlockerClass(work: Pick<Work, 'blocker' | 'humanRequest'>): BlockerClassification | null {
+  return work.blocker ? classifyBlocker(work.blocker, { humanRequest: !!work.humanRequest && !work.humanRequest.answer }) : null;
 }
-
-/**
- * The class of an item's standing blocker, or null when it has none. A scope ask that names its
- * files and no commit is `genuine` as text alone, but recorded by `blocked` it carries its
- * attempt's kept head: then it is the planned-file-scope blocker the approver widens, not one a
- * coordinator widens by hand once the item is back at ready (GY-1396).
- */
-export function itemBlockerClass(work: Pick<Work, 'blocker' | 'humanRequest'> & Partial<Pick<Work, 'epoch' | 'capacity'>>): BlockerClassification | null {
-  if (!work.blocker) return null;
-  const classification = classifyBlocker(work.blocker, { humanRequest: !!work.humanRequest && !work.humanRequest.answer });
-  if (classification.class !== 'genuine' || work.blocker.startsWith(scopeRefusalBlocker) || !scopeWords.test(work.blocker)) return classification;
-  const unlinked = unlinkedText(work.blocker), paths = blockerPaths(unlinked, namedPaths(unlinked), scopeWords), commit = paths.length ? blockedAttemptCommit(work) : null;
-  return commit ? { ...classification, class: 'planned-file-scope', paths, commit } : classification;
-}
-
-/** The planned-file-scope blocker's files that plannedFiles do not yet cover. */
-export const uncoveredBlockerPaths = (work: Partial<Pick<Work, 'plannedFiles'>>, classification: BlockerClassification) =>
-  classification.paths.filter(path => !(work.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
-
-/** A planned-file-scope blocker whose files no fold represents under the plannedFiles cap: no widening decision can answer it, so it needs the master. */
-export const unrepresentableScope = (work: Partial<Pick<Work, 'plannedFiles' | 'criteria'>>, classification: BlockerClassification) => {
-  const missing = classification.class === 'planned-file-scope' ? uncoveredBlockerPaths(work, classification) : [];
-  return missing.length > 0 && !widenedPlannedFiles(work, missing).representable;
-};
 
 /**
  * The last probe of an item's standing blocker, as the loop recorded it on the item: which class
@@ -288,11 +228,11 @@ export interface BlockerView {
  * The view of an item's standing blocker, or null when it has none. A routine class stops counting
  * as routine once the loop has cleared this item's blocker `maxAutomaticClears` times in a row.
  */
-export function blockerView(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'> & Partial<Pick<Work, 'plannedFiles' | 'criteria'>>): BlockerView | null {
+export function blockerView(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'>): BlockerView | null {
   const classification = itemBlockerClass(work);
   if (!classification) return null;
   const probe = work.blockerProbe && work.blockerProbe.blocker === work.blocker ? work.blockerProbe : null;
-  const spent = (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears || unrepresentableScope(work, classification);
+  const spent = (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears;
   return {
     class: classification.class,
     needsSomeone: needsSomeone(classification.class) || spent,
@@ -302,7 +242,7 @@ export function blockerView(work: Pick<Work, 'blocker' | 'humanRequest' | 'block
 }
 
 /** Who acts next on an item blocked on a routine class: the loop, which re-checks the cause every cycle (GY-1008); null otherwise. */
-export function routineBlocker(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'> & Partial<Pick<Work, 'plannedFiles' | 'criteria'>>): { who: string; does: string } | null {
+export function routineBlocker(work: Pick<Work, 'blocker' | 'humanRequest' | 'blockerProbe'>): { who: string; does: string } | null {
   const view = blockerView(work);
   if (!view || view.needsSomeone) return null;
   const meaning = blockerClassMeaning[view.class];

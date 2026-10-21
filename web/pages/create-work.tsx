@@ -13,7 +13,7 @@ export default function CreateWork({ work, error, busy, codexAvailable, setCreat
     e.preventDefault(); const f = new FormData(e.currentTarget); const epoch = sessionEpoch.current; setBusy(true);
     try {
       const criteria = rows.map((row, i) => ({ id: `AC-${i + 1}`, text: String(f.get(`criterion-${row}`)), proofs: split(f.get(`proof-${row}`)) }));
-      const created = await api('work', { title: f.get('title'), description: f.get('description'), criteria, dependencies: f.get('dependency') ? [f.get('dependency')] : [], plannedFiles: split(f.get('plannedFiles')), exclusiveResources: split(f.get('exclusiveResources')), policy: { review: true, reviewProvider: f.get('reviewProvider'), checks: split(f.get('checks')) } });
+      const created = await api('work', { title: f.get('title'), description: f.get('description'), criteria, dependencies: f.get('dependency') ? [f.get('dependency')] : [], exclusiveResources: split(f.get('exclusiveResources')), policy: { review: true, reviewProvider: f.get('reviewProvider'), checks: split(f.get('checks')) } });
       if (epoch !== sessionEpoch.current) return; setCreating(false); await refresh(epoch); if (epoch === sessionEpoch.current) setSelected(created.id);
     } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); }
   }}>
@@ -28,7 +28,6 @@ export default function CreateWork({ work, error, busy, codexAvailable, setCreat
       </div>)}
       <button type="button" className="text-button" onClick={() => setRows([...rows, Math.max(...rows) + 1])}>＋ Add another criterion</button>
     </fieldset>
-    <label><span><Term term="planned files">Planned files</Term> or directories (comma separated)</span><input name="plannedFiles" placeholder="src/booking/, src/sms/send.ts"/></label>
     <label><span><Term term="exclusive resource">Exclusive resources</Term> (comma separated)</span><input name="exclusiveResources" placeholder="staging:sms-test-account"/></label>
     <label><span>Code <Term term="review provider">review provider</Term></span><select name="reviewProvider" defaultValue="github"><option value="codex" disabled={!codexAvailable}>Codex cloud review{codexAvailable ? '' : ' (unavailable)'}</option><option value="github">Formal GitHub approval</option></select></label>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}
     <label><span>Required <Term term="automated checks">CI checks</Term></span><input name="checks" defaultValue="test, typecheck" required/></label>

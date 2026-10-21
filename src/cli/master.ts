@@ -54,8 +54,7 @@ export const masterCommands = defineCommands([
       '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
       '  master status                 Graphyard work truth joined with Herdr session health, the',
       '                                dispatch order, overlaps and merge conflicts',
-      '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab;',
-      '                                planned-file overlap never holds it (optimistic dispatch)',
+      '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab',
       '  master settle-containment GY-N REASON',
       '                                Settle a containment quarantine whose supervisor this host',
       '                                verifies dead; unverifiable signals refuse',
@@ -75,16 +74,13 @@ export const masterCommands = defineCommands([
       '  master autonomy [--admin-token-stdin --apply]  Provision the master and approver identities',
       '  master promote --admin-token-stdin  Promote a supervised install to autonomy once its reviewer',
       '                                App and profile are independent of you and every worker; audited',
-      '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE [--allow-broad-scope] REASON',
-      '                                Own intent; a root-level directory scope needs the flag',
+      '  master create FILE|release GY-N|unblock GY-N|requirements GY-N FILE REASON',
+      '                                Own intent',
       '  master goal-amend GOAL-N REQUEST_ID  Apply the operator\'s answered goals-and-priorities',
       '                                request to the goal as the master\'s operator agent',
       '  master defer GY-N NOT-BEFORE REASON  Hold an unleased post-deploy follow-up until NOT-BEFORE',
       '                                (ISO, at most 30 days away) and clear its blocker; no worker launch',
       ...closeHelp,
-      '  master scope GY-N [--allow-broad-scope] [REASON]',
-      '                                Apply a scope request the loop refused, widening plannedFiles',
-      '                                while the attempt keeps its lease',
       '  master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON',
       '                                Request a two-party decision, citing precedent and context',
       '                                A refused rework or recover recorded before refusals kept their',
@@ -131,6 +127,4 @@ export const masterCommands = defineCommands([
 ]);
 
 export { cycleBudget };
-
-// plannedFiles resolved against the base branch (GY-140) lives beside this module.
-export { baseTree, derivedIntent } from './planned-files-intent.js';
+export { derivedIntent } from './master/intent.js';

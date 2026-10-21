@@ -162,8 +162,8 @@ export async function readAppliedRetroChecks(db: Db): Promise<RetroArtefact[]> {
  * concurrent syntheses never draft the same instances twice.
  */
 export async function synthesizeRetro(store: Store, policy: InterventionPolicy, options: { now?: string; actor?: Principal; limit?: number; window?: ScanWindow } = {}) {
-  const { snapshot, now, rows, truncated, routes } = options.window ?? await readScanWindow(store, policy, options);
-  const { interventions } = foldInterventions(rows, snapshot.work, now, { routes });
+  const { snapshot, now, rows, truncated } = options.window ?? await readScanWindow(store, policy, options);
+  const { interventions } = foldInterventions(rows, snapshot.work, now);
   const actor = options.actor ?? controlPlaneActor;
   const drafted = await store.transaction(async db => {
     const artefacts = await readRetroArtefacts(db);

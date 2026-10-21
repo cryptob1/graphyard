@@ -54,8 +54,7 @@ export function fitDecisionReason(prefix: string, grounds: string, suffix: strin
   return prefix + (grounds.length <= room ? grounds : `${grounds.slice(0, Math.max(0, room - 1))}…`) + suffix;
 }
 /**
- * An action detail within its bound. A scope request carries up to 50 paths of up to 500 characters,
- * so a detail that lists them — or quotes an error that does — is cut, never left to fail record()
+ * An action detail within its bound. A detail that lists paths — or quotes an error that does — is cut, never left to fail record()
  * after the action it records has already happened. record() applies it to every detail it stores.
  */
 export function boundDetail(detail: string, max = actionDetailMax): string {
@@ -142,7 +141,7 @@ export function heldApproverPaneIn(error: unknown, name: string): string | null 
 /**
  * The actions whose standing request the loop adopts on the server's word alone (GY-1374): they bind
  * nothing a standing one could disagree with, unlike a merge or attest (its candidate), a resolve (its
- * trigger) or a requirements decision (its scope request), each of which the history read must judge.
+ * trigger) or a requirements decision (its revision), each of which the history read must judge.
  */
 export const adoptedOnRefusal: readonly RoutineDecisionAction[] = ['rework', 'recover', 'close'];
 /**

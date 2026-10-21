@@ -1,11 +1,12 @@
-// Concern: `graphyard master` intent and two-party decision subcommands — autonomy, promote, goal-amend, scope, close, withdraw, refuse.
+// Concern: `graphyard master` intent and two-party decision subcommands — autonomy, promote, goal-amend, close, withdraw, refuse.
 import { randomUUID } from 'node:crypto';
-import { agentToken, autonomySubcommands, runAutonomyCommand, listHerdrAgents, readCredentialFile, promoteToAutonomy, assertPromotionRoute } from '../../master.js';
+import { readFile } from 'node:fs/promises';
+import { agentToken, decisionInput, autonomySubcommands, runAutonomyCommand, listHerdrAgents, readCredentialFile, promoteToAutonomy, assertPromotionRoute } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
 import { readProducerLedger } from '../../producer.js';
 import { readDispatchCursor } from '../../auto-dispatch.js';
-import { approveScopeRequest } from '../master-status.js';
-import { derivedIntent } from '../planned-files-intent.js';
+import { wholeDocument } from '../../model/work-summary.js';
+import { postDeployCriterionRefusal, postDeployOnlyRefusal, type Work } from '../../model/work.js';
 import { readSecretFromStdin } from '../context.js';
 import { closeRequest } from '../master-close.js';
 import { assertHandAction, handDecision } from '../hand-actions.js';
@@ -14,10 +15,31 @@ import { readMechanicalFixRequests } from '../../mechanical-findings.js';
 import { cappedEscalationKey } from '../../daemon/cycle-review-cap.js';
 import { unhandled, type MasterSession } from './session.js';
 
-/** The master's own intent (create, requirements, scope) and the decisions it requests, withdraws or refuses. */
+/**
+ * `master create FILE REASON` and `master requirements GY-N FILE REASON`: the intent file is posted
+ * as written. A criterion whose outcome is a live-install observation is refused unless declared
+ * post-deploy (GY-1660), and so is an item of nothing but declared verifications (GY-1685).
+ */
+export async function derivedIntent(id: 'create' | 'requirements', args: string[],
+  deps: { coordinator: (path: string) => Promise<any>; mutate: (path: string, data: unknown, requestId?: string, credential?: string) => Promise<any>; token: () => Promise<string> }) {
+  const file = id === 'create' ? args[0] : args[1], reason = args.slice(id === 'create' ? 1 : 2).join(' ').trim();
+  if (!file || id === 'requirements' && !args[0]) throw new Error(id === 'create' ? 'Use master create FILE REASON' : 'Use master requirements GY-N FILE REASON');
+  if (!reason) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`);
+  const input = JSON.parse(await readFile(file, 'utf8'));
+  const listed: Work | undefined = id === 'requirements' ? (await deps.coordinator('work-snapshot')).work.find((item: Work) => item.id === args[0] || item.key === args[0]) : undefined;
+  // A settled delivery is a summary in the snapshot (GY-422); its requirements are read whole.
+  const work = listed && await wholeDocument(listed, deps.coordinator);
+  if (id === 'requirements' && !work) throw new Error(`Unknown work item ${args[0]}`);
+  const { plannedFiles: _retired, ...intent } = work ? decisionInput('requirements', work, input) : input;
+  const postDeploy = postDeployCriterionRefusal(intent.criteria ?? []) ?? postDeployOnlyRefusal(intent.criteria ?? []);
+  if (postDeploy) throw new Error(postDeploy);
+  return deps.mutate(work ? `work/${work.id}/requirements` : 'work', { ...intent, reason }, process.env.GRAPHYARD_REQUEST_ID ?? randomUUID(), await deps.token());
+}
+
+/** The master's own intent (create, requirements) and the decisions it requests, withdraws or refuses. */
 export async function intentCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterToken, masterApi, masterMutation, coordinator } = session;
-  if (id === 'create' || id === 'requirements') return print(await derivedIntent(root, master, id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
+  if (id === 'create' || id === 'requirements') return print(await derivedIntent(id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
   // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175),
   // judged on the same work document the decision is built from.
   // A rework the loop requests itself on its recorded grounds is its round, not the master's (GY-1389).
@@ -47,7 +69,6 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
     if (!goal || !decision || extra.length) throw new Error('Use master goal-amend GOAL-N REQUEST_ID');
     return print(await masterMutation(`goals/${encodeURIComponent(goal)}/amend`, { decision }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
   }
-  if (id === 'scope') return print(await approveScopeRequest(root, master, args, { coordinator: masterApi }));
   if (id === 'adopt') {
     // GY-1849: bind one existing pull request to one held item on its same branch and head, with the
     // original source's key and URL kept on the item. The control plane re-reads the live head itself

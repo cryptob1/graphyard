@@ -81,10 +81,9 @@ export const decomposeParameters: JsonSchema = {
   properties: {
     reason: text(2000, 'Why this split (or why the item stays whole)'),
     children: { type: 'array', maxItems: 10, description: 'Two to ten child items, or an empty list to keep the item whole',
-      items: { type: 'object', additionalProperties: false, required: ['title', 'criteria', 'plannedFiles'], properties: {
+      items: { type: 'object', additionalProperties: false, required: ['title', 'criteria'], properties: {
         title: text(200, 'The child item title'), description: text(6000, 'What this child builds'),
         criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'A criterion ID of the parent, such as AC-2; each goes to exactly one child' } },
-        plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory this child changes, inside the parent\'s planned files and narrower than them') },
         after: { type: 'array', maxItems: 9, items: { type: 'integer', minimum: 0, maximum: 9, description: 'The 0-based position of an earlier child this one must land after' } },
       } } },
   },
@@ -105,14 +104,13 @@ export const doctorReportParameters: JsonSchema = {
       items: { type: 'object', additionalProperties: false, required: ['subject', 'command', 'outcome', 'detail'],
         properties: { subject: text(200, 'The work item key the command acted on'), command: text(500, 'The command, as you ran it'), outcome: { type: 'string', enum: ['applied', 'refused'], description: 'applied when the control plane accepted it' }, detail: text(1000, 'What it changed, or the refusal the control plane gave') } } },
     filed: { type: 'array', maxItems: 20, description: 'One entry per fault item to file for a finding no open item covers (the loop files it and deduplicates it against open items)',
-      items: { type: 'object', additionalProperties: false, required: ['faultClass', 'title', 'description', 'priority', 'criteria', 'plannedFiles'],
+      items: { type: 'object', additionalProperties: false, required: ['faultClass', 'title', 'description', 'priority', 'criteria'],
         properties: {
           faultClass: { type: 'string', enum: ['session-liveness', 'review-convergence', 'decision', 'scope', 'overlap-hold', 'observation', 'deployment', 'configuration', 'containment', 'merge', 'proof', 'capacity', 'resources', 'loop', 'human-decision', 'stalled-gate', 'unclassified'], description: 'The fault class the finding belongs to' },
           title: text(200, 'The fault item title'), description: text(20000, 'What is wrong, the evidence, and what should change'),
           priority: { type: 'integer', minimum: 0, description: '0 (P0) or 1 (P1): a fault the doctor files is urgent, never lower' },
           criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
             properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: proof } } } },
-          plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory the fix changes') },
         } } },
   },
 };
@@ -146,7 +144,7 @@ export const planParameters: JsonSchema = {
     goal: { type: 'string', pattern: '^GOAL-\\d+$', description: 'The goal you were asked to plan, exactly as given' },
     summary: text(800, 'At most three plain sentences: what the user gets and how it will be built; no file paths, commit shas or internal terms'),
     note: text(6000, 'The architecture note, at most 400 words: stack, module layout, data and deploy approach'),
-    items: { type: 'array', minItems: 1, maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['ref', 'title', 'plain', 'outcomes', 'cases', 'criteria', 'plannedFiles'],
+    items: { type: 'array', minItems: 1, maxItems: 30, items: { type: 'object', additionalProperties: false, required: ['ref', 'title', 'plain', 'outcomes', 'cases', 'criteria'],
       properties: {
         ref: { type: 'string', pattern: '^[a-z][a-z0-9-]{0,39}$', description: 'A short id for this item within the plan' }, title: text(200, 'The item title'),
         plain: text(400, 'One plain sentence a non-engineer understands'),
@@ -155,7 +153,6 @@ export const planParameters: JsonSchema = {
         cases: { type: 'array', minItems: 1, maxItems: 30, items: text(100, 'A required case id this item must make pass') },
         criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
           properties: { id: { type: 'string', pattern: '^AC-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(2000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: proof } } } },
-        plannedFiles: { type: 'array', minItems: 1, maxItems: 100, items: text(500, 'A file or directory the item changes') },
         dependsOn: { type: 'array', maxItems: 20, items: text(40, 'The ref of an item this one lands after') },
       } } },
   },
@@ -255,7 +252,7 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
  * nothing stated past the file is refused, so a notice never files an item. A
  * command the allowlist refuses is recorded in the doctor's report, never run.
  */
-export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
+export const doctorSanctionedCommands = ['requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
 /** The master subcommands and root commands that only read. */
 export const doctorReadOnlyCommands = ['status', 'decisions', 'context', 'guide', 'board'] as const;
 /**
@@ -369,7 +366,7 @@ function doctorLineAllowed(line: string, context: DoctorGuardContext): GuardVerd
  * after ACTION opens with `{` or `@`. The flags each one reads a value after — `master decide`'s
  * `--precedent` and `--context`, `master close`'s `--duplicate-of` and `--superseded-by` — are its own.
  */
-const doctorReasonAfter: Record<(typeof doctorSanctionedCommands)[number], number> = { scope: 1, requirements: 2, unblock: 1, decide: 2, approver: 2, 'settle-containment': 1, close: 1, create: 1, release: 1, 'checkout-restore': 0 };
+const doctorReasonAfter: Record<(typeof doctorSanctionedCommands)[number], number> = { requirements: 2, unblock: 1, decide: 2, approver: 2, 'settle-containment': 1, close: 1, create: 1, release: 1, 'checkout-restore': 0 };
 const doctorValueFlags: Partial<Record<(typeof doctorSanctionedCommands)[number], Set<string>>> = { decide: new Set(['--precedent', '--context']), close: new Set(['--duplicate-of', '--superseded-by']) };
 /**
  * The line a sanctioned master command runs as when its reason broke the shell's reading of it:

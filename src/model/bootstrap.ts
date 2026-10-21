@@ -2,8 +2,8 @@ import type { Work } from './work.js';
 import { itemLane, laneRequiresProof, type BootstrapMode } from './policy.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { evidenceProves } from './mechanical-proofs.js';
-import { pathScopesOverlap } from './scope.js';
-export { pathScope, pathScopeContains, pathScopesOverlap } from './scope.js';
+import { pathScopesOverlap } from './documentation-glob.js';
+export { pathScope, pathScopeContains, pathScopesOverlap } from './documentation-glob.js';
 
 export interface BootstrapObligation extends BootstrapMode { key: string; workId: string; criterionId: string; proof: string }
 
@@ -28,7 +28,7 @@ export function bootstrapObligations(all: Work[]): BootstrapObligation[] {
 }
 
 /**
- * Obligations another change deferred that this item's planned files now touch. A criterion
+ * Obligations another change deferred that the files this item's candidate was observed to change touch. A criterion
  * of this item cannot defer an inherited proof a second time: its own bootstrap declaration is
  * deliberately not consulted here, so the deferral can never be renewed by the change that
  * inherits it.
@@ -40,7 +40,7 @@ export function inheritedObligations(work: Work, all: Work[]): BootstrapObligati
   for (const obligation of bootstrapObligations(all)) {
     if (obligation.workId === work.id || alreadyRequired.has(obligation.proof)) continue;
     if (inherited.some(seen => seen.proof === obligation.proof)) continue;
-    if (work.plannedFiles.some(path => obligation.contractPaths.some(contract => pathScopesOverlap(path, contract)))) inherited.push(obligation);
+    if ((work.observation?.files ?? []).some(path => obligation.contractPaths.some(contract => pathScopesOverlap(path, contract)))) inherited.push(obligation);
   }
   return inherited;
 }

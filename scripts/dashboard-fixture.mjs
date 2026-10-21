@@ -36,7 +36,7 @@ function item(n, title, fields) {
   const criteria = fields.criteria ?? [{ id: 'AC-1', text: 'The change works for a signed-in customer.', proofs: [`integration:gy-${n}`] }];
   return {
     id: `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`, key: `GY-${n}`, title, description: fields.description ?? `${title}.`, type: 'feature', priority: 2,
-    dependencies: [], criteria, policy: { checks: ['test', 'typecheck'], review: true, reviewProvider: 'github' }, plannedFiles: ['src/'], scenarioRequirements: [],
+    dependencies: [], criteria, policy: { checks: ['test', 'typecheck'], review: true, reviewProvider: 'github' }, scenarioRequirements: [],
     stage: 'ready', revision: 1, policyRevision: 1, createdAt: at(-10 * day), updatedAt: at(-hour), stageEnteredAt: at(-day), ready: true, epoch: 0,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, evidence: [], observation: null, blocker: null, violations: [],
     ...fields, criteria, gates: gates(fields.reasons ?? blocked({}), criteria), reasons: undefined,

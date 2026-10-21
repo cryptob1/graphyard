@@ -1,9 +1,9 @@
 <!-- page: Operate Graphyard | 7 | typed actions -->
 # Master-agent reference
 
-## Items, scope and human waits
+## Items and human waits
 
-`scope-request` files nothing, the plan is not a lock (GY-1991). Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([the dashboard](onboarding.md#the-dashboard)); `answer GY-N …`; criterion-rewrite asks refused.
+Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([the dashboard](onboarding.md#the-dashboard)); `answer GY-N …`; criterion-rewrite asks refused.
 
 ## Promotion to autonomy
 

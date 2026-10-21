@@ -84,7 +84,7 @@ export interface EscalationContext {
   };
   item: {
     key: string; title: string; type: string; description: string; stage: string; ready: boolean; revision: number; policyRevision: number; epoch: number; createdAt: string;
-    criteria: Work['criteria']; retiredCriterionIds: string[]; plannedFiles: string[]; producerProofs: string[]; exclusiveResources: unknown[]; dependencies: string[];
+    criteria: Work['criteria']; retiredCriterionIds: string[]; producerProofs: string[]; exclusiveResources: unknown[]; dependencies: string[];
     refusal: { escalation: Escalation; standing: Escalation[]; gates: Work['gates']; blocker: string | null; violations: string[] };
     candidate: Work['candidate']; submission: Work['submission']; lease: Work['lease']; implementers: string[];
     history: { total: number; kinds: LedgerKindCount[]; recent: HistoryEntry[]; omitted: number };
@@ -206,7 +206,7 @@ export function assembleAt(inputs: ContextInputs, level: { recent: number; detai
     },
     item: {
       key: work.key, title: work.title, type: work.type, description: work.description, stage: work.stage, ready: work.ready, revision: work.revision, policyRevision: work.policyRevision, epoch: work.epoch, createdAt: work.createdAt,
-      criteria: work.criteria, retiredCriterionIds: work.retiredCriterionIds ?? [], plannedFiles: work.plannedFiles, producerProofs: work.producerProofs ?? [], exclusiveResources: work.exclusiveResources ?? [], dependencies: work.dependencies.map(keyOf),
+      criteria: work.criteria, retiredCriterionIds: work.retiredCriterionIds ?? [], producerProofs: work.producerProofs ?? [], exclusiveResources: work.exclusiveResources ?? [], dependencies: work.dependencies.map(keyOf),
       refusal: { escalation, standing: standingEscalations(work), gates: work.gates, blocker: work.blocker, violations: work.violations },
       candidate: work.candidate, submission: work.submission, lease: work.lease, implementers: work.implementers ?? [],
       history: { total: inputs.history.total, kinds: inputs.history.kinds, recent: recentRows.map(summariseLedgerRow), omitted: Math.max(0, nonRoutine - recentRows.length) },

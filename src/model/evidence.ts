@@ -22,7 +22,7 @@ export interface Evidence {
   artifacts?: EvidenceArtifact[];
   scenarioRevision?: number; environment?: string;
   /**
-   * The paths this proof depends on, in the bounded scope syntax of `plannedFiles`, declared by
+   * The paths this proof depends on, in the bounded path scope syntax (`pathScope`), declared by
    * the producer. The merge queue carries the record onto a Graphyard-authored tip only when this
    * scope is disjoint from what the predecessor changed; an undeclared scope is never carried.
    */

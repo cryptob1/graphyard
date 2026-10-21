@@ -1,8 +1,6 @@
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import { approvalConflict, approveCapability, assertDecisionAuthority, decisionRefusalSchema, decisionRequestSchema, type DecisionSituation } from '../model/approval.js';
-import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
-import { askIdentity } from '../model/scope-collapse.js';
 import { save } from '../store.js';
 import { authenticated, digest, findWork, readDecisions, receipt, record } from './decisions.js';
 import type { Services } from './routes.js';
@@ -29,7 +27,6 @@ export async function refuseDecision(services: Services, caller: Principal, id: 
     assertDecisionAuthority(actor, approveCapability, work!, services.repository);
     demand(decision!.state === 'requested', `Decision ${decision!.id} is already ${decision!.state}; only a requested decision can be refused`, 409);
     await record(db, work!, actor.id, 'decision.declined', { id: decision!.id, action: decision!.action, reason: data.reason, requestedBy: decision!.requestedBy, approver: { id: actor.id, role: actor.role } });
-    await answerScopeRequest(db, work!, decision!, actor, data.reason, now);
     await liftRefusedReworkMergeRefusal(db, work!, decision!, actor, data.reason, now);
     // A refused triage closure returns the item to triage (GY-402).
     if (decision!.action === 'close') await refuseTriageClosure(db, work!, decision!, actor.id, data.reason, now);
@@ -111,42 +108,3 @@ export async function withdrawDecision(services: Services, caller: Principal, id
   });
 }
 
-/**
- * A refused widening that answers a worker's scope request (GY-176) is that request's decision:
- * kept on the item, in the same transaction, where the asking worker's own `status` and
- * `scope-request --wait` read it — the approver, its reason, and that the attempt stays inside
- * plannedFiles — rather than sent to its session. Only the open request of the live attempt it
- * names is answered; one withdrawn, re-asked or outlived by its lease is left as it stands, and so
- * is one whose requirements moved on since the decision was requested: a decline judged against a
- * superseded policy revision is no answer to the request as it now stands, exactly as the approval
- * path refuses that stale input (`decisionPrecondition`), so the request stays undecided.
- */
-async function answerScopeRequest(db: Parameters<typeof save>[0], work: Work, decision: { id: string; action: string; input: any }, actor: Principal, reason: string, now: Date) {
-  const answers = decision.action === 'requirements' ? decision.input?.answers : undefined, request = work.scopeRequest;
-  // The same liveness the approval path demands: a lease that has expired, reconciled or not, is
-  // no attempt to answer, and its item is not written to on that attempt's behalf.
-  // An ask a claim inherited (GY-1568) is answered under the epoch that asked it, and held by the attempt that holds it now.
-  const live = !!work.lease && work.lease.epoch === request?.epoch && Date.parse(work.lease.expiresAt) > now.getTime();
-  const current = decision.input?.expectedPolicyRevision === work.policyRevision;
-  // GY-1568: the ask an ended attempt carried is routed too, so its refusal is the answer: it is
-  // recorded and the carried ask cleared, or the next claim would inherit it and route it afresh.
-  const carried = work.carriedScopeRequest;
-  if (answers && !request && carried && askIdentity(carried).epoch === answers.epoch && carried.at === answers.at && current) {
-    const paths = unplannedPaths(work.plannedFiles, carried.paths);
-    work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(carried.at)), paths: paths.length ? paths : carried.paths, requestedBy: carried.requestedBy, requestedAt: carried.at, epoch: carried.epoch };
-    work.carriedScopeRequest = null;
-    await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: carried.epoch, requestedAt: carried.at, paths: work.scopeDecision.paths, approver: actor.id, reason, carried: true });
-    return;
-  }
-  if (!answers || !request || askIdentity(request).epoch !== answers.epoch || request.at !== answers.at || !live || !current) return;
-  // What was refused is what the approver judged: the paths still outside plannedFiles, not those a
-  // partial widening has planned since the worker asked.
-  const refused = unplannedPaths(work.plannedFiles, request.paths), paths = refused.length ? refused : request.paths;
-  work.scopeDecision = { state: 'refused', reason, at: now.toISOString(), decidedBy: actor.id, waitedMs: Math.max(0, now.getTime() - Date.parse(request.at)), paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch };
-  work.scopeRequest = { ...request, decision: work.scopeDecision };
-  // The refusal replaces only a scope refusal (the rule's, which it answers) or no blocker at all: a
-  // blocker the worker reported meanwhile is its own hand-off, and withdrawing the ask — which lifts
-  // only a scope-refusal blocker — must not clear it. The refusal itself is held in scopeDecision.
-  if (!work.blocker || work.blocker.startsWith(scopeRefusalBlocker)) work.blocker = `${scopeRefusalBlocker} by the independent approver ${actor.id} (decision ${decision.id}): ${reason}`.slice(0, 2000);
-  await save(db, work, actor.id, 'scope.refused', now, { decision: decision.id, epoch: request.epoch, requestedAt: request.at, paths, approver: actor.id, reason });
-}

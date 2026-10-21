@@ -2,7 +2,7 @@
 
 /**
  * Why a park is refused before it reaches the human, or null when it may park (GY-1395): a scope
- * widening (GY-1113) is `scope-request`'s, and NEEDED names every human step, never deferring one.
+ * widening (GY-1113) needs nobody's permission, and NEEDED names every human step, never deferring one.
  * GY-1416: work an agent identity on the host can do is never the human's (`hostDoableAsk`) — a
  * repository the host's gh login creates or administers (GY-1384), a deployment variable derived
  * from saved credentials (GY-1365) or a credential the host already holds. GY-1692 adds three more
@@ -60,7 +60,7 @@ export function hostDoableAsk(needed: string, kind?: string): HostDoableAsk | nu
 }
 export const hostDoableRefusal = (ask: HostDoableAsk) => `Not a human-only decision: NEEDED asks for ${ask.what}, which an agent identity on the host can do; it is the master's owed action, not the human's. Agent route: ${ask.route} — ${ask.command}`;
 export function parkRefusal(data: { needed: string; kind?: string }): string | null {
-  if (scopeWideningAsk.test(data.needed)) return 'A scope widening is not a human-only decision: plannedFiles is a plan, not a lock — edit the file you need and submit; nothing needs requesting';
+  if (scopeWideningAsk.test(data.needed)) return 'A scope widening is not a human-only decision: no file needs permission — edit the file you need and submit; nothing needs requesting';
   if (deferredAsk.test(data.needed)) return 'Ask for every human step the item still needs in this one request: NEEDED may not leave steps to later parks';
   const doable = hostDoableAsk(data.needed, data.kind);
   return doable ? hostDoableRefusal(doable) : null;

@@ -51,8 +51,6 @@ export function plainReason(reason: string, gate: string, now = Date.now(), work
     [/^Pull request has not been independently observed$/, () => 'Graphyard has not seen the pull request on GitHub yet'],
     [/^No workspace registered$/, () => 'The builder has not said where the code lives yet'],
     [/^Candidate diff has not been compared/, () => 'Graphyard is checking which files the pull request changes'],
-    [/^Candidate changes (\d+) files? outside/, m => `The pull request changes ${m[1]} file${m[1] === '1' ? '' : 's'} it was not planned to touch`, true],
-    [/^Out-of-scope regression: ([^:\s]+)/, m => `${m[1]} was changed but is outside the plan`, true],
     [/^Verified clean Codex review/, () => 'Waiting for the Codex reviewer to approve the latest code'],
     [/^Every configured reviewer profile is exhausted/, () => 'No reviewer is available — more reviewers are needed', true],
     [/^Verified approval from reviewer profile (\S+) is required/, m => `Waiting for reviewer ${m[1]} to approve the latest code`],
@@ -117,7 +115,7 @@ export function notBeforeInstants(text: string): number[] {
  * browser writes it in the reader's own zone; a server answer (`GET /api/board`) passes `UTC`.
  */
 export const localInstant = (at: number, timeZone?: string) => new Date(at).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short', ...(timeZone ? { timeZone } : {}) });
-export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key' | 'blocker' | 'humanRequest' | 'blockerProbe' | 'plannedFiles' | 'criteria' | 'observationWindow'>, timeZone?: string): { sentence: string; kind: BlockerKind; until?: string } {
+export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key' | 'blocker' | 'humanRequest' | 'blockerProbe' | 'observationWindow'>, timeZone?: string): { sentence: string; kind: BlockerKind; until?: string } {
   const human = !!work?.humanRequest && !work.humanRequest.answer;
   const classified = classifyBlocker(text, { humanRequest: human });
   const named = (pattern: RegExp) => text.match(pattern)?.[1];
@@ -132,7 +130,6 @@ export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key
   // Spent: the loop has cleared it `maxAutomaticClears` times (daemon/cycle-blockers.ts) and left it to the master.
   const spent = view?.needsSomeone ?? false;
   if (kind === 'needs-decision') return { sentence: spent ? 'Waiting on a decision that keeps coming back; the master agent decides it and clears the block.' : 'Waiting on an agent decision; an approver agent judges it, then Graphyard clears the block.', kind };
-  if (kind === 'planned-file-scope' && !spent) return { sentence: 'Needs files outside its plan; an approver agent decides whether to allow them.', kind };
   const cause = routineCause[kind];
   if (cause) return { sentence: spent ? `${cause}, again and again; the master agent must clear it.` : `${cause}; Graphyard re-checks it every cycle and clears it on its own.`, kind };
   // Only a blocker no class explains reads as a wait on another item: a classified fault that merely mentions one
@@ -149,7 +146,7 @@ export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key
  */
 const stepWords: Record<string, string> = {
   dispatch: 'handing it to a builder', 'request-review': 'asking for a review',
-  'request-rework': 'sending it back for changes', 'approve-scope': 'deciding which files it may touch',
+  'request-rework': 'sending it back for changes',
   resync: 're-reading it from GitHub', reclaim: 'freeing it from its last builder', merge: 'merging it',
   escalate: 'getting somebody to decide it',
 };
