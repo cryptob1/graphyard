@@ -161,7 +161,7 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     assert.ok(timings.calls[0].ms >= 1_400 && timings.calls[1].ms >= 1_100);
     // The completion line names the three slowest steps and the slowest call, with durations (their floors are asserted above; a loaded host only lengthens them).
     const complete = lines.find(line => / complete in /.test(line))!;
-    assert.match(complete, /slowest steps: deployment verification \d+\.\ds, credentials \d+\.\ds, \S[^,;]* \d+(\.\d)?s; slowest call: github gh api repos\/:repo\/deployments \d+\.\ds in deployment verification \(2 calls of 1s or more\)/, complete);
+    assert.match(complete, /slowest steps: deployment verification \d+(\.\d)?s, credentials \d+(\.\d)?s, \S[^,;]* \d+(\.\d)?s; slowest call: github gh api repos\/:repo\/deployments \d+(\.\d)?s in deployment verification \(2 calls of 1s or more\)/, complete);
 
     // master status: the same recorder over its own phases, returned under `timings`.
     const status = slowServer(() => work);
