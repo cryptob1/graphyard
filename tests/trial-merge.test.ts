@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
-import { credentialTrialVariable, groupTestFiles, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
+import { credentialTrialVariable, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
 import { preMergeTestFiles } from '../scripts/ci-tests.mjs';
 import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -45,7 +45,7 @@ async function repository(files: Record<string, string>) {
   return { root, base, commitOnBase, write };
 }
 
-test('unit:trial-merge-exact-commit — trialMerge makes the merge commit of head onto the base tip in the object store: parents [baseTip, head], the merged tree, author graphyard-merge-writer, only refs/graphyard/trial/<head> written, and no worktree, branch or remote touched', async () => {
+test('unit:trial-merge-exact-commit — a head whose first-parent chain does not hold the base tip gets its merge commit in the object store: parents [baseTip, head], the merged tree, author graphyard-merge-writer, the subject the caller names (`Merge GY-N: title`), only refs/graphyard/trial/<head> written, and no worktree, branch or remote touched', async () => {
   const repo = await repository({ 'a.txt': 'one\n', 'b.txt': 'two\n' });
   const baseTip = gitIn(repo.root, 'commit-tree', gitIn(repo.root, 'rev-parse', 'HEAD^{tree}'), '-p', repo.base, '-m', 'main moved');
   gitIn(repo.root, 'reset', '-q', '--hard', baseTip);
@@ -54,17 +54,48 @@ test('unit:trial-merge-exact-commit — trialMerge makes the merge commit of hea
   const tip = gitIn(repo.root, 'rev-parse', 'HEAD');
   const head = repo.commitOnBase({ 'a.txt': 'one head\n' }, 'head edit');
   const before = { heads: gitIn(repo.root, 'for-each-ref', 'refs/heads'), status: gitIn(repo.root, 'status', '--porcelain'), worktrees: gitIn(repo.root, 'worktree', 'list'), remotes: gitIn(repo.root, 'remote') };
-  const result = await trialMerge(gitFor(repo.root), { head, baseTip: tip });
+  const result = await trialMerge(gitFor(repo.root), { head, baseTip: tip, subject: mergeSubject({ key: 'GY-9', title: 'Edit a' }) });
   assert.ok('mergeSha' in result, JSON.stringify(result));
+  assert.notEqual(result.mergeSha, head, 'the head does not hold the tip, so it is merged, not fast-forwarded');
   assert.equal(gitIn(repo.root, 'rev-list', '--parents', '-n', '1', result.mergeSha), `${result.mergeSha} ${tip} ${head}`, 'the parents are the base tip, then the head');
   assert.equal(gitIn(repo.root, 'rev-parse', `${result.mergeSha}^{tree}`), result.tree);
   assert.equal(gitIn(repo.root, 'show', `${result.mergeSha}:a.txt`), 'one head', 'the head\'s change is in the merge');
   assert.equal(gitIn(repo.root, 'show', `${result.mergeSha}:b.txt`), 'two main', 'and main\'s');
   assert.equal(gitIn(repo.root, 'log', '-1', '--format=%an', result.mergeSha), trialAuthor);
+  assert.equal(gitIn(repo.root, 'log', '-1', '--format=%s', result.mergeSha), 'Merge GY-9: Edit a');
+  assert.equal(mergeSubject({ key: 'GY-9' }), 'Merge GY-9', 'an item whose title is not at hand is named by its key');
   assert.equal(gitIn(repo.root, 'rev-parse', trialRef(head)), result.mergeSha, 'the one ref written');
   assert.equal(gitIn(repo.root, 'for-each-ref', '--format=%(refname)', 'refs/graphyard'), trialRef(head));
   assert.deepEqual({ heads: gitIn(repo.root, 'for-each-ref', 'refs/heads'), status: gitIn(repo.root, 'status', '--porcelain'), worktrees: gitIn(repo.root, 'worktree', 'list'), remotes: gitIn(repo.root, 'remote') }, before, 'no branch, worktree, index or remote moved');
+  // A head that merged the moved tip in as a second parent still does not hold it on its own first-parent chain: merged, never fast-forwarded past main's own history.
+  gitIn(repo.root, 'checkout', '-q', '--detach', head); gitIn(repo.root, 'merge', '-q', '--no-edit', tip); const synced = gitIn(repo.root, 'rev-parse', 'HEAD'); gitIn(repo.root, 'checkout', '-q', 'main');
+  const ofSynced = await trialMerge(gitFor(repo.root), { head: synced, baseTip: tip });
+  assert.ok('mergeSha' in ofSynced && ofSynced.mergeSha !== synced);
+  assert.equal(gitIn(repo.root, 'rev-list', '--parents', '-n', '1', ofSynced.mergeSha), `${ofSynced.mergeSha} ${tip} ${synced}`);
+  assert.equal(gitIn(repo.root, 'log', '-1', '--format=%s', ofSynced.mergeSha), `Merge ${synced.slice(0, 12)}`, 'the subject with no item named');
   await assert.rejects(trialMerge(gitFor(repo.root), { head: 'main', baseTip: tip }), /full 40-hex/);
+});
+
+test('unit:trial-merge-fast-forward — a head whose first-parent chain holds the base tip is its own merge commit: trialMerge answers the head sha and its tree, writes only refs/graphyard/trial/<head> at the head, makes no commit, and the tip itself fast-forwards to itself', async () => {
+  const repo = await repository({ 'a.txt': 'one\n' });
+  const first = repo.commitOnBase({ 'a.txt': 'one head\n' }, 'first edit');
+  gitIn(repo.root, 'checkout', '-q', '--detach', first); writeFileSync(join(repo.root, 'a.txt'), 'two head\n'); gitIn(repo.root, 'commit', '-q', '-am', 'second edit');
+  const head = gitIn(repo.root, 'rev-parse', 'HEAD'); gitIn(repo.root, 'checkout', '-q', 'main');
+  const objects = gitIn(repo.root, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname)');
+  const result = await trialMerge(gitFor(repo.root), { head, baseTip: repo.base, subject: 'Merge GY-9: unused' });
+  assert.deepEqual(result, { mergeSha: head, tree: gitIn(repo.root, 'rev-parse', `${head}^{tree}`) }, 'the tested and pushed sha is the head itself');
+  assert.equal(gitIn(repo.root, 'rev-parse', trialRef(head)), head, 'the trial ref keeps the head resolving');
+  assert.equal(gitIn(repo.root, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname)'), objects, 'no commit was made');
+  assert.deepEqual(await trialMerge(gitFor(repo.root), { head: repo.base, baseTip: repo.base }), { mergeSha: repo.base, tree: gitIn(repo.root, 'rev-parse', `${repo.base}^{tree}`) });
+  // Chained as a batch: a second head that holds the first fast-forwards onto it; one that does not is merged onto it.
+  gitIn(repo.root, 'checkout', '-q', '--detach', head); writeFileSync(join(repo.root, 'b.txt'), 'new\n'); gitIn(repo.root, 'add', 'b.txt'); gitIn(repo.root, 'commit', '-q', '-m', 'third edit');
+  const onHead = gitIn(repo.root, 'rev-parse', 'HEAD'); gitIn(repo.root, 'checkout', '-q', 'main');
+  const chained = await trialMerge(gitFor(repo.root), { head: onHead, baseTip: head });
+  assert.ok('mergeSha' in chained && chained.mergeSha === onHead);
+  const apart = repo.commitOnBase({ 'c.txt': 'apart\n' }, 'apart edit');
+  const merged = await trialMerge(gitFor(repo.root), { head: apart, baseTip: onHead });
+  assert.ok('mergeSha' in merged && merged.mergeSha !== apart);
+  assert.equal(gitIn(repo.root, 'rev-list', '--parents', '-n', '1', merged.mergeSha), `${merged.mergeSha} ${onHead} ${apart}`);
 });
 
 test('unit:trial-merge-conflict-reported — a head that conflicts with the base tip gives the conflicted paths and writes no commit and no ref', async () => {

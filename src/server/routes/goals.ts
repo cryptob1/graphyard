@@ -58,12 +58,15 @@ async function once<T>(context: RouteContext, input: unknown, run: (db: pg.PoolC
 /**
  * GY-1535: why the base does not hold a merge-writer landing of `head` as `mergeSha`, or null when it
  * does: the commit is on the first-parent history of `refs/remotes/origin/BASE` in the checkout the
- * control plane shares with the merge writer, and its second parent is exactly the approved head.
+ * control plane shares with the merge writer, and it is the approved head itself (fast-forwarded)
+ * or a merge whose second parent is exactly that head.
  */
 export async function acceptanceMergeRefusal(git: GitRunner, base: string, head: string, mergeSha: string): Promise<string | null> {
   const ref = `refs/remotes/origin/${base}`;
-  const second = await git(['rev-parse', '--verify', '--quiet', `${mergeSha}^2`]);
-  if (second.status !== 0 || second.stdout.trim().toLowerCase() !== head) return `${mergeSha.slice(0, 12)} is not a merge of the approved head ${head.slice(0, 12)}`;
+  if (mergeSha !== head) {
+    const second = await git(['rev-parse', '--verify', '--quiet', `${mergeSha}^2`]);
+    if (second.status !== 0 || second.stdout.trim().toLowerCase() !== head) return `${mergeSha.slice(0, 12)} is not a merge of the approved head ${head.slice(0, 12)}`;
+  }
   const listed = await git(['rev-list', '--first-parent', ref]);
   if (listed.status !== 0) return `the control plane's checkout holds no ${ref}: ${listed.stderr.trim()}`;
   return listed.stdout.split('\n').some(line => line.trim().toLowerCase() === mergeSha) ? null : `${base}'s first-parent history does not hold ${mergeSha.slice(0, 12)}`;

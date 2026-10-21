@@ -165,7 +165,7 @@ test('unit:acceptance-control-plane-change — in control-plane mode the accepta
   assert.equal(world.spied.pushes, 1, 'one push'); assert.equal(world.spied.landed, 1); assert.equal(world.spied.land, 0, 'the GitHub land path was never taken');
   const tip = git(origin, 'rev-parse', 'main');
   assert.equal(merged.merged!.pr, null); assert.equal(merged.merged!.mergeSha, tip);
-  assert.equal(git(origin, 'rev-parse', `${tip}^1`), baseTip); assert.equal(git(origin, 'rev-parse', `${tip}^2`), head, 'main\'s new first parent merges exactly the approved head');
+  assert.equal(tip, head, 'the approved head sat on the base tip, so main fast-forwarded to exactly it'); assert.equal(git(origin, 'rev-parse', `${tip}^1`), baseTip);
   assert.equal(JSON.parse(git(origin, 'show', `${tip}:e2e/contract.json`)).outcomes[0].cases[0], 'greeting');
   assert.equal(JSON.parse(git(origin, 'show', `${tip}:e2e/cases/greeting.json`)).required, true);
   assert.deepEqual(merged.protected, { cases: ['greeting'], outcomes: ['greeting'] });

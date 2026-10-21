@@ -515,7 +515,7 @@ function fixtureReads(options: { record?: MergePorts['record']; trial?: (input: 
 }
 const firstParents = () => git(origin, 'rev-list', '--first-parent', 'main').split('\n');
 
-test('integration:control-plane-merge-end-to-end — a worker commit under a lease, complete --head, the executor merges in a cycle: main\'s first parent is the exact tested merge commit, the item is done with that mergeSha, the ledger holds intent, pushed and reconciled in order, and the trial ran the file carrying the item\'s proof', async () => {
+test('integration:control-plane-merge-end-to-end — a worker commit under a lease, complete --head, the executor merges in a cycle: main\'s first parent is the exact tested commit (the head itself, fast-forwarded), the item is done with that mergeSha, the ledger holds intent, pushed and reconciled in order, and the trial ran the file carrying the item\'s proof', async () => {
   const w = await submittedItem(1);
   assert.equal(w.observation?.source, 'control-plane');
   assert.deepEqual(w.gates.find(gate => gate.name === 'test')!.reasons, [trialRefusal(heads[1]!, baseTip)]);
@@ -533,9 +533,9 @@ test('integration:control-plane-merge-end-to-end — a worker commit under a lea
   const done = await document(w.id);
   assert.equal(done.stage, 'done');
   const mergeSha = done.delivery!.mergeSha;
-  assert.equal(firstParents()[0], mergeSha, 'main\'s first parent is the exact merge commit the trial tested');
-  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), baseTip); assert.equal(git(origin, 'rev-parse', `${mergeSha}^2`), heads[1]);
-  assert.equal(git(origin, 'show', '-s', '--format=%an', mergeSha), 'graphyard-merge-writer', 'the merge commit is the trial\'s own');
+  assert.equal(firstParents()[0], mergeSha, 'main\'s first parent is the exact commit the trial tested');
+  assert.equal(mergeSha, heads[1], 'the head\'s first-parent chain held the base tip, so main fast-forwarded to the head itself');
+  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), baseTip);
   assert.deepEqual(await ledgerKinds(w.id), ['merge.intent', 'merge-writer.intent', 'merge.trial', 'merge-writer.trial', 'merge.pushed', 'merge-writer.pushed', 'merge.reconciled', 'merge-writer.delivered']);
   assert.deepEqual(done.mergeLedger && [done.mergeLedger.state, done.mergeLedger.head, done.mergeLedger.baseTip, done.mergeLedger.mergeSha, done.mergeLedger.observedTip], ['reconciled', heads[1], baseTip, mergeSha, mergeSha]);
   assert.equal(done.delivery!.authorizationRevision, done.revision - 1);
