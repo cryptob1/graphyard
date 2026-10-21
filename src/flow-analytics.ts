@@ -2023,8 +2023,8 @@ export async function reworkRoundsWithOwnCauses<T extends Record<string, any>>(r
  * Delivery speed on the GitHub path (GY-1232): ready→merged into main, and merged→promoted to
  * production. Read from the work documents alone, over the items merged into main in each window:
  * the merge is GitHub's own merge instant on the repository clock, the promotion is the first
- * release observed serving the merge commit in the production environment (`releaseObservedAt`),
- * and ready is the item's earliest recorded `ready` event, or its creation for an item created
+ * release observed serving the merge commit in the production environment (`releaseObservedAt`)
+ * or the loop's own verified deploy of a main commit that contains it (GY-2844), and ready is the item's earliest recorded `ready` event, or its creation for an item created
  * ready. An item merged but not yet promoted is pending: counted, never a duration. A merge whose
  * content the base no longer holds is reverted (GY-1275): measured ready→merged and named as
  * reverted, never pending a promotion it will not get. When the ready-event read was incomplete
@@ -2075,6 +2075,19 @@ function mainMerge(work: Work): { mergedAt: number; reverted: boolean } | null {
   const mergedAt = time(work.delivery?.mergedAtRepository ?? work.delivery?.mergedAt ?? (reverted ? work.observation?.mergedAt : null));
   return mergedAt === null ? null : { mergedAt, reverted };
 }
+/** GY-2844: one verified deploy of main by the loop (the cursor's `promotion.deploys`): the commit, its committer date and when the deploy passed. */
+export interface LoopDeploy { sha: string; committedAt: string; at: string }
+/**
+ * When production first served a merge: the release observed serving it, or the earliest of the
+ * loop's own verified deploys whose commit contains it — committed no earlier than the merge, so
+ * main's history holds it — whichever came first. Null while pending, reverted or after `now`.
+ */
+function servingAt(work: Work, merge: { mergedAt: number; reverted: boolean }, productionEnvironment: string, now: number, deploys: readonly LoopDeploy[] = []): number | null {
+  if (merge.reverted) return null;
+  const served = [time(releaseObservedAt(work, productionEnvironment)), ...deploys.filter(deploy => (time(deploy.committedAt) ?? -Infinity) >= merge.mergedAt).map(deploy => time(deploy.at))]
+    .filter((at): at is number => at !== null && at <= now);
+  return served.length ? Math.max(merge.mergedAt, Math.min(...served)) : null;
+}
 /**
  * The live delivery mode. GitHub merges every pull request into main on CI and review (GY-1235);
  * the `graphyard` mode is kept only so a report recorded before then still reads.
@@ -2086,14 +2099,14 @@ const deliveryModeStatement: Record<DeliveryPathMode, string> = {
   github: 'Delivery mode: GitHub merges each pull request into main on CI and review; UAT gates promotion to production.',
   graphyard: "Delivery mode: Graphyard's merge queue lands each candidate on main; promotion to production follows the release.",
 };
-export function deliverySpeed(items: readonly Work[], options: { now: number; readyAt?: ReadonlyMap<string, string>; readyComplete?: boolean; targets?: Partial<DeliverySpeedTargets>; productionEnvironment?: string; deliveryMode?: DeliveryPathMode }): DeliverySpeed {
+export function deliverySpeed(items: readonly Work[], options: { now: number; readyAt?: ReadonlyMap<string, string>; readyComplete?: boolean; targets?: Partial<DeliverySpeedTargets>; productionEnvironment?: string; deliveryMode?: DeliveryPathMode; deploys?: readonly LoopDeploy[] }): DeliverySpeed {
   const productionEnvironment = options.productionEnvironment ?? defaultProductionEnvironment, now = options.now, readyComplete = options.readyComplete ?? true;
   const merged = items.flatMap(work => {
     const merge = mainMerge(work);
     if (!merge || merge.mergedAt > now) return [];
     const recorded = options.readyAt?.get(work.id);
-    const readyAt = time(recorded ?? (readyComplete ? work.createdAt : null)), promotedAt = merge.reverted ? null : time(releaseObservedAt(work, productionEnvironment));
-    return [{ key: work.key, mergedAt: merge.mergedAt, reverted: merge.reverted, readyAt, promotedAt: promotedAt !== null && promotedAt <= now ? promotedAt : null }];
+    const readyAt = time(recorded ?? (readyComplete ? work.createdAt : null));
+    return [{ key: work.key, mergedAt: merge.mergedAt, reverted: merge.reverted, readyAt, promotedAt: servingAt(work, merge, productionEnvironment, now, options.deploys) }];
   });
   const readyToMerged = {} as DeliverySpeed['readyToMerged'], mergedToProduction = {} as DeliverySpeed['mergedToProduction'];
   for (const window of deliverySpeedWindows) {
@@ -2256,13 +2269,13 @@ export function firstClaimAndSubmit(work: Work): { claimedAt: number; submittedA
   const submittedAt = time(timeline.submittedAt);
   return claimedAt === null || submittedAt === null ? null : { claimedAt, submittedAt };
 }
-export function deliveryStageBreakdown(items: readonly Work[], reads: DeliveryStageReads, options: { now: number; readyAt?: ReadonlyMap<string, string>; readyComplete?: boolean; productionEnvironment?: string }): DeliveryStageBreakdown {
+export function deliveryStageBreakdown(items: readonly Work[], reads: DeliveryStageReads, options: { now: number; readyAt?: ReadonlyMap<string, string>; readyComplete?: boolean; productionEnvironment?: string; deploys?: readonly LoopDeploy[] }): DeliveryStageBreakdown {
   const now = options.now, readyComplete = options.readyComplete ?? true, productionEnvironment = options.productionEnvironment ?? defaultProductionEnvironment;
   const entries = items.flatMap(work => {
     const merge = mainMerge(work);
     if (!merge || merge.mergedAt > now) return [];
     const readyAt = time(options.readyAt?.get(work.id) ?? (readyComplete ? work.createdAt : null)), firsts = firstClaimAndSubmit(work);
-    const promoted = merge.reverted ? null : time(releaseObservedAt(work, productionEnvironment)), promotedAt = promoted !== null && promoted <= now ? promoted : null;
+    const promotedAt = servingAt(work, merge, productionEnvironment, now, options.deploys);
     const covered = firsts !== null && reads.moves.has(work.key) && merge.mergedAt <= reads.movesCoveredUntil && firsts.submittedAt >= reads.movesFrom;
     const stages = readyAt === null || firsts === null || !covered ? null
       : itemDeliveryStages({ readyAt, ...firsts, mergedAt: merge.mergedAt, promotedAt, moves: reads.moves.get(work.key) ?? [] });
@@ -2351,7 +2364,7 @@ export async function readStepMovesSince(readFlow: (path: string) => Promise<any
  * incomplete, so items with no ready event found are unmeasured and ready→merged raises no breach.
  */
 export async function speedSections(speed: Record<string, any>, masterApi: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string },
-  options: { root: string; targets?: Partial<DeliverySpeedTargets>; sections: { mark(section: string, route: string | null, error: unknown): void } }) {
+  options: { root: string; targets?: Partial<DeliverySpeedTargets>; deploys?: readonly LoopDeploy[]; sections: { mark(section: string, route: string | null, error: unknown): void } }) {
   const { sections } = options, now = Date.parse(snapshot.now) || Date.now();
   try { speed.reworkRounds = await reworkRoundsWithOwnCauses(speed.reworkRounds, masterApi, snapshot, 100, { root: options.root }); }
   catch (error) { sections.mark('rework causes', 'GET /api/events?kind=rework', error); }
@@ -2360,10 +2373,10 @@ export async function speedSections(speed: Record<string, any>, masterApi: (path
     .catch(error => { sections.mark('delivery speed', 'GET /api/events?kind=ready', error); return { readyAt: new Map<string, string>(), complete: false }; }) : { readyAt: new Map<string, string>(), complete: true };
   let productionEnvironment: string | undefined;
   try { productionEnvironment = productionEnvironmentFromEnv(); } catch { /* an invalid name falls back to the default */ }
-  const report = deliverySpeed(snapshot.work, { now, readyAt: read.readyAt, readyComplete: read.complete, targets: options.targets, productionEnvironment });
+  const report = deliverySpeed(snapshot.work, { now, readyAt: read.readyAt, readyComplete: read.complete, targets: options.targets, productionEnvironment, deploys: options.deploys });
   if (window.length) {
     const reads = await deliveryStageReads(masterApi, window, now, sections);
-    if (reads) report.stages = deliveryStageBreakdown(snapshot.work, reads, { now, readyAt: read.readyAt, readyComplete: read.complete, productionEnvironment });
+    if (reads) report.stages = deliveryStageBreakdown(snapshot.work, reads, { now, readyAt: read.readyAt, readyComplete: read.complete, productionEnvironment, deploys: options.deploys });
   }
   const attention = deliverySpeedBreaches(report).map(breach => ({ subject: 'delivery speed', text: breach.text,
     // agentOwner('master', …)'s shape, built here: src/master/attention.ts imports Node-only modules this browser-bundled file must not.

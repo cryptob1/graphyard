@@ -2166,6 +2166,7 @@
     "tests/merge-writer-trial-timeout-queue.test.ts": 1000,
     "tests/risk-delta-base-advance.test.ts": 500,
     "tests/deployed-e2e-cleanup.test.ts": 407,
+    "tests/delivery-speed-served-by-loop-deploy.test.ts": 760,
     "~": 0
   }
 }
