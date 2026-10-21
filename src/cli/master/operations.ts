@@ -1,4 +1,4 @@
-// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, main-watch.
+// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, recover, reading.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
 import { handSettlementRefusal } from '../../model/containment.js';
@@ -11,7 +11,6 @@ import { assertHandDispatch } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
 import { masterHarnessDrift } from './fleet.js';
 import { readSecretFromStdin } from '../context.js';
-import { acknowledgeCommand, mainWatchAttention } from '../../daemon/main-watch.js';
 import { mergeWriterSummary } from '../../daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../../child-runner.js';
 import { installDirectory } from '../../install/secrets.js';
@@ -25,9 +24,6 @@ import { masterConfinementVariable } from '../../master/launch.js';
 
 /** Whether this command runs inside the master session's confinement (GY-1658): its wrapper sets the variable. */
 export const confinedMaster = (env: NodeJS.ProcessEnv = process.env) => env[masterConfinementVariable] === 'master';
-
-/** `master main-watch`: the watch's state and policy, or an admin's acknowledgement of one commit (GY-1519). */
-export const mainWatchUsage = 'Use master main-watch acknowledge SHA --reason TEXT --admin-token-stdin (the admin credential on stdin), or master main-watch status';
 
 /** `master recover`: repin the known-good coordinator (GY-1529). */
 export const recoverUsage = 'Use master recover [--to SHA] [--reason TEXT] --admin-token-stdin (the admin credential on stdin; the pin returns to the previous known-good SHA without --to)';
@@ -64,11 +60,10 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const master2 = summary.master ? { ...summary.master, budgetMinutes: masterSessionMinutes(master), heartbeatMinutes: masterHeartbeatMinutes(master) } : null;
     // An installed harness that differs from the current plan is drift the master repairs (GY-1217).
     const harness = await masterHarnessDrift(root, master);
-    // GY-1519: each commit on the base branch the main watch cannot explain is one attention line, report-only.
     // GY-1603: a loop holding the lock outside this install's unit, which the unit's own run is refused on.
     const refusal = await readLockRefusal(root);
     const holder = refusal && state?.lock ? unsupervisedHolderAttention({ refusal, lock: state.lock, hostId: master.hostId, unit: await supervisingUnit(root, master, { host: effects.host }).catch(() => null) }) : null;
-    const added = [...(harness ? [harness] : []), ...(holder ? [holder] : []), ...mainWatchAttention(state?.mainWatch ?? null, master.baseBranch)];
+    const added = [...(harness ? [harness] : []), ...(holder ? [holder] : [])];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
     // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
     return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
@@ -117,17 +112,6 @@ export async function operationsCommand(session: MasterSession, effects: Recover
   }
   // GitHub merges (docs/delivery.md): there is no Graphyard merge to run, by hand or by the loop.
   if (id === 'merge') return print({ merged: false, result: mergeAnswer });
-  // GY-1519: an admin acknowledges a commit the main watch cannot explain, lifting the promotion freeze on it.
-  // The control plane records it with an admin credential only, so the command reads one from stdin
-  // (`--admin-token-stdin`, as `master promote` does) and never offers the master's coordinator credential.
-  if (id === 'main-watch') {
-    const { values, positionals } = parseArgs({ args, options: { reason: { type: 'string' }, 'admin-token-stdin': { type: 'boolean' } }, allowPositionals: true });
-    const [action, sha] = positionals;
-    if (action === 'status') return print({ mainWatch: (await readDaemonState(root, master).catch(() => null))?.mainWatch ?? null, policy: await masterApi('main-watch') });
-    if (action !== 'acknowledge' || !sha || !values.reason?.trim()) throw new Error(mainWatchUsage);
-    if (!values['admin-token-stdin']) throw new Error(`An acknowledgement is recorded with an admin credential, which the master does not hold: pipe one to ${acknowledgeCommand(sha)}`);
-    return print(await masterMutation('main-watch/acknowledge', { sha, reason: values.reason.trim() }, undefined, await readSecretFromStdin(10_000)));
-  }
   // GY-1529: repin the coordinator the loop runs from (previous known-good, or --to SHA), restart its unit, record the move.
   if (id === 'recover') {
     const { values } = parseArgs({ args, options: { to: { type: 'string' }, reason: { type: 'string' }, 'admin-token-stdin': { type: 'boolean' } }, allowPositionals: false });

@@ -47,8 +47,8 @@ test('unit:soak-scope-settling — over three simulated hours transport failures
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: Object.keys(planned).map((key, index) => work(key, index)), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {}, reviewFindings: async () => [], basePaths: async (paths: string[]) => new Set(paths), baseSuccessions: undefined, replan: undefined,
     widenScope: async (item: Work, request: { epoch: number; at: string }, paths: string[]) => {
       widenCalls.push(`${item.key}@${(now - start) / minute}`);

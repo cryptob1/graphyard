@@ -236,10 +236,10 @@ test('unit:herdr-scope-per-install — the install\'s workspace scopes every inv
     closeSession: (pane: string) => closeHerdrPane(pane, herdr.run),
     herdr: () => observeHerdrAgents(herdr.run),
     panes: async () => ({ panes: await listHerdrPanes(herdr.run), available: true }),
-    persist: async () => {}, recordSession: async () => {}, dispatch: async () => {}, requestProof: () => {},
+    persist: async () => {}, recordSession: async () => {}, dispatch: async () => {},
     merge: async () => ({ result: 'merged', merged: true }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
   }) as unknown as DaemonEffects;
   await runCycle(config, state, effects(clockStart), () => clockStart);
   const later = clockStart + launchAppearanceMs + 60_000;

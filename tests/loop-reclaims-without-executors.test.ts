@@ -57,10 +57,8 @@ function harness(item: { current: Work[] }) {
     snapshot: async () => ({ work: item.current, now: new Date(clock).toISOString() }),
     closeSession: () => {},
     dispatch: async (work, profile) => { log.dispatches.push(`${work.key}:${profile.name}`); },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     recordSession: async () => {},
     // The control plane's reconciliation clears the lapse, as `POST work/:id/resync` does.

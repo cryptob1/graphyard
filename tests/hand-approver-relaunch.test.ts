@@ -42,10 +42,8 @@ function effects(work: Work[], agents: () => HerdrAgent[], decisions: Record<str
     snapshot: async () => ({ work, now: new Date(tick.at).toISOString() }),
     closeSession: pane => { closed.push(pane); },
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     decisions: async entry => ({ decisions: (decisions[entry.key] ?? []).map(decision => ({ ...decision, input: {}, approvedBy: decision.state === 'applied' ? 'graphyard-approver-project' : null })) }),
     // The loop's own launch, as production builds it: the next eligible approver account is the

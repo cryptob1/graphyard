@@ -13,7 +13,6 @@ import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
-import { mainWatchStateSchema } from './main-watch.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 
 // 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
@@ -151,11 +150,10 @@ export const deploymentObservationSchema = z.object({
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
 /**
- * GY-1302: the loop's promotion drive (`promotionCycle`), as GitHub's scheduled runs are best-effort.
- * `dispatchedAt` is the loop's own last dispatch, so a run GitHub has not listed is never dispatched
- * twice; `lastDispatchAt`, the later of it and the newest listed cut, starts the `promoteEveryMinutes`
- * gap. GY-1488: `cutSha` is the tip the newest candidate cut; one concluded unpromoted is not re-cut.
- * GY-1491: `candidates`, the newest (merges each carries, merges on main behind it); `candidateAtDispatch`, the newest at the last dispatch.
+ * The release reading the continuous deploy records (GY-1982): `mainSha` the base tip it last
+ * deployed, `promotedSha`/`promotedAt` the release the install runs, `deployFailed` the failed
+ * deploy's line, `reason` why no deploy ran. The other fields are the retired promotion drive's
+ * (GY-1302), kept so a cursor written before still parses; nothing sets or reads them now.
  */
 const sealCheckSchema = z.object({ mayseal: z.boolean(), role: z.string().max(64), needed: z.array(z.string().max(64)).max(8), at: z.string().max(64), secret: z.string().max(100), environment: z.string().max(100) }).strict();
 export const promotionStateSchema = z.object({
@@ -515,8 +513,9 @@ export const daemonStateSchema = z.object({
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
-  promotion: promotionStateSchema.nullable().default(null), // the loop's promotion drive (GY-1302)
-  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits and the promotion freeze; lazy as main-watch.ts imports this module
+  promotion: promotionStateSchema.nullable().default(null), // the continuous deploy's release reading (GY-1982)
+  /** Retired: the main watch (GY-1519) is gone; a cursor written before still carries its state, which nothing reads. */
+  mainWatch: z.unknown().optional(),
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),

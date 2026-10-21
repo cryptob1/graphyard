@@ -12,8 +12,6 @@ import { daemonSummary, loopAttention, progressAttention, readDaemonState } from
 import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
-import { promotionSummaryWithLag } from '../daemon/promotion-stale.js';
-import { sealRefusalAttention } from '../validation-import.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { approverLaunchAttention, leadTimeHeadline, loopCursorLines, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
@@ -121,11 +119,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
-  const promotion = promotionSummaryWithLag(cursor?.promotion, lag.report, lag.attention, Date.parse(snapshot.now), intervalMs);
-  // GY-1773: a held snapshot ahead of the dirty checkout left behind; a refused seal check.
+  // GY-1773: a held snapshot ahead of the dirty checkout left behind.
   // GY-1899: the pin lives under the running CLI's checkout, where the upgrade's holdCliAt wrote it.
   const codeRoot = loopCodeRoot(master.cliPath, root);
-  lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(codeRoot), codeRoot), ...sealRefusalAttention(cursor?.promotion, master.repository));
+  lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(codeRoot), codeRoot));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
@@ -167,8 +164,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // GY-1511: the Herdr server holding this install's agents, and the command that opens them.
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,
-    // GY-1982: + a failed deploy's line.
-    promotion: { ...promotion, deploy: deployLine(cursor?.promotion?.deployFailed) },
+    // GY-1982: the continuous deploy's release reading and a failed deploy's line.
+    promotion: { lastPromotedSha: cursor?.promotion?.promotedSha ?? null, promotedAt: cursor?.promotion?.promotedAt ?? null, checkedAt: cursor?.promotion?.checkedAt ?? null, reason: cursor?.promotion?.reason ?? null, deploy: deployLine(cursor?.promotion?.deployFailed) },
     launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
     itemSize,
     // Every open item the control plane names no action for, with the account it names and how

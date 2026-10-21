@@ -109,7 +109,7 @@ test('unit:approver-idle-stall-relaunch — over a simulated day the loop closes
     for (const entry of behaviours) state.approvals[`${handWatchPrefix}${entry.decision}`] = approvalWatchSchema.parse({ work: entry.work.key, action: 'requirements', decision: entry.decision, requestedAt: new Date(start - 10 * minute).toISOString(), launches: 1 });
     const loop: DaemonEffects = {
       agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: behaviours.map(entry => entry.work), now: new Date().toISOString() }),
-      closeSession: pane => close(pane), dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+      closeSession: pane => close(pane), dispatch: async () => {}, persist: async () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
       decisions: async work => ({ decisions: behaviours.filter(entry => entry.work.id === work.id).map(entry => ({ id: entry.decision, action: 'requirements', state: decisions.get(entry.decision)!, input: {}, approvedBy: null, requestedAt: new Date(start - 10 * minute).toISOString() })) }),
       approverLaunches: () => autonomy.readApproverLaunches(root),

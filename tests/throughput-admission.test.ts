@@ -239,9 +239,9 @@ test('integration:throughput-remeasure-cadence — a loop cycle that finds the s
     let clock = takenAt + throughputRemeasureMs - minute, measured = 0;
     const effects = {
       agents: () => [], credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-      snapshot: async () => ({ work: items, now: new Date(clock).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      snapshot: async () => ({ work: items, now: new Date(clock).toISOString() }), closeSession: () => {}, dispatch: async () => {},
       observeDeployment: async () => ({ source: 'endpoint', sha: revision, at: new Date(clock).toISOString(), reason: null, deployed: items.map(item => item.key), pending: [], requests: 0 }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      recordDeployment: async () => {}, persist: async () => {},
       measureThroughput: async (work: Work[], observedSha: string) => { measured++; return loopThroughputMeasurement(root, { work, observedSha, now: () => clock, origin: 'https://example.invalid',
         status: async () => ({ now: new Date(clock).toISOString(), release: { version: '1', revision } }), readItem: async (id: string) => items.find(item => item.id === id)!, contains: async () => true }); },
     } as never;

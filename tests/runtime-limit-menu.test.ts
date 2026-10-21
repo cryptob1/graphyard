@@ -139,10 +139,8 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
       herdr.agents.push({ name: profile.agentName, pane_id: `pane-${profile.name}-${calls.dispatch.length}`, agent_status: 'working' });
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     sessionOutput: agent => herdr.output[agent.name!] ?? '',
     answerSession: (_agent, keys) => { calls.keys.push(keys); },

@@ -236,7 +236,7 @@ function loop(history: { current: any[] }) {
   const decided: { action: string; input: any; reason: string }[] = [], approvers: string[] = [];
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    closeSession: () => {}, dispatch: async () => {}, recordDeployment: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     // The high lane's risk lane applies a failed-check rework as it is requested, as it does any.
     decide: async (_work: Work, action: string, reason: string, input: any) => { decided.push({ action, input, reason }); const id = randomUUID(); history.current.push({ id, action, state: 'applied', input, approvedBy: 'graphyard-risk-lane', reason }); return { id, state: 'applied', approvedBy: 'graphyard-risk-lane' }; },

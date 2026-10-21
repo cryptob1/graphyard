@@ -91,9 +91,9 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
       herdr: () => ({ agents, available: true }),
       credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
       snapshot: async () => ({ work: [wakeItem('GY-9', now)], now: new Date(now).toISOString() }),
-      dispatch: async () => {}, requestProof: () => {},
+      dispatch: async () => {},
       observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      recordDeployment: async () => {}, persist: async () => {},
       closeSession: pane => { closed.push(pane); const keep = agents.filter(agent => agent.pane_id !== pane); agents.splice(0, agents.length, ...keep); },
       // The pane whatever replaces the session stays deaf, as a Herdr regression or an unknown dialog would keep it.
       promptSession: async () => { if (deaf) throw new PromptNotAcceptedError(stalled); accepted.push(now); },
@@ -234,9 +234,9 @@ test('soak:session-liveness — the finished-session line waits for the orphan w
       herdr: () => ({ agents: agents(), available: true }),
       credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
       snapshot: async () => ({ work: work(now), now: new Date(now).toISOString() }),
-      dispatch: async () => {}, requestProof: () => {},
+      dispatch: async () => {},
       observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      recordDeployment: async () => {}, persist: async () => {},
       closeSession: () => {},
       // The gone-worker preserve ends the attempt on the record, as the plane's capacity write does.
       reportCapacity: async (item, event) => {

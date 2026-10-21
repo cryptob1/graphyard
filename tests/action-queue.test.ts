@@ -665,9 +665,9 @@ test('integration:typed-agent-requests — an agent that needs something records
   const state = emptyDaemonState(config);
   const sessions: unknown[] = [];
   const effects: DaemonEffects = {
-    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => ({}), requestSmoke: () => {},
+    recordDeployment: async () => ({}),
     agents: () => [{ name: 'work-claude', pane_id: 'pane-9', agent_status: 'blocked' } as any],
     credentials: async () => ({ 'claude-worker': { available: true, reason: null } }),
     recordSession: async (item, handle) => { sessions.push(handle); return engine.execute(executorA, 'session', item.id, handle, randomUUID()); },
@@ -895,9 +895,9 @@ test('integration:session-handles-visible — the reviewer launcher records a ha
   waiting = await reload(waiting);
   const blockedConfig = masterConfigSchema.parse({ ...fleetConfig, workers: [{ name: 'claude-worker', principal: worker.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }] });
   const daemonEffects: DaemonEffects = {
-    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => ({}), requestSmoke: () => {},
+    recordDeployment: async () => ({}),
     agents: () => [{ name: 'work-claude', pane_id: 'pane-9', agent_status: 'blocked' } as any],
     credentials: async () => ({ 'claude-worker': { available: true, reason: null } }),
     recordSession: async (work, handle) => engine.execute(executorA, 'session', work.id, handle, randomUUID()),

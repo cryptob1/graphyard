@@ -68,9 +68,9 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
   const effects: DaemonEffects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work.map(entry => ({ ...entry })), now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(0), reason: null, deployed: ['GY-87'], pending: [], requests: 0 }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     // The measurement misses its p50 with an admitted population past the minimum: a needs-decision
     // stands, and the loop neither files an owner nor raises an escalation on one (GY-2186).
     measureThroughput: async () => ({ outcome: 'recorded', revision: serving, verdict: 'unverified',
@@ -131,9 +131,9 @@ test('unit:no-flake-or-advisory-items — a test that fails then passes on rerun
   const effects: DaemonEffects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [flaky], now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
   };
   await runCycle(master, state, effects, () => clock);
   const filings = Object.values(state.actions).filter(action => action.kind === 'fault' && /^Filed |flake/i.test(action.detail));

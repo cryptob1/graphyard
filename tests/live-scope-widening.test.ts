@@ -259,9 +259,9 @@ function effects(control: ReturnType<typeof plane>, overrides: Partial<DaemonEff
   return {
     agents: () => [], credentials: async () => ({}),
     snapshot: async () => ({ work: [control.read()], now: iso() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'no deployment in this test', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     reviewFindings: async () => [],
     // Every requested path exists on the base; nothing reads their text, so only the rules decide.
     basePaths: async paths => new Set(paths),
@@ -361,9 +361,9 @@ test('manual:fault-class-scope — GY-1287: a refused scope request reaches its 
   let at = clock;
   const effect = {
     agents: () => approvers, credentials: async () => ({}), snapshot: async () => ({ work: [structuredClone(slow), structuredClone(target)], now: new Date(at).toISOString() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'no deployment in this test', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     reviewFindings: async () => [], basePaths: async (asked: string[]) => new Set(asked.filter(path => !path.startsWith('tests/'))), baseText: async () => 'export const unrelated = 1;\n', baseMentions: async () => 0,
     widenScope: async () => { throw new Error('no rule grounds any of these paths'); },
     decisionReadDeadlineMs: deadlineMs,

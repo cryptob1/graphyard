@@ -93,9 +93,9 @@ test('unit:soak-intervention-pattern-escalation-build — a simulated day of the
     const effects = {
       agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
       snapshot: async () => ({ work: [...items.values()].map(entry => structuredClone(entry)), now: iso(now) }),
-      closeSession: () => {}, dispatch: async (work: Work) => { dispatched.push(work.key); }, requestProof: () => {}, persist: async () => {},
+      closeSession: () => {}, dispatch: async (work: Work) => { dispatched.push(work.key); }, persist: async () => {},
       observeDeployment: async () => ({ source: 'endpoint', sha: release, at: iso(now), reason: null, deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {},
+      recordDeployment: async () => {},
       // The loop's pass is judged by the control plane's own route, as in production, and the cleared item is mirrored back into the day's snapshot.
       recordBlockerProbe: async (work: Work, body: Record<string, unknown>) => {
         const updated = await recordBlockerProbe({ engine } as never, coordinator, work.id, body, randomUUID()) as Work;

@@ -78,9 +78,9 @@ function loopEffects(current: () => Work, decided: Decided[], approvers: string[
   return {
     agents: () => [], herdr: () => ({ agents: approvers.map(decision => ({ name: `graphyard-approver-gy-374-${decision}`, pane_id: `pane-${decision}`, agent_status: 'working' })), available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [current()], now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async (work: Work, action: string, reason: string, input?: Record<string, unknown>) => {
       const id = `d-${decided.length + 1}`;
       decided.push({ id, action, reason, input: { ...input, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision } });

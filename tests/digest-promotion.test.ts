@@ -370,11 +370,10 @@ test('unit:promotion-records-actual-mode — a candidate sha-promoted then retri
   assert.equal(read().production.length, 1, 'the candidate\'s production record is still written once');
 });
 
-/* The wiring review findings: the supported release entry points — the CLI's and the loop's local
- * ports — build at cut, deploy recorded digests and verify instance digests through the repository's
- * command adapter. */
-test('unit:release-callers-use-digest-adapter — the command adapter builds once at cut, deploys exactly the manifest under its generation, and the loop\'s ports promote by digest and verify production\'s instance digests', async () => {
-  const { commandDigestAdapter, localReleasePorts, masterConfigSchema, uatDigestSuite } = await load();
+/* The wiring review findings: the supported release entry point — the CLI — builds at cut, deploys
+ * recorded digests and verifies instance digests through the repository's command adapter. */
+test('unit:release-callers-use-digest-adapter — the command adapter builds once at cut, deploys exactly the manifest under its generation, and UAT\'s digest suite asks the adapter for UAT\'s instances', async () => {
+  const { commandDigestAdapter, uatDigestSuite } = await load();
   const commands: { command: string; env: Record<string, string> }[] = [];
   let running: { service: string; instance: string; digest: string }[] = built.artifacts.map(entry => ({ service: entry.service, instance: `${entry.service}-1`, digest: entry.digest }));
   const shell: ShellRun = async (command, env) => {
@@ -394,58 +393,4 @@ test('unit:release-callers-use-digest-adapter — the command adapter builds onc
   const suite = await uatDigestSuite(built.artifacts, adapter.instances!).run('https://uat.example.test', candidate);
   assert.equal(suite.passed, true);
   assert.equal(commands.at(-1)!.env.GRAPHYARD_DEPLOY_ENVIRONMENT, 'uat', 'UAT\'s digest suite asks the adapter for UAT\'s instances');
-
-  // The loop's local ports, over the in-memory ledger: every git call answered by it, every shell command recorded.
-  const repo = ledgerGit({ candidates: [candidate], uat: [passedUat] }, { 'ls-remote': () => '' });
-  const sh: string[] = [];
-  const run = async (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
-    if (command === 'git') return repo.git(args);
-    sh.push(args[1]);
-    if (args[1] === 'instances') return JSON.stringify(running);
-    assert.equal(options?.env?.GRAPHYARD_DEPLOY_MANIFEST, JSON.stringify(built.artifacts), 'the loop deploys exactly the recorded manifest');
-    return '';
-  };
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 2 } } });
-  const ports = localReleasePorts(config, '/checkout', run, { base: '/managed', record: async () => ({}), now: () => 0,
-    environment: { GRAPHYARD_UAT_URL: 'https://uat.example.test', GRAPHYARD_PRODUCTION_URL: 'https://app.example.test', ...environment } })!;
-  assert.deepEqual(await ports.promote(candidate.id), { promoted: true, sha: tip });
-  assert.deepEqual(sh, ['deploy'], 'the loop promoted through the digest deployer');
-  assert.ok(repo.pushes().every(push => !push.includes('refs/heads/')), 'and moved no branch: nothing rebuilds');
-  const served = (async () => new Response(JSON.stringify({ ok: true, commit: tip }))) as typeof fetch;
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = served;
-  try {
-    assert.deepEqual(await ports.verify(tip), { served: tip, verified: true }, 'every instance runs the promoted digest');
-    running = [...running, { service: 'web', instance: 'web-2', digest: sha256('f') }];
-    assert.deepEqual(await ports.verify(tip), { served: tip, verified: false }, 'one instance on another digest fails production verification at the same SHA');
-  } finally { globalThis.fetch = realFetch; }
-});
-
-test('unit:managed-uat-attests-digests — the loop\'s managed-repository UAT validation attests that UAT\'s instances run the digests it was deployed with, recording a failed verdict on the digests suite when one runs another', async () => {
-  const { localReleasePorts, masterConfigSchema } = await load();
-  const repo = ledgerGit({ candidates: [candidate], ...digestServed(candidate, 1) }, { 'ls-remote': () => '' });
-  const asked: string[] = [];
-  const run = async (command: string, args: string[], options?: { env?: NodeJS.ProcessEnv }) => {
-    if (command === 'git') return repo.git(args);
-    asked.push(`${args[1]} ${options?.env?.GRAPHYARD_DEPLOY_ENVIRONMENT}`);
-    return JSON.stringify([{ service: 'api', instance: 'api-1', digest: sha256('a') }, { service: 'web', instance: 'web-1', digest: sha256('f') }]);
-  };
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 2 } } });
-  // '/checkout' is no Graphyard checkout, so the port validates the candidate as a managed repository's.
-  const ports = localReleasePorts(config, '/checkout', run, { base: '/managed', record: async () => ({}), now: () => 0,
-    environment: { GRAPHYARD_UAT_URL: 'https://uat.example.test', GRAPHYARD_INSTANCE_DIGESTS: 'instances' } })!;
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response(JSON.stringify({ ok: true, commit: tip }))) as typeof fetch;
-  try {
-    const { record } = await ports.validate(candidate.id);
-    assert.equal(record.result, 'failed');
-    const digests = record.suites.find(suite => suite.name === 'digests');
-    assert.equal(digests?.passed, false, 'the digests suite judged the managed candidate');
-    assert.match(digests!.detail, /web/, 'naming the service whose instance runs another digest');
-    assert.equal(repo.tags().find(tag => tag.id === candidate.id && 'suites' in tag)?.digests, undefined, 'the observation refused the digests, so the failed verdict names none (GY-1868)');
-    assert.ok(asked.length > 0 && asked.every(entry => entry === 'instances uat'), 'it asked the adapter for UAT\'s instances');
-    assert.ok(repo.tagNames().includes(`rc-uat/${candidate.id}`), 'and recorded the verdict');
-  } finally { globalThis.fetch = realFetch; }
 });

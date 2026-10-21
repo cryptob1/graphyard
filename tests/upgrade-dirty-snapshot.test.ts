@@ -386,9 +386,9 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   const effects = (upgrades: { count: number }): DaemonEffects => ({
     agents: () => [], credentials: async () => ({}), workerCredentials: async () => ({}), producerCredentials: async () => ({}),
     mutate: async () => ({}), dispatchWorker: async () => ({}), launchReview: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}),
-    snapshot: async () => ({ work: [], now: iso() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    snapshot: async () => ({ work: [], now: iso() }), closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, loadedRelease: { commit: loaded, dirty: true },
+    recordDeployment: async () => {}, persist: async () => {}, loadedRelease: { commit: loaded, dirty: true },
     selfUpgrade: async () => { upgrades.count += 1; return { outcome: 'skipped', reason: 'recorded' }; },
   } as unknown as DaemonEffects);
   const options = (loadedSnapshot: string | null) => ({ once: true, intervalMs: 5, identity: { pid: process.pid, host: master.hostId }, signals: [] as NodeJS.Signals[], log: () => {}, checkout: () => dirtyTree, loadedSnapshot: () => loadedSnapshot });

@@ -59,9 +59,9 @@ test('unit:recurring-fault-attention-not-items — the faults step makes no work
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [], now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     faultClassPolicy: policy,
     // Any work-item write the step attempted would go through the operator-agent; record and refuse none silently.
     controlPlane: async () => { posted.push('status'); return { github: true }; },

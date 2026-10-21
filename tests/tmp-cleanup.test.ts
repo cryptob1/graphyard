@@ -406,7 +406,7 @@ test('unit:tmp-reclaim-zero-escalates — a /tmp pass that removes 0 entries whi
     const state = emptyDaemonState(config), clock = Date.now();
     const effects = {
       agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }), closeSession: () => {},
-      dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      dispatch: async () => {}, recordDeployment: async () => {}, persist: async () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
       reclaimResources: reclaim,
     } as unknown as DaemonEffects;
@@ -449,7 +449,7 @@ test('unit:tmp-reclaim-zero-escalates — a standing zero-removal pass with erro
   const config = await loadMasterConfig(root), clock = Date.now();
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }), closeSession: () => {},
-    dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    dispatch: async () => {}, recordDeployment: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     reclaimResources: async () => ({ at: new Date(clock).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: ['Tmp reclaim: /tmp/graphyard-held: EBUSY'],
       tmpPass: { roots: ['/tmp'], scanned: 1, kept: 1, boundStands: true } }),

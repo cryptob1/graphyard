@@ -164,9 +164,9 @@ function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): 
     workerCredentials: async () => ({}), producerCredentials: async () => ({}),
     mutate: async () => ({}), dispatchWorker: async () => ({}), launchReview: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}),
     snapshot: async () => ({ work: work as Work[], now: iso(0) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
   };
   return { ...base, ...overrides } as DaemonEffects;
 }

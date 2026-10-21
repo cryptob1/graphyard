@@ -101,9 +101,9 @@ function daemonEffects(snapshot: () => Awaited<ReturnType<DaemonEffects['snapsho
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => snapshot(),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: snapshot().now, reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     wakeObservation: async work => { log.push(`wake:${work.key}`); },
     decide: async (work, action) => { log.push(`decide:${work.key}:${action}`); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
     decisions: async () => ({ decisions: [] }),

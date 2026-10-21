@@ -110,8 +110,8 @@ test('unit:soak-release-filing-invariants — over two simulated days the loop k
     const effects = {
       agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
       snapshot: async () => ({ work: [], now: iso(now) }),
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
-      observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+      closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
+      observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {},
       selfProvision: async () => loopSelfProvision(root, master, { now, setup }),
     } as unknown as DaemonEffects;
 

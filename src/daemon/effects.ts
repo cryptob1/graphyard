@@ -2,7 +2,6 @@
 import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -56,11 +55,8 @@ import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
 import type { ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
-import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
+import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
-import { localReleasePorts } from './release-ports.js';
-import { revertRecordKey } from '../release-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import type { ReadingEffects } from './reading-effect.js';
@@ -93,7 +89,6 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffects, ReadingEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
-  requestProof: (work: Work) => void | Promise<void>;
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
   /** An item as the control plane holds it now, read outside any transaction (GY-2151): a containment settlement is judged on this record before it is posted, because the plane lowers the fence against its own record, not the cycle's snapshot. */
@@ -141,21 +136,12 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    * so the dashboard and flow report read releases under that same name; sent only on a change.
    */
   publishProductionEnvironment?: () => Promise<unknown>;
-  /**
-   * GY-1302: the promotion drive's reads and its dispatch of the release-candidate workflow; null
-   * when the repository has no such workflow, absent on a loop wired without it.
-   */
-  promotion?: PromotionReads | null;
-  /** The main watch's reads (GY-1519, main-watch.ts): the checkout's history and the control plane's acknowledgements; absent, the watch does not run. */
-  mainWatch?: MainWatchReads | null;
   /** The control-plane merge executor's reads (GY-1524, cycle-merge-writer.ts): git in the coordinator checkout, the leased deploy-key push, the merge-record post and the recorded merger; absent, the executor does not run. */
   mergeWriter?: MergeWriterReads | null;
   /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
   publishMergeSettings?: () => Promise<unknown>;
   /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
   selfProvision?: () => Promise<unknown>;
-  /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
-  requestSmoke: (work: Work) => void | Promise<void>;
   /**
    * The producer requests the dispatcher has stopped attempting (GY-496), from its cursor: the loop
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.

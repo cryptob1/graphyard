@@ -112,8 +112,8 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   assert.match(refusedRow.attention!, /the last reconciliation was refused — Reconciliation by decision d1 refused: gate acceptance had not passed/);
   assert.equal(refusedRow.merged?.refusal, 'Reconciliation by decision d1 refused: gate acceptance had not passed: proof missing');
   // The durable loop names the stuck item once as an escalation; GitHub merges, so nothing is offered a merge.
-  const effects: DaemonEffects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [stuck, waiting], now: at }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
+  const effects: DaemonEffects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [stuck, waiting], now: at }), closeSession: () => {}, dispatch: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), persist: async () => {} };
   const state = emptyDaemonState(config);
   const cycle = await runCycle(config, state, effects);
   const escalation = cycle.actions.find(action => action.kind === 'escalation' && action.work === 'GY-81')!;

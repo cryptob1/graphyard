@@ -77,10 +77,8 @@ function harness() {
     snapshot: async () => { const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: snapshot.now }; },
     closeSession: pane => { closed.push(pane); sessions.splice(0, sessions.length, ...sessions.filter(agent => agent.pane_id !== pane)); },
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     decideScope: work => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, treeRead: true }) as Promise<Work>,
     // No review finding names anything, so the finding rule judges and grounds nothing.
     reviewFindings: async () => [],

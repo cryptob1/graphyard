@@ -122,9 +122,9 @@ function effectsOf(work: Work): DaemonEffects {
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work], now: work.updatedAt, jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: work.updatedAt, reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async () => ({ id: 'unused' }), decisions: async () => ({ decisions: [] }),
     approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-1' }), persist: async () => {},
   };

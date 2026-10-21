@@ -173,9 +173,9 @@ test('integration:throughput-measurement-ledger — failures classify into the b
   let asks = 0, settled = false;
   const effects: DaemonEffects = {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-    snapshot: async () => ({ work: [claim], now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    snapshot: async () => ({ work: [claim], now: new Date().toISOString() }), closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'endpoint', sha: served, at: new Date().toISOString(), reason: null, deployed: [claim.key], pending: [], requests: 0 }) as any,
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     measureThroughput: async () => { asks++; return { outcome: asks === 1 ? 'recorded' : 'current', settled, revision: served, detail: settled ? 'verified' : `0 of 10 (ask ${asks})` }; },
   };
   for (let cycles = 0; cycles < 8; cycles++) await runCycle(master, state, effects, () => Date.now());

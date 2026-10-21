@@ -91,10 +91,8 @@ function harness(items: { current: Work[] }, agents: () => HerdrAgent[], availab
     snapshot: async () => ({ work: items.current, now: iso(0) }),
     closeSession: pane => { log.closed.push(pane); },
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     // The target is what the production effect derives: the pane of the agent the loop selected,
     // never its name alone — this is the assertion surface for AC-1.

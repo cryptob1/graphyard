@@ -182,10 +182,8 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
     persist: async () => {},
     credentials: async () => ({}),
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'none', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     doctor,
   } as unknown as DaemonEffects;
 

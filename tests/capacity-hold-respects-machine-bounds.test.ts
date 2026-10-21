@@ -156,10 +156,8 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
         epoch: next.epoch, host: 'loop-host', path: `/tmp/bounds/${next.id}`, branch: `graphyard/${next.key.toLowerCase()}-${next.epoch}`,
       });
     },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'n/a', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,
   };

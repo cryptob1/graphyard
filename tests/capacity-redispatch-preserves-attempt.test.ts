@@ -128,10 +128,8 @@ test('integration:capacity-redispatch-preserves-attempt — worker WIP and an ap
       herdr.agents = herdr.agents.filter(agent => agent.name !== orphan.agentName);
       await ok(workerA, 'POST', `work/${orphan.id}/settle`, { epoch: orphan.epoch, settlementToken });
     },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'n/a', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     sessionOutput: agent => herdr.output[agent.name!] ?? '',
     reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,

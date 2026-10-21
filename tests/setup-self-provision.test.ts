@@ -246,8 +246,8 @@ test('unit:setup-attention-owner — a missing derivable deployment variable is 
     // The step is the cycle's own: every cycle offers it, isolated, and a throw fails only that step.
     let offered = 0;
     const effects: DaemonEffects = {
-      agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, persist: async () => {},
       selfProvision: async () => { offered++; if (offered === 2) throw new Error('railway is not logged in'); },
     };
     const state = emptyDaemonState(master);

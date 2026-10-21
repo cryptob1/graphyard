@@ -178,9 +178,9 @@ test('unit:verification-map-with-importing-test — the ask GY-1776 made, the ma
   await runCycle(config, state, {
     agents: () => [], credentials: async () => ({}),
     snapshot: async () => ({ work: [{ ...work, lease, scopeRequest: refused } as Work], now: new Date(clock).toISOString() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'no deployment in this test', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     basePaths: async (asked: readonly string[]) => new Set(asked.filter(exists)), baseText: read, baseMentions: async () => Infinity,
     widenScope: async (item: Work, _request: unknown, added: string[], reason: string) => { widened.push({ paths: added, reason }); return { ...item, plannedFiles: [...(item.plannedFiles ?? []), ...added], policyRevision: item.policyRevision + 1 }; },
   } as unknown as DaemonEffects, () => clock);
