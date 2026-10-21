@@ -22,15 +22,12 @@ const credential = { ...admin, token: `removal-admin-${'r'.repeat(32)}` };
 let database: EmbeddedPostgres | null = null, store: Store | null = null, http: ReturnType<typeof server> | null = null;
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
-test('unit:candidate-machinery-removed — the candidate modules are gone, `graphyard release` names no candidate subcommand and /api/candidates answers 404', { timeout: 120_000 }, async () => {
+test('unit:candidate-machinery-removed — the candidate modules are gone, `graphyard release` is no longer a command and /api/candidates answers 404', { timeout: 120_000 }, async () => {
   for (const file of removed) assert.ok(!existsSync(join(repositoryRoot, file)), `${file} is deleted`);
-  // `release GY-N EPOCH` still gives up a lease; no candidate subcommand (cut, uat, validate, promote, …) is left.
+  // No command is named release; giving up a lease is `unclaim GY-N EPOCH`.
   const { commands, renderHelp } = await import('../src/cli/index.js');
-  const release = commands.filter(command => command.name === 'release');
-  assert.equal(release.length, 1);
-  assert.equal(release[0].scope, 'work', 'the one release entry is the lease release, which names a work item');
-  assert.deepEqual(release[0].help, ['  release GY-N EPOCH            Release current lease']);
-  assert.doesNotMatch(renderHelp(), /release (contract|cut|status|uat|validate|follow-up|holds|fold|promote|verify|soak|imports|seal-check)\b/);
+  assert.deepEqual(commands.filter(command => command.name === 'release'), []);
+  assert.doesNotMatch(renderHelp(), /^ {2}release /m);
 
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1983;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('candidate-removed'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
