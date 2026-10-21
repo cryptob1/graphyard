@@ -81,7 +81,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('zero-touch-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('zero_touch_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/zero_touch_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   // The server as src/server/main.ts starts it without GITHUB_APP_ID: no GitHub at all.
   http = server(engine, credentials, null);
@@ -249,9 +249,9 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
     const document = async () => (await store.workDocument(item.id))!;
     const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
       snapshot: async () => ({ work: [await document()], now: new Date(clock).toISOString() }),
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      closeSession: () => {}, dispatch: async () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+      recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
       github: githubDouble, merge: githubDouble, mergeWriter: reads } as unknown as DaemonEffects;
     await runCycle(config, state, effects, () => clock);
     await mergeWriterIdle(state);
@@ -287,9 +287,9 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   const mergeSha = done.delivery!.mergeSha;
   assert.equal(git(origin, 'rev-list', '--first-parent', 'main').split('\n')[0], mergeSha, 'main\'s first parent on the bare origin is the delivered merge commit');
   const acceptanceMerge = goal.merged!.mergeSha!;
-  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), acceptanceMerge, 'the item merged onto the acceptance change');
+  assert.ok(git(origin, 'rev-list', '--first-parent', mergeSha).split('\n').includes(acceptanceMerge), 'the item landed on the acceptance change: the fast-forwarded head carries it on its first-parent chain');
   assert.equal(git(origin, 'rev-parse', `${acceptanceMerge}^1`), baseTip);
-  assert.equal(git(origin, 'rev-parse', `${mergeSha}^2`), submittedHead);
+  assert.equal(mergeSha, submittedHead, 'the worker\'s head sat on the tip, so main fast-forwarded to it');
   assert.match(git(origin, 'show', `${mergeSha}:src/greeting.ts`), /Hello/, 'the worker\'s file is on main');
   assert.equal(pushes.length, 2, 'two pushes: the acceptance change, then the item');
   for (const push of pushes) assert.equal(push.env?.GIT_SSH_COMMAND, deployKeySshCommand(deployKeyFile), 'every push used the deploy key `up` placed, and no other credential');

@@ -7,7 +7,7 @@ import { appendFile, mkdir, readFile, rename, rm, writeFile } from 'node:fs/prom
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import type { CliContext } from './context.js';
-import { deploymentTarget, derivedVariables, installIdFor, prepareInstall, providers, selfProvision, type DerivedVariable, type PendingRedeploy, type PendingSetup, type Provider, type SelfProvisionAudit } from '../install/index.js';
+import { derivedVariables, installIdFor, prepareInstall, selfProvision, type DerivedVariable, type PendingRedeploy, type PendingSetup, type SelfProvisionAudit } from '../install/index.js';
 import type { AdapterContext, ProviderAdapter } from '../install/adapters.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
 
@@ -126,25 +126,21 @@ async function writeAtomically(file: string, value: unknown) {
 
 /** Where `master setup --apply` appends one audit line per variable it set: name, source and fingerprint, never a value. */
 export const setupAuditFile = (root: string) => resolve(root, '.graphyard', 'setup-audit.jsonl');
-export interface MasterSetupOptions { apply: boolean; provider?: Provider; service?: string; linkDirectory?: string; workspace?: string }
+export interface MasterSetupOptions { apply: boolean; service?: string }
 export interface MasterSetupDependencies {
   /** The deployment and the variables its install record derives; the install record's by default (`recordedDeployment`). */
   locate?: (root: string, master: Pick<MasterConfig, 'repository'>, options: MasterSetupOptions) => Promise<{ adapter: ProviderAdapter; context: AdapterContext; derived: DerivedVariable[] } | null>;
   now?: () => number;
 }
 
-/**
- * The deployment this host installed, from its install record (`graphyard install`), or the one
- * named by --provider, --service and --link-dir. Null when neither names one.
- */
+/** The deployment this host installed, from its install record (`graphyard install`); null without one. */
 export async function recordedDeployment(root: string, master: Pick<MasterConfig, 'repository'>, options: MasterSetupOptions) {
-  if (options.provider) return { ...deploymentTarget({ provider: options.provider, repository: master.repository, service: options.service ?? 'graphyard', linkDirectory: resolve(options.linkDirectory ?? root), workspace: options.workspace ?? null }), derived: [] as DerivedVariable[] };
   const record = await readInstallRecord(installDirectory(installIdFor(master.repository)));
   if (!record) return null;
   // The service install named (--server-name) is recorded; --service names it for a record written before it was.
   const serverName = options.service ?? record.service ?? undefined;
   const session = await prepareInstall(root, { repository: record.repository, provider: record.provider, baseBranch: record.baseBranch, reviewPolicy: record.reviewPolicy, ...(record.domain ? { domain: record.domain } : {}), ...(serverName ? { serverName } : {}),
-    workers: record.principals.filter(principal => principal.role === 'worker').length || undefined, producerProofs: record.principals.flatMap(principal => principal.proofs ?? []), ...(record.selfContained ? { selfContained: true } : {}) }, {}, 'plan');
+    workers: record.principals.filter(principal => principal.role === 'worker').length || undefined, producerProofs: record.principals.flatMap(principal => principal.proofs ?? []) }, {}, 'plan');
   return { adapter: session.adapter, context: session.context, derived: await derivedVariables(session) };
 }
 
@@ -157,7 +153,7 @@ export async function masterSetup(root: string, master: Pick<MasterConfig, 'repo
   const audit = async (entry: SelfProvisionAudit) => { await mkdir(resolve(root, '.graphyard'), { recursive: true }); await appendFile(setupAuditFile(root), `${JSON.stringify(entry)}\n`, { mode: 0o600 }); };
   const located = await (deps.locate ?? recordedDeployment)(root, master, options);
   if (!located) return { mode: options.apply ? 'apply' as const : 'plan' as const, target: null, observed: false, canApply: false, missing: [], set: [], redeployed: [] as string[], pendingRedeploy: [] as string[], audit: [],
-    next: `No deployment is recorded for ${master.repository} on this host (no graphyard install record): name it with graphyard master setup --provider railway --service NAME --link-dir DIR${options.apply ? ' --apply' : ''}` };
+    next: `No deployment is recorded for ${master.repository} on this host (no graphyard install record): run graphyard install --provider compose|local --repo ${master.repository} --apply first` };
   const pendingFile = resolve(root, '.graphyard', `setup-redeploy-${located.context.provider}-${located.context.service}.json`);
   const pending: PendingRedeploy = {
     read: () => readFile(pendingFile, 'utf8').then(text => JSON.parse(text) as PendingSetup, () => ({ redeploy: [], audit: [] })),
@@ -167,7 +163,6 @@ export async function masterSetup(root: string, master: Pick<MasterConfig, 'repo
 }
 
 export async function masterSetupCommand(context: CliContext, root: string, master: Pick<MasterConfig, 'repository' | 'reviewer' | 'url'>) {
-  const { values } = parseArgs({ args: context.args, options: { apply: { type: 'boolean' }, provider: { type: 'string' }, service: { type: 'string' }, 'link-dir': { type: 'string' }, workspace: { type: 'string' } }, allowPositionals: false });
-  if (values.provider && !providers.includes(values.provider as Provider)) throw new Error(`--provider is one of ${providers.join(', ')}`);
-  return context.print(await masterSetup(root, master, { apply: !!values.apply, ...(values.provider ? { provider: values.provider as Provider } : {}), ...(values.service ? { service: values.service } : {}), ...(values['link-dir'] ? { linkDirectory: values['link-dir'] } : {}), ...(values.workspace ? { workspace: values.workspace } : {}) }));
+  const { values } = parseArgs({ args: context.args, options: { apply: { type: 'boolean' }, service: { type: 'string' } }, allowPositionals: false });
+  return context.print(await masterSetup(root, master, { apply: !!values.apply, ...(values.service ? { service: values.service } : {}) }));
 }

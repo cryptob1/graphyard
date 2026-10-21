@@ -39,7 +39,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-executor'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_executor_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -96,7 +96,7 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   const waiting = shape('GY-82', {});
   const status = buildMasterStatus({ work: [stuck, waiting], now: at }, [], []);
   const row = status.work.find(entry => entry.key === 'GY-81')!;
-  assert.match(row.attention!, /GY-81 was merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head: Merge observed without a prior authorization/);
+  assert.match(row.attention!, /GY-81 was merged \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head: Merge observed without a prior authorization/);
   assert.match(row.attention!, /held at the merge stage; /);
   assert.equal(row.attentionOwner?.role, 'master'); assert.equal(row.attentionOwner?.approvedBy, 'approver');
   assert.match(row.attentionOwner!.next, /^graphyard master decide GY-81 merge REASON, then graphyard master approver GY-81 DECISION/);
@@ -105,19 +105,19 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   const item = status.attentionItems.find(entry => entry.subject === 'GY-81')!;
   assert.equal(item.text, row.attention); assert.equal(item.human, false);
   const other = status.work.find(entry => entry.key === 'GY-82')!;
-  assert.equal(other.merged, null); assert.doesNotMatch(other.attention ?? '', /merged on GitHub/);
+  assert.equal(other.merged, null); assert.doesNotMatch(other.attention ?? '', /was merged \(/);
   assert.equal(status.counts.mergedUnreconciled, 1); assert.equal(status.counts.mergeCandidates, 1);
   // A refused reconciliation is carried into the line, so the master reads why before deciding again.
   const refusedRow = buildMasterStatus({ work: [{ ...stuck, violations: [unauthorizedMergeViolation, 'Reconciliation by decision d1 refused: gate acceptance had not passed: proof missing'] }], now: at }, [], []).work[0];
   assert.match(refusedRow.attention!, /the last reconciliation was refused — Reconciliation by decision d1 refused: gate acceptance had not passed/);
   assert.equal(refusedRow.merged?.refusal, 'Reconciliation by decision d1 refused: gate acceptance had not passed: proof missing');
   // The durable loop names the stuck item once as an escalation; GitHub merges, so nothing is offered a merge.
-  const effects: DaemonEffects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [stuck, waiting], now: at }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {}, persist: async () => {} };
+  const effects: DaemonEffects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [stuck, waiting], now: at }), closeSession: () => {}, dispatch: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), persist: async () => {} };
   const state = emptyDaemonState(config);
   const cycle = await runCycle(config, state, effects);
   const escalation = cycle.actions.find(action => action.kind === 'escalation' && action.work === 'GY-81')!;
-  assert.match(escalation.detail, /merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head/);
+  assert.match(escalation.detail, /was merged \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head/);
   assert.match(escalation.detail, /graphyard master decide GY-81 merge REASON, then graphyard master approver GY-81 DECISION/);
   const again = await runCycle(config, state, effects);
   assert.equal(again.actions.some(action => action.kind === 'escalation' && action.work === 'GY-81'), false, 'the escalation is recorded once');

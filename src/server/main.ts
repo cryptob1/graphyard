@@ -43,7 +43,7 @@ export async function main(options: MainOptions = {}) {
     announce: outcome => console.log(`Retro index events_retro_id: ${outcome}`),
     failed: error => console.error('Retro index events_retro_id was not built; will retry:', error instanceof Error ? error.message : 'unknown'),
   });
-  const engine = new Engine(store, (process.env.GITHUB_CI_APP_IDS ?? '15368').split(',').map(Number));
+  const engine = new Engine(store);
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };

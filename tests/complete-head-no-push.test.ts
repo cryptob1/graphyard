@@ -54,19 +54,3 @@ test('unit:complete-head-no-push — complete GY-N EPOCH --head SHA attempts no 
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
   assert.equal(existsSync(attempts), false, 'complete --head attempted a git push');
 });
-
-test('unit:complete-pr-push-refusal — the pull-request form still pushes the graphyard/ (or adopted) branch first and is refused, submitting nothing, when that push fails', async () => {
-  const { completeCommand } = await import('../src/cli/complete.js');
-  const { attempts, work } = await repository('graphyard/gy-2-1');
-  const calls: string[] = [];
-  const context = { args: ['1', '77'], api: async (path: string) => { calls.push(path); return {}; }, print: () => undefined, repositoryRoot: () => work } as never;
-  await assert.rejects(completeCommand.run(context, { id: 'x', key: 'GY-2' } as never), /pushing the graphyard\/ branch failed/);
-  assert.deepEqual(calls, [], 'the refused complete submitted anyway');
-  assert.equal((await readFile(attempts, 'utf8')).split('\n').filter(Boolean).length, 1, 'the push was not attempted exactly once before the refusal');
-  // GY-1849: an adopted item's attempt works the adopted pull request's own branch, which is
-  // pushed the same way; its failure refuses the submission too.
-  const adopted = await repository('feature/huck-migration');
-  const adoptedContext = { args: ['1', '77'], api: async () => { throw new Error('the refused complete submitted anyway'); }, print: () => undefined, repositoryRoot: () => adopted.work } as never;
-  await assert.rejects(completeCommand.run(adoptedContext, { id: 'x', key: 'GY-2', prAdoption: { branch: 'feature/huck-migration' } } as never), /pushing the graphyard\/ branch failed/);
-  assert.equal(existsSync(adopted.attempts), true, 'the adopted branch was not pushed');
-});

@@ -45,9 +45,9 @@ function effects(work: Work | Work[], overrides: Partial<DaemonEffects>): Daemon
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: Array.isArray(work) ? work : [work], now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async () => ({ id: 'unused' }), decisions: async () => ({ decisions: [] }),
     approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-1' }), persist: async () => {},
     stepCallBoundMs: 30,
@@ -76,7 +76,7 @@ test('unit:slow-loop-step-bounded — an observation wake whose resync never ans
   const result = await returns(runCycle(config(), state, fx, () => clock));
   assert.ok(performance.now() - started < 5_000, 'the step returned instead of waiting on the resync timeout');
   assert.deepEqual(slow.calls.length, 1, 'the waker woke the observation once, under the per-call bound');
-  assert.ok(records(result, 'GY-1865').some(action => action.state === 'done' && /rework waits for a fresh GitHub observation/.test(action.detail)), 'the rework still waits for the reading it asked for');
+  assert.ok(records(result, 'GY-1865').some(action => action.state === 'done' && /rework waits for a fresh observation/.test(action.detail)), 'the rework still waits for the reading it asked for');
   assert.deepEqual(Object.values(state.approvals), [], 'no watch exists until a decision stands');
   // The next cycle rejoins the wake still in flight instead of starting a second resync for the same item.
   await returns(runCycle(config(), state, fx, () => clock + 60_000));

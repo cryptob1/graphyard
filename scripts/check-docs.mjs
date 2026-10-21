@@ -162,12 +162,6 @@ for (const file of files) {
 const shipsInstaller = existsSync('src/install');
 const ONE_COMMAND = 'install --provider';
 const MANUAL_MARKERS = [
-  /scripts\/provision-railway\.mjs/g,
-  /railway init\b/g,
-  /railway add\b/g,
-  /railway up\b/g,
-  /railway variables?\b/g,
-  /hcloud server create\b/g,
   /docker compose --profile full\b/g,
 ];
 const SETUP_DOCS = /\(((?:docs\/)?(?:install|onboarding|quickstart|deployment)\.md)[^)]*\)/;
@@ -202,7 +196,7 @@ if (runbook) {
   }
   const steps = headings.filter(heading => /^step \d/i.test(heading));
   if (steps.length < 3) installFailures.push(`docs/install.md: expected numbered steps with exact commands, found ${steps.length}`);
-  for (const required of [ONE_COMMAND, '--plan', '--apply', 'railway', 'hetzner', 'docker-host', 'compose', '0600', 'idempotent', 'Verify']) {
+  for (const required of [ONE_COMMAND, '--plan', '--apply', 'compose', 'local', '0600', 'idempotent', 'Verify']) {
     if (!runbook.includes(required)) installFailures.push(`docs/install.md: missing required content "${required}"`);
   }
 }

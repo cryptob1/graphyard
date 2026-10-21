@@ -123,7 +123,7 @@ before(async () => {
   await pg.initialise(); await pg.start(); await pg.createDatabase('ssh_origin_delivery');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ssh_origin_delivery`);
   await store.init();
-  engine = new Engine(store, [15368], 120, repository);
+  engine = new Engine(store, 120, repository);
   engine.submissionObserver = null;
   engine.directMergeEnvironment = null;
   engine.baseBranch = 'main';
@@ -336,9 +336,9 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
   const mergeTick = async () => {
     const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
       snapshot: async () => ({ work: [await document()], now: new Date(clock).toISOString() }),
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      closeSession: () => {}, dispatch: async () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+      recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
       github: new Proxy({}, { get: (_, name) => { throw new Error(`the delivery called GitHub (${String(name)})`); } }),
       merge: new Proxy({}, { get: (_, name) => { throw new Error(`the delivery called GitHub's merge (${String(name)})`); } }),
       mergeWriter: writerReads } as unknown as DaemonEffects;
@@ -360,9 +360,9 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
   assert.equal(landed.goal.stage, 'delivering', `the goal stands past planning with its item done: ${landed.goal.stage}`);
   const acceptanceMerge = landed.goal.merged!.mergeSha!;
   assert.ok(acceptanceMerge, `the acceptance change is recorded merged: ${landed.goal.stage}`);
-  assert.equal(git(origin.repository, 'rev-parse', `${acceptanceMerge}^1`), baseTip, 'the acceptance change merged onto the seeded base');
-  assert.equal(git(origin.repository, 'rev-parse', `${mergeSha}^1`), acceptanceMerge, 'the item merged onto the acceptance change');
-  assert.equal(git(origin.repository, 'rev-parse', `${mergeSha}^2`), submittedHead, 'the delivered merge\'s second parent is the worker\'s submitted head');
+  assert.equal(git(origin.repository, 'rev-parse', `${acceptanceMerge}^1`), baseTip, 'the acceptance change landed on the seeded base');
+  assert.ok(git(origin.repository, 'rev-list', '--first-parent', mergeSha).split('\n').includes(acceptanceMerge), 'the item landed on the acceptance change: the fast-forwarded head carries it on its first-parent chain');
+  assert.equal(mergeSha, submittedHead, 'the worker\'s head sat on the tip, so main fast-forwarded to the submitted head itself');
   assert.match(git(origin.repository, 'show', `${mergeSha}:src/greeting.ts`), /Hello/, 'the worker\'s file is on the origin\'s main');
   const history = (await request(coordinator, `goals/${goal.key}`)).history as { kind: string }[];
   assert.deepEqual(history.map(entry => entry.kind), ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.merged', 'goal.plan', 'goal.plan-approve', 'goal.released'], 'the goal moved through acceptance, landing, planning and release');

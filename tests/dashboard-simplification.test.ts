@@ -64,7 +64,7 @@ const jargonIn = (sentence: string) => jargon.filter(term => new RegExp(`\\b${te
 /** A work item in a given shape, evaluated by the real gate evaluator so its reasons are the control plane's own. */
 function evaluated(overrides: Partial<Work>, all: Work[] = work): Work {
   const base = { ...find('GY-13'), id: `probe-${Math.random()}`, key: 'GY-99', ...overrides } as Work;
-  const result = evaluate(base, [...all, base], new Date(NOW), [1]);
+  const result = evaluate(base, [...all, base], new Date(NOW));
   return { ...base, stage: base.stage === 'done' ? 'done' : result.stage, gates: result.gates };
 }
 const withGates = (item: Partial<Work>, first: string, reasons: string[]): Work => {
@@ -123,7 +123,7 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['review', 'Verified clean Codex review of the current commit is required'],
     ['review', 'Every configured reviewer profile is exhausted for this candidate (claude); add reviewer capacity or select another review provider'],
     ['review', 'Verified approval from reviewer profile claude is required for the current commit'],
-    ['review', 'A new independent GitHub approval after the requirement-review baseline is required'], ['review', 'Independent approval of the current commit is required'],
+    ['review', 'A new independent approval after the requirement-review baseline is required'], ['review', 'Independent approval of the current commit is required'],
     ['review', 'Outstanding change requests must be resolved through a new review'],
     ['test', 'Required CI check typecheck has not passed on the current candidate'],
     ['acceptance', 'AC-2: unit:login needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
@@ -131,7 +131,7 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['acceptance', 'Bootstrap obligation inherited from GY-4 AC-1: unit:x needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'],
     ['acceptance', 'Trusted unit:x evidence from ci is no longer independent: ci has since held an assignment on GY-9'],
     // GY-1235: the merge gate reads no observation age and no protection verification, only whether GitHub was seen at the candidate.
-    ['merge', 'GitHub has not been observed at the current candidate'],
+    ['merge', 'The merge writer has not observed the current candidate'],
     ['merge', 'Pull request is not mergeable against the current base'], ['merge', 'Unresolved lease-loss escalation requires operator resolution: worker vanished'],
     ['merge', 'Slice lead lead-1 ruled hold under rule R-2; delivery is blocked until the authorized recovery: redo the migration'],
   ];
@@ -143,7 +143,7 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     assert.deepEqual(jargonIn(status.sentence), [], `${reason} → ${status.sentence}`);
   }
   // The live evaluator's reasons for every fixture item are all recognised.
-  for (const item of work) for (const gate of evaluate(item, work, new Date(NOW), [1]).gates) for (const reason of gate.reasons) assert.ok(plainReason(reason, gate.name).known, `${item.key} ${gate.name}: ${reason}`);
+  for (const item of work) for (const gate of evaluate(item, work, new Date(NOW)).gates) for (const reason of gate.reasons) assert.ok(plainReason(reason, gate.name).known, `${item.key} ${gate.name}: ${reason}`);
   // An unanticipated reason never leaks: it reads as its step.
   assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge').text, 'Waiting to merge');
 });

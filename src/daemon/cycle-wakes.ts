@@ -3,7 +3,7 @@ import { observationWaker } from '../master/base-break-refresh.js';
 import type { Work } from '../model.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { type GitHubPause, observationWakeDue } from './decisions.js';
+import { observationWakeDue } from './decisions.js';
 import { type DaemonEffects, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { boundedCalls, callKey, carriedRow, recordCarried, retireCarried, stepCallCarried } from './step-budget.js';
@@ -64,7 +64,7 @@ export async function retireDepartedWakes(cycle: Cycle) {
  * - `retireMootWake`: retire the item's carried wake row once its wake is moot — no rework wait, a fresher observation,
  *   or the item gone — so no carried call stays owed with nothing left to retry it.
  */
-export function observationWakes(cycle: Cycle, effects: DaemonEffects, pause: GitHubPause | null) {
+export function observationWakes(cycle: Cycle, effects: DaemonEffects) {
   const { state, now, clock, performed } = cycle;
   const wake = effects.observe && observationWaker((work, waitMs) => effects.observe!(work, waitMs).then(async fresh => {
     const key = wakeKey(work), row = state.actions[key];
@@ -78,7 +78,7 @@ export function observationWakes(cycle: Cycle, effects: DaemonEffects, pause: Gi
     const key = wakeKey(item), previous = state.actions[key], carried = carriedRow(previous), observed = carried && !!effects.observe && carriedObserve(previous, item);
     if (!effects.wakeObservation && !observed) return;
     if (carried && previous!.cycle === state.cycle) return;
-    if (previous && !carried && (previous.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock, pause))) return;
+    if (previous && !carried && (previous.state === 'failed' ? !readyToRetry(previous, state.cycle) : !observationWakeDue(item, previous?.at, clock))) return;
     // GY-1865 review: a carried row's attempts are the sends already made (recordCarried); consuming its rejection makes none, so a failure keeps that count — and the backoff it grows — adding one only for the first send a spent budget had never made.
     const sends = carried ? previous!.attempts + (/ budget passed before .+ was made /.test(previous!.detail) ? 1 : 0) : (previous?.state === 'failed' ? previous.attempts : 0) + 1;
     const noteWake = async (outcome: 'done' | 'failed', detail: string, at: number) =>

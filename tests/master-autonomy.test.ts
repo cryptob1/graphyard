@@ -37,7 +37,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('master-autonomy'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('autonomy_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/autonomy_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repositoryName); engine.submissionObserver = null;
+  engine = new Engine(store, 120, repositoryName); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -138,15 +138,11 @@ test('integration:master-autonomy-setup — onboarding provisions the master and
     const rotation = await runAutonomyCommand(root, config, 'principals', [], dependencies()) as ReturnType<typeof previewPrincipalRotation>;
     assert.equal(rotation.applicable, true); assert.deepEqual(rotation.added, ['worker-two (worker)']);
     assert.equal(JSON.stringify(rotation).includes('z'.repeat(40)), false, 'the preview never prints a token');
-    const calls: string[][] = [];
-    const run = (command: string, args: string[]) => { calls.push([command, ...args]); return ''; };
-    await assert.rejects(runAutonomyCommand(root, config, 'principals', ['--apply'], dependencies({ run })), /no roster applier/);
-    await mkdir(join(root, 'scripts')); await writeFile(join(root, 'scripts/provision-railway.mjs'), '');
-    const rotated = await runAutonomyCommand(root, config, 'principals', ['--apply'], dependencies({ run })) as { applied: boolean };
-    assert.equal(rotated.applied, true); assert.deepEqual(calls, [[process.execPath, join(root, 'scripts/provision-railway.mjs')]]);
+    // The roster is deployed by the installer, never from here: --apply names the install command and applies nothing.
+    const rotated = await runAutonomyCommand(root, config, 'principals', ['--apply'], dependencies()) as { applied: boolean; next: string };
+    assert.equal(rotated.applied, false); assert.match(rotated.next, /graphyard install --apply/);
     await writeFile(join(root, '.graphyard/credentials.json'), JSON.stringify(credentials.filter(credential => credential.id !== worker.id).map(credential => credential.id === coordinator.id ? { ...credential, role: 'admin' } : credential)), { mode: 0o600 });
-    await assert.rejects(runAutonomyCommand(root, config, 'principals', ['--apply'], dependencies({ run })), /worker-one \(worker\) is live and would be dropped; master-loop would change role from coordinator to admin/);
-    assert.equal(calls.length, 1, 'a refused rotation deploys nothing');
+    await assert.rejects(runAutonomyCommand(root, config, 'principals', ['--apply'], dependencies()), /worker-one \(worker\) is live and would be dropped; master-loop would change role from coordinator to admin/);
 
     // Restarting the loop: the running loop on this host is stopped and a fresh one started detached.
     const running = spawn('sleep', ['30']);

@@ -101,9 +101,9 @@ function daemonEffects(snapshot: () => Awaited<ReturnType<DaemonEffects['snapsho
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => snapshot(),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: snapshot().now, reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     wakeObservation: async work => { log.push(`wake:${work.key}`); },
     decide: async (work, action) => { log.push(`decide:${work.key}:${action}`); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
     decisions: async () => ({ decisions: [] }),
@@ -123,7 +123,7 @@ test('unit:stale-refusal-wakes-observation — a rework refused for a stale obse
 
   const first = await runCycle(config, state, effects, () => now);
   assert.deepEqual(log, ['wake:GY-42'], 'the refusal wakes the observation job immediately, and decides nothing');
-  assert.match(first.actions.find(action => action.work === 'GY-42' && action.kind === 'decision')!.detail, /rework waits for a fresh GitHub observation/);
+  assert.match(first.actions.find(action => action.work === 'GY-42' && action.kind === 'decision')!.detail, /rework waits for a fresh observation/);
   assert.match(first.actions.find(action => action.kind === 'refresh')!.detail, /Woke the observation job of GY-42/);
 
   // The next cycle, before the woken observation lands: no second wake, and still no attempt.

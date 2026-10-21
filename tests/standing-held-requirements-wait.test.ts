@@ -60,7 +60,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('standing-held-wait'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('standing_held_wait');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/standing_held_wait`); await store.init();
-  engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 300, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -90,10 +90,8 @@ function harness(options: { resume?: DaemonEffects['resume'] } = {}) {
     snapshot: async () => { const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: snapshot.now }; },
     closeSession: pane => { sessions.splice(0, sessions.length, ...sessions.filter(agent => agent.pane_id !== pane)); },
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: fixtureNow, reason: 'no deployment endpoint', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     decideScope: (work, _nonRepository, treeRead) => ok(token(coordinator), 'POST', `work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}) }) as Promise<Work>,
     repositoryFiles: async () => new Set([layout, helper, extra]),
     reviewFindings: async () => [],
@@ -524,9 +522,9 @@ test('unit:scope-budget-holds-during-quarantine-held-decision — a failed cover
   const fx = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [at(later)], now: new Date(later).toISOString(), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(later).toISOString(), reason: 'n/a', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decisions: async () => ({ decisions: structuredClone(ledger) }),
     decide: async () => { decideCalls += 1; throw new Error('Simulated: transient decide API error'); },
     withdraw: async () => {}, resume: async () => ledger[0],

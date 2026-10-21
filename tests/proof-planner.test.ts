@@ -59,7 +59,7 @@ function item(outcomes: Record<string, Outcome>, options: { producerProofs?: str
   return grade(work);
 }
 function grade(work: Work): Work {
-  const result = evaluate(work, [work], now, [CI_APP]);
+  const result = evaluate(work, [work], now);
   return { ...work, stage: result.stage, gates: result.gates, violations: result.violations };
 }
 /** The item as the control plane holds it after a reading: the reconciler has run over it. */
@@ -144,7 +144,7 @@ test('unit:planner-matches-reconciler — property: no item, read or unread, cur
 // ---- AC-2 --------------------------------------------------------------------------------------
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
-const engine = new Engine({} as Store, [CI_APP], 120, 'owner/project');
+const engine = new Engine({} as Store, 120, 'owner/project');
 const refusal = async (command: 'create' | 'requirements', input: unknown) => {
   try { await engine.execute(operator, command, command === 'create' ? null : '11111111-2222-4333-8444-555555555555', input, `gy-188-${command}`); }
   catch (error) { return error instanceof Error ? error.message : String(error); }

@@ -4,11 +4,11 @@
 // lives in (GY-1892), so a worker answering that finding never waits on an approver for it.
 
 /**
- * The paths whose changes run on every loop cycle, head and item (GY-404): the loop, the master,
- * the merge queue, the GitHub adapter and review-thread filing. A fault there passes the change's own
+ * The paths whose changes run on every loop cycle, head and item (GY-404): the loop, the master
+ * and the merge writer. A fault there passes the change's own
  * gates and appears only when the behaviour repeats, so the review asks what repetition does.
  */
-export const repeatingPaths = ['src/daemon/', 'src/master/', 'src/merge-queue.ts', 'src/github.ts', 'src/review-threads.ts'] as const;
+export const repeatingPaths = ['src/daemon/', 'src/master/', 'src/merge-writer/'] as const;
 export const touchesRepeatingPath = (files: readonly string[]) => files.some(file => repeatingPaths.some(path => path.endsWith('/') ? file.startsWith(path) : file === path));
 
 /** A soak suite (`tests/soak-*.test.ts`) or the simulation helper one runs on (`tests/helpers/soak-*.ts`). */

@@ -465,7 +465,7 @@ test('unit:system-driven-items master decide merge stays open where the loop sen
   const loop = (requestsDecisions?: boolean) => ({ sessions: [], failures: {}, now: Date.now(), requestsDecisions });
   assert.equal(handDecision(item({ systemDriven: true }), 'merge', null, loop(true)), 'merge-decision');
   assert.equal(handDecision(merged, 'merge', null, loop(true)), null);
-  assert.match(mergeDecisionRecovery(merged, loop(true))!, /merged on GitHub though its gates had not passed on that head; only a two-party merge decision reconciles it/);
+  assert.match(mergeDecisionRecovery(merged, loop(true))!, /was merged though its gates had not passed on that head; only a two-party merge decision reconciles it/);
   assert.equal(handDecision(item({ systemDriven: true }), 'merge', null, loop(false)), null);
   assert.match(mergeDecisionRecovery(item({ systemDriven: true }), loop(false))!, /no master operator-agent identity/);
   const master = await masterHarness({ work: [merged] }, { operatorAgent: true });
@@ -497,7 +497,7 @@ test('unit:system-driven-items the master\'s own next steps name the loop step f
   assert.doesNotMatch(workAttentionOwner(item({ systemDriven: true }), 'launch-review').next, /then graphyard master review GY-7$/);
   assert.equal(workAttentionOwner(item({ systemDriven: false }), 'launch-review').next, 'Fix the refusal reason, then graphyard master review GY-7');
   // An ordinary pending review names the loop's relaunch too, not a `master review` the CLI refuses.
-  const atReview = (systemDriven: boolean) => item({ systemDriven, stage: 'review', gates: [{ name: 'review', passed: false, reasons: ['A new independent GitHub approval is required'] }] as any });
+  const atReview = (systemDriven: boolean) => item({ systemDriven, stage: 'review', gates: [{ name: 'review', passed: false, reasons: ['A new independent approval is required'] }] as any });
   assert.match(workAttentionOwner(atReview(true), 'gate').next, /the loop relaunches the review on its own; graphyard master review GY-7 only once the loop has stopped relaunching its request/);
   assert.doesNotMatch(workAttentionOwner(atReview(true), 'gate').next, /relaunches a refused review/);
   assert.match(workAttentionOwner(atReview(false), 'gate').next, /graphyard master review GY-7 relaunches a refused review/);

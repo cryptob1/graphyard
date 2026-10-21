@@ -59,7 +59,7 @@ export const statusRoutes = defineRoutes('status', [
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
-        delegationLimits: services.delegationLimits, build, repositoryPolicy: repositoryPolicy(), production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment, ciAppIds: engine.ciAppIds, mergeQueue: { rerunFailedChecks: engine.rerunFailedChecks },
+        delegationLimits: services.delegationLimits, build, repositoryPolicy: repositoryPolicy(), production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment,
         // The documentation policy this control plane stamps on new items, which doctor compares
         // with the checkout's committed graphyard.json (GY-293).
         documentation: engine.documentation,
@@ -105,7 +105,7 @@ export const statusRoutes = defineRoutes('status', [
       const work = operatorVisible(await engine.store.fleet());
       // A scope ask's command reads the routed decisions the engine's guard reads (GY-1388).
       return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: await resolvedProductionEnvironment(engine.store.pool),
-        production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds, scopeDecisions: await routedScopeDecisions(engine.store.pool, work) });
+        production: actor.role === 'operator-agent' ? null : production?.status() ?? null, scopeDecisions: await routedScopeDecisions(engine.store.pool, work) });
     },
   },
   {
@@ -202,7 +202,7 @@ export const statusRoutes = defineRoutes('status', [
     // The work list is the bounded fleet read (GY-1778): every open item whole and each settled
     // delivery as the work index's stored summary (store.fleet, GY-1376). `?pr=N` narrows it to
     // the item whose candidate or submission names pull request N, which is all the CI plan step
-    // (scripts/enumerate-ci-proofs.mjs) needs. store.list() served every document whole here:
+    // needs. store.list() served every document whole here:
     // 134 MB on a 1,777-item ledger, past the plan's abort on every acceptance run.
     method: 'GET', path: '/api/work',
     async handle({ url, services, operatorVisible }) {

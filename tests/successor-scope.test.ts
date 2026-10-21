@@ -73,9 +73,9 @@ function item(key: string, plannedFiles: string[], extra: Partial<Work> = {}): W
 const loopEffects = (work: () => Work[], overrides: Partial<DaemonEffects>): DaemonEffects => ({
   agents: () => [], credentials: async () => ({}),
   snapshot: async () => ({ work: work(), now: new Date(clock).toISOString() }),
-  closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+  closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
   observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'no deployment in this test', deployed: [], pending: [] }),
-  recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+  recordDeployment: async () => {}, persist: async () => {},
   ...overrides,
 } as DaemonEffects);
 

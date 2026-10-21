@@ -86,10 +86,8 @@ function harness(item: { current: Work[] }, agents: HerdrAgent[]) {
     snapshot: async () => ({ work: item.current, now: new Date(time.value).toISOString() }),
     closeSession: pane => { log.closed.push(pane); },
     dispatch: async (_work, profile) => { log.dispatches.push(profile.name); },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     recordSession: async () => {},
     // The control plane ends the attempt and appends the exhaustion record the ladder reads back.

@@ -52,9 +52,9 @@ function effects(work: Work, overrides: Partial<DaemonEffects>): DaemonEffects {
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work], now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async () => ({ id: 'unused' }), decisions: async () => ({ decisions: [] }),
     approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-1' }), persist: async () => {},
     ...overrides,

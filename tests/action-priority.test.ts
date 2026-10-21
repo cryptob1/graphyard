@@ -54,10 +54,10 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('action-priority'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [human, master, worker, other, coordinator];
   // Leases granted by this engine have already lapsed by the time reconciliation reads them.
-  expiring = new Engine(store, [15368], 0, 'owner/project'); expiring.principals = engine.principals;
+  expiring = new Engine(store, 0, 'owner/project'); expiring.principals = engine.principals;
   http = server(engine, [{ ...coordinator, token: coordinatorToken }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

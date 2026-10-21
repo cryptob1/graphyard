@@ -3,14 +3,13 @@ import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
-import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
+import type { ExhaustedProof } from './decisions.js';
 import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist, progressAttention } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
-import { e2eFixtureStep } from './e2e-fixtures.js';
 import { masterSessionStep } from './cycle-master.js';
 import { scopeStep, successorStep } from './cycle-scope.js';
 import { blockerStep } from './cycle-blockers.js';
@@ -23,7 +22,6 @@ import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { faultStep } from './faults.js';
 import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
-import { mainWatchStep } from './main-watch.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
@@ -112,9 +110,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   const startedAt = now();
   const read = await timings.step('snapshot', () => effects.snapshot());
   const readAt = now();
-  // Filing runs in the dispatcher, beside this cycle: an approval it has not yet reconciled still
-  // sets its threads aside, so the cycle never sends a head back over what that review filed.
-  const snapshot = setAsideFollowUpThreads(read, await timings.step('follow-up threads', () => effects.followUpThreads?.(read.work, Number.isFinite(Date.parse(read.now)) ? Date.parse(read.now) : readAt).catch(() => undefined)));
+  const snapshot = read;
   const observedAt = Date.parse(snapshot.now), clock = Number.isFinite(observedAt) ? observedAt : startedAt;
   // The same bound `master status` uses, from the read that produced this snapshot: containment
   // settlement may only be proposed while the local clock can be compared with the control plane.
@@ -209,7 +205,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, heldDecisions, closedPanes };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
   const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
-  await timings.step('e2e fixtures', () => e2eFixtureStep(cycle));
   await timings.step('close', () => closeStep(cycle));
   await settleLaunches();
 
@@ -258,10 +253,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   spent('merge');
 
   await timings.step('deployment verification', () => deploymentStep(cycle));
-  // 7a''''. The main watch (GY-1519): main's first-parent history since the last promotion, read from
-  //         the coordinator checkout, classified against the merge ledger, deliveries, reverts and
-  //         direct-merge windows; an unknown commit is reported once, and freezes promotion when asked.
-  await timings.step('main watch', () => cycle.isolate('deployment', null, 'main watch', () => mainWatchStep(cycle)));
   // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
   //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
   await timings.step('faults', () => faultStep(cycle, assessments));

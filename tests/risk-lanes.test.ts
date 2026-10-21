@@ -47,7 +47,7 @@ const item = (paths: string[], proofs: string[] = ['unit:core-flow', 'manual:saf
   createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(),
 } as unknown as Work);
 
-const verdict = (work: Work) => evaluate(work, [work], new Date(), [15368]);
+const verdict = (work: Work) => evaluate(work, [work], new Date());
 /**
  * The landability verdict's acceptance family: the proofs the lane requires. Since GY-1235 it is no
  * merge gate of its own (proofs gate nothing), but the verdict still decides it from the lane.
@@ -192,7 +192,7 @@ test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap 
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(),
   } as unknown as Work;
   const work = item(['src/model/gates.ts'], ['unit:core-flow'], ['src/model/policy.ts']);
-  const result = evaluate(work, [work, source], new Date(), [15368]);
+  const result = evaluate(work, [work, source], new Date());
   const gate = acceptance(work, [work, source]);
   assert.equal(result.lane, 'low');
   assert.equal(gate.reasons.some(reason => reason.includes('Bootstrap obligation inherited') && reason.includes('unit:deferred-contract')), true,
@@ -216,7 +216,7 @@ async function startLanes() {
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('risk-lanes'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('lanes_test');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/lanes_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

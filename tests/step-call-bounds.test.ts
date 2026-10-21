@@ -57,9 +57,9 @@ function effects(work: Work[], overrides: Partial<DaemonEffects>, agents: HerdrA
   return {
     agents: () => agents, herdr: () => ({ agents, available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work, now: iso(0), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async () => ({ id: 'decision-1' }), decisions: async () => ({ decisions: [] }),
     approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-1' }), persist: async () => {},
     stepCallBoundMs: 30,

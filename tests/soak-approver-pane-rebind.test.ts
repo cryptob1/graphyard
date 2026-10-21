@@ -112,7 +112,7 @@ test('unit:approver-stall-followup — soak: over a simulated day the real loop 
       };
       const loop: DaemonEffects = {
         agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: behaviours.map(entry => entry.work), now: new Date().toISOString() }),
-        closeSession: pane => close(pane), dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        closeSession: pane => close(pane), dispatch: async () => {}, persist: async () => {},
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
         decisions: async item => ({ decisions: behaviours.filter(entry => entry.work.id === item.id).map(entry => ({ id: entry.decision, action: 'requirements', state: decisions.get(entry.decision)!, input: {}, approvedBy: null, requestedAt: new Date(start).toISOString() })) }),
         approverLaunches: () => autonomy.readApproverLaunches(root),
@@ -190,7 +190,7 @@ test('unit:approver-stall-followup — soak: a watch whose loop relaunch failed 
           if (Date.now() - session.since < bound) closedWithinBound.push(`${pane} after ${(Date.now() - session.since) / 1000}s`);
           panes.delete(pane);
         },
-        dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        dispatch: async () => {}, persist: async () => {},
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
         decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: judged, input: {}, approvedBy: null, requestedAt: new Date(start).toISOString() }] }),
         approverLaunches: () => autonomy.readApproverLaunches(root),
@@ -269,7 +269,7 @@ test('unit:approver-stall-followup — soak: over a simulated day the real loop 
       const loop: DaemonEffects = {
         agents: listed, credentials: async () => ({}), // An applied closure closes its item.
         snapshot: async () => ({ work: behaviours.map(entry => decisions.get(entry.decision) === 'applied' ? { ...entry.work, stage: 'done', triage: { ...entry.work.triage!, state: 'applied' } } as Work : entry.work), now: new Date().toISOString() }),
-        closeSession: pane => close(pane), dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        closeSession: pane => close(pane), dispatch: async () => {}, persist: async () => {},
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
         decisions: async item => ({ decisions: behaviours.filter(entry => entry.work.id === item.id).map(entry => ({ id: entry.decision, action: 'close', state: decisions.get(entry.decision)!, input: {}, approvedBy: null, requestedAt: at })) }),
         approverLaunches: () => autonomy.readApproverLaunches(root),
@@ -366,7 +366,7 @@ test('unit:approver-stall-first-seen — soak: over a simulated day the real loo
       const listed = (): HerdrAgent[] => [...panes.values()].map(session => ({ name: session.name, pane_id: session.pane, agent: 'claude', agent_status: session.status }));
       const loop: DaemonEffects = {
         agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: behaviours.map(entry => entry.work), now: new Date().toISOString() }),
-        closeSession: pane => close(pane), dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        closeSession: pane => close(pane), dispatch: async () => {}, persist: async () => {},
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
         decisions: async item => ({ decisions: behaviours.filter(entry => entry.work.id === item.id).map(entry => ({ id: entry.decision, action: 'requirements', state: decisions.get(entry.decision)!, input: {}, approvedBy: null, requestedAt: new Date(start).toISOString() })) }),
         approverLaunches: () => autonomy.readApproverLaunches(root),
@@ -491,7 +491,7 @@ test('unit:approver-stall-first-seen — soak: over a simulated day the loop\'s 
       const loop: DaemonEffects = {
         agents: listed, credentials: async () => ({}), // An applied closure closes its item.
         snapshot: async () => ({ work: behaviours.map(entry => decisions.get(entry.decision) === 'applied' ? { ...entry.work, stage: 'done', triage: { ...entry.work.triage!, state: 'applied' } } as Work : entry.work), now: new Date().toISOString() }),
-        closeSession: pane => close(pane), dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        closeSession: pane => close(pane), dispatch: async () => {}, persist: async () => {},
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
         decisions: async item => ({ decisions: behaviours.filter(entry => entry.work.id === item.id).map(entry => ({ id: entry.decision, action: 'close', state: decisions.get(entry.decision)!, input: {}, approvedBy: null, requestedAt: at })) }),
         approverLaunches: () => autonomy.readApproverLaunches(root),

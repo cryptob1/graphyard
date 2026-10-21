@@ -51,9 +51,9 @@ async function makeCycle(work: Work[], directory: string, reader: DaemonEffects[
   const { localPostDeployChecks } = await import('../src/master-verification.js');
   const served = () => ({ source: 'endpoint', sha: serving, at: iso(now - 60_000), reason: null, deployed: work.filter(item => item.stage === 'done' && item.delivery).map(item => item.key), pending: [], requests: 1 });
   const effects: DaemonEffects = {
-    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work, now: iso(now) }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work, now: iso(now) }), closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
     observeDeployment: async () => served() as never,
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     recordReading: async (item: Work, reading: Parameters<NonNullable<DaemonEffects['recordReading']>>[1]) => { recorded.push({ key: item.key, reading }); item.evidence.push({ id: randomUUID(), producer: 'graphyard-master', trusted: true, executed: 1, skipped: 0, at: iso(now), proof: reading.proof, sha: reading.sha, baseSha: reading.baseSha, policyRevision: reading.policyRevision, result: reading.result, reading: { detail: reading.detail } }); },
     closeObservation: async (item: Work, release: string, reason: string, idempotency: string) => { closing(item, release); closed.push({ key: item.key, release, reason, idempotency }); item.stage = 'done'; item.closure = { kind: 'delivered-observation', reason, ref: release, by: 'graphyard-master', at: iso(now), from: 'ready' }; },
     postDeployFiler: localPostDeployChecks, readPostDeploy: reader,

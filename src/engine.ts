@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, type PlaneDeploy, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, mergeabilityComputingRefusal, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, type PlaneDeploy, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
 import { readInterventionReport } from './interventions/report.js';
 import { interventionPolicyFromEnv } from './model/interventions.js';
@@ -19,16 +19,14 @@ import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
 import { containmentPhase } from './model/containment.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { unauthorizedMergeViolation } from './merge-queue.js';
-import { conflictSince, disprovedConflict, withDisprovedConflict, dismissedApproval, onto, reconciliationRefusalPrefix, reconcileCheckReruns, rerunFailedChecksEvent, checkRerunLimit, owedRerunAfter, type BaseRefresh, type CheckRerun, type OwedRerunOutcome, type GitHubMergeQueueState, type MergeEnqueueRequest, type MergeQueueAction, type RestoredApproval } from './merge-queue.js';
-import { docsSyncCarry } from './model/docs-sync.js';
+import { onto } from './model/base-refresh.js';
+import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './model/merge-authorization.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { regressionRefusals } from './regression-guard.js';
 import { protectedCasePrefix, protectedCaseRefusals, readProtectingGoals } from './model/goal.js';
 import { retroCheckRefusals } from './model/retro-synthesis.js';
 import { readAppliedRetroChecks } from './retro-synthesis.js';
-import { ciFamilyAllows, ciProofFamilies, ciRunBindingSchema, ciRunRefusal, isCiProducer, refuseCiProducer, staleCiAttemptRefusal, type CiRunObservation } from './model/ci-proofs.js';
 import { nonRepositoryRead } from './model/scope-repository.js';
 import { buildIdentity } from './protocol-version.js';
 import { decideScopeRequest, liveScopeWidening, scopeRefusalBlocker, unplannedPaths, type ScopeDecision, type ScopeRequestState } from './model/scope.js';
@@ -44,7 +42,6 @@ import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { sameObservationInputs } from './model/observation-save.js';
-import { adoptSchema, adoptedBranchHeld, adoptionHolderRefusal, attemptLiveRefusal, closedPullRefusal, draftPullRefusal, foreignBaseRefusal, forkedPullRefusal, gitBranchName, movedHeadRefusal, prAdoptionOf, sameAdoption, type AdoptedPull } from './model/pr-adoption.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
 import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
@@ -63,7 +60,6 @@ import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, owner
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { mechanicalHoldUntil } from './mechanical-findings.js';
 import { decompositionHoldGraceMs, deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
-import { defaultRerunFailedChecks, maxRerunFailedChecks } from './master/profiles.js';
 import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
 /** When a containment fence's authority lapsed, read from the record before it was lowered; null while its lease is live or it records no deadline. */
@@ -134,7 +130,7 @@ const commands = {
   // GY-860: what this allocation released before it could create its worktree — an earlier
   // attempt's worktree that still held the branch, with the refs and uncommitted diff it carried.
   // The record is the item's preserved-attempt history, kept on the ledger.
-  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(255).refine(branch => validBranch(branch) || gitBranchName(branch), 'Invalid Graphyard branch name'),
+  workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(255).refine(validBranch, 'Invalid Graphyard branch name'),
     preserved: z.object({ path: z.string().min(1).max(1000), head: z.string().regex(/^[0-9a-f]{40}$/i), branchTip: z.string().regex(/^[0-9a-f]{40}$/i), op: z.enum(['rebase', 'merge', 'cherry-pick']).nullable(), refs: z.string().max(20000), diff: z.string().max(100000), at: z.iso.datetime() }).strict().optional() }).strict(),
   // `documentation` is the worker's explicit statement that the change alters no documented
   // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
@@ -174,9 +170,6 @@ const commands = {
     runId: z.string().regex(/^[1-9]\d*$/), runAttempt: z.number().int().positive(),
     artifact: z.object({ id: z.number().int().positive(), name: z.string().min(1).max(200), digest: z.string().regex(/^sha256:[a-f0-9]{64}$/), url: publicArtifactUrl, createdAt: z.iso.datetime() }).strict(),
   }).strict().optional(),
-    // The CI producer names the workflow job that ran the contract; the control plane reads that
-    // job back from GitHub and accepts the record only when it completed on this commit.
-    ciRun: ciRunBindingSchema.optional(),
     // GY-135: the same proof run against a tree with its criterion's behaviour removed.
     exercise: proofExerciseSchema.optional() }).strict(),
   // GY-1779: the loop's own reading of a loop-owned observation item's proof on the serving release,
@@ -195,9 +188,6 @@ const commands = {
   // job runs it and records it on `baseRefresh`, where the binding carry decides what the head keeps.
   // No `mergerefused`: GitHub merges on every passing gate (GY-1235) and Graphyard keeps no guarded
   // merge (GY-1236), so nothing reports a merge refusal and none sends a candidate back (GY-1391).
-  // GY-1849: one existing pull request adopted into this item on its same branch and head; the live
-  // head is read before the transaction and the binding's rules are model/pr-adoption.ts's.
-  adopt: adoptSchema,
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
 const actionClaimSchema = z.object({
@@ -223,7 +213,7 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', window: 'intent:unblock', adopt: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', window: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
   const capability = operatorCapabilitiesByCommand[command];
@@ -416,16 +406,6 @@ function endedBySubmission(work: Work, epoch: number) {
 /** The violation an observed merge records when its gates had not passed on the merged head. */
 export { unauthorizedMergeViolation };
 /**
- * The refresh record a stale mergeability reading (GY-375) leaves for its head: the reading over
- * whatever the record for that same head carried onto it. `conflictSince` and `conflictPaths` are
- * kept only beside a conflict (GY-1230), so what an earlier conflict on the head recorded never
- * survives on a record whose conflict the stale reading cleared.
- */
-export function staleRefreshRecord(previous: BaseRefresh | null | undefined, refresh: BaseRefresh): BaseRefresh {
-  const kept = previous?.head === refresh.from.sha ? previous : null;
-  const record: BaseRefresh = { ...(kept ?? {}), ...refresh, merge: kept?.merge ?? null, carry: kept?.carry ?? null, ...(kept?.restoredApproval ? { restoredApproval: kept.restoredApproval } : {}) };
-  if (!record.conflict) { delete record.conflictSince; delete record.conflictPaths; }
-  return record;
 }
 /**
  * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
@@ -571,7 +551,7 @@ export function historicalAuthorizationRefusals(past: Work, _all: Work[], observ
   // it (GY-94): the unauthorized-merge violation it exists to clear, and a refusal of an earlier
   // decision.
   const circular = (violation: string) => options.reconciling && (violation === unauthorizedMergeViolation || violation.startsWith(reconciliationRefusalPrefix));
-  const githubAnswers = (reason: string) => reason === mergeabilityComputingRefusal || reason === 'Pull request is not mergeable against the current base';
+  const githubAnswers = (reason: string) => reason === 'Pull request is not mergeable against the current base';
   for (const gate of past.gates) {
     const reasons = gate.name === 'merge' ? gate.reasons.filter(reason => !githubAnswers(reason)) : gate.reasons;
     if (!gate.passed && reasons.length) refusals.push(`gate ${gate.name} had not passed: ${reasons.join('; ')}`);
@@ -973,27 +953,6 @@ export class Engine {
   reviewerApps: ReviewerApp[] = [];
   controlPlaneAppId?: number;
   /**
-   * GY-1849: reads the pull request an adoption names, outside any coordination transaction. Left
-   * undefined, none is read, and
-   * every adoption is refused as unverifiable, since a binding without its live head binds nothing.
-   */
-  adoptionObserver: ((pr: number) => Promise<AdoptedPull>) | null | undefined = undefined;
-  /** The reader `adoptionObserver` stands for while undefined: none, since Graphyard reads no GitHub API. */
-  private async adoptionReader(): Promise<((pr: number) => Promise<AdoptedPull>) | null> {
-    if (this.adoptionObserver !== undefined) return this.adoptionObserver;
-    this.adoptionObserver = null;
-    return this.adoptionObserver;
-  }
-  /**
-   * GY-1849: the live read an `adopt` is judged against. A replayed key answers from its receipt,
-   * so it must not depend on the provider again; a read that fails leaves null, and the transaction
-   * refuses the adoption as unverifiable rather than binding an unverified head.
-   */
-  private async observeAdoptionTarget(actorId: string, data: { pr: number }, key: string): Promise<AdoptedPull | null> {
-    if ((await this.store.pool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actorId, key])).rowCount) return null;
-    const read = await this.adoptionReader();
-    if (!read) return null;
-    try { return await read(data.pr); } catch { return null; }
   }
   /**
    * Observes the pull request a worker submits before the submission is recorded, so a candidate
@@ -1009,10 +968,6 @@ export class Engine {
    */
   gitRunner: GitRunner | null | undefined = undefined;
   /**
-   * Reads a retained pull request's live reviews (GY-1978). Left undefined, the deployment's GitHub
-   * App (from the environment) reads them; null means none is read and recorded reviews are kept.
-   */
-  pullReviewReader: ((pr: number) => Promise<Pick<Observation, 'reviews' | 'reviewIds' | 'dismissedReviewIds'>>) | null | undefined = undefined;
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
   /**
@@ -1037,83 +992,8 @@ export class Engine {
   private conflictTransitions = new WeakMap<Work, ReviewConflictTransition[]>();
   /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
   documentation: DocumentationPolicy = configuredDocumentation();
-  /**
-   * How many times a required check that failed on a candidate sha is rerun before the failure
-   * counts (GY-516): `mergeQueue.rerunFailedChecks` as the master publishes it, else the product
-   * default (src/master/profiles.ts); 0 disables.
-   */
-  rerunFailedChecks = defaultRerunFailedChecks;
-  /** `mergeQueue.rerunFailedChecks` as the master last published it (POST /api/merge-queue), read back from the installation ledger, else the default. */
-  async loadRerunFailedChecks() {
-    const row = (await this.store.pool.query('SELECT (payload->>\'rerunFailedChecks\')::int AS reruns FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [rerunFailedChecksEvent])).rows[0];
-    this.rerunFailedChecks = Number.isSafeInteger(row?.reruns) && row.reruns >= 0 && row.reruns <= maxRerunFailedChecks ? row.reruns : defaultRerunFailedChecks;
-    return this.rerunFailedChecks;
-  }
-  /**
-   * Records the outcome of asking GitHub to rerun an owed check (GY-516), made by the integration
-   * job outside any transaction: `requested` holds the failure until the rerun concludes,
-   * `refused` lets it stand, and the item is re-evaluated at once either way. `waiting` (GY-1329)
-   * keeps the rerun owed while its workflow run is unfinished; an unchanged wait adds no ledger entry.
-   */
-  async recordCheckRerun(id: string, jobToken: string, owed: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome: OwedRerunOutcome) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      demand(work, 'Work item not found', 404);
-      const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === owed.sha && entry.check === owed.check && entry.failedRunId === owed.failedRunId);
-      if (index < 0 || work.checkReruns![index].state !== 'owed') return work;
-      const current = work.checkReruns![index], rerun = owedRerunAfter(current, outcome, now.toISOString());
-      work.checkReruns = work.checkReruns!.map((entry, at) => at === index ? rerun : entry).slice(-checkRerunLimit);
-      if (outcome.state === 'waiting' && current.waiting?.status === outcome.status) { await rewriteDocument(db, work); return work; }
-      this.evaluate(work, all, now);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'github', `check.rerun.${outcome.state}`, now, rerun);
-      return work;
-    });
-  }
-  /**
-   * Records what GitHub said of an accepted rerun's workflow run once no new check run appeared
-   * within the visibility bound (GY-1096), read by the integration job outside any transaction:
-   * `waiting` (queued or running) keeps holding the failure and names the runner-queue wait,
-   * `failed` is the rerun concluding failing, `rerequested` is the one further request made for a
-   * rerun not found at all, and `refused` or `expired` let the failure stand. `recancelled` is a
-   * rerun asked again after GitHub cancelled its attempt (GY-1109), spending the cancelled allowance
-   * named in `detail`; it is written like every other outcome, under the item's lock and over the
-   * revision it read, so a heartbeat that committed meanwhile is never overwritten (GY-1124).
-   */
-  async recordCheckRerunProbe(id: string, jobToken: string, rerun: Pick<CheckRerun, 'sha' | 'check' | 'failedRunId'>, outcome:
-    { kind: 'waiting'; status: string } | { kind: 'failed'; conclusion: string } | { kind: 'rerequested'; runId: number; attempt?: number } | { kind: 'recancelled'; runId: number; attempt?: number; detail: string } | { kind: 'refused' | 'expired'; detail: string }) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      demand(work, 'Work item not found', 404);
-      const index = (work.checkReruns ?? []).findIndex(entry => entry.sha === rerun.sha && entry.check === rerun.check && entry.failedRunId === rerun.failedRunId);
-      if (index < 0 || work.checkReruns![index].state !== 'requested') return work;
-      const at = now.toISOString(), current = work.checkReruns![index];
-      const next: CheckRerun = outcome.kind === 'waiting' ? { ...current, probedAt: at, waiting: current.waiting?.status === outcome.status ? current.waiting : { status: outcome.status, at } }
-        : outcome.kind === 'failed' ? { ...current, state: 'failed', probedAt: at, detail: `its workflow run concluded ${outcome.conclusion}`, resolvedAt: at }
-        : outcome.kind === 'rerequested' ? { ...current, runId: outcome.runId, ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), probedAt: at, rerequestedAt: at, waiting: undefined }
-        : outcome.kind === 'recancelled' ? { ...current, runId: outcome.runId, ...(outcome.attempt !== undefined ? { attempt: outcome.attempt } : {}), detail: outcome.detail, probedAt: at, waiting: undefined }
-        : { ...current, state: outcome.kind, probedAt: at, detail: outcome.detail, resolvedAt: at };
-      work.checkReruns = work.checkReruns!.map((entry, position) => position === index ? next : entry).slice(-checkRerunLimit);
-      // A wait whose status is unchanged is not a new fact: it refreshes the probe without a ledger entry.
-      // Written in place under the item's lock, so a concurrent renewal of the item is never lost (GY-1124).
-      if (outcome.kind === 'waiting' && current.waiting?.status === outcome.status) {
-        await rewriteDocument(db, work);
-        return work;
-      }
-      this.evaluate(work, all, now);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'github', `check.rerun.${outcome.kind === 'recancelled' ? 'requested' : outcome.kind}`, now, next);
-      return work;
-    }, { itemLock: id });
-  }
   // The launch fence is a deployment-independent safety default; only tests shorten it.
-  constructor(public store: Store, public ciAppIds: number[] = [15368], public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
+  constructor(public store: Store, public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
   /** The commit this process first recorded itself serving (recordPlaneLiveness); undefined until its first tick named one (GY-2177). */
   private servedCommit: string | null | undefined;
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
@@ -1169,21 +1049,6 @@ export class Engine {
     const recorded = work.observation?.reviews ?? [];
     observation.reviews = [...recorded];
     observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
-    // A pull request submitted before the cutover (no change number allocated for it) keeps its
-    // GitHub review path: its live reviews replace the recorded GitHub ones, so an approval posted
-    // after submission passes the review gate; control-plane verdicts are kept beside them.
-    const pr = work.submission?.pr;
-    if (pr && !(await this.store.pool.query('SELECT 1 FROM change_numbers WHERE work_id=$1 AND number=$2', [work.id, pr])).rowCount) {
-      if (this.pullReviewReader === undefined) this.pullReviewReader = null;
-      // An unreadable pull request keeps what was recorded: the head is still observed and handed on.
-      const live = this.pullReviewReader ? await this.pullReviewReader(pr).catch(() => null) : null;
-      if (live) {
-        const kept = recorded.filter(r => r.source === 'control-plane');
-        observation.reviews = [...kept, ...(live.reviews ?? [])];
-        observation.reviewIds = [...kept.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0), ...(live.reviewIds ?? [])];
-        observation.dismissedReviewIds = live.dismissedReviewIds;
-      }
-    }
     if (work.candidate.pr) observation.candidate.pr = work.candidate.pr;
     return observation;
   }
@@ -1256,7 +1121,7 @@ export class Engine {
    * a programming error included, is refused without a grace, so bugs surface instead of
    * extending the lease they broke (GY-671).
    */
-  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
+  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; attestation?: EvidenceAttestation } = {}) {
     if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
     const started = new Date();
     this.renewing++;
@@ -1375,7 +1240,7 @@ export class Engine {
     lease.expiresAt = new Date(Math.max(expires, Date.parse(stall.to) + stallRenewalWindowMs)).toISOString();
     return true;
   }
-  private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; ciRun?: CiRunObservation | null; attestation?: EvidenceAttestation } = {}) {
+  private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; attestation?: EvidenceAttestation } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
@@ -1407,9 +1272,6 @@ export class Engine {
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
-    // GY-1849: an adoption judges the pull request's live head, read outside the coordination
-    // transaction exactly as a submission's observation is; the transaction refuses without it.
-    const adoption = command === 'adopt' ? await this.observeAdoptionTarget(actor.id, data, key) : null;
     // GY-1735: a command that may derive a legacy follow-up's window reads the report's projection first; a claim reads the item on its lease pool.
     const projections = command === 'create' ? await this.followUpProjections(data) : command === 'ready' || command === 'unblock' || command === 'claim'
       ? await this.followUpProjections((await (command === 'claim' ? this.store.leasePool : this.store.pool).query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document) : {};
@@ -1474,7 +1336,7 @@ export class Engine {
         }
         const created = now.toISOString();
         const { reason: _reason, ...intent } = data;
-        work = { ...intent, criteria, createdBy: actor.id, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
+        work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
         // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
         work!.proofGaps = await unauthorizedProofs(db, this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])], data.producerProofs);
@@ -1536,45 +1398,6 @@ export class Engine {
         // every superseded exhaustion record for this candidate.
         work.reviewFailovers = (work.reviewFailovers ?? []).filter(failover => failover.sha !== work.candidate?.sha
           || failover.baseSha !== work.candidate?.baseSha || failover.policyRevision !== work.policyRevision);
-      }
-      if (command === 'adopt') {
-        // The master's own non-weakening intent — an adoption rewrites no criterion: the operator-agent
-        // capability was checked with every other command; a hand master needs the coordinator.
-        if (actor.role !== 'operator-agent') demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        // One pull request per item: an item already past adoption or submission takes no other.
-        demand(!work.submission, `${work.key} already links pull request #${work.submission?.pr}; adoption binds an item with no pull request`, 409);
-        demand(!work.prAdoption || work.prAdoption.pr === data.pr, `${work.key} already adopted pull request #${work.prAdoption?.pr}; one binding stands per item`, 409);
-        // The binding names this repository, so the number and head mean one pull request.
-        demand(!!this.repository, 'The control plane has no repository configured; adoption binds a pull request of one repository', 503);
-        // The live read ran outside this transaction; without it the head cannot be verified, so nothing binds.
-        demand(adoption, `Pull request #${data.pr} could not be read from ${this.repository}; adoption binds a live head and is refused unreadable`, 503);
-        demand(adoption!.state === 'open', closedPullRefusal(data.pr), 409);
-        // A draft's author is still reshaping it: the adoption waits for it to be marked ready.
-        demand(adoption!.draft === false, draftPullRefusal(data.pr), 409);
-        // A fork's head is outside the managed origin and a foreign base never lands on the managed
-        // branch: either could never be worked or completed, so both are refused at adoption, the
-        // same-repository and managed-base invariants the observation path holds.
-        demand((adoption!.headRepository ?? '').toLowerCase() === this.repository!.toLowerCase() && (adoption!.baseRepository ?? '').toLowerCase() === this.repository!.toLowerCase(),
-          forkedPullRefusal(data.pr, adoption!.headRepository, adoption!.baseRepository, this.repository!), 409);
-        demand(adoption!.baseRef === this.baseBranch, foreignBaseRefusal(data.pr, adoption!.baseRef, this.baseBranch), 409);
-        // The branch is the one every attempt will reserve, so it must be a name git accepts.
-        demand(gitBranchName(adoption!.branch), `Pull request #${data.pr}'s branch ${JSON.stringify(adoption!.branch)} is not a branch name git accepts; adoption binds a branch an attempt can check out`, 409);
-        // The moved-head refusal names the head the provider reports now.
-        demand(adoption!.head === data.head, movedHeadRefusal(data.pr, adoption!, data.head), 409);
-        // A second owner is refused naming the holder: another item's binding or submission, or its hold on the branch.
-        const holder = adoptionHolderRefusal(all, work, data.pr, adoption!.branch);
-        demand(!holder, holder!, 409);
-        // Repeating the same adoption is the no-op: the one binding stands, nothing else is recorded.
-        if (work.prAdoption && sameAdoption(work.prAdoption, data, this.repository)) return work;
-        // A first adoption never races work in flight: an attempt with a live lease is working the
-        // item now, so the master adopts once it ends. A rebind of the adopted pull request may
-        // pass a live attempt — the moved-head refusal at complete is what sent the master here,
-        // and complete re-checks the observed head and branch against the binding it names.
-        if (!work.prAdoption) {
-          const live = attemptLiveRefusal(work, now);
-          demand(!live, live!, 409);
-        }
-        work.prAdoption = prAdoptionOf(data, adoption!, this.repository, actor.id, now, work.prAdoption);
       }
       if (command === 'reviewpolicy') {
         if (actor.role !== 'operator-agent') admin(actor);
@@ -2007,19 +1830,10 @@ export class Engine {
         }
       }
       if (command === 'workspace') {
-        // GY-1849: a branch outside Graphyard's own namespace is only the adopted pull request's own
-        // branch, and only the adopting item's attempt works there; every other reservation stays inside the namespace.
-        demand(validBranch(data.branch) || !!work.prAdoption && data.branch === work.prAdoption.branch,
-          `Only a Graphyard branch${work.prAdoption ? `, or the adopted pull request's own branch ${work.prAdoption.branch},` : ''} can be reserved`);
+        demand(validBranch(data.branch), 'Only a Graphyard branch can be reserved');
         demand(!work.workspaces.some(w => w.epoch === data.epoch), 'This assignment already has a workspace');
-        // GY-1849: the adopted branch is shared by every attempt on the adopted item, so only an open attempt's record of it holds.
-        const adoptedBranch = !!work.prAdoption && data.branch === work.prAdoption.branch;
-        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && !adoptedBranch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
-        if (adoptedBranch) { const holder = adoptedBranchHeld(all, data.branch); demand(!holder, `${holder?.key} holds ${data.branch} in an open attempt; the adopted branch is reserved by one attempt at a time`, 409); }
+        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
         if (work.submission) demand(data.branch === work.workspaces.find(w => w.epoch === work!.submission!.epoch)?.branch, 'Rework must use the already linked PR branch in a fresh workspace');
-        // GY-1849: an attempt on an adopted item is assigned the adopted pull request's own branch —
-        // it works there from the pull request's existing commits, and no fresh branch is reserved beside it.
-        else if (work.prAdoption) demand(data.branch === work.prAdoption.branch, `${work.key} adopted pull request #${work.prAdoption.pr}; its attempt works on the adopted branch ${work.prAdoption.branch}, not ${data.branch}`, 409);
         const { preserved, ...workspace } = data;
         work.workspaces.push({ ...workspace, owner: actor.id });
         // The preserved-attempt record (GY-860): what the released holder of this branch carried —
@@ -2037,8 +1851,6 @@ export class Engine {
         // hands it to the merge writer.
         let observed = observation, number: number;
         if (data.head !== undefined) {
-          // GY-2010: a stored adoption (GY-1849) binds nothing here. Graphyard observes no pull request,
-          // so an adopted item's replacement head completes as a change of its own, like a rework's.
           demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane; complete ${work.key} ${data.epoch} --head again`, 409);
           // One change number per (item, head), allocated under the item lock this transaction holds:
           // the candidate, the submission and the number commit together, and a retried or repeated
@@ -2049,18 +1861,9 @@ export class Engine {
           number = data.pr;
           demand(!all.some(w => w.id !== work!.id && w.submission?.pr === number), 'Pull request is already linked to another task');
           demand(!work.submission || work.submission.pr === number, 'A submitted task cannot switch pull requests');
-          // GY-1849: an adopted item completes only on its adopted pull request, so no replacement PR is created.
-          demand(!work.prAdoption || work.prAdoption.pr === number, `${work.key} adopted pull request #${work.prAdoption?.pr}; complete accepts only that pull request`);
         }
-        // GY-1849: the adopted head is verified against a live observation or not at all, so an
-        // unobserved completion of an adopted item is refused rather than recorded unchecked.
-        demand(data.head !== undefined || !work.prAdoption || observed, `${work.key} adopted pull request #${work.prAdoption?.pr}, whose live head could not be observed; complete is refused until it can be verified against the adopted head`, 503);
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
-          // GY-1849: the binding is exact-head, so the head observed now is compared to the adopted
-          // one; a moved head is refused naming both shas, and the master re-adopts at the live head.
-          if (data.head === undefined && work.prAdoption && observed!.candidate.sha !== work.prAdoption.head)
-            demand(false, `${work.key} adopted pull request #${work.prAdoption.pr} at head ${work.prAdoption.head.slice(0, 12)}, but its live head is ${observed!.candidate.sha.slice(0, 12)}; adopt naming the live head, then complete again`, 409);
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
           // GY-1528: a control-plane observation is refused nothing on plannedFiles (regressionRefusals answers none for it).
           const regressions = regressionRefusals(work, observed, all);
@@ -2111,25 +1914,8 @@ export class Engine {
         // that could mint trust must be independent of the implementation and the lead.
         const dependent = actor.role === 'worker' ? null : producerIndependenceRefusal(actor, work, this.principals);
         demand(!dependent, dependent ?? 'Evidence producer is not independent', 403);
-        // Trust is decided by the live grant set, never by the deployment environment. The CI
-        // producer's authority is additionally clipped to the automatable families: a grant it
-        // holds outside them is inert, so manual proofs and deploy smoke never arrive from CI.
-        const ciProducer = isCiProducer(actor);
-        const trusted = await authorizedForProof(db, actor, data.proof) && (!ciProducer || ciFamilyAllows(data.proof));
-        let ciRun: Evidence['ciRun'] | undefined;
-        if (ciProducer || data.ciRun) {
-          // The CI lane refuses instead of storing an untrusted record: every refusal here is a
-          // configuration or provenance fault the operator must see, not an assertion to keep.
-          demand(ciProducer, 'A CI run binding is accepted only from the CI producer principal', 403);
-          demand(data.ciRun, 'CI producer evidence must name the workflow job that produced it', 400);
-          demand(ciFamilyAllows(data.proof), `CI evidence is accepted only for ${ciProofFamilies.map(family => `${family}:*`).join(' and ')} proofs; ${data.proof} needs a producer session`, 403);
-          demand(trusted, `The CI producer ${actor.id} is not granted ${data.proof}`, 403);
-          const refusal = ciRunRefusal(data.ciRun, context.ciRun, data, this.repository, this.ciAppIds);
-          demand(!refusal, refusal ?? 'CI run binding refused', context.ciRun ? 403 : 503);
-          const stale = staleCiAttemptRefusal(work.evidence, data);
-          demand(!stale, stale ?? 'Stale CI attempt');
-          ciRun = { ...data.ciRun, headSha: context.ciRun!.headSha, job: context.ciRun!.name, conclusion: context.ciRun!.conclusion!, verifiedAt: context.ciRun!.observedAt };
-        }
+        // Trust is decided by the live grant set, never by the deployment environment.
+        const trusted = await authorizedForProof(db, actor, data.proof);
         if (data.proof === deploySmokeProof) {
           // Post-deployment proof is a trust boundary with no untrusted tier: it is accepted only
           // from a producer granted the proof, only once Graphyard has observed the deployment,
@@ -2147,7 +1933,7 @@ export class Engine {
         const unexercised = trusted && data.proof !== deploySmokeProof ? exerciseRefusal(work, all, data) : null;
         // An approved attest decision names itself on the record it applies (GY-615), which is what
         // lets a Graphyard-authored refresh of the same patch carry it; see model/carry.ts.
-        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(ciRun ? { ciRun } : {}), ...(unexercised ? { unexercised } : {}), ...(context.attestation ? { attestation: context.attestation } : {}) };
+        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(unexercised ? { unexercised } : {}), ...(context.attestation ? { attestation: context.attestation } : {}) };
         if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'evidence.exercise.refused',
           JSON.stringify({ details: { proof: data.proof, criteria: attachedCriteria(work, all, data.proof), behaviour: data.exercise?.behaviour ?? null, sha: data.sha, reason: unexercised } })]);
         work.evidence.push(evidence);
@@ -2157,7 +1943,6 @@ export class Engine {
         if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
       if (command === 'revoke') {
-        refuseCiProducer(actor, 'revocation');
         // Producer authority is the same live grant set that decides trust at submission.
         demand(actor.role === 'admin' || actor.role === 'producer' && await authorizedForProof(db, actor, data.proof),
           'Evidence revocation requires an operator or the trusted producer authorized for this proof', 403);
@@ -2696,40 +2481,6 @@ export class Engine {
     const iso = (value: Date | null) => value ? new Date(value).toISOString() : null;
     return { availableAt: iso(row.available_at), lockedUntil: iso(row.locked_until), attempts: Number(row.attempts), error: row.error ?? null, heldUntil: iso(row.held_until), heldReason: row.held_reason ?? null };
   }
-  /** The latest merge request the coordinator recorded for the item, or null (GY-258). */
-  async enqueueRequest(id: string, db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> } = this.store.pool): Promise<MergeEnqueueRequest | null> {
-    return (await db.query("SELECT payload->'details' AS request FROM events WHERE work_id=$1 AND kind='merge.enqueue.requested' ORDER BY seq DESC LIMIT 1", [id])).rows[0]?.request ?? null;
-  }
-  /**
-   * What GitHub's queue holds for the item, written onto its observation when it changed, and every
-   * enqueue and dequeue the control plane performed appended to the ledger with its reason.
-   */
-  async recordGitHubQueue(id: string, state: GitHubMergeQueueState, action: MergeQueueAction): Promise<Work> {
-    return this.store.transaction(async (db, now) => {
-      const work: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [id])).rows[0]?.document;
-      demand(work, 'Work item not found', 404);
-      if (action.kind !== 'hold') await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'github', action.kind === 'enqueue' ? 'merge.enqueued' : 'merge.dequeued',
-        JSON.stringify({ details: { reason: action.reason, pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, head: state.head, queue: state.queue, mode: state.mode, at: now.toISOString() } })]);
-      // A refused enqueue or dequeue is a hold for the queue, never silent (all merges stalled when
-      // GitHub refused auto-merge on clean pull requests): one `merge.enqueue.refused` per reason and
-      // head, however many observations repeat it, and the latest kept on the observation for master status.
-      let refused: GitHubMergeQueueState['refused'] = null;
-      if (action.kind === 'hold' && action.reason.startsWith('GitHub refused to')) {
-        const seen = (await db.query("SELECT created_at FROM events WHERE work_id=$1 AND kind='merge.enqueue.refused' AND payload->'details'->>'reason'=$2 AND payload->'details'->>'head'=$3 ORDER BY seq DESC LIMIT 1", [work.id, action.reason, state.head])).rows[0];
-        const at = seen ? new Date(seen.created_at).toISOString() : now.toISOString();
-        if (!seen) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'github', 'merge.enqueue.refused',
-          JSON.stringify({ details: { reason: action.reason, head: state.head, mode: state.mode, pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, queue: state.queue, mergeStateStatus: state.mergeStateStatus ?? null, at } })]);
-        refused = { reason: action.reason, head: state.head, mode: state.mode, at };
-      }
-      // What the queue holds once the action took effect: GitHub answered the mutation, not a re-read.
-      const recorded: GitHubMergeQueueState = { ...state, mode: action.kind === 'enqueue' ? state.queue ? 'queued' : 'auto-merge' : action.kind === 'dequeue' ? 'none' : state.mode, refused };
-      const comparable = (value: GitHubMergeQueueState | null | undefined) => value ? JSON.stringify({ ...value, at: null }) : null;
-      if (!work.observation || work.observation.merged || comparable(work.observation.githubQueue) === comparable(recorded)) return work;
-      work.observation.githubQueue = recorded;
-      await save(db, work, 'github', 'github.queue', now, { mode: recorded.mode, entryState: recorded.entryState, position: recorded.position });
-      return work;
-    });
-  }
   async bindReviewRequest(id: string, expectedRevision: number, request: ReviewRequest, jobToken: string) {
     return this.store.transaction(async (db, now) => {
       const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
@@ -2753,107 +2504,6 @@ export class Engine {
     });
   }
   /**
-   * Records what the control plane did about a base branch that moved under an in-flight
-   * candidate: the head it republished on the new base, or the conflict that stopped it. The
-   * carry is decided here, once, from the record as it stands and GitHub's account of the merge
-   * (model/carry.ts), so a clean advance costs no rework round and a conflicting one carries nothing. The worker asserts none of it and never pushes for it.
-   */
-  async bindBaseRefresh(id: string, expectedRevision: number, refresh: BaseRefresh, jobToken: string) {
-    return this.store.transaction(async (db, now) => {
-      const job = (await db.query('SELECT 1 FROM jobs WHERE work_id=$1 AND token=$2 AND locked_until>$3', [id, jobToken, now])).rows[0];
-      requireCurrent(job, 'Integration job lease expired or superseded');
-      const all = await lockedWork(db, [id]);
-      const work = all.find(w => w.id === id);
-      requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed while the base was refreshed');
-      requireCurrent(refresh.policyRevision === work.policyRevision
-        && work.candidate?.sha === refresh.from.sha && work.candidate.baseSha === refresh.from.baseSha, 'Candidate or policy changed while the base was refreshed');
-      if (refresh.stale) {
-        // GitHub's conflict reading was stale (GY-375): the test merge was clean and nothing was
-        // written. The reading replaces the refresh record for this head, keeping what it carried
-        // onto the head, and the stored observation has its conflict disproved.
-        work.baseRefresh = staleRefreshRecord(work.baseRefresh, refresh);
-        const disproved = work.observation?.conflicting ? disprovedConflict(work, work.observation) : null;
-        if (disproved) { work.observation = withDisprovedConflict(work.observation!, disproved); observeBaseHold(work, now.toISOString()); }
-        this.evaluate(work, all, now);
-        await this.recordDispatch(db, work, now);
-        await save(db, work, 'graphyard', 'base.stale-mergeability', now, { head: refresh.from.sha, base: refresh.base, reading: refresh.stale.reading });
-        await wakeJob(db, work.id);
-        return work;
-      }
-      // A docs-sync head (GY-566) resolved a conflict, which the refresh rule never carries across;
-      // its own rule keeps the approval when the diff outside docs/ is unchanged.
-      const carry = refresh.docsSync && refresh.head ? docsSyncCarry({ from: refresh.from, base: refresh.base, at: now.toISOString(), policyRevision: work.policyRevision, merge: refresh.merge ?? null, docsSync: refresh.docsSync,
-        reviewedFiles: work.observation?.candidate.sha === refresh.from.sha ? work.observation.files : [], approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })) })
-        : refresh.head && refresh.head !== refresh.from.sha ? this.decideBaseRefreshCarry(work, all, refresh, now) : null;
-      // A conflict re-recorded on a moved base keeps when it was first found on this head (GY-1200).
-      work.baseRefresh = { ...refresh, carry, ...(refresh.conflict ? { conflictSince: conflictSince(work.baseRefresh, refresh) } : {}) };
-      // A requested refresh (GY-528) is answered by the refresh of the head it named, merged or conflicting.
-      if (work.baseRefreshRequest?.head === refresh.from.sha) work.baseRefreshRequest = null;
-      this.evaluate(work, all, now);
-      if (carry) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'base.carry', JSON.stringify({ details: { ...carry, merge: refresh.merge ?? null } })]);
-      await this.recordDispatch(db, work, now);
-      await save(db, work, 'graphyard', refresh.conflict ? 'base.conflict' : 'base.refreshed', now, { from: refresh.from, base: refresh.base, head: refresh.head, trigger: refresh.trigger ?? null,
-        ...(refresh.conflict ? { conflict: refresh.conflict, conflictPaths: refresh.conflictPaths ?? null } : {}),
-        ...(refresh.docsSync ? { docsSync: { paths: refresh.docsSync.paths, reviewed: refresh.docsSync.reviewed, synced: refresh.docsSync.synced } } : {}),
-        ...(carry ? { carry: { approval: carry.approval.carried ? 'carried' : 'required', evidence: Object.fromEntries(carry.evidence.map(entry => [entry.proof, entry.carried ? 'carried' : 'required'])) } } : {}) });
-      await wakeJob(db, work.id);
-      return work;
-    });
-  }
-  /** The carry decision for a head Graphyard republished on a moved base; see model/carry.ts for the rule. */
-  private decideBaseRefreshCarry(work: Work, all: Work[], refresh: BaseRefresh, now: Date) {
-    const candidate = work.candidate!, observation = work.observation;
-    const observed = !!observation && observation.candidate.sha === candidate.sha && observation.candidate.baseSha === candidate.baseSha;
-    // The base branch is validated by definition: every commit on it already landed through the
-    // gates, so the predecessor of a base refresh is the branch itself and nothing else.
-    return decideCarry({
-      from: refresh.from, to: { sha: refresh.head!, baseSha: refresh.base }, policyRevision: work.policyRevision, at: now.toISOString(),
-      merge: refresh.merge, predecessor: { key: null, validated: true }, reviewedFiles: observed ? observation!.files : [],
-      approval: bindingApproval(work), proofs: requiredProofs(work, all).map(proof => ({ proof, evidence: currentEvidence(work, proof, now) })),
-      app: this.controlPlaneAppId ? `control-plane (App ${this.controlPlaneAppId})` : 'control-plane',
-    });
-  }
-  /**
-   * Restores an approval GitHub dismissed for a merge-base change of the unchanged head as the
-   * binding one (GY-127, see `dismissedApproval`). The reviewed content is exactly what the
-   * reviewer approved, so no review round and no reviewer attempt is spent on it. Decided before
-   * the gates are evaluated, so no review request is ever opened for it.
-   */
-  private restoreDismissedApproval(work: Work, now: Date): RestoredApproval | null {
-    if (exactApproval(work) || carriedApproval(work)) return null;
-    const dismissed = dismissedApproval(work);
-    if (!dismissed) return null;
-    // A carried approval the guarded merge could not re-post (GY-831) is not restored from the
-    // same dismissed review: the refusal re-required the review, and only a new approval answers it.
-    const standing = currentCarry(work)?.approval, refusal = work.mergeRefusal;
-    const refused = standing && !standing.carried && standing.refused ? standing.refused : refusal?.sha === work.candidate?.sha ? refusal?.approval : undefined;
-    if (refused && refused.reviewer.toLowerCase() === dismissed.reviewer.toLowerCase() && refused.reviewId === dismissed.reviewId) return null;
-    const candidate = work.candidate!, observation = work.observation!, at = now.toISOString();
-    const short = candidate.sha.slice(0, 12);
-    const review = dismissed.reviewId !== undefined ? ` (review ${dismissed.reviewId})` : '';
-    const approval: CarriedApproval = { provider: 'github', reviewer: dismissed.reviewer, sha: candidate.sha, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), carried: true, originalSha: candidate.sha,
-      reason: `approval of ${short} by ${dismissed.reviewer}${review} restored: GitHub dismissed it with "${dismissed.dismissal.reason}" while the head was unchanged, so the reviewed content is exactly what was approved` };
-    const restored: RestoredApproval = { reviewer: dismissed.reviewer, ...(dismissed.reviewId !== undefined ? { reviewId: dismissed.reviewId } : {}), sha: candidate.sha, dismissal: dismissed.dismissal, at };
-    const same = { sha: candidate.sha, baseSha: candidate.baseSha };
-    const carry = (existing: BaseRefresh['carry'] | undefined) => existing && existing.to.sha === candidate.sha && existing.to.baseSha === candidate.baseSha && existing.policyRevision === work.policyRevision
-      ? { ...existing, approval }
-      : { from: same, to: same, policyRevision: work.policyRevision, at, predecessor: 'base branch', changedFiles: [], reviewedFiles: observation.files, approval, evidence: [] };
-    if (work.baseRefresh && work.baseRefresh.head === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
-      work.baseRefresh.carry = carry(work.baseRefresh.carry); work.baseRefresh.restoredApproval = restored;
-    } else if (work.baseRefresh && work.baseRefresh.head === null && work.baseRefresh.from.sha === candidate.sha && work.baseRefresh.policyRevision === work.policyRevision) {
-      // A record of this very head that republished nothing — a refresh whose merge conflicted —
-      // is left as it says, and nothing is restored: such a head is replaced before it could land
-      // (the worker resolves the conflict), and replacing the record would drop the conflict the
-      // worker owes and have the refresh retried for a conflict already recorded. No review is
-      // asked for it meanwhile: the head does not contain the base tip.
-      return null;
-    } else {
-      // The head is not a refreshed head: the restored binding is recorded as a refresh of the
-      // head onto the base it is bound to, which republished nothing.
-      work.baseRefresh = { from: same, base: candidate.baseSha, baseTree: observation.baseTip === candidate.baseSha ? observation.baseTree ?? '' : '', policyRevision: work.policyRevision, at,
-        head: candidate.sha, conflict: null, merge: null, carry: carry(undefined), restoredApproval: restored };
-    }
-    return restored;
   }
   /**
    * Record provider exhaustion for the dispatched reviewer profile and release the request so
@@ -2902,7 +2552,7 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
-    const result = evaluate(work, all, now, this.ciAppIds);
+    const result = evaluate(work, all, now);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
     // Graphyard keeps no merge queue (GY-1236): a document stored before then drops its fields here.
@@ -3253,7 +2903,7 @@ export class Engine {
           if (opening) {
             // Versions first: a row that moves after them reads as moved, so the first batch reads it again.
             const listed = (await db.query(reconcileRowsSql)).rows as { id: string; number: string; version: string; settled: boolean }[];
-            config = stableJson({ ciAppIds: this.ciAppIds });
+            config = stableJson({});
             // Measured on the clock evaluation reads, so time the gates see pass is what brings the catch-up.
             // GY-1867: the interval stretches past the last full pass, so the tick after a long full
             // pass is not full again at once; a face a writer moved no longer makes it full either
@@ -3675,20 +3325,10 @@ export class Engine {
         }
       }
       const previousObservation = work.observation;
-      // GitHub's queue state is read after the observation, by the check publication; it is kept
-      // across observations of the same pull request until that read replaces it.
-      if (observation.githubQueue === undefined && previousObservation?.githubQueue && previousObservation.candidate?.pr === observation.candidate.pr) observation.githubQueue = previousObservation.githubQueue;
       // When this pull request's head was first observed (GY-1460): the worker bound reads a push from it, never a poll.
       observeHead(work, observation.candidate, observation.at);
       work.candidate = observation.candidate;
-      // A conflict the control plane's own test merge of this head onto this tip found clean is
-      // GitHub's stale reading (GY-375): it is stored disproved — the head merges cleanly, which is
-      // all GitHub's `mergeable: false` withheld from an open, non-draft pull request — so nothing
-      // refreshes, holds or reworks it for that reading again. GitHub's raw reading is kept beside
-      // it under `disproved` (GY-390), so the stored observation `graphyard status` prints still
-      // carries what GitHub reported.
-      const disproved = observation.conflicting ? disprovedConflict(work, observation) : null;
-      work.observation = disproved ? withDisprovedConflict(observation, disproved) : observation;
+      work.observation = observation;
       // When the hold on this head was first sighted (GY-1557): the actorless bound runs from it, never from a poll that reads it again.
       observeBaseHold(work, observation.at);
       // A submission recorded without an observation has no files (GY-293): the first observation
@@ -3697,18 +3337,6 @@ export class Engine {
       const recorded = work.documentation?.submission;
       if (recorded && recorded.files === null && work.submission?.pr === recorded.pr && observation.candidate.pr === recorded.pr && Array.isArray(observation.files))
         work.documentation = { ...work.documentation!, submission: recordDocumentationSubmission(work.documentation!, recorded, observation.files, recorded.statement, new Date(recorded.at)) };
-      // Snapshot all provider review identities after the revision. Approvals in this
-      // first observation never count, regardless of clock skew or future reevaluation. A baseline
-      // names one pull request: when the candidate moves to another (a reland after a revert), the
-      // first observation of the new one is captured again, or no approval there could count (GY-1425).
-      if (work.formalReviewResetRequired && reviewProviderOf(work.policy) === 'github' && work.formalReviewBaseline?.pr !== observation.candidate.pr && observation.reviewIds
-        && observation.reviewIds.every(id => Number.isSafeInteger(id) && id > 0)
-        && observation.reviews.every(r => Number.isSafeInteger(r.id) && observation.reviewIds!.includes(r.id!))) {
-        work.formalReviewBaseline = { pr: observation.candidate.pr, policyRevision: work.policyRevision, reviewIds: [...observation.reviewIds] };
-      }
-      // An approval GitHub withdrew for a merge-base change on this unchanged head binds again
-      // before the gates read the record, so no review request is opened for it (GY-127).
-      const restoredApproval = observation.merged ? null : this.restoreDismissedApproval(work, now);
       // A newer approval of the head a base refresh was built from replaces the carried binding
       // (GY-831), so the binding names a review the pull request still holds.
       const refreshed = observation.merged ? null : refreshedCarriedApproval(work);
@@ -3719,19 +3347,11 @@ export class Engine {
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.carry-refreshed',
           JSON.stringify({ details: { reviewer: refreshed.reviewer, reviewId: refreshed.reviewId, sha: refreshed.originalSha, replaced: { reviewId: replaced.reviewId ?? null, sha: replaced.originalSha }, candidate: work.candidate!.sha } })]);
       }
-      // A required check that just failed on this candidate is owed one rerun before it counts, and
-      // a rerun that concluded is resolved with its own conclusion (GY-516), before the gates read it.
-      const reruns = reconcileCheckReruns(work, this.ciAppIds, this.rerunFailedChecks, now);
-      if (reruns.transitions.length || work.checkReruns) work.checkReruns = reruns.reruns;
-      for (const transition of reruns.transitions) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', transition.kind,
-        JSON.stringify({ details: { ...transition.rerun, at: now.toISOString() } })]);
       // Protected cases (GY-1417) are judged on every observed head, not only at complete: a head pushed
       // since that changes one holds a violation, which no merge passes, until a later head or grant clears it.
       const e2e = [...(Array.isArray(observation.files) ? observation.files : []), ...(observation.scopeFiles ?? []).map(file => file.previousPath ?? '')].some(path => path.startsWith('e2e/'));
       if (!observation.merged) work.violations = [...work.violations.filter(entry => !entry.startsWith(protectedCasePrefix)), ...(e2e ? protectedCaseRefusals(work, observation, await readProtectingGoals(db)) : [])];
       this.evaluate(work, all, now);
-      if (restoredApproval) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.restored',
-        JSON.stringify({ details: { ...restoredApproval, baseSha: observation.candidate.baseSha, policyRevision: work.policyRevision } })]);
       if (observation.merged) {
         const violation = unauthorizedMergeViolation;
         if (authorizedSnapshot && observation.mergeSha) {

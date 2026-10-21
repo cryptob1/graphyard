@@ -1,6 +1,5 @@
 // Concern: base-branch breakage — telling a failure the base caused from the candidate's own, and the refresh and waking that answer it.
 import type { Observation, Work } from '../model.js';
-import { latestCheck } from '../merge-queue.js';
 
 // GY-793. A candidate whose required check failed only because the base branch was broken when it
 // ran is not the worker's to fix, and not the approver's to send back: it is the control plane's
@@ -84,6 +83,11 @@ export interface BaseBreak { head: string; builtOn: string; fixedBy: string; che
 declare module '../model/work.js' { interface Observation { baseBreak?: BaseBreak | null } }
 
 const failedConclusions = ['failure', 'timed_out', 'cancelled', 'action_required'];
+/** The newest run of a check: a cancelled run never supersedes one that was not cancelled (GY-1109); ids increase as a provider retries. */
+const latestCheck = (checks: Observation['checks']) => {
+  const decisive = checks.filter(check => check.result !== 'cancelled');
+  return (decisive.length ? decisive : checks).reduce<Observation['checks'][number] | undefined>((latest, check) => !latest ? check : check.id !== undefined && (latest.id === undefined || check.id > latest.id) ? check : latest.id !== undefined && check.id === undefined ? latest : check, undefined);
+};
 
 /** The required checks that failed on the observed head, by their latest run. */
 export function failedRequiredChecks(required: string[], checks: Observation['checks']): string[] {

@@ -95,8 +95,8 @@ test('unit:soak-worktree-prepare-cycles — over simulated days the real loop, i
         await prepareWorkerLaunch(root, item.key, profile.name, runFor(snapshot.now, profile.principal), undefined, undefined, snapshot.now);
         await new Promise<void>(resolve => holding.push(resolve));
       },
-      requestProof: () => {}, observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+ observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
+      recordDeployment: async () => {}, persist: async () => {},
     };
     const state = emptyDaemonState(config), launcher = new Launcher();
     /** Lets the oldest running launch finish and waits until the next one is prepared and holding, or nothing is left. */

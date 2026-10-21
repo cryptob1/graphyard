@@ -2,7 +2,6 @@
 import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
@@ -57,7 +56,6 @@ import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
 import type { ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
-import { mainWatchReads, type MainWatchReads } from './main-watch.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
@@ -91,7 +89,6 @@ export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => age
 export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffects, ReadingEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
-  requestProof: (work: Work) => void | Promise<void>;
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
   readThroughputOwner?: (owner: Work) => Promise<Work>;
   /** An item as the control plane holds it now, read outside any transaction (GY-2151): a containment settlement is judged on this record before it is posted, because the plane lowers the fence against its own record, not the cycle's snapshot. */
@@ -139,16 +136,12 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    * so the dashboard and flow report read releases under that same name; sent only on a change.
    */
   publishProductionEnvironment?: () => Promise<unknown>;
-  /** The main watch's reads (GY-1519, main-watch.ts): the checkout's history and the control plane's acknowledgements; absent, the watch does not run. */
-  mainWatch?: MainWatchReads | null;
   /** The control-plane merge executor's reads (GY-1524, cycle-merge-writer.ts): git in the coordinator checkout, the leased deploy-key push, the merge-record post and the recorded merger; absent, the executor does not run. */
   mergeWriter?: MergeWriterReads | null;
-  /** Publishes `mergeQueue.rerunFailedChecks` to the control plane, which reruns a failed required check by it (GY-516); sent only on a change, and read at the start of every cycle so a reconfiguration applies before the next observation. */
+  /** Publishes `mergeQueue.rerunFailedChecks` to the control plane (GY-516), which accepts and ignores it since the merge writer reruns a trial's failing files itself; sent only on a change. */
   publishMergeSettings?: () => Promise<unknown>;
   /** GY-1416: the loop's setup step, `master setup --apply` beside the cycle at most hourly; it sets derived deployment variables only where the provider adapter applies them in place. */
   selfProvision?: () => Promise<unknown>;
-  /** Asks the provider to run the trusted smoke workflow against the observed deployment. */
-  requestSmoke: (work: Work) => void | Promise<void>;
   /**
    * The producer requests the dispatcher has stopped attempting (GY-496), from its cursor: the loop
    * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
@@ -185,8 +178,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
   hostMemory?: () => Promise<HostMemoryReading | null>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
-  /** GY-2610: close one item as the coordinator (POST /api/work/ID/close), under its own idempotency key. */
-  closeWork?: (work: Work, body: { kind: 'obsolete'; reason: string }, key: string) => Promise<Work>;
   /** GY-1740: hold an unleased post-deploy follow-up on the instant its blocker names, clearing it (`window`). */ deferWindow?: (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
@@ -335,15 +326,12 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
   credentials: (profiles: WorkerProfile[]) => Promise<Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }>>;
   /**
-   * The coordination read. `jobs` are the control plane's integration jobs with their last error,
-   * which is where a paused GitHub client shows (see `githubPause`); a snapshot without them is
-   * judged on observation age alone.
+   * The coordination read. `jobs` are the control plane's integration jobs with their last error.
    */
   snapshot: () => Promise<{ work: Work[]; now: string; jobs?: { work_id?: string; error?: string | null }[] }>;
   /**
-   * The review threads, per item key, that a standing approval named as follow-up (GY-166), or that
-   * an approval of `work`'s current head was shown while the dispatcher has yet to file its
-   * follow-ups. The review loop files and resolves them, so the cycle requests no thread rework for them.
+   * Pull-request-era review threads a standing approval named as follow-up (GY-166); nothing reads
+   * them since GY-2010 (effects-production.ts still supplies the read).
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
@@ -357,7 +345,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   faultClassPolicy?: FaultClassPolicy;
   /**
    * The control plane's status, read with the coordinator's visibility, whose status-level problems
-   * (App permissions, held jobs, production, a GitHub pause) are classified and
+   * (held jobs, production) are classified and
    * tracked each cycle. A read that fails makes the cycle partial: it opens what it saw and ends nothing.
    */
   controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;

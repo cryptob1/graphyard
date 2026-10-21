@@ -96,8 +96,8 @@ test('unit:soak-worktree-disk — over simulated cycles the disk gate answers a 
         trees: { at: iso(now), limit: 2, removed: goners.map(gone => ({ path: gone.path, key: gone.key, reason: gone.detail, head: null })), kept: [], backlog: 0, held: [], errors: [] } };
     };
     const effects = {
-      agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {},
+      recordDeployment: async () => {}, persist: async () => {},
       // The plan beside the pass, as production wires it (effects-production.ts): the derived line
       // judges the same plan the registry reading does, never the pass alone.
       worktreeReclaimable: (work: Work[], at: number) => disposableWorktrees(root, config10, { work, now: at }),

@@ -748,37 +748,6 @@ export async function readLoopCode(root: string, options: {
   } catch (failure) { return failed(failure); }
 }
 
-/** A host install's layout, as far as the reading of its units reaches (install/host's HostLayout). */
-export interface HostLoopLayout { home: string; graphyard: string; checkout: string; userUnitDirectory: string }
-/**
- * GY-1859: what a host install's loop runs, read on the host through its transport.
- * There the loop starts the host's own Graphyard checkout (LAYOUT.graphyard), which install places
- * at the installer's commit (REF): the CLI whose code they must run is that checkout at REF, so a
- * host checkout left at an earlier commit, or a loop still on what it loaded before, is
- * other code exactly as on this machine. `run` executes a program on the host (cat, ls, git).
- */
-export async function readHostLoopCode(run: (program: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>, layout: HostLoopLayout, ref: string, host: string): Promise<LoopCodeReading> {
-  const absent = (stderr: string) => /No such file/i.test(stderr);
-  const files: LoopCodeFiles = {
-    read: async path => { const result = await run('cat', [path]); if (result.code === 0) return result.stdout; if (absent(result.stderr)) return null; throw new Error(`${path} on ${host} could not be read: ${result.stderr.trim() || `exit ${result.code}`}`); },
-    list: async directory => { const result = await run('ls', ['-1', directory]); if (result.code === 0) return result.stdout.split('\n').filter(Boolean); if (absent(result.stderr)) return []; throw new Error(`${directory} on ${host} could not be read: ${result.stderr.trim() || `exit ${result.code}`}`); },
-  };
-  const cli = { root: layout.graphyard, commit: ref };
-  const failed = (failure: unknown): LoopCodeReading => ({ loop: null, loopCommit: null, cli, repository: null, loopStale: null, loopReplace: null, host, error: failureText(failure) });
-  try {
-    const { installUnitsFile, parseInstallUnits, unrecordedInstallUnits, legacyLoopUnit, legacyExecutorTemplate } = await import('./install/units.js');
-    const recorded = await files.read(`${layout.checkout}/${installUnitsFile}`);
-    const legacy = recorded === null ? await Promise.all([legacyLoopUnit, legacyExecutorTemplate].map(async name => ({ path: `${layout.userUnitDirectory}/${name}`, text: await files.read(`${layout.userUnitDirectory}/${name}`) }))) : [];
-    const units = parseInstallUnits(recorded, `${layout.checkout}/${installUnitsFile} on ${host}`, () => unrecordedInstallUnits(layout.checkout, legacy, layout.home));
-    const masterText = await files.read(`${layout.checkout}/.graphyard/master.json`);
-    const master = masterText === null ? null : JSON.parse(masterText);
-    const unit = async (name: string): Promise<UnitCode | null> => { const path = `${layout.userUnitDirectory}/${name}`, text = await files.read(path); return text === null ? null : { unit: name, path, checkout: unitCodeCheckout(text, layout.home), launcher: unitLauncherCheckout(text, layout.home) }; };
-    const loop = await unit(units.master);
-    const credentialFile = typeof master?.credentialFile === 'string' ? master.credentialFile : null;
-    const cursor = loop && credentialFile ? await files.read(loopCursorPath(credentialFile)) : null;
-    return judgeLoopCode({ cli, primary: layout.checkout, repository: typeof master?.repository === 'string' ? master.repository : null, loop, cursor, host, canonical: path => path.replace(/\/+$/, '') });
-  } catch (failure) { return failed(failure); }
-}
 /**
  * GY-1859: the pins that hold this install's loop on code other than this CLI's, lifted so
  * a replacement starts this CLI. `loopUnitText` renders the known-good coordinator's launcher while

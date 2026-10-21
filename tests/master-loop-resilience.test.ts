@@ -18,8 +18,6 @@ import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger
 import { emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, tickReadTimeout, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, noteConfigReload, readDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// @ts-expect-error Dependency-free operator script.
-import { assertRosterSafe, awaitServedTokens, generatedProducer, mergeRoster, parseOptions, pendingSecretSyncs, rosterPreview, secretsDue, secretSyncRecord, secretsToSync } from '../scripts/configure-integrations.mjs';
 import { readMasterGuide } from './helpers/master-guide.js';
 // Time-bomb allowance (GY-1694): the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, already past) and the 2026-10-09 lock start is only rendered; the launcher runs on the real clock with relative mint expiries.
 
@@ -102,8 +100,7 @@ function stubDispatch(items: () => Work[], log: string[], overrides: Partial<Dis
 function daemonEffects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): DaemonEffects {
   return { agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: iso(0) }), closeSession: pane => { log.push(`close:${pane}`); }, dispatch: async item => { log.push(`dispatch:${item.key}`); },
-    requestProof: item => { log.push(`proof:${item.key}`); },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), requestSmoke: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}),
     persist: async () => {}, ...overrides };
 }
 
@@ -469,89 +466,6 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const typedCursor = expandTypedCommand(cursorCalls[1][3]);
     assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
   } finally { await cleanup(); }
-});
-
-test('integration:principal-rotation-safety — rotation merges into the live roster, previews without secrets, refuses dropping the coordinator, an admin or a live principal, and keeps GitHub secrets in step with the deployment', async () => {
-  const secret = (label: string) => `${label}-`.padEnd(64, '0');
-  const live = [
-    { id: 'operator', role: 'admin', sessionKind: 'human', token: secret('admin') },
-    { id: 'master', role: 'coordinator', token: secret('coordinator') },
-    { id: 'graphyard-claude-1', role: 'worker', token: secret('worker1') },
-    { id: 'graphyard-codex-1', role: 'worker', token: secret('worker2') },
-    { id: 'trusted-acceptance', role: 'producer', proofs: ['integration:claim-safety'], token: secret('acceptance') },
-    { id: 'ci-proofs', role: 'producer', runtime: 'github-actions', proofs: ['unit:*', 'integration:*'], token: secret('ci') },
-  ];
-  // The incident: a partial local file. Merging keeps every live principal the file does not mention.
-  const local = [{ id: 'operator', role: 'admin', sessionKind: 'human', token: secret('admin') }, { id: 'graphyard-claude-1', role: 'worker', token: secret('worker1-new') }, { id: 'graphyard-cursor-1', role: 'worker', token: secret('worker3') }];
-  const merged = mergeRoster(live, local);
-  assert.deepEqual(merged.map((entry: any) => entry.id), ['operator', 'master', 'graphyard-claude-1', 'graphyard-codex-1', 'trusted-acceptance', 'ci-proofs', 'graphyard-cursor-1']);
-  assert.equal(merged.find((entry: any) => entry.id === 'graphyard-claude-1')!.token, secret('worker1-new'), 'a local entry updates its live principal');
-  assert.doesNotThrow(() => assertRosterSafe(live, merged));
-  // What the old script deployed — the local file alone — is refused, naming every principal it drops.
-  assert.throws(() => assertRosterSafe(live, local), (error: Error) => /master \(coordinator\) is live and would be dropped; name it with --remove master/.test(error.message) && /graphyard-codex-1 \(worker\) is live and would be dropped/.test(error.message) && !error.message.includes(secret('coordinator')));
-  assert.throws(() => assertRosterSafe(live, mergeRoster(live, [], ['operator'])), /operator \(admin\) is live and would be dropped/, 'an admin leaves only when named');
-  assert.doesNotThrow(() => assertRosterSafe(live, mergeRoster(live, [], ['graphyard-codex-1']), { remove: ['graphyard-codex-1'] }), 'a live principal named with --remove may leave');
-  assert.doesNotThrow(() => assertRosterSafe(live, mergeRoster(live, [], ['master']), { remove: ['master'] }), 'even the coordinator, when named explicitly');
-  assert.throws(() => assertRosterSafe(live, mergeRoster(live, [{ id: 'master', role: 'worker', token: secret('coordinator') }])), /master would change role from coordinator to worker/);
-  assert.throws(() => assertRosterSafe(live, merged, { remove: ['nobody'] }), /nobody is not in the live roster/);
-  assert.deepEqual(parseOptions(['--apply', '--rotate', 'ci-proofs', '--remove=graphyard-codex-1', '--deploy']), { apply: true, deploy: true, rotate: ['ci-proofs'], remove: ['graphyard-codex-1'] });
-
-  // Generated producers keep their live token unless named for rotation.
-  const kept = generatedProducer(live, 'trusted-acceptance', { role: 'producer', proofs: ['integration:claim-safety'] }, [], () => secret('fresh'));
-  assert.equal(kept.token, secret('acceptance'));
-  const rotated = generatedProducer(live, 'trusted-acceptance', { role: 'producer', proofs: ['integration:claim-safety'] }, ['trusted-acceptance'], () => secret('fresh'));
-  assert.equal(rotated.token, secret('fresh'));
-  assert.equal(generatedProducer([], 'trusted-acceptance', { role: 'producer', proofs: [] }, [], () => secret('first')).token, secret('first'), 'a producer with no live token gets one');
-  const next = mergeRoster(live, [...local, rotated]);
-  // The preview names ids, roles and token changes; no token value appears in it.
-  const preview = rosterPreview(live, next);
-  assert.deepEqual(preview.map((row: any) => [row.id, row.change, row.token]), [['operator', 'kept', 'unchanged'], ['master', 'kept', 'unchanged'], ['graphyard-claude-1', 'updated', 'rotated'], ['graphyard-codex-1', 'kept', 'unchanged'], ['trusted-acceptance', 'updated', 'rotated'], ['ci-proofs', 'kept', 'unchanged'], ['graphyard-cursor-1', 'added', 'new']]);
-  assert.deepEqual(rosterPreview(live, mergeRoster(live, [], ['graphyard-codex-1'])).at(-1), { id: 'graphyard-codex-1', role: 'worker', change: 'removed', token: 'removed' });
-  const printed = JSON.stringify(preview);
-  for (const entry of [...live, ...next]) assert.equal(printed.includes(entry.token), false, `the preview never prints ${entry.id}'s token`);
-  // Only a changed producer token touches a GitHub secret, and only once the deployment serves it.
-  assert.deepEqual(secretsToSync(live, merged), [], 'an unchanged producer token leaves every secret alone');
-  assert.deepEqual(secretsToSync(live, next).map((entry: any) => [entry.id, entry.secret]), [['trusted-acceptance', 'GRAPHYARD_PRODUCER_TOKEN']]);
-  let deployedAfter = 2;
-  const fetcher = async (_url: string, init: any) => {
-    const bearer = init.headers.Authorization.slice('Bearer '.length);
-    const serving = deployedAfter-- <= 0 ? next : live;
-    const actor = serving.find((entry: any) => entry.token === bearer);
-    return new Response(JSON.stringify(actor ? { actor: { id: actor.id, role: actor.role } } : { error: 'unauthorized' }), { status: actor ? 200 : 401 });
-  };
-  const waits: number[] = [];
-  const served = await awaitServedTokens('https://graphyard.example', [{ id: 'trusted-acceptance', token: rotated.token }], { fetcher: fetcher as typeof fetch, intervalMs: 7, wait: async (ms: number) => { waits.push(ms); } });
-  assert.deepEqual(served, { served: ['trusted-acceptance'], pending: [] });
-  assert.deepEqual(waits, [7, 7], 'the secret waits until the deployment authenticates the rotated token');
-  let now = 0;
-  const never = await awaitServedTokens('https://graphyard.example', [{ id: 'trusted-acceptance', token: rotated.token }], { fetcher: (async () => new Response('{}', { status: 401 })) as typeof fetch, timeoutMs: 30, intervalMs: 10, wait: async (ms: number) => { now += ms; }, clock: () => now });
-  assert.deepEqual(never, { served: [], pending: ['trusted-acceptance'] }, 'an undeployed token is reported pending and its secret is left unchanged');
-  // Timeout, then rerun: the first run records the owed sync (by digest, never the token) before it
-  // stages. On the rerun the live roster already holds the staged token, so no token "changes" —
-  // yet the record keeps the secret due until it is set.
-  const rotation = secretsDue(live, next, []);
-  const record = secretSyncRecord(rotation);
-  assert.deepEqual(record.map((entry: any) => [entry.id, entry.secret]), [['trusted-acceptance', 'GRAPHYARD_PRODUCER_TOKEN']]);
-  assert.equal(JSON.stringify(record).includes(rotated.token), false, 'the record never holds a token');
-  const staged = next; // what `railway variable list` returns once the first run staged its roster
-  const rerunRoster = mergeRoster(staged, [...local, generatedProducer(staged, 'trusted-acceptance', { role: 'producer', proofs: ['integration:claim-safety'] }, [], () => secret('other'))]);
-  assert.deepEqual(secretsToSync(staged, rerunRoster), [], 'the staged token reads as live on the rerun');
-  assert.deepEqual(secretsDue(staged, rerunRoster, record).map((entry: any) => [entry.id, entry.secret, entry.token]), [['trusted-acceptance', 'GRAPHYARD_PRODUCER_TOKEN', rotated.token]], 'the rerun still owes the secret the staged token');
-  // Once set, the record is emptied and nothing is owed; a record whose token never reached the roster is stale.
-  assert.deepEqual(secretsDue(staged, rerunRoster, secretSyncRecord([])), []);
-  assert.deepEqual(pendingSecretSyncs(record, live), [], 'a token that was never staged owes nothing: the secret still matches the live roster');
-  // Rotating again on the rerun supersedes the owed token rather than setting both.
-  const again = mergeRoster(staged, [generatedProducer(staged, 'trusted-acceptance', { role: 'producer', proofs: ['integration:claim-safety'] }, ['trusted-acceptance'], () => secret('third'))]);
-  assert.deepEqual(secretsDue(staged, again, record).map((entry: any) => entry.token), [secret('third')]);
-  // The script wires these together: it reads the live roster, refuses before any write, and deploys before any secret.
-  const script = await readFile(new URL('../scripts/configure-integrations.mjs', import.meta.url), 'utf8');
-  const order = ['variable\', \'list\'', 'assertRosterSafe(live, roster, options)', 'rerun with --deploy', 'variable\', \'set\'', '\'redeploy\'', 'await awaitServedTokens(url', '\'secret\', \'set\''].map(fragment => script.indexOf(fragment));
-  assert.ok(order.every(index => index > 0), 'every step is present'); assert.deepEqual([...order].sort((x, y) => x - y), order, 'live read, safety check, staging, deploy, serve check, then secret');
-  assert.doesNotMatch(script, /--skip-deploys[^\n]*\n[^\n]*gh\(\['secret'/, 'no secret is set straight after a skip-deploys stage');
-  const recorded = ['secretsDue(live, roster, record)', 'await saveRecord(secrets)', 'variable\', \'set\'', '\'secret\', \'set\'', 'await saveRecord(secrets.filter'].map(fragment => script.indexOf(fragment));
-  assert.ok(recorded.every(index => index > 0)); assert.deepEqual([...recorded].sort((x, y) => x - y), recorded, 'the owed sync is recorded before staging and cleared only after its secret is set');
-  const docs = await readFile(new URL('../docs/deployment.md', import.meta.url), 'utf8');
-  for (const fragment of ['--rotate', '--remove', '--deploy', 'live roster']) assert.ok(docs.includes(fragment), `docs/deployment.md documents ${fragment}`);
 });
 
 test('unit:autonomous-session-prompts — reviewer, producer and worker sessions are told to decide and act on their own, and one that ends waiting on input is recorded as failed with the reason', async () => {

@@ -126,7 +126,7 @@ export interface MergeTrialRun extends TrialRun {
    */
   flaked?: { files: string[]; tests: string[] };
   /**
-   * GY-1834: the files still failing after the rerun that fail on the base tip (the merge's first parent) too,
+   * GY-1834: the files still failing after the rerun that fail on the base tip (the tip the merge was made on) too,
    * with the test names the base run reported and the cases that failed the rerun: the failure is the base's
    * only when every such case fails on the base too (`failureIsBase`), not merely its file.
    */
@@ -270,22 +270,8 @@ export const pushArgs = (base: string, baseTip: string, mergeSha: string) => ['p
  */
 export const staleLeaseRejection = (output: string) => /\bstale info\b/i.test(output);
 
-/**
- * Whether the base branch's first-parent history holds `sha`, exactly and unbounded (AC-5): the
- * first-parent walk from `ref` down to the first ancestor of `sha` (`git rev-list --first-parent
- * REF ^SHA`) ends right above `sha` when, and only when, `sha` is on that chain — then the oldest
- * commit listed has `sha` as its first parent, or nothing is listed because the tip is `sha`
- * itself. A commit merged in as a second parent, or unknown to the checkout, is not held.
- */
-export async function firstParentHolds(git: (args: string[]) => Promise<string>, ref: string, sha: string): Promise<boolean> {
-  const wanted = sha.toLowerCase();
-  let listed: string[];
-  try { listed = (await git(['rev-list', '--first-parent', ref, `^${wanted}`])).split('\n').map(line => line.trim().toLowerCase()).filter(Boolean); }
-  catch { return false; }
-  if (!listed.length) return (await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim().toLowerCase() === wanted;
-  try { return (await git(['rev-parse', '--verify', '--quiet', `${listed[listed.length - 1]}^1`])).trim().toLowerCase() === wanted; }
-  catch { return false; }
-}
+/** Whether the base branch's first-parent history holds `sha`, exactly and unbounded (AC-5): trial.ts's walk, which the trial merge shares. */
+export { firstParentHolds } from './trial.js';
 
 // ---- The trial on the merged tree ------------------------------------------------------------------
 
@@ -316,6 +302,8 @@ export interface MergeTrialInput extends RunTrialInput {
   proofFiles: readonly string[];
   /** GY-1834: false skips the rerun of failing files and their run on the base tip; on by default. */
   attribute?: boolean;
+  /** The tip the merge was made on, where the base run of GY-1834 runs: a fast-forwarded head's first parent is its own earlier commit, never the tip. Absent, the merge commit's first parent. */
+  baseTip?: string;
   /**
    * How to discover more of them, run in each attempt's selection phase until one answers (GY-1832),
    * so a read that fails or times out is that attempt's no-verdict, timed and retried like any host failure.
@@ -396,7 +384,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
  * that named no failing case. Every failing file is run once more on the same merge commit; a file
  * that passes there is a flake, the verdict is the rerun's, and the cases that failed only once,
  * none of them the item's proofs, are the flake the trial record carries to the flake ledger. Unless
- * a file is held or the rerun failed a proof case, files that fail again are run on the base tip, the merge commit's first parent;
+ * a file is held or the rerun failed a proof case, files that fail again are run on the base tip (`input.baseTip`, else the merge commit's first parent);
  * those that fail there too, with every case the rerun failed failing there too, are the base's (`failureIsBase`). Nothing is skipped: a file that fails
  * on the head and passes on the base stays the head's failure, and a rerun or base run that could
  * not reach a verdict attributes nothing.
@@ -434,7 +422,7 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   }
   if (!still.length || held.length || ownAgain) return result;
   let tip: string;
-  try { tip = String(await git('git', ['-C', input.root, 'rev-parse', `${input.mergeSha}^1`])).trim().toLowerCase(); }
+  try { tip = input.baseTip ?? String(await git('git', ['-C', input.root, 'rev-parse', `${input.mergeSha}^1`])).trim().toLowerCase(); }
   catch { return result; }
   if (!/^[0-9a-f]{40}$/.test(tip)) return result;
   const onBase = await retest(tip, still).catch(() => null);
@@ -466,7 +454,7 @@ function caseFiles(tap: string, files: readonly string[]): Map<string, string | 
 
 // ---- One merge, step by step against the ledger ------------------------------------------------------
 
-/** The trial merge of one head onto one tip: the merge commit and the files it changes against the tip, or the conflicting paths. */
+/** The trial merge of one head onto one tip: the commit to land (the head itself when it fast-forwards the tip, else its merge commit) and the files it changes against the tip, or the conflicting paths. */
 export type MergeOutcomeOfTrial = { mergeSha: string; files: string[] } | { conflict: string[] };
 /** Everything `mergeOne` and `reconcileIntents` touch outside the process: git in the coordinator checkout, the deploy-key push, and the coordinator's ledger. */
 export interface MergePorts {
@@ -476,10 +464,10 @@ export interface MergePorts {
   now(): number;
   /** Fetches the base branch into the checkout (the head is already in its object store, GY-1523); answers the base tip. */
   fetch(): Promise<string>;
-  /** The trial merge of `head` onto `baseTip` in the object store (trial.ts `trialMerge`): a commit, or the conflict. */
-  merge(head: string, baseTip: string): Promise<MergeOutcomeOfTrial>;
-  /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes, with the item's proofs counted. */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'>): Promise<MergeTrialRun>;
+  /** The trial merge of `head` onto `baseTip` in the object store (trial.ts `trialMerge`): a commit, or the conflict; `item` names the merge commit's subject. */
+  merge(head: string, baseTip: string, item?: { key: string; title?: string | null }): Promise<MergeOutcomeOfTrial>;
+  /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted. */
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'>, baseTip?: string): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
    * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
@@ -547,17 +535,18 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
   if (opening) return { outcome: 'requeued', reason: opening, pushes: 0 };
   let pushes = 0, baseTip = await ports.fetch();
   for (let attempt = 0; attempt <= ports.retrials; attempt++) {
-    const merged = await ports.merge(head, baseTip);
+    const merged = await ports.merge(head, baseTip, item);
     if ('conflict' in merged) {
       const reason = trialFailureReason({ conflict: merged.conflict })!;
       await ports.record(item, { kind: 'refused', head, reason });
       return { outcome: 'refused', reason, trial: null, conflict: merged.conflict };
     }
+    // The head itself when it fast-forwards the tip (trial.ts `trialMerge`): the ledger then names the head as the merge commit.
     const { mergeSha } = merged;
     // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
     await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
     let run: MergeTrialRun;
-    try { run = await ports.trial(mergeSha, merged.files, item); }
+    try { run = await ports.trial(mergeSha, merged.files, item, baseTip); }
     catch (error) {
       // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
       const attempts = trialAttempts(error), last = attempts.at(-1)!;

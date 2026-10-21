@@ -84,8 +84,8 @@ test('unit:soak-carried-scope-ask — over three simulated days asks carried pas
 
   const effects = {
     agents: () => [], herdr: () => ({ agents: working(), available: true }), credentials: async () => ({}), snapshot: async () => { judge(); return { work: items.map(view), now: iso(now) }; },
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     decisions: async (work: Work) => ({ decisions: decisions.get(work.key) ?? [] }),
     decide: async (work: Work, action: string, _reason: string, input?: Record<string, unknown>) => {
       assert.equal(action, 'requirements', `only the routed widening is asked for, not ${action}`);

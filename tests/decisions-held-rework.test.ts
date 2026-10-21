@@ -136,7 +136,7 @@ test('integration:held-rework-request-refused-mechanically — a rework request 
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('held-rework'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('held_rework_test');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/held_rework_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -236,7 +236,7 @@ function loop(history: { current: any[] }) {
   const decided: { action: string; input: any; reason: string }[] = [], approvers: string[] = [];
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    closeSession: () => {}, dispatch: async () => {}, recordDeployment: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     // The high lane's risk lane applies a failed-check rework as it is requested, as it does any.
     decide: async (_work: Work, action: string, reason: string, input: any) => { decided.push({ action, input, reason }); const id = randomUUID(); history.current.push({ id, action, state: 'applied', input, approvedBy: 'graphyard-risk-lane', reason }); return { id, state: 'applied', approvedBy: 'graphyard-risk-lane' }; },
@@ -271,14 +271,14 @@ test('unit:ci-rework-after-review-refusal — a stored failed check requests no 
   assert.equal(refusedOnOtherGrounds(`${shaA}:threads:1,2`, `${shaA}:threads:3`), false, 'a moved thread set is the same grounds');
 });
 
-test('unit:ci-rework-after-review-refusal — master status names the failed-check rework, never the refused review rework, and asks nobody to answer the refusal by hand', async () => {
+test('unit:ci-rework-after-review-refusal — master status names the review rework (a pull-request-era check refusal is history, not a rework), never the refused review rework, and asks nobody to answer the refusal by hand', async () => {
   const work = failingHead(clock), now = new Date(clock);
   const action = nextAction(work, [work], now)!;
   assert.equal(action.kind, 'request-rework');
-  assert.equal(action.gate, 'test', 'the failed required check is the rework named, not the review change request');
-  assert.match(action.reason, /Required CI check test has not passed/);
-  assert.match(humanNeeded(action)!.resolve, /^the loop requests this rework for the failed trial itself/);
-  // A review change request alone is still named as before.
+  assert.equal(action.gate, 'review', 'the review change request is the rework named: a stored pull-request-era check result names none');
+  assert.match(action.reason, /requested changes on/);
+  assert.doesNotMatch(humanNeeded(action)!.resolve, /failed trial/);
+  // A review change request alone is named the same way.
   const reviewOnly = { ...work, gates: work.gates.filter(gate => gate.name !== 'test') } as Work;
   assert.equal(nextAction(reviewOnly, [reviewOnly], now)?.gate, 'review');
   // The refused capped rework raises no "answer the refusal" attention; another refused rework still does.

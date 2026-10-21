@@ -30,7 +30,7 @@ async function plane() {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('master-defer'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('master_defer');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/master_defer`); await store.init(); stores.push(store);
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.operatorAuthorizer = async (_db, _now, actor) => actor;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.operatorAuthorizer = async (_db, _now, actor) => actor;
   const now = async () => ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
   /** A released follow-up whose worker blocked on a reading that cannot exist yet, as GY-1689, GY-1721 and GY-1724 did. */
   const claimed = async (criteria: unknown[] = [followUp]) => {

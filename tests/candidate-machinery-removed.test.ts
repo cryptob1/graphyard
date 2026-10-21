@@ -33,7 +33,7 @@ test('unit:candidate-machinery-removed — the candidate modules are gone, `grap
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('candidate-removed'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('candidate_removed_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/candidate_removed_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, 'owner/removed'); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, 'owner/removed'); engine.submissionObserver = null;
   http = server(engine, [credential]);
   await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

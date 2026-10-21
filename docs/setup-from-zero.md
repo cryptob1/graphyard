@@ -9,10 +9,8 @@ The setup agent acts as the **master** identity `install --apply` records; the o
 
 ```sh
 git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphyard && npm ci)
-cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default), railway or hetzner
+cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default) or local
 ```
-
-Hetzner waits (exit 3) for price approval.
 
 `up` runs: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts, harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity; neither: exit 2). The loop merges onboarding's change; goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until the loop runs this CLI's commit.
 
@@ -67,10 +65,6 @@ Connect accounts; host-logged-in accounts register with `gy master registry prop
 ## 10. Start the master
 
 [Start the master](onboarding.md#3-start-the-master): `gy master init --token-stdin < "$(node -p "require('./.graphyard/master.json').credentialFile")"`, then `gy master restart`. **Verify:** `gy master status` shows `setup.supervisor` active.
-
-## 11. Hosted variables (Railway only)
-
-Set `RAILWAY_API_TOKEN` (**HUMAN:** issued by its owner). **Verify:** doctor `production` has no `error`.
 
 ## 12. First item end to end
 

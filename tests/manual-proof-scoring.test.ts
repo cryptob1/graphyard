@@ -38,7 +38,7 @@ function observation(overrides: Partial<Observation> = {}): Observation {
     reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }], protected: true, mergeable: true, merged: false, mergeSha: null,
     // GY-883: a public API path keeps the item in the high lane, which still demands the manual proof this test scores.
     files: ['src/server/routes/followups.ts'], scopeFiles: [{ path: 'src/server/routes/followups.ts', status: 'modified' as const, sha: 'f'.repeat(40), additions: 1, deletions: 1, binary: false }], at, prState: 'open', draft: false, baseTip: base, baseTipContained: true,
-    conversations: { required: true, unresolved: [] }, ...overrides,
+    ...overrides,
   };
 }
 /** A submitted, approved item whose criteria name the manual proof and a unit proof, graded by the real evaluator. */
@@ -55,7 +55,7 @@ function item(evidenceEntries: Partial<Evidence>[] = [], extra: Partial<Work> = 
     observation: observation(), gates: [], violations: [], blocker: null, queue: null, queueSequence: 0, queueHistory: [],
     ...extra,
   } as unknown as Work;
-  const graded = evaluate(work, [work], now, [CI_APP]);
+  const graded = evaluate(work, [work], now);
   return { ...work, stage: graded.stage, gates: graded.gates, violations: graded.violations } as Work;
 }
 const outcomeOf = (work: Work, proof: string) => automatableOutcomes(work, [work], now).find(entry => entry.proof === proof)!.outcome;

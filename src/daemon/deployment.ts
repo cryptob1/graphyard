@@ -96,7 +96,7 @@ export async function observeDeployment(config: MasterConfig, delivered: Work[],
 // ——— The step's per-cycle budget (GY-1354) ———
 
 /**
- * What the deployment step's reads — the release observation and the promotion check — may spend in
+ * What the deployment step's reads — the release observation and the readings — may spend in
  * one cycle before the step moves on: on 2026-10-06 the inline reads ran for 381.9s of cycle 12621's
  * 450s, past the two-interval liveness bound. Like the decisions step (GY-1286) and the faults
  * step's observation (GY-1345), a fifth of the interval and never under the 30s actionable cadence:
@@ -200,3 +200,4 @@ export function localAncestry(root: string, baseBranch: string, run: ChildRun) {
     },
   };
 }
+

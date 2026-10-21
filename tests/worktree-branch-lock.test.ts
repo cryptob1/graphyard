@@ -264,9 +264,9 @@ test('unit:workspace-failure-spares-profile — the loop cools off no profile fo
   const effectsWith = (failure: () => Promise<never>): DaemonEffects => ({
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: new Date().toISOString() }),
-    closeSession: () => {}, dispatch: failure, requestProof: () => {},
+    closeSession: () => {}, dispatch: failure,
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
   });
   const cycle = async (effects: DaemonEffects, items: Work[]) => {
     const state = emptyDaemonState(config);
@@ -405,7 +405,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.submissionObserver = null;
   engine.principals = [{ id: 'human-operator', role: 'admin', sessionKind: 'human' as const }, { id: 'engineer-a', role: 'worker', sessionKind: 'ai' as const }];
 });

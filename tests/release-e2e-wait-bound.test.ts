@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadCases, parseCase } from '../src/e2e/case.js';
-import { checkAnswer, checkoutContract, deliverySuspendedCases, deployedE2e, e2eSuite, exercisesDelivery, installServesDeliveries, releaseRetries, releaseWaitBudgetSeconds, releaseWaitUntil, runCases } from '../src/e2e/runner.js';
+import { checkAnswer, checkoutContract, deliverySuspendedCases, e2eSuite, exercisesDelivery, installServesDeliveries, releaseRetries, releaseWaitBudgetSeconds, releaseWaitUntil, runCases } from '../src/e2e/runner.js';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.js';
 
 // GY-1938: candidate 20261017T182412Z's e2e suite was killed at its one-hour command timeout. GY-1904
@@ -135,26 +135,4 @@ test('unit:release-e2e-wait-bound — a case whose path reads nothing names the 
   assert.equal(checkAnswer(step as never, 200, { delivery: { state: 'merging' } }, ''), 'delivery.mergeSha is unset (delivery is {"state":"merging"}), expected string');
   assert.equal(checkAnswer(step as never, 200, { id: 'w1' }, ''), 'delivery.mergeSha is unset ((body) is {"id":"w1"}), expected string');
   assert.equal(checkAnswer(step as never, 200, undefined, ''), 'delivery.mergeSha is unset (the answer has no body), expected string');
-});
-
-test('integration:e2e-runner-wait-budget — a deploy run whose first case never delivers still gives every later case its own wait, and rolls back naming each failing case', async () => {
-  const clock = fakeClock(), began = clock.at;
-  const fetcher = (async (input: string | URL | Request) => {
-    const url = new URL(String(input)); clock.at += 1_000;
-    if (url.pathname === '/healthz') return Response.json({ ok: true });
-    if (url.pathname === '/api/merger') return Response.json({ mode: 'control-plane' });
-    if (url.pathname === '/api/status') return Response.json({ github: true });
-    // `never` is never delivered; each `late` item is delivered two fake minutes after it is first asked about.
-    if (url.pathname === '/api/work/never') return Response.json({ delivery: null });
-    const first = (asked[url.pathname] ??= clock.at);
-    return Response.json({ delivery: clock.at - first >= 120_000 ? { mergeSha: 'a'.repeat(40) } : { state: 'merging' } });
-  }) as typeof fetch;
-  const asked: Record<string, number> = {};
-  const cases = [waitingCase('a-never', '/api/work/never'), ...[1, 2, 3].map(n => waitingCase(`b-late-${n}`, `/api/work/late${n}`))];
-  const suite = ((_cases: unknown, token: string, options: Parameters<typeof e2eSuite>[2]) => e2eSuite(cases, token, { ...options, fetcher, now: clock.now, sleep: clock.sleep })) as typeof e2eSuite;
-  const rolledBack = await deployedE2e(root, 'http://install.test', 't', suite).then(() => null, (error: Error) => error.message);
-  assert.ok(clock.at - began < hour, `the run took ${(clock.at - began) / 1000} fake s`);
-  assert.ok(rolledBack, 'the failing required case still fails the deploy');
-  assert.match(rolledBack!, /case a-never failed at step 1 .*delivery\.mergeSha is unset \(delivery is null\), expected string \(still, after waiting \d+ s, all that remained of case a-never's \d+ s wait budget for this attempt\)/);
-  assert.doesNotMatch(rolledBack!, /b-late|after 0 s|shared wait deadline/, 'every later case waited for its delivery and passed');
 });

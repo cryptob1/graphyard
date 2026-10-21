@@ -50,9 +50,9 @@ function cycle(root: string, master: MasterConfig, wired: { research?: boolean; 
   const clock = Date.parse(observedAt);
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: observedAt }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     ...(wired.research ? { research: { cwd: root } } : {}),
     ...(wired.doctor ? { doctor: { cwd: root } as DoctorEffects } : {}),
   } as unknown as DaemonEffects;

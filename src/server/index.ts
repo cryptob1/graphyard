@@ -8,7 +8,6 @@ import { assembleServices, authenticate, configuredActor, confinedLaneProducer, 
 import { type Credential } from './principals.js';
 import { healthRoutes } from './routes/health.js';
 import { signinRoutes } from './routes/signin.js';
-import { githubGoneRoutes } from './routes/github-gone.js';
 import { operatorAgentRoutes } from './routes/operator-agents.js';
 import { proofGrantRoutes } from './routes/proof-grants.js';
 import { agentRegistryRoutes } from './routes/agent-registry.js';
@@ -31,7 +30,7 @@ export type { ArtifactOptions, ServerOptions } from './auth.js';
 export { assembleServices } from './auth.js';
 
 /** Routes that answer without a bearer token. */
-export const publicRoutes: readonly RouteModule[] = [healthRoutes, githubGoneRoutes, signinRoutes];
+export const publicRoutes: readonly RouteModule[] = [healthRoutes, signinRoutes];
 /**
  * Every authenticated `/api/` route, in matching order. A resource adds its module here or in
  * routes.ts (`registerApiRoutes`); modules ahead of the operator-agent guard authorize their

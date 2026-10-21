@@ -192,7 +192,6 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/daemon/step-stalls.ts': { subcommands: ['ls-remote'], runs: 'the loop diagnosing a stalled merge step', credential: 'the merge writer\'s deploy key alone (pushEnvironment)', door: 'the probe diagnoses whether the merge writer\'s deploy key still reaches the remote while the writer is stalled; routing it through the stalled writer would make the diagnosis wait on the fault it diagnoses' },
   'src/daemon/upgrade.ts': { subcommands: ['fetch'], runs: 'the loop\'s self-upgrade reading the base tip', credential: 'the coordinator checkout\'s own git credential', door: 'the self-upgrade decides whether to restart the loop that runs the merge writer, so it must read the base tip without it, from a writer that may be the one owed the restart' },
   'src/docs-sync.ts': { subcommands: ['fetch'], runs: 'the loop\'s docs-sync (branch and base reads)', credential: 'the coordinator checkout\'s own git credential', door: 'the fetches put a reviewed worker branch and its base into the coordinator\'s object store for an in-memory merge-tree and a detached worktree; the merge writer exposes no read of a branch it is not merging, and a failed fetch falls back to commits already held' },
-  'src/install/host.ts': { subcommands: ['clone', 'fetch'], runs: 'the installer driving the host shell over ssh (`sh -c`): the managed checkout and the Graphyard source checkout', credential: 'the merge writer deploy key the installer registered and copied to the host, over SSH (GY-2009); the source checkout\'s remote is public and needs none', door: 'the installer creates the host checkouts the loop and its merge writer will later run from, so no merge writer exists yet; the managed clone uses the writer\'s own deploy key' },
   'src/master/autonomy.ts': { subcommands: ['clone', 'fetch'], runs: 'the master cloning the approver\'s own copy (approverClone) and fetching its bound sha', credential: 'the coordinator checkout\'s own git credential for the bound-sha fetch; the clone itself is local', door: 'the clone is local (the approver\'s own unshared copy of the coordinator checkout) and never reaches the remote; the fetch reads a worker\'s bound sha into that copy, a branch the merge writer never handles, and a miss is tolerated' },
   'src/master/worktrees.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s cycle preparation (cycleBaseTip, one fetch per cycle)', credential: 'the coordinator checkout\'s own git credential', door: 'the worker launcher prepares worktrees from the base tip in the coordinator\'s own object store, once per cycle; the merge writer runs as a serial queue step and publishes no base read other processes can await, so routing it there would serialize every launch behind merges' },
   'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on', door: 'it is the merge writer: pushArgs is the door\'s own leased push, defined here and executed only by the writer\'s ports' },
@@ -235,7 +234,6 @@ export const baseline = [
   'src/daemon/step-stalls.ts',
   'src/daemon/upgrade.ts',
   'src/docs-sync.ts',
-  'src/install/host.ts',
   'src/master/autonomy.ts',
   'src/master/worktrees.ts',
   'src/merge-writer/executor.ts',
@@ -249,7 +247,8 @@ export const baseline = [
  * (its calls moved behind the merge writer) or keeps its entry with `door`, the reason it cannot.
  * GY-2035: src/master/branch-release.ts left both lists — its rework-workspace fetch and its
  * GY-1753 recovery push stay deleted (GY-2017's registered-head start keeps them out), so no
- * process but the merge writer touches a worker branch.
+ * process but the merge writer touches a worker branch. The local release ports left both lists
+ * with the promotion drive (simplify 1a): only the plane's exact-candidate client remains there.
  */
 export const releaseCluster = [
   'src/release-project.ts', 'src/daemon/deployment.ts', 'src/daemon/step-stalls.ts',
@@ -340,7 +339,6 @@ export const docsSyncWorkspaceCluster = [
   'src/cli/workspace-worktree.ts',
   'src/daemon/held-cli.ts',
   'src/docs-sync.ts',
-  'src/install/host.ts',
   'src/master/autonomy.ts',
   'src/master/worktrees.ts',
   'src/up.ts',

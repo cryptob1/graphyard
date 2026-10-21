@@ -66,10 +66,10 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   // An approval naming nits classified mechanical holds the head for the worker bot's round (GY-971).
   { gate: 'review', id: 'mechanical-hold', match: mechanicalHoldPattern, kinds: ['request-rework'],
     example: "Approval 901 of aaaaaaaaaaaa names 2 findings classified mechanical, which the worker bot fixes before the reviewer's fresh read (GY-971); the head is not merged before that round, or before 2026-10-05T15:00:00.000Z if it never starts" },
-  { gate: 'review', id: 'github-approval', match: /^Independent approval of the current commit is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
+  { gate: 'review', id: 'approval', match: /^Independent approval of the current commit is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'Independent approval of the current commit is required' },
-  { gate: 'review', id: 'github-reset', match: /^A new independent GitHub approval after the requirement-review baseline is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
-    example: 'A new independent GitHub approval after the requirement-review baseline is required' },
+  { gate: 'review', id: 'baseline-reset', match: /^A new independent approval after the requirement-review baseline is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
+    example: 'A new independent approval after the requirement-review baseline is required' },
   { gate: 'review', id: 'codex', match: /^Verified clean Codex review of the current commit is required$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
     example: 'Verified clean Codex review of the current commit is required' },
   { gate: 'review', id: 'agent-profile', match: /^Verified approval from reviewer profile .+ is required for the current commit$/, kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'],
@@ -78,12 +78,12 @@ export const gateRefusalCatalogue: RefusalShape[] = [
     example: 'Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider' },
   { gate: 'review', id: 'provider-reason', match: /.*/, example: 'Pull request is draft; mark it ready to request code review', kinds: ['request-review', 'request-rework', 'resync', 'escalate', 'dispatch'], free: true },
   // test: the control plane's reading of the head, then the merge writer's own trial and push
-  // (GY-2010): the item waits on the writer. No GitHub check, mergeability or protection refuses a gate.
-  { gate: 'test', id: 'unobserved', match: /^GitHub has not been observed at the current candidate$/, example: 'GitHub has not been observed at the current candidate', kinds: ['resync'] },
+  // (GY-2010): the item waits on the writer. No remote check, mergeability or protection refuses a gate.
+  { gate: 'test', id: 'unobserved', match: /^The merge writer has not observed the current candidate$/, example: 'The merge writer has not observed the current candidate', kinds: ['resync'] },
   { gate: 'test', id: 'merge-writer-trial', match: mergeWriterTrialPattern, kinds: ['merge'], example: 'merge writer has not trialled aaaaaaaaaaaa on bbbbbbbbbbbb' },
   // merge
   { gate: 'merge', id: 'merge-writer-push', match: mergeWriterPushPattern, kinds: ['merge'], example: 'merge writer has not pushed aaaaaaaaaaaa' },
-  { gate: 'merge', id: 'github-unobserved', match: /^GitHub has not been observed at the current candidate$/, example: 'GitHub has not been observed at the current candidate', kinds: ['resync'] },
+  { gate: 'merge', id: 'unobserved', match: /^The merge writer has not observed the current candidate$/, example: 'The merge writer has not observed the current candidate', kinds: ['resync'] },
   { gate: 'merge', id: 'escalation', match: /^Unresolved .+ escalation requires operator resolution: /, kinds: ['escalate'],
     example: 'Unresolved security-concern escalation requires operator resolution: the candidate ships a credential' },
   { gate: 'merge', id: 'lead-hold', match: /^Slice lead .+ ruled .+ under rule .+; delivery is blocked until the authorized recovery: /, kinds: ['escalate'],

@@ -62,7 +62,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('action-queue'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, otherWorker, executorA, executorB, producer];
   http = server(engine, [{ ...operator, token: 'o'.repeat(32) }, { ...worker, token: 'w'.repeat(32) }, { ...executorA, token: 'x'.repeat(32) }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -163,7 +163,7 @@ test('integration:typed-next-action — the control plane names one typed action
   const conflict = `Candidate ${head.slice(0, 12)} cannot be brought onto base branch tip ${sha40('ef').slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: merge conflict in src/loop.ts. Run graphyard sync ${item.key}, resolve it and push; the approval and proofs bound to ${head.slice(0, 12)} do not survive the resolution.`;
   const conflicted = { ...structuredClone(await reload(item)), lease: null,
     baseRefresh: { from: { sha: head, baseSha: base }, base: sha40('ef'), baseTree: sha40('7e'), policyRevision: 1, at: new Date().toISOString(), head: null, conflict, carry: null } } as unknown as Work;
-  Object.assign(conflicted, evaluate(conflicted, [conflicted], new Date(), [15368]));
+  Object.assign(conflicted, evaluate(conflicted, [conflicted], new Date()));
   const conflictAction = nextAction(conflicted, [conflicted], new Date())!;
   assert.equal(conflictAction.gate, 'build');
   assert.equal(conflictAction.refusal, conflict);
@@ -183,7 +183,7 @@ test('integration:typed-next-action — the control plane names one typed action
   const providerProbe = (policy: Record<string, unknown>, overrides: Partial<Work> = {}) => {
     const probe = { ...structuredClone(reviewable), lease: null, policy: { ...reviewable.policy, ...policy },
       observation: observation(reviewable, { reviews: [], baseTipContained: true, baseTip: base }), ...structuredClone(overrides) } as unknown as Work;
-    Object.assign(probe, evaluate(probe, [probe], new Date(), [15368]));
+    Object.assign(probe, evaluate(probe, [probe], new Date()));
     return probe;
   };
   const claude = { name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 };
@@ -226,7 +226,7 @@ test('integration:typed-next-action — the control plane names one typed action
   // item owes a new head rather than another review of this one.
   const answered = providerProbe({ reviewProvider: 'codex' });
   answered.observation!.agentReview = { provider: 'codex', sha: head, approved: false, verdict: 'changes-requested', requestId: 11, reason: 'the refusal is still swallowed' };
-  Object.assign(answered, evaluate(answered, [answered], new Date(), [15368]));
+  Object.assign(answered, evaluate(answered, [answered], new Date()));
   const answeredAction = nextAction(answered, [answered], new Date())!;
   assert.equal(answeredAction.kind, 'request-rework');
   assert.equal(answeredAction.llmRole, 'approve-decision', 'a new head is a judgment owed, not a step an executor runs');
@@ -310,7 +310,7 @@ test('integration:typed-next-action — an unsettled containment fence escalates
   await expireLease(lapsed);
   const now = new Date();
   const probe = structuredClone(await reload(lapsed));
-  Object.assign(probe, evaluate(probe, [probe], now, [15368]));
+  Object.assign(probe, evaluate(probe, [probe], now));
   const reclaim = nextAction(probe, [probe], now)!;
   assert.equal(reclaim.kind, 'reclaim');
   assert.equal(reclaim.llmRole, null, 'asking the control plane to look again needs no judgment');
@@ -665,9 +665,9 @@ test('integration:typed-agent-requests — an agent that needs something records
   const state = emptyDaemonState(config);
   const sessions: unknown[] = [];
   const effects: DaemonEffects = {
-    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => ({}), requestSmoke: () => {},
+    recordDeployment: async () => ({}),
     agents: () => [{ name: 'work-claude', pane_id: 'pane-9', agent_status: 'blocked' } as any],
     credentials: async () => ({ 'claude-worker': { available: true, reason: null } }),
     recordSession: async (item, handle) => { sessions.push(handle); return engine.execute(executorA, 'session', item.id, handle, randomUUID()); },
@@ -895,9 +895,9 @@ test('integration:session-handles-visible — the reviewer launcher records a ha
   waiting = await reload(waiting);
   const blockedConfig = masterConfigSchema.parse({ ...fleetConfig, workers: [{ name: 'claude-worker', principal: worker.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }] });
   const daemonEffects: DaemonEffects = {
-    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => ({}), requestSmoke: () => {},
+    recordDeployment: async () => ({}),
     agents: () => [{ name: 'work-claude', pane_id: 'pane-9', agent_status: 'blocked' } as any],
     credentials: async () => ({ 'claude-worker': { available: true, reason: null } }),
     recordSession: async (work, handle) => engine.execute(executorA, 'session', work.id, handle, randomUUID()),
@@ -972,7 +972,7 @@ test('integration:typed-next-action — the gate evaluator and the action comput
   } as unknown as Work;
   const evaluated = (overrides: Partial<Work>) => {
     const probe = { ...structuredClone(base_), ...overrides } as Work;
-    Object.assign(probe, evaluate(probe, [probe], new Date(at), [15368]));
+    Object.assign(probe, evaluate(probe, [probe], new Date(at)));
     return probe;
   };
   // Backlog raises no action: nobody runs "decide this is worth doing".
@@ -990,7 +990,7 @@ test('integration:typed-next-action — the gate evaluator and the action comput
   // An unfinished dependency belongs to the other item: this one names no action at all.
   const dependency = evaluated({ ready: true, id: 'work-3', key: 'GY-3' });
   const dependent = { ...evaluated({ ready: true, dependencies: ['work-3'] }) };
-  Object.assign(dependent, evaluate(dependent, [dependent, dependency], new Date(at), [15368]));
+  Object.assign(dependent, evaluate(dependent, [dependent, dependency], new Date(at)));
   assert.match(dependent.gates.find(gate => gate.name === 'ready')!.reasons[0], /Dependency GY-3 is unfinished/);
   assert.equal(nextAction(dependent, [dependent, dependency], new Date(at)), null);
   assert.equal(nextAction(dependency, [dependent, dependency], new Date(at))!.kind, 'dispatch', 'the dependency is the one that gets dispatched');

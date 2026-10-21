@@ -5,7 +5,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import type { Observation, Work } from '../src/model.js';
-import type { BaseRefresh } from '../src/merge-queue.js';
+import type { BaseRefresh } from '../src/model/base-refresh.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
 
 /**
@@ -63,9 +63,9 @@ function effects(item: () => Work, at: () => number, herdr: { agents: { name: st
   return {
     agents: () => [], herdr: () => ({ agents: herdr.agents.map((agent, index) => ({ name: agent.name, pane_id: `pane-${index}`, agent_status: agent.status })), available: true }),
     credentials: async () => ({}), snapshot: async () => ({ work: [item()], now: new Date(at()).toISOString(), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at()).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async (_work, action) => { decided.push(action); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
     decisions: async () => ({ decisions: [] }), approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-a' }),
     docsSync: async (_work, plan: DocsSyncPlan) => {

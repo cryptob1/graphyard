@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { decisionBindingMax, decisionInputs, decisionSituation, foldDecisions, unansweredRefusal, uncitedRefusals, type DecisionEvent } from '../src/model/approval.js';
-import { routineDecision, threadResolutionGraceMs } from '../src/master-daemon.js';
+import { routineDecision } from '../src/master-daemon.js';
 import { situatedInput } from '../src/daemon/decisions.js';
 import { decisionInput } from '../src/master.js';
 import { requestDecision } from '../src/server/decisions.js';
@@ -152,14 +152,6 @@ test('unit:rework-input-names-its-grounds — the loop sends its binding with a 
   const posted = decisionInput('rework', verdictItem([]), decided.input ?? {});
   assert.deepEqual(decisionInputs.rework.parse(posted), { previousWorkerStopped: true, binding: decided.binding }, 'the control plane accepts exactly what the loop sends');
 
-  // A binding past the input bound is truncated to it, and the truncated form still parses.
-  const long = Array.from({ length: 8 }, (_, index) => `${'t'.repeat(300)}-${index}`);
-  const threaded = routineDecision(verdictItem([{ state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', submittedAt: new Date(Date.parse(at) - threadResolutionGraceMs).toISOString() }],
-    long.map(id => thread(id))), { autoMerge: true }, Date.parse(at))!;
-  assert.equal(threaded.action, 'rework');
-  assert.ok(threaded.binding.length > decisionBindingMax, 'the grounds binding alone is past the bound');
-  assert.equal((threaded.input?.binding as string | undefined)?.length, decisionBindingMax, 'the loop truncates the binding it sends to the bound');
-  assert.deepEqual(decisionInputs.rework.parse(decisionInput('rework', verdictItem([]), threaded.input ?? {})), { previousWorkerStopped: true, binding: threaded.input?.binding });
 
   // Recover is situated the same way; a resolve is not, and its input is left alone.
   assert.deepEqual(situatedInput({ action: 'recover', binding: '3' }), { binding: '3' });

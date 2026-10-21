@@ -18,7 +18,7 @@ import { externalRunsImportGrant } from '../src/server/principals.js';
 import { cliPath } from '../src/cli/context.js';
 import { freePort } from '../src/cli/test-isolation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { deployedRoster, harness, REPOSITORY, type Harness } from './install-harness.js';
+import { catFrom, deployedRoster, harness, REPOSITORY, type Harness, type HarnessOptions } from './install-harness.js';
 
 // GY-1879: an installation keeps its principal roster in install.json as a durable record and every
 // apply reconciles with it instead of rewriting it. `graphyard principal add|remove` edits one entry,
@@ -28,46 +28,46 @@ import { deployedRoster, harness, REPOSITORY, type Harness } from './install-har
 
 const GRANT = externalRunsImportGrant;
 const SERVICE = 'graphyard-owner-project';
-/** Every deployment variable write the fake Railway transport recorded, newest last. */
-const variableWrites = (fixture: Harness) => fixture.transport.commands.filter(command => command.program === 'railway' && ((command.args[0] === 'variables' && command.args.includes('--set')) || command.args[0] === 'variable'));
-const redeploys = (fixture: Harness) => fixture.commandLines().filter(line => line.startsWith('railway redeploy')).length;
-const uploads = (fixture: Harness) => fixture.commandLines().filter(line => line.startsWith('railway up')).length;
+/** Every bundle rewrite the fake Compose transport ran, newest last: a roster edit rewrites server.env and restarts the stack once. */
+const variableWrites = (fixture: Harness) => fixture.transport.commands.filter(command => command.program === 'docker' && command.args.includes('up') && command.args.includes('--remove-orphans'));
+const redeploys = (fixture: Harness) => variableWrites(fixture).length;
 const recordOf = async (directory: string) => JSON.parse(await readFile(join(directory, 'install.json'), 'utf8'));
 const withoutToken = ({ token: _token, ...principal }: { token: string }) => principal;
 const huck = { id: 'huck-engineer', role: 'producer', sessionKind: 'ai', grants: [GRANT] };
 
-/** A Railway account that remembers what the installer created, so a rerun observes its own service. */
-function statefulRailway(state: { project: boolean }) {
-  return [
-    { match: 'railway status --json', result: () => state.project ? JSON.stringify({ name: SERVICE, services: { edges: [{ node: { name: 'Postgres' } }, { node: { name: SERVICE } }] } }) : { stdout: '', stderr: 'no linked project', code: 1 } },
-    { match: 'railway init', result: () => { state.project = true; return ''; } },
-    { match: 'git/ref/heads/release', result: { stdout: '', stderr: 'gh: Not Found (HTTP 404)', code: 1 } },
-    { match: `repos/${REPOSITORY}/environments`, result: JSON.stringify({ environments: [] }) },
-  ];
+/** A Compose install whose `cat` reads back what the installer wrote, as a real machine would. */
+async function composeHarness(options: Omit<HarnessOptions, 'provider'> = {}): Promise<Harness> {
+  let fixture: Harness | undefined;
+  fixture = await harness({ ...options, provider: 'compose', extraResponses: [catFrom(() => fixture!.transport.files), ...(options.extraResponses ?? [])] });
+  return fixture;
 }
+/** The GitHub reads an observation-only install makes for the release wiring: no release refs, no environments. */
+const githubReleaseReads = [
+  { match: 'git/ref/heads/release', result: { stdout: '', stderr: 'gh: Not Found (HTTP 404)', code: 1 } },
+  { match: `repos/${REPOSITORY}/environments`, result: JSON.stringify({ environments: [] }) },
+];
 const principal = (fixture: Harness, args: string[]) => principalCommand(args, { ...fixture.deps, cwd: fixture.root });
 
 test('unit:principal-upsert-remove-single-entry-readback — principal add writes exactly one roster entry to GRAPHYARD_PRINCIPALS and install.json, changes no other variable, entry or token, reads the principal back from the control plane with its role and grant, and is a no-op when repeated; principal remove removes only that entry, with readback, and is a no-op when repeated', async () => {
-  const fixture = await harness({ provider: 'railway' });
+  const fixture = await composeHarness();
   try {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await applyInstall(session, await buildPlan(session));
     const directory = session.directory;
     const before = deployedRoster(fixture.transport), recordBefore = await recordOf(directory);
-    const writesBefore = variableWrites(fixture).length, redeploysBefore = redeploys(fixture), uploadsBefore = uploads(fixture);
+    const writesBefore = variableWrites(fixture).length, redeploysBefore = redeploys(fixture);
     assert.deepEqual(before.map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard', 'owner-project-e2e']);
 
-    // Add: one entry, one variable, one redeploy, no upload, and the served roster lists it with its role and grant.
+    // Add: one entry, one bundle rewrite and restart, and the served roster lists it with its role and grant.
     const added = await principal(fixture, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
     assert.equal(added.changed, true);
     assert.deepEqual(added.principal, huck);
-    assert.deepEqual(added.deployment, { provider: 'railway', service: SERVICE, variables: ['GRAPHYARD_PRINCIPALS'], rewritten: false });
+    assert.deepEqual(added.deployment, { provider: 'compose', service: SERVICE, variables: ['GRAPHYARD_PRINCIPALS'], rewritten: true });
     assert.deepEqual(added.readback.principal, huck, 'the control plane lists the principal with its role and grant');
     assert.equal(added.readback.principals, before.length + 1);
     const writes = variableWrites(fixture).slice(writesBefore);
-    assert.equal(writes.length, 1, `exactly one variable is written: ${writes.map(command => command.args.join(' ')).join('; ')}`);
-    assert.deepEqual(writes[0].args, ['variable', 'set', '--service', SERVICE, '--skip-deploys', '--stdin', 'GRAPHYARD_PRINCIPALS']);
-    assert.equal(redeploys(fixture), redeploysBefore + 1); assert.equal(uploads(fixture), uploadsBefore, 'the checkout is never uploaded for a roster edit');
+    assert.equal(writes.length, 1, `exactly one bundle rewrite: ${writes.map(command => command.args.join(' ')).join('; ')}`);
+    assert.equal(redeploys(fixture), redeploysBefore + 1);
     const after = deployedRoster(fixture.transport);
     assert.deepEqual(after.slice(0, before.length), before, 'no other principal\'s entry or token changed');
     assert.equal(after.length, before.length + 1);
@@ -128,9 +128,9 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add write
 });
 
 test('unit:principal-upsert-remove-single-entry-readback — principal add --token-file restores a former worker credential instead of minting one, and --proof registers a proof producer without a lane grant (GY-1998)', async () => {
-  const fixture = await harness({ provider: 'railway' });
+  const fixture = await composeHarness();
   try {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await applyInstall(session, await buildPlan(session));
     const directory = session.directory;
     const former = join(fixture.root, 'former-worker.token');
@@ -190,16 +190,16 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add --tok
 
 test('unit:installer-roster-keeps-named-external-producer-across-apply — a later full install --apply and a later install --observe-only --apply keep a principal added by principal add with its id, role, grants and token while planning their own principals; --observe-only creates no worker or producer, keeps the ones registered, and is no longer refused because install.json records one', async () => {
   // A full installation: principal add, then a second full apply plans operator, master, worker and dashboard and keeps huck-engineer.
-  const first = await harness({ provider: 'railway' });
+  const first = await composeHarness();
   let rerun: Harness | undefined;
   try {
-    const session = await prepareInstall(first.root, { repository: REPOSITORY, provider: 'railway' }, first.deps);
+    const session = await prepareInstall(first.root, { repository: REPOSITORY, provider: 'compose' }, first.deps);
     await applyInstall(session, await buildPlan(session));
     const added = await principal(first, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
     assert.equal(added.changed, true);
     const token = (await readFile(tokenFile(session.directory, 'huck-engineer'), 'utf8')).trim();
-    rerun = await harness({ provider: 'railway', installed: true, root: first.root, configHome: first.configHome });
-    const again = await prepareInstall(rerun.root, { repository: REPOSITORY, provider: 'railway' }, rerun.deps);
+    rerun = await composeHarness({ installed: true, root: first.root, configHome: first.configHome });
+    const again = await prepareInstall(rerun.root, { repository: REPOSITORY, provider: 'compose' }, rerun.deps);
     const plan = await buildPlan(again);
     assert.deepEqual(plan.principals.map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-worker-1', 'owner-project-dashboard', 'owner-project-e2e', 'huck-engineer']);
     await applyInstall(again, plan);
@@ -211,10 +211,9 @@ test('unit:installer-roster-keeps-named-external-producer-across-apply — a lat
   } finally { await first.cleanup(); }
 
   // An observation-only installation: it plans no worker or producer, keeps the ones principal add registered, and is not refused for recording them.
-  const railway = { project: false };
-  const observed = await harness({ provider: 'railway', extraResponses: statefulRailway(railway), statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: false, githubAppId: null, githubInstallationId: null } });
+  const observed = await composeHarness({ extraResponses: githubReleaseReads, statusBody: { actor: { id: 'owner-project-operator', role: 'admin' }, repository: REPOSITORY, github: false, githubAppId: null, githubInstallationId: null } });
   try {
-    const prepare = () => prepareInstall(observed.root, { repository: REPOSITORY, provider: 'railway', observeOnly: true }, observed.deps, 'apply');
+    const prepare = () => prepareInstall(observed.root, { repository: REPOSITORY, provider: 'compose', observeOnly: true }, observed.deps, 'apply');
     const session = await prepare();
     await applyInstall(session, await buildPlan(session));
     assert.deepEqual(deployedRoster(observed.transport).map(entry => entry.id), ['owner-project-operator', 'owner-project-master', 'owner-project-dashboard', 'owner-project-e2e']);
@@ -250,13 +249,13 @@ test('unit:installer-roster-keeps-named-external-producer-across-apply — a lat
 });
 
 test('unit:installer-roster-keeps-named-external-producer-across-apply — an apply whose plan produces the id of an entry principal add registered is refused before any write: an import-only producer is never replaced by the planned proof producer while its token stands', async () => {
-  const first = await harness({ provider: 'railway' });
+  const first = await composeHarness();
   try {
-    const session = await prepareInstall(first.root, { repository: REPOSITORY, provider: 'railway' }, first.deps);
+    const session = await prepareInstall(first.root, { repository: REPOSITORY, provider: 'compose' }, first.deps);
     await applyInstall(session, await buildPlan(session));
     assert.equal((await principal(first, ['add', 'owner-project-ci', '--role', 'producer', '--grant', GRANT])).changed, true);
     const recordText = await readFile(join(session.directory, 'install.json'), 'utf8'), roster = deployedRoster(first.transport), writes = variableWrites(first).length;
-    await assert.rejects(prepareInstall(first.root, { repository: REPOSITORY, provider: 'railway', producerProofs: ['unit:*'] }, first.deps), /owner-project-ci is registered by graphyard principal add as producer with grants external-runs:import.*graphyard principal remove owner-project-ci/);
+    await assert.rejects(prepareInstall(first.root, { repository: REPOSITORY, provider: 'compose', producerProofs: ['unit:*'] }, first.deps), /owner-project-ci is registered by graphyard principal add as producer with grants external-runs:import.*graphyard principal remove owner-project-ci/);
     assert.equal(await readFile(join(session.directory, 'install.json'), 'utf8'), recordText, 'install.json is unchanged');
     assert.deepEqual(deployedRoster(first.transport), roster, 'the registered entry keeps its role and grant and gains no proofs');
     assert.equal(variableWrites(first).length, writes);
@@ -289,7 +288,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('principal_roster_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/principal_roster_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, REPOSITORY);
+  const engine = new Engine(store, 120, REPOSITORY);
   http = server(engine, [operator, granted, ungranted].map(entry => ({ ...entry, token: tokens.get(entry.id)! })), github as any);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
@@ -361,9 +360,9 @@ test('unit:principal-upsert-remove-single-entry-readback — on a bundle provide
 });
 
 test('unit:principal-upsert-remove-single-entry-readback — a re-add that changes an entry reads back only once the served roster carries the new fields: a stale served entry under the same id is not taken for the change', async () => {
-  const fixture = await harness({ provider: 'railway' });
+  const fixture = await composeHarness();
   try {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await applyInstall(session, await buildPlan(session));
     await principal(fixture, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
     // The served roster lags the redeploy: the first three reads still list huck-engineer as declared before.
@@ -380,13 +379,13 @@ test('unit:principal-upsert-remove-single-entry-readback — a re-add that chang
 });
 
 test('unit:principal-upsert-remove-single-entry-readback — overlapping roster edits never drop each other\'s entry: an edit holds the installation\'s apply lock from reading install.json until it is persisted and read back, so a second add of another id, or an install --apply planned before it, is refused and writes nothing, and once the first finishes both entries stand', async () => {
-  const fixture = await harness({ provider: 'railway' });
+  const fixture = await composeHarness();
   try {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await applyInstall(session, await buildPlan(session));
     const before = deployedRoster(fixture.transport);
     // A full apply planned now, against the roster before either edit.
-    const stalePlan = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const stalePlan = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     const plan = await buildPlan(stalePlan);
     // The first edit is held at its readback, after it deployed and before it returns.
     let hold!: () => void, reached!: () => void;
@@ -416,42 +415,7 @@ test('unit:principal-upsert-remove-single-entry-readback — overlapping roster 
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:principal-upsert-remove-single-entry-readback — principal add reaches the deployment where install --apply reached it: a Hetzner bundle over SSH at the server\'s address, a Docker host at its recorded host and user, a Compose bundle on its own port; principal remove on a self-contained host deletes the removed credential there', async () => {
-  const lines = (transport: Harness['transport']) => transport.commands.map(command => [command.program, ...command.args].join(' '));
-  // Each remote answers `cat` from the files written to it, as a real machine would.
-  const remoteCat = (files: () => Harness['hostFiles']) => ({ match: 'cat /opt/graphyard/', result: (line: string) => files().get(line.slice(4))?.content ?? { stdout: '', stderr: 'No such file', code: 1 } });
-
-  // Hetzner server-only: the bundle is read and rewritten on the server, never on this machine.
-  let hetzner: Harness | undefined;
-  hetzner = await harness({ provider: 'hetzner', extraResponses: [remoteCat(() => hetzner!.hostFiles)] });
-  try {
-    const session = await prepareInstall(hetzner.root, { repository: REPOSITORY, provider: 'hetzner', sshKey: 'graphyard-key', maxMonthly: 50, domain: 'graphyard.example.test' }, hetzner.deps);
-    await applyInstall(session, await buildPlan(session));
-    const added = await principal(hetzner, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
-    assert.deepEqual(added.readback.principal, huck);
-    const env = `${session.context.workdir}/server.env`;
-    assert.ok(lines(hetzner.remotes.get('203.0.113.10')!).includes(`cat ${env}`), 'the server\'s bundle is read over SSH at its address');
-    assert.ok(!lines(hetzner.transport).includes(`cat ${env}`), 'no local file is taken for the server\'s bundle');
-    assert.equal(deployedRoster(hetzner.transport, hetzner.remotes).at(-1)!.id, 'huck-engineer');
-  } finally { await hetzner.cleanup(); }
-
-  // A Docker host: the recorded host and SSH user are reached again; a record that predates them is refused before anything is written.
-  let docker: Harness | undefined;
-  docker = await harness({ provider: 'docker-host', extraResponses: [remoteCat(() => docker!.hostFiles)] });
-  try {
-    const session = await prepareInstall(docker.root, { repository: REPOSITORY, provider: 'docker-host', sshHost: '203.0.113.30', sshUser: 'deploy', domain: 'graphyard.example.test' }, docker.deps);
-    await applyInstall(session, await buildPlan(session));
-    assert.deepEqual((await recordOf(session.directory)).deployment, { sshHost: '203.0.113.30', sshUser: 'deploy', local: false, port: null, image: null });
-    const reached: string[] = [];
-    const ssh = (host: string, user?: string) => { reached.push(`${user}@${host}`); return docker!.deps.ssh!(host, user); };
-    const added = await principalCommand(['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT], { ...docker.deps, ssh, cwd: docker.root });
-    assert.deepEqual(added.readback.principal, huck);
-    assert.ok(reached.length > 0 && reached.every(entry => entry === 'deploy@203.0.113.30'), `every SSH session reaches the recorded host as its user: ${reached.join(', ')}`);
-    const record = await recordOf(session.directory);
-    await writeFile(join(session.directory, 'install.json'), JSON.stringify({ ...record, deployment: null }));
-    await assert.rejects(principal(docker, ['remove', 'huck-engineer']), /does not record the host this installation runs on; rerun graphyard install --apply/);
-  } finally { await docker.cleanup(); }
-
+test('unit:principal-upsert-remove-single-entry-readback — principal add reaches the deployment where install --apply reached it: a Compose bundle on its recorded port, or on the port the bundle publishes when an older record names none', async () => {
   // Compose on a port of its own: the rewritten bundle keeps publishing it, from the record or, for an older record, from the bundle itself.
   let compose: Harness | undefined;
   const cat = { match: 'cat /', result: (line: string) => compose!.transport.files.get(line.slice(4))?.content ?? { stdout: '', stderr: 'No such file', code: 1 } };
@@ -471,42 +435,13 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add reach
     assert.doesNotMatch(bundle(), /127\.0\.0\.1:4310:/);
   } finally { await compose.cleanup(); }
 
-  // A self-contained host keeps credentials on the host: removing a principal deletes its token file there and no other.
-  let host: Harness | undefined;
-  host = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test', extraResponses: [remoteCat(() => host!.hostFiles)] });
-  try {
-    const session = await prepareInstall(host.root, { repository: REPOSITORY, provider: 'host', selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test' }, host.deps);
-    await applyInstall(session, await buildPlan(session));
-    const tokens = '/home/graphyard/.config/graphyard/owner-project/tokens';
-    // The unredeemed dashboard sign-in claim install --apply printed keeps working: a roster edit mints none.
-    const claim = () => host!.hostFiles.get(`${session.context.workdir}/server.env`)!.content.split('\n').filter(line => line.startsWith('GRAPHYARD_SIGNIN_CLAIM='));
-    const installed = claim();
-    assert.equal(installed.length, 1, 'install --apply deploys one sign-in claim');
-    const added = await principal(host, ['add', 'huck-engineer', '--role', 'producer', '--grant', GRANT]);
-    assert.ok(host.hostFiles.has(`${tokens}/huck-engineer.token`), 'the added credential is written on the host');
-    // GY-1998: the host mints its own credentials, so --token-file is refused there before anything is imported or deployed.
-    const former = join(host.root, 'former.token');
-    await writeFile(former, `${'c'.repeat(43)}\n`, { mode: 0o600 });
-    const hostWrites = lines(host.remotes.get('203.0.113.20')!).length;
-    await assert.rejects(principal(host, ['add', 'restored-worker', '--role', 'worker', '--token-file', former]), /self-contained host installation keeps its credentials on the host/);
-    await assert.rejects(stat(tokenFile(session.directory, 'restored-worker')), { code: 'ENOENT' }, 'no stray copy of the credential is left in the install directory');
-    assert.equal(lines(host.remotes.get('203.0.113.20')!).length, hostWrites, 'nothing reaches the host');
-    assert.ok(!deployedRoster(host.transport, host.remotes).some(entry => entry.id === 'restored-worker'));
-    assert.deepEqual(claim(), installed, 'principal add keeps the deployed sign-in claim');
-    assert.ok(!('signIn' in added), 'no new sign-in link is minted');
-    await principal(host, ['remove', 'huck-engineer']);
-    assert.deepEqual(claim(), installed, 'principal remove keeps the deployed sign-in claim');
-    const removals = lines(host.remotes.get('203.0.113.20')!).filter(line => line.startsWith('rm -f '));
-    assert.deepEqual(removals, [`rm -f ${tokens}/huck-engineer.token`], 'only the removed principal\'s token is deleted');
-    assert.ok(!deployedRoster(host.transport, host.remotes).some(entry => entry.id === 'huck-engineer'));
-  } finally { await host.cleanup(); }
 });
 
 test('manual:local-plane-principals-restored — a local plane booted on the old plane\'s database with only the installer\'s roster refuses the dispatched worker process\'s existing credential file and reports proof-authority gaps; principal add --token-file/--proof, read back from that real plane as each roster redeploys, restores the claim with the existing credential file, brings the gap count master status reports to 0, and leaves every former producer\'s effective grant exactly as the old plane recorded it (GY-1998)', async () => {
-  const fixture = await harness({ provider: 'railway' });
+  const fixture = await composeHarness();
   const planes: { url: string; roster: string; close: () => Promise<void> }[] = [];
   try {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await applyInstall(session, await buildPlan(session));
     const installed = deployedRoster(fixture.transport), admin = installed.find(entry => entry.role === 'admin')!;
     await database.createDatabase('local_plane_restore');
@@ -515,7 +450,7 @@ test('manual:local-plane-principals-restored — a local plane booted on the old
     const boot = async (roster: typeof installed) => {
       const credentials = principalSchema.parse(roster);
       await new ProofGrants(planeStore, credentials.map(({ token: _token, ...actor }) => actor)).seed();
-      const plane = server(new Engine(planeStore, [15368], 120, REPOSITORY), credentials);
+      const plane = server(new Engine(planeStore, 120, REPOSITORY), credentials);
       await new Promise<void>(resolve => plane.listen(0, '127.0.0.1', resolve));
       const booted = { url: `http://127.0.0.1:${(plane.address() as any).port}`, roster: JSON.stringify(roster), close: () => new Promise<void>(resolve => plane.close(() => resolve())) };
       planes.push(booted);
@@ -539,7 +474,7 @@ test('manual:local-plane-principals-restored — a local plane booted on the old
     const adminActor = { id: admin.id, role: 'admin' as const };
     await new ProofGrants(planeStore, principalSchema.parse([...installed, ...former]).map(({ token: _token, ...actor }) => actor))
       .grant(adminActor, 'production-acceptance-producer', { patterns: ['unit:*', 'integration:*', 'manual:*'], reason: 'Designated independent proof producer' }, randomUUID());
-    const oldEngine = new Engine(planeStore, [15368], 120, REPOSITORY);
+    const oldEngine = new Engine(planeStore, 120, REPOSITORY);
     const open = async (title: string) => {
       const created = await oldEngine.execute(adminActor, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:roster-restore', 'integration:roster-restore'] }] }, randomUUID());
       return oldEngine.execute(adminActor, 'ready', created.id, {}, randomUUID());

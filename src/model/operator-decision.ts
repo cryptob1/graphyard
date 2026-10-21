@@ -1,4 +1,4 @@
-import { reconciliationRefusalPrefix } from '../merge-queue.js';
+import { reconciliationRefusalPrefix } from './merge-authorization.js';
 import type { Decision } from './approval.js';
 import type { Work } from './work.js';
 

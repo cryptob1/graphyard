@@ -2,7 +2,6 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 
 ## Tests
 
-- `tests/module-budgets.test.ts`: every `src/master/` module stays within 800 lines and opens with a `// Concern:` header.
 - `tests/dispatch-collision.test.ts`, `tests/dispatch-overlap.test.ts`, `tests/dispatch-race-guard.test.ts`: dispatch.
 - `tests/launch-prompt-delivery.test.ts`, `tests/project-memory.test.ts`: session requests.
 - `tests/master.test.ts`, `tests/master-daemon.test.ts`, `tests/managed-worktree-root.test.ts`.

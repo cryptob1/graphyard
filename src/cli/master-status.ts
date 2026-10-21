@@ -45,7 +45,7 @@ export { approveScopeRequest } from './master-scope.js';
 // the report and the tests read them from here.
 export { observationThroughputStatus } from './stall-attention.js';
 // The attention builders live in `status-attention.ts`; the report reads them from here.
-export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
+export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
@@ -119,7 +119,6 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // The slow intervention report: the loop's copy, or a bounded live read.
       reports: 'bounded', reportBoundMs: dependencies.reportReadBoundMs, sections });
   const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
-  const release = cursor?.promotion;
   // GY-1773: a held snapshot ahead of the dirty checkout left behind.
   // GY-1899: the pin lives under the running CLI's checkout, where the upgrade's holdCliAt wrote it.
   const codeRoot = loopCodeRoot(master.cliPath, root);
@@ -165,8 +164,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // GY-1511: the Herdr server holding this install's agents, and the command that opens them.
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,
-    // GY-1982: + a failed deploy's line.
-    promotion: { lastPromotedSha: release?.promotedSha ?? null, promotedAt: release?.promotedAt ?? null, behind: release?.behind ?? null, checkedAt: release?.checkedAt ?? null, reason: release?.reason ?? null, deploy: deployLine(release?.deployFailed) },
+    // GY-1982: the continuous deploy's release reading and a failed deploy's line.
+    promotion: { lastPromotedSha: cursor?.promotion?.promotedSha ?? null, promotedAt: cursor?.promotion?.promotedAt ?? null, checkedAt: cursor?.promotion?.checkedAt ?? null, reason: cursor?.promotion?.reason ?? null, deploy: deployLine(cursor?.promotion?.deployFailed) },
     launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
     itemSize,
     // Every open item the control plane names no action for, with the account it names and how

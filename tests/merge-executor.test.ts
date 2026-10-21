@@ -292,9 +292,9 @@ function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => nu
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: await world.work(), now: iso(world.now()) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(world.now()), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: world.mergeWriter, ...(world.decide ? { decide: world.decide } : {}),
   } as unknown as DaemonEffects;
 }
@@ -473,7 +473,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-executor-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_executor_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -515,7 +515,7 @@ function fixtureReads(options: { record?: MergePorts['record']; trial?: (input: 
 }
 const firstParents = () => git(origin, 'rev-list', '--first-parent', 'main').split('\n');
 
-test('integration:control-plane-merge-end-to-end — a worker commit under a lease, complete --head, the executor merges in a cycle: main\'s first parent is the exact tested merge commit, the item is done with that mergeSha, the ledger holds intent, pushed and reconciled in order, and the trial ran the file carrying the item\'s proof', async () => {
+test('integration:control-plane-merge-end-to-end — a worker commit under a lease, complete --head, the executor merges in a cycle: main\'s first parent is the exact tested commit (the head itself, fast-forwarded), the item is done with that mergeSha, the ledger holds intent, pushed and reconciled in order, and the trial ran the file carrying the item\'s proof', async () => {
   const w = await submittedItem(1);
   assert.equal(w.observation?.source, 'control-plane');
   assert.deepEqual(w.gates.find(gate => gate.name === 'test')!.reasons, [trialRefusal(heads[1]!, baseTip)]);
@@ -533,9 +533,9 @@ test('integration:control-plane-merge-end-to-end — a worker commit under a lea
   const done = await document(w.id);
   assert.equal(done.stage, 'done');
   const mergeSha = done.delivery!.mergeSha;
-  assert.equal(firstParents()[0], mergeSha, 'main\'s first parent is the exact merge commit the trial tested');
-  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), baseTip); assert.equal(git(origin, 'rev-parse', `${mergeSha}^2`), heads[1]);
-  assert.equal(git(origin, 'show', '-s', '--format=%an', mergeSha), 'graphyard-merge-writer', 'the merge commit is the trial\'s own');
+  assert.equal(firstParents()[0], mergeSha, 'main\'s first parent is the exact commit the trial tested');
+  assert.equal(mergeSha, heads[1], 'the head\'s first-parent chain held the base tip, so main fast-forwarded to the head itself');
+  assert.equal(git(origin, 'rev-parse', `${mergeSha}^1`), baseTip);
   assert.deepEqual(await ledgerKinds(w.id), ['merge.intent', 'merge-writer.intent', 'merge.trial', 'merge-writer.trial', 'merge.pushed', 'merge-writer.pushed', 'merge.reconciled', 'merge-writer.delivered']);
   assert.deepEqual(done.mergeLedger && [done.mergeLedger.state, done.mergeLedger.head, done.mergeLedger.baseTip, done.mergeLedger.mergeSha, done.mergeLedger.observedTip], ['reconciled', heads[1], baseTip, mergeSha, mergeSha]);
   assert.equal(done.delivery!.authorizationRevision, done.revision - 1);

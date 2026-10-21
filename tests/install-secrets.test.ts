@@ -118,7 +118,7 @@ test('the installation record round-trips without credentials and refuses a dire
     const tokens = await ensureTokens(directory, principals, vault);
     const now = new Date().toISOString();
     await writeInstallRecord(directory, {
-      version: 1, installId: 'owner-project', repository: 'owner/project', provider: 'railway', baseBranch: 'main',
+      version: 1, installId: 'owner-project', repository: 'owner/project', provider: 'compose', baseBranch: 'main',
       reviewPolicy: 'github', domain: null, url: 'https://example.test',
       principals: principals.map(principal => ({ id: principal.id, role: principal.role, fingerprint: fingerprint(tokens.get(principal.id)!) })),
       github: null, reviewers: [], profiles: [], createdAt: now, updatedAt: now,

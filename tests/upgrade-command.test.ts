@@ -5,7 +5,6 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { cliChangesOf, healthVerdict, liveEffects, renderPlan, resolveTarget, runUpgrade, schemaAt, upgradePlan, type UpgradeInputs, type UpgradeStep } from '../src/cli/upgrade.js';
 import { installRequestFromArgs, redeployArguments } from '../src/install/index.js';
-import { chooseRailwayWorkspace } from '../src/install/adapters.js';
 import type { InstallRecord } from '../src/install/secrets.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -15,13 +14,13 @@ const order = ['checkout', 'npm-ci', 'backup', 'redeploy', 'restart', 'refresh',
 const releaseSource = (generations: string[]) => `export const schemaGenerations: readonly (string | null)[] = [\n  ${generations.join(', ')},\n];\n`;
 type Entry = InstallRecord['principals'][number];
 const principal = (id: string, role: Entry['role'], extra: Partial<Entry> = {}): Entry => ({ id: `acme-app-${id}`, role, fingerprint: 'f'.repeat(12), ...extra });
-const record = { installId: 'acme-app', repository: 'acme/app', provider: 'railway', selfContained: false, baseBranch: 'main', service: 'graphyard', domain: null, deployment: null,
+const record = { installId: 'acme-app', repository: 'acme/app', provider: 'compose', selfContained: false, baseBranch: 'main', service: 'graphyard', domain: null, deployment: null,
   reviewPolicy: 'github', noGithubApp: false, principals: [principal('operator', 'admin'), principal('master', 'coordinator'), principal('worker-1', 'worker'), principal('dashboard', 'reader')] } as unknown as InstallRecord;
 
 function inputs(overrides: Partial<UpgradeInputs> = {}): UpgradeInputs {
   return { cliRoot: '/opt/graphyard', repoRoot: '/work/app', current: { version: '2026.10.16', revision: 'a'.repeat(40), released: true },
     target: { version: '2026.10.17', revision: 'b'.repeat(40), schema: 4 }, databaseSchema: 4, install: record, url: 'https://gy.example',
-    backupFile: '/home/op/.config/graphyard/acme-app/backups/before-2026.10.17.json', cliChanges: [], workspace: null, ...overrides };
+    backupFile: '/home/op/.config/graphyard/acme-app/backups/before-2026.10.17.json', cliChanges: [], ...overrides };
 }
 
 test('unit:upgrade-command-plan — the plan lists the ordered steps without acting, and refuses a target older than the database\'s schema', async () => {
@@ -29,13 +28,14 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   assert.deepEqual(plan.steps.map(step => step.id), order);
   assert.match(plan.steps[0].command, /git -C "\/opt\/graphyard" checkout --detach b{40}/);
   assert.match(plan.steps[1].command, /^npm ci/);
-  assert.match(plan.steps[3].command, /install --repo acme\/app --provider railway --base-branch main --server-name graphyard --review-policy github --workers 1 --image ghcr\.io\/cryptob1\/graphyard:2026\.10\.17 --source-root \/opt\/graphyard --plan && .*install --repo acme\/app .* --source-root \/opt\/graphyard --apply$/, 'the install preview runs before the apply, both building from the checkout the upgrade checked out (GY-2168)');
+  assert.match(plan.steps[3].command, /install --repo acme\/app --provider compose --base-branch main --server-name graphyard --review-policy github --workers 1 --image ghcr\.io\/cryptob1\/graphyard:2026\.10\.17 --source-root \/opt\/graphyard --plan && .*install --repo acme\/app .* --source-root \/opt\/graphyard --apply$/, 'the install preview runs before the apply, both building from the checkout the upgrade checked out (GY-2168)');
   assert.match(plan.steps[4].command, /master restart$/);
   assert.match(plan.steps[5].command, /init --scan --url https:\/\/gy\.example && .*init --scan --apply --url https:\/\/gy\.example$/, 'the scan refreshes the stored proposal before it is applied');
   assert.equal(plan.rollback, 'graphyard upgrade --to 2026.10.16');
   assert.match(renderPlan(plan), /^upgrade 2026\.10\.16 -> 2026\.10\.17/);
   assert.match(upgradePlan(inputs({ current: { version: 'unreleased aaaaaaaaaaaa', revision: 'a'.repeat(40), released: false } })).rollback, /checkout --detach a{40}/, 'an unreleased previous rolls back by commit');
-  assert.deepEqual(redeployArguments({ ...record, provider: 'host', selfContained: true, deployment: { sshHost: 'h', sshUser: 'root', local: false, port: null, image: null } }, 'img').slice(0, 4), ['--repo', 'acme/app', '--target', 'host']);
+  assert.deepEqual(redeployArguments({ ...record, deployment: { sshHost: null, sshUser: 'root', local: false, port: 4317, image: null } }, 'img').slice(0, 4), ['--repo', 'acme/app', '--provider', 'compose']);
+  assert.ok(redeployArguments({ ...record, deployment: { sshHost: null, sshUser: 'root', local: false, port: 4317, image: null } }, 'img').join(' ').includes('--port 4317'), 'the recorded port is kept');
   // The redeploy is a full apply, so it replans exactly the recorded roster and mode: extra workers and the CI producer's grants stay
   // authorized, a principal added by graphyard principal add is reconciled in by install itself, and nothing reverts to defaults.
   const fleet = redeployArguments({ ...record, reviewPolicy: 'agent', noGithubApp: true, principals: [...record.principals, principal('worker-2', 'worker'), principal('worker-3', 'worker'),
@@ -46,13 +46,6 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   const observed = redeployArguments({ ...record, noGithubApp: true, principals: record.principals.filter(entry => entry.role !== 'worker') }, 'img');
   assert.ok(observed.includes('--observe-only') && !observed.includes('--workers'), 'an installation with no installer worker redeploys observation-only');
   assert.equal(installRequestFromArgs(observed).request.observeOnly, true);
-  // The record keeps no Railway workspace: an account in several names it with upgrade --workspace, and the redeploy's preflight settles on it.
-  const workspaces = [{ id: 'ws-1', name: 'Personal' }, { id: 'ws-2', name: 'Acme' }];
-  assert.match(chooseRailwayWorkspace(installRequestFromArgs(redeployArguments(record, 'img')).request.workspace ?? null, workspaces).problem ?? '', /belongs to 2 workspaces/);
-  const named = upgradePlan(inputs({ workspace: 'Acme' }));
-  assert.match(named.steps[3].command, /--server-name graphyard --workspace Acme --review-policy github .*--plan && .*--workspace Acme .*--apply$/);
-  assert.deepEqual(chooseRailwayWorkspace(installRequestFromArgs(redeployArguments(record, 'img', 'Acme')).request.workspace ?? null, workspaces).selected, workspaces[1]);
-  assert.throws(() => redeployArguments({ ...record, provider: 'compose' }, 'img', 'Acme'), /Railway installation's workspace/);
 
   assert.throws(() => upgradePlan(inputs({ target: { version: '2026.10.1', revision: 'c'.repeat(40), schema: 3 } })), /Refusing 2026\.10\.1: its schema generation 3 is older than the database's \(4\)/);
   assert.equal(plan.rollforward, null, 'a target at the database generation migrates nothing');

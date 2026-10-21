@@ -93,9 +93,9 @@ export function heldAccountLoop(config: MasterConfig, root: string, fetcher: typ
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: real.snapshot,
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
   } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   return { state, cycle: () => runCycle(config, state, effects, Date.now) };

@@ -55,7 +55,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('capacity_redispatch');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/capacity_redispatch`);
   await store.init();
-  engine = new Engine(store, [15368], 300, repository);
+  engine = new Engine(store, 300, repository);
   engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -128,10 +128,8 @@ test('integration:capacity-redispatch-preserves-attempt — worker WIP and an ap
       herdr.agents = herdr.agents.filter(agent => agent.name !== orphan.agentName);
       await ok(workerA, 'POST', `work/${orphan.id}/settle`, { epoch: orphan.epoch, settlementToken });
     },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'n/a', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     sessionOutput: agent => herdr.output[agent.name!] ?? '',
     reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,

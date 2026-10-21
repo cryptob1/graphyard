@@ -13,7 +13,6 @@ import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
-import { mainWatchStateSchema } from './main-watch.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 
 // 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
@@ -151,10 +150,10 @@ export const deploymentObservationSchema = z.object({
 export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
 
 /**
- * The release reading the continuous deploy (GY-1982) writes and master status reads: the base tip
- * the loop last saw, the commit it last deployed and when, and why it did not. Not strict: a cursor
- * written while the release-candidate drive ran (GY-1983 removed it) still carries its candidate,
- * soak, seal-check, dispatch and run fields, which load and are dropped.
+ * The release reading the continuous deploy records (GY-1982): `mainSha` the base tip it last
+ * deployed, `promotedSha`/`promotedAt` the release the install runs, `deployFailed` the failed
+ * deploy's line, `reason` why no deploy ran. The other fields are the retired promotion drive's
+ * (GY-1302), kept so a cursor written before still parses; nothing sets or reads them now.
  */
 export const promotionStateSchema = z.object({
   checkedAt: z.string(),
@@ -484,7 +483,8 @@ export const daemonStateSchema = z.object({
   metrics: z.array(cycleMetricsSchema).default([]),
   deployment: deploymentObservationSchema.nullable().default(null),
   promotion: promotionStateSchema.nullable().default(null), // the continuous deploy's release reading (GY-1982)
-  mainWatch: z.lazy(() => mainWatchStateSchema).nullable().default(null), // GY-1519: unknown main commits; lazy as main-watch.ts imports this module
+  /** Retired: the main watch (GY-1519) is gone; a cursor written before still carries its state, which nothing reads. */
+  mainWatch: z.unknown().optional(),
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),

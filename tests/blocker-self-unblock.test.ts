@@ -85,10 +85,8 @@ function harness(probeRun: (command: string, args: string[]) => string = () => '
     snapshot: async () => { const snapshot = await ok(token(coordinator), 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: snapshot.now }; },
     closeSession: () => {},
     dispatch: async work => { dispatched.push(work.key); },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     decide: async (work, action, reason, input = {}) => { decided.push({ key: work.key, action, input }); return ok(master.token, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }); },
     approver: async (work, decision) => { launched.push(decision); const agentName = approverSessionName(work, decision); sessions.push({ name: agentName, pane_id: `pane-${launched.length}`, agent_status: 'working' } as HerdrAgent); return { agentName, pane: `pane-${launched.length}` }; },
@@ -107,7 +105,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('blocker-unblock-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('blocker_unblock_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/blocker_unblock_test`); await store.init();
-  engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 300, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

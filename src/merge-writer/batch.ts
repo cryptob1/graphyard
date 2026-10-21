@@ -22,8 +22,9 @@ const alone = async (ports: MergePorts, items: readonly Work[]) => {
 
 /**
  * GY-2088. The heads, in queue order, merged one onto the other from the fetched tip: each head's
- * merge commit has the previous one as its first parent, so main's first-parent history holds every
- * head's own merge commit once the last is pushed. A head the queue's chain cannot merge (a
+ * merge commit has the previous one as its first parent (or is the head itself, when its own
+ * first-parent chain holds the previous tip, trial.ts `trialMerge`), so main's first-parent history
+ * holds every head's own merge commit once the last is pushed. A head the queue's chain cannot merge (a
  * conflict) is refused as `mergeOne` refuses it and the rest still batch; a held head is left
  * queued. The chain's tip is trialled once (the build and the tests its combined change affects,
  * with every head's proofs) and previewed; when it passes, every head is recorded intent and trial,
@@ -41,7 +42,7 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
   for (const work of items) {
     const held = ports.hold ? await ports.hold(work) : null;
     if (held) { results.push({ work, outcome: { outcome: 'requeued', reason: held, pushes: 0 } }); continue; }
-    const head = work.candidate!.sha.toLowerCase(), merged = await ports.merge(head, tip);
+    const head = work.candidate!.sha.toLowerCase(), merged = await ports.merge(head, tip, work);
     if ('conflict' in merged) {
       const reason = trialFailureReason({ conflict: merged.conflict })!;
       await ports.record(work, { kind: 'refused', head, reason });
@@ -56,7 +57,7 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
   if (batch.length < 2) return [...results, ...await alone(ports, works)];
   try {
     // A batch trial that times out is trialled one head at a time, so a timeout counts only on the head it is its own (GY-2079).
-    const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
+    const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }, baseTip).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
     if (!run) return [...results, ...await alone(ports, works)];
     let failed = failureIsBase(run) || !!trialFailureReason({ run }), preview: PreviewVerdict | null = null;
     // A preview that could not run is no pass: each head is then previewed alone, as `mergeOne` previews it.

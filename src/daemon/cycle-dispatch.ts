@@ -1,6 +1,6 @@
 // Concern: cycle step 4 — dispatch claimable work under capacity and report base refreshes.
 import type { Work } from '../model.js';
-import { pendingBaseRefresh } from '../merge-queue.js';
+import { pendingBaseRefresh } from '../model/base-refresh.js';
 import { docsOnlyConflict } from '../model/docs-sync.js';
 import { dispatchSort, inFlight } from '../coordination.js';
 import { isHotfix, maxInFlight, wipHoldWording } from '../model/dispatch.js';
@@ -518,7 +518,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   // 4b. A base branch that moved under an in-flight candidate GitHub reports conflicting with it
   //     (GY-292: a clean one keeps its head, CI, review and proofs). Nobody is asked to do anything first: the
   //     control plane tries the merge into the candidate's own branch and decides what the review
-  //     and each proof carry (see merge-queue.ts `baseRefreshNeeded`). The cycle reports what
+  //     and each proof carry (see model/base-refresh.ts `baseRefreshNeeded`). The cycle reports what
   //     that refresh did — or the conflict that stopped it — so the pass is an action rather
   //     than a "0 actions" line.
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested)) await isolate('refresh', item, item.key, async () => {
@@ -541,9 +541,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     const kept = carry ? [...(carry.approval.carried ? ['the approval'] : []), ...carry.evidence.filter(entry => entry.carried).map(entry => entry.proof)] : [];
     const again = carry ? [...(carry.approval.carried ? [] : ['the approval']), ...carry.evidence.filter(entry => !entry.carried).map(entry => entry.proof)] : [];
     const trigger = refresh!.trigger ? ` [trigger: ${refresh!.trigger}]` : '';
-    const detail = refresh!.stale
-      ? `${item.key}: ${refresh!.stale.reading}; it keeps its head, review and proofs (GY-375)`
-      : refresh!.conflict
+    const detail = refresh!.conflict
       ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; ${docsOnlyConflict(refresh!.conflictPaths) ? `both sides changed only docs pages (${refresh!.conflictPaths!.join(', ')}), so a docs-sync session resolves it unless the loop's own merge finds code conflicting, when it returns to the worker` : 'it returns to the worker'} with the conflict named: ${refresh!.conflict}`
       : refresh!.docsSync
       ? `${item.key}${trigger}: a docs-sync session brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}${carry && !carry.approval.carried ? ` (${carry.approval.reason})` : ''}`

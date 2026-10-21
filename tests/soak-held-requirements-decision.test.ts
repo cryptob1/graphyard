@@ -135,7 +135,7 @@ test('unit:soak-invariants-hold — over three simulated days, decisions held th
     workspaces: [], submission: item.submission, candidate: item.candidate, reworkRequested: item.reworkRequested, scenarioRequirements: [], violations: [], evidence: [], observation: null, blocker: null,
     scopeRequest: item.scopeRequest, carriedScopeRequest: null, scopeDecision: null,
     gates: item.stage === 'build' ? [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }]
-      : [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['A new independent GitHub approval after the requirement-review baseline is required'] }],
+      : [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['A new independent approval after the requirement-review baseline is required'] }],
   } as unknown as Work);
 
   const launches: string[] = [], requested: string[] = [], withdrawals: string[] = [], resumes: string[] = [], widened: string[] = [];
@@ -144,8 +144,8 @@ test('unit:soak-invariants-hold — over three simulated days, decisions held th
     agents: () => [], herdr: () => ({ agents: sessions.map(session => ({ name: session.name, agent_status: session.status, pane_id: session.pane })), available: true }), credentials: async () => ({}),
     snapshot: async () => { advance(); return { work: items.map(view), now: iso(now) }; },
     closeSession: (pane: string) => { closes.push({ pane, at: now }); const index = sessions.findIndex(session => session.pane === pane); assert.ok(index >= 0, `the loop closes a pane Herdr lists: ${pane}`); sessions.splice(index, 1); },
-    dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     decisions: async (work: Work) => { reads++; return { decisions: structuredClone(decisions.get(work.key) ?? []) }; },
     decide: async (work: Work, action: string, reason: string) => { requested.push(`${work.key}: ${action}: ${reason}`); return { id: randomUUID(), state: 'requested' }; },
     withdraw: async (work: Work, decision: string, reason: string) => { withdrawals.push(`${work.key}: ${decision}: ${reason}`); },
@@ -317,15 +317,15 @@ test('unit:soak-covering-scope-adopt — over two simulated days, covering asks 
     scopeRequest: item.scopeRequest, carriedScopeRequest: null, scopeDecision: null,
     containmentQuarantine: standing(item)?.state === 'held' ? { at: iso(now - minute), epoch: item.epoch, owner: `worker-${item.n % 3}`, scope: { pid: 1, unit: 'u' }, leaseExpiresAt: iso(now + hour), settlementHash: 'a'.repeat(64), launchExpiresAt: iso(now - minute), launchAcknowledgedAt: iso(now - minute) } : undefined,
     gates: item.stage === 'build' ? [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }]
-      : [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['A new independent GitHub approval after the requirement-review baseline is required'] }],
+      : [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['A new independent approval after the requirement-review baseline is required'] }],
   } as unknown as Work);
 
   const effects = {
     agents: () => [], herdr: () => ({ agents: sessions.map(session => ({ name: session.name, agent_status: session.status, pane_id: session.pane })), available: true }), credentials: async () => ({}),
     snapshot: async () => { advance(); return { work: items.map(view), now: iso(now) }; },
     closeSession: (pane: string) => { closes.push({ pane, at: now }); const index = sessions.findIndex(session => session.pane === pane); if (index >= 0) sessions.splice(index, 1); },
-    dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     decisions: async (work: Work) => ({ decisions: structuredClone(decisions.get(work.key) ?? []) }),
     decide: async (work: Work, action: string, reason: string) => { requested.push(`${work.key}: ${action}: ${reason}`); return { id: randomUUID(), state: 'requested' }; },
     withdraw: async (work: Work, decision: string, reason: string) => {

@@ -236,10 +236,10 @@ test('unit:herdr-scope-per-install — the install\'s workspace scopes every inv
     closeSession: (pane: string) => closeHerdrPane(pane, herdr.run),
     herdr: () => observeHerdrAgents(herdr.run),
     panes: async () => ({ panes: await listHerdrPanes(herdr.run), available: true }),
-    persist: async () => {}, recordSession: async () => {}, dispatch: async () => {}, requestProof: () => {},
+    persist: async () => {}, recordSession: async () => {}, dispatch: async () => {},
     merge: async () => ({ result: 'merged', merged: true }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
   }) as unknown as DaemonEffects;
   await runCycle(config, state, effects(clockStart), () => clockStart);
   const later = clockStart + launchAppearanceMs + 60_000;
@@ -307,36 +307,6 @@ test('unit:harness-own-units-only — the generated master harness allows restar
   assert.equal(decide(pilotPlan, 'systemctl --user restart graphyard-master-cryptob1-graphyard-game-pilot.service'), 'allow');
 });
 
-test('unit:per-install-units — re-applying the self-contained host installer to a host installed before per-install names enables and reports the legacy unit master init recorded, never a per-install unit that was not written', async () => {
-  const { applyInstall, buildPlan, prepareInstall } = await import('../src/install/index.js');
-  const { harness } = await import('./install-harness.js');
-  const { legacyInstallUnits } = await units();
-  const inputs = { repository: 'owner/project', provider: 'host' as const, selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test' };
-  const legacyHost = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
-  try {
-    // The host's loop already runs as the legacy unit for this checkout (an install from before GY-1441).
-    legacyHost.hostFiles.set(`/home/graphyard/.config/systemd/user/${legacyLoopUnit}`, { content: 'WorkingDirectory=/home/graphyard/code/owner-project\n', mode: 0o644 });
-    const session = await prepareInstall(legacyHost.root, inputs, legacyHost.deps);
-    const summary = await applyInstall(session, await buildPlan(session));
-    const lines = [...legacyHost.remotes.values()][0].commands.map(command => [command.program, ...command.args].join(' '));
-    assert.ok(lines.some(line => line.includes(`systemctl --user enable --now ${legacyLoopUnit}`)), 'the recorded alias is the unit enabled');
-    assert.ok(!lines.some(line => line.includes('graphyard-master-owner-project.service')), 'a per-install unit that was never written is never named');
-    const reported = summary.host!.units.map(unit => unit.name);
-    assert.ok(reported.includes(legacyLoopUnit), reported.join(', '));
-    assert.ok(!reported.some(name => name.startsWith('graphyard-executor')), 'no executor unit is installed or reported');
-    assert.match(summary.profiles!.master.detail, new RegExp(`runs as ${legacyLoopUnit.replace('.', '\\.')}`));
-    assert.deepEqual(JSON.parse(legacyHost.hostFiles.get(`/home/graphyard/code/owner-project/.graphyard/units.json`)!.content), legacyInstallUnits);
-  } finally { await legacyHost.cleanup(); }
-
-  const freshHost = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test' });
-  try {
-    const session = await prepareInstall(freshHost.root, inputs, freshHost.deps);
-    const summary = await applyInstall(session, await buildPlan(session));
-    assert.ok(summary.host!.units.some(unit => unit.name === 'graphyard-master-owner-project.service'), 'a fresh host runs its per-install loop unit');
-    assert.ok(!summary.host!.units.some(unit => unit.name === legacyLoopUnit));
-  } finally { await freshHost.cleanup(); }
-});
-
 test('unit:per-install-units — repositories whose names differ only in punctuation get distinct units, and a record that exists but cannot be read fails closed instead of claiming the legacy units', async () => {
   const { installSlug, perInstallUnits, readInstallUnits, resolveInstallUnits, installUnitsFile } = await units();
   assert.equal(installSlug('cryptob1/graphyard'), 'cryptob1-graphyard', 'a plain OWNER/NAME keeps its readable slug');
@@ -355,27 +325,3 @@ test('unit:per-install-units — repositories whose names differ only in punctua
   assert.equal(await readFile(join(root, installUnitsFile), 'utf8'), '{"version":2}', 'the unreadable record is left for the operator, not overwritten');
 });
 
-test('unit:per-install-units — install --migrate stops the units the managed checkout recorded, even when the installer\'s CLI lies outside that checkout, and never another install\'s legacy units', async () => {
-  const { applyInstall, buildPlan, prepareInstall } = await import('../src/install/index.js');
-  const { MIGRATE_SOURCE_VARIABLE } = await import('../src/install/host.js');
-  const { harness } = await import('./install-harness.js');
-  const { installUnitsFile, perInstallUnits } = await units();
-  const fixture = await harness({ provider: 'host', serverUrl: 'https://graphyard.example.test',
-    extraResponses: [
-      { match: 'is-active graphyard-master-owner-project.service', result: { stdout: 'inactive\n', stderr: '', code: 3 } },
-      { match: 'db backup', result: { stdout: '', stderr: 'db backup: stopped here, after the freeze', code: 1 } },
-    ] });
-  try {
-    // master init recorded per-install names in the managed checkout; the CLI is an installed launcher elsewhere.
-    const recorded = perInstallUnits('owner/project');
-    await mkdir(join(fixture.root, '.graphyard'), { recursive: true });
-    await writeFile(join(fixture.root, installUnitsFile), JSON.stringify(recorded));
-    const outside = await temporaryDirectory('installed-launcher');
-    const deps = { ...fixture.deps, cliPath: join(outside, 'bin/graphyard.mjs'), environment: { [MIGRATE_SOURCE_VARIABLE]: 'postgres://graphyard:old-password-0123456789@old.example.test:5432/graphyard' } };
-    const session = await prepareInstall(fixture.root, { repository: 'owner/project', provider: 'host' as const, selfContained: true, sshHost: '203.0.113.20', sshUser: 'root', domain: 'graphyard.example.test', migrate: true }, deps);
-    await assert.rejects(applyInstall(session, await buildPlan(session)), /stopped here, after the freeze/);
-    const local = fixture.commandLines();
-    assert.ok(local.includes(`systemctl --user disable --now ${recorded.master}`), local.join('\n'));
-    assert.ok(!local.some(line => line.includes(legacyLoopUnit) || line.includes('graphyard-executor@')), 'another install\'s legacy units are never stopped');
-  } finally { await fixture.cleanup(); }
-});

@@ -6,7 +6,7 @@ import { implementerIdentities, proofExerciseSchema } from './evidence.js';
 import { standingEscalations } from './escalation.js';
 import { closureKinds } from './closure.js';
 import { createSchema, escalationTriggers, operatorCapability, type OperatorCapability, type Principal, type Work } from './work.js';
-import { baseRefreshConflict } from '../merge-queue.js';
+import { baseRefreshConflict } from './base-refresh.js';
 import { loopOwnedRefusal } from './loop-owned.js';
 import { judgedSame, situatedDecisionActions, type DecisionSituation } from './decision-situation.js';
 import { withdrawParkInput, withdrawParkRefusal } from './park-withdrawal.js';

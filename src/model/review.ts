@@ -51,7 +51,8 @@ export interface ReviewFailover {
   at: string; sha: string; baseSha: string; policyRevision: number; requestCommentId: number; nextProfile: string | null;
 }
 
-// A task created before pluggable providers keeps requiring a formal GitHub approval.
+// `github` is the default provider: the reviewer session the loop launches, whose verdict the control plane records on the observation
+// (server/review-verdict.ts). The identifier predates the control-plane merger and is kept so stored policies still read.
 export const reviewProviderOf = (policy: Work['policy']): ReviewProvider => policy.reviewProvider ?? 'github';
 export const nativeReviewRequired = (policy: Work['policy']) => !!policy.review && reviewProviderOf(policy) === 'github';
 // Failover is derived, never stored: the recorded exhaustion history for the exact
@@ -80,7 +81,7 @@ export function assertReviewerProfiles(profiles: ReviewerProfile[] | undefined, 
 
 /**
  * The approval the review gate accepts for the exact current candidate, with the identity behind
- * it, or null. One rule for every provider: a formal GitHub approval of the head by someone other
+ * it, or null. One rule for every provider: a reviewer session's approval of the head by someone other
  * than the author (after the requirement-review baseline when one is set), or the dispatched
  * provider's verdict for the exact recorded request and, for agent review, the profile Graphyard
  * currently dispatches to under the same registered App.

@@ -103,10 +103,8 @@ test('unit:producer-manual-proof-never-escalated — a judged manual failure rew
     snapshot: async () => ({ work: [outstanding], now: at }),
     closeSession: (pane: string) => { log.push(`close:${pane}`); },
     dispatch: async (work: Work) => { log.push(`dispatch:${work.key}`); },
-    requestProof: async (work: Work) => { log.push(`proof:${work.key}`); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: async () => {},
     persist: async () => {},
   } as unknown as DaemonEffects;
   const result = await runCycle(config, emptyDaemonState(config), deps, () => Date.parse(at));

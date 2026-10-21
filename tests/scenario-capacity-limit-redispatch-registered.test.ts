@@ -40,7 +40,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('scenario_capacity_redispatch');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scenario_capacity_redispatch`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/capacity-redispatch');
+  engine = new Engine(store, 120, 'owner/capacity-redispatch');
   http = server(engine, [{ ...operator, token: tokens.get(operator.id)! }], null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

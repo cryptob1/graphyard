@@ -64,13 +64,13 @@ test('the build gate carries the regression refusal only for the observed candid
     observation: { candidate: { sha: head, baseSha: base, pr: 5, branch: 'graphyard/gy-55-1', author: 'a' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/quarantine.ts'],
       scopeFiles: [file({ path: 'src/quarantine.ts', additions: 0, deletions: 9 })], at: new Date().toISOString() },
     evidence: [], violations: [], gates: [], stage: 'build', scenarioRequirements: [], reworkRequested: false, lease: null, epoch: 1, revision: 1, policyRevision: 1, blocker: null } as unknown as Work;
-  const refused = evaluate(work, [work], new Date(), [15368]);
+  const refused = evaluate(work, [work], new Date());
   assert.equal(refused.stage, 'build');
   assert.match(refused.gates.find(gate => gate.name === 'build')!.reasons.join('\n'), /src\/quarantine\.ts: removes 9 lines/);
   const stale = { ...work, candidate: { ...work.candidate!, sha: blob('c') } } as Work;
-  assert.doesNotMatch(evaluate(stale, [stale], new Date(), [15368]).gates.find(gate => gate.name === 'build')!.reasons.join('\n'), /quarantine/, 'a refusal never outlives its observation');
+  assert.doesNotMatch(evaluate(stale, [stale], new Date()).gates.find(gate => gate.name === 'build')!.reasons.join('\n'), /quarantine/, 'a refusal never outlives its observation');
   const fixed = { ...work, observation: { ...work.observation!, scopeFiles: [file({ path: 'src/quarantine.ts', sha: blob('2') })] } } as Work;
-  assert.equal(evaluate(fixed, [fixed], new Date(), [15368]).gates.find(gate => gate.name === 'build')!.passed, true);
+  assert.equal(evaluate(fixed, [fixed], new Date()).gates.find(gate => gate.name === 'build')!.passed, true);
 });
 
 test('the local diff parser turns git raw and numstat output into the same file records the provider observation carries', () => {

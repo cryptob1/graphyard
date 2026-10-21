@@ -161,10 +161,8 @@ function cycleEffects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
     snapshot: async () => ({ work: [], now: iso(0) }),
     closeSession: () => {},
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     ...overrides,
   };
