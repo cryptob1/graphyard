@@ -2552,11 +2552,12 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
+    // Graphyard keeps no merge queue (GY-1236) and no planned-file scope (GY-1992): a document stored
+    // before then drops their fields, and a scope refusal it carried, before any gate reads them.
+    dropRetiredQueueFields(work); dropRetiredScopeFields(work);
     const result = evaluate(work, all, now, this.ciAppIds);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
-    // Graphyard keeps no merge queue (GY-1236) and no planned-file scope (GY-1992): a document stored before then drops their fields here.
-    dropRetiredQueueFields(work); dropRetiredScopeFields(work);
     // GitHub merges on every passing gate (GY-1235): no merge authorization is recorded, and one a
     // record carried from before is cleared.
     if (work.mergeAuthorization) work.mergeAuthorization = null;
