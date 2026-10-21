@@ -11,6 +11,7 @@ import { coordinatorCheckoutRoot } from '../master/profiles.js';
 import { harnessDrift, writeHarnessPermissions } from '../harness.js';
 import { message, touchStanding, type DaemonAction } from './state.js';
 import { readyToRetry } from './sessions.js';
+import { workspaceGone } from './dispatch-failures.js';
 import { record, stoppedStates } from './effects.js';
 import { decisionReadConcurrency } from './decision-reads.js';
 import { maxApproverLaunches } from './decisions.js';
@@ -104,6 +105,33 @@ export async function clearCoveredBlockers(cycle: Cycle) {
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Cleared ${item.key}'s blocker as the operator-agent identity: its scope refusal names only paths plannedFiles already covers (${named.join(', ')})`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not clear ${item.key}'s covered scope-refusal blocker: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      }
+    });
+  }
+}
+
+/**
+ * Remedy 2b (GY-2600): re-queue the items the loop stopped redispatching because Herdr refused the
+ * workspace it was configured with. Once the configured workspace is another one, the cause is
+ * gone, so the dispatch-failure blocker is cleared and the item dispatches again into the live workspace.
+ */
+export async function requeueWorkspaceRefusals(cycle: Cycle) {
+  const { config, state, effects, now, snapshot, performed, isolate } = cycle;
+  const unblock = effects.unblock, current = config.herdrWorkspace;
+  if (!unblock || !current) return;
+  for (const item of snapshot.work.filter(item => item.stage !== 'done' && item.blocker?.startsWith('Dispatch failed '))) {
+    const dead = /workspace (\S+) not found/.exec(item.blocker!)?.[1];
+    if (!dead || dead === current || !workspaceGone(item.blocker!, dead)) continue;
+    await isolate('decision', item, item.key, async () => {
+      const key = remedyKey('requeue', `${item.id}:${item.revision}`);
+      const previous = state.actions[key];
+      if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) return;
+      const attempts = (previous?.attempts ?? 0) + 1;
+      try {
+        await unblock(item, `The loop re-queued ${item.key}: its dispatches failed only because Herdr workspace ${dead} no longer exists, and the loop now launches into ${current} (GY-2600).`);
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Re-queued ${item.key}: its dispatch-failure blocker named the dead Herdr workspace ${dead}; launches now go to ${current}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      } catch (error) {
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not re-queue ${item.key} after the Herdr workspace switch: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
       }
     });
   }
@@ -227,6 +255,7 @@ export async function applyHarnessContract(cycle: Cycle) {
 export async function routineRemedies(cycle: Cycle) {
   await settleSubmittedContainment(cycle);
   await clearCoveredBlockers(cycle);
+  await requeueWorkspaceRefusals(cycle);
   await relaunchUnansweredApprovers(cycle);
   await applyHarnessContract(cycle);
 }

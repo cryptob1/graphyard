@@ -19,6 +19,7 @@ import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { holdBoundWait } from './cycle-decisions.js';
 import { detailChanged } from './decisions.js';
+import { workspaceGone } from './dispatch-failures.js';
 import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, loadedHeldSnapshot, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
 import { checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
 import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
@@ -109,6 +110,12 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
   if (reload.refused && previous?.refused !== state.config.refused) {
     // A refused reload is a configuration fault, whatever kind of action reports it.
     noted.push(storeAction(state, `escalation:config:${reload.at}`, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }, 'action:config'));
+  }
+  // GY-2600: a dead Herdr workspace replaced with a live one is recorded with its reason, and the
+  // dispatch-failure runs it caused are forgotten, so the items they held dispatch again.
+  if (reload.workspace) {
+    noted.push(storeAction(state, `config:herdr-workspace:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Switched herdrWorkspace from ${reload.workspace.from} to ${reload.workspace.to}: ${reload.workspace.reason}`, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
+    for (const [id, run] of Object.entries(state.dispatchFailures)) if (workspaceGone(run.cause, reload.workspace.from)) delete state.dispatchFailures[id];
   }
   if (reload.changed.length) {
     noted.push(storeAction(state, `config:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));

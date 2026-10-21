@@ -95,11 +95,34 @@ export const herdrServerSeen = () => serverSeen;
  */
 export async function herdrWorkspaceHealth(config: Pick<MasterConfig, 'herdrWorkspace'>, run?: ChildRun) {
   if (!config.herdrWorkspace) return { workspace: null, exists: null as boolean | null, reason: null as string | null };
-  let workspaces: any[];
-  try { const listed = await herdrJson(['workspace', 'list'], run); workspaces = Array.isArray(listed?.workspaces) ? listed.workspaces : []; }
+  let listed: string[];
+  try { listed = await listHerdrWorkspaces(run); }
   catch { return { workspace: config.herdrWorkspace, exists: null, reason: 'Herdr could not list workspaces, so the configured workspace is unverified' }; }
-  const exists = workspaces.some(entry => entry?.workspace_id === config.herdrWorkspace);
-  return { workspace: config.herdrWorkspace, exists, reason: exists ? null : `Herdr workspace ${config.herdrWorkspace} configured in .graphyard/master.json no longer exists (Herdr lists ${workspaces.map(entry => entry?.workspace_id).filter(Boolean).join(', ') || 'none'}); every launch into it will refuse. Set herdrWorkspace to a live workspace, or rerun master init --herdr-workspace ID` };
+  const exists = listed.includes(config.herdrWorkspace);
+  return { workspace: config.herdrWorkspace, exists, reason: exists ? null : `Herdr workspace ${config.herdrWorkspace} configured in .graphyard/master.json no longer exists (Herdr lists ${listed.join(', ') || 'none'}); every launch into it will refuse. Set herdrWorkspace to a live workspace, or rerun master init --herdr-workspace ID` };
+}
+const listHerdrWorkspaces = async (run?: ChildRun): Promise<string[]> => {
+  const result = await herdrJson(['workspace', 'list'], run);
+  return (Array.isArray(result?.workspaces) ? result.workspaces : []).map((entry: any) => entry?.workspace_id).filter((id: unknown): id is string => typeof id === 'string' && !!id);
+};
+
+/** Set when a herdr call refused with workspace_not_found (GY-2600): the loop's next config reload re-resolves the workspace. */
+let workspaceRefused = false;
+export const herdrWorkspaceRefused = () => workspaceRefused;
+/**
+ * GY-2600: the live workspace to replace a configured one Herdr no longer lists — the one the
+ * master's own agent runs in, else the first Herdr lists — or null while the configured one lives,
+ * Herdr cannot be read, or it lists none.
+ */
+export async function liveHerdrWorkspace(config: Pick<MasterConfig, 'herdrWorkspace' | 'masterAgentName'>, run?: ChildRun): Promise<{ from: string; to: string; reason: string } | null> {
+  const from = config.herdrWorkspace;
+  const listed = from ? await listHerdrWorkspaces(run).catch(() => null) : null;
+  workspaceRefused = false;
+  if (!from || !listed?.length || listed.includes(from)) return null;
+  const agents = await herdrJson(['agent', 'list'], run).then(result => (result?.agents ?? []) as HerdrAgent[], () => []);
+  const own = agents.find(agent => agent.name === config.masterAgentName && agent.workspace_id && listed.includes(agent.workspace_id))?.workspace_id;
+  const to = own ?? listed[0];
+  return { from, to, reason: `Herdr no longer lists workspace ${from} (it lists ${listed.join(', ')}), so every launch into it refused; adopted ${to}, ${own ? `where the master agent ${config.masterAgentName} runs` : 'the first workspace Herdr lists'}` };
 }
 
 export type HerdrAgent = { name?: string; pane_id?: string; workspace_id?: string; agent?: string | null; agent_status?: string; cwd?: string; foreground_cwd?: string; tokens?: Record<string, string> };
@@ -146,8 +169,16 @@ export function assertHerdrScope(target: string, scope: string | null = processS
 export const agentRuntimeTimeoutMs = defaultChildTimeoutMs;
 export const agentRuntimeRun = (timeoutMs: number = agentRuntimeTimeoutMs): BoundChildRun => childRunner({ timeoutMs });
 export async function herdrJson(args: string[], run: ChildRun = defaultChildRun) {
-  const parsed = JSON.parse(await herdrCall(run, args));
-  if (parsed.error) throw Object.assign(new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`), { herdrCode: typeof parsed.error.code === 'string' ? parsed.error.code : undefined });
+  // A refusal arrives as the JSON body or, from a call that exits non-zero, inside the failure's text.
+  const output = await Promise.resolve().then(() => herdrCall(run, args)).catch(error => {
+    if (/"code"\s*:\s*"workspace_not_found"/.test([error?.message, error?.stdout, error?.stderr].join('\n'))) workspaceRefused = true;
+    throw error;
+  });
+  const parsed = JSON.parse(output);
+  if (parsed.error) {
+    if (parsed.error.code === 'workspace_not_found') workspaceRefused = true;
+    throw Object.assign(new Error(`Herdr refused the operation: ${parsed.error.message ?? parsed.error}`), { herdrCode: typeof parsed.error.code === 'string' ? parsed.error.code : undefined });
+  }
   return parsed.result ?? parsed;
 }
 export async function herdrRun(args: string[], run: ChildRun = defaultChildRun) { await herdrCall(run, args); }
