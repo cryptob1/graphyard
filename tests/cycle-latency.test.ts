@@ -165,16 +165,17 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     // master status: the same recorder over its own phases, returned under `timings`, with the slow
     // server read named by route and phase.
     const status = slowServer(() => work);
-    const slowActions = async (path: string, _credential?: string, timeoutMs?: number) => path === 'actions' ? (await sleep(1_250), { executors: undefined }) : status.read(path, timeoutMs);
-    const report = await masterStatusReport(root, master, slowActions, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
+    // Master status no longer reads GET actions; the board read is the one slow server read left to time.
+    const slowBoard = async (path: string, _credential?: string, timeoutMs?: number) => path === 'board' ? (await sleep(1_250), status.read(path, timeoutMs)) : status.read(path, timeoutMs);
+    const report = await masterStatusReport(root, master, slowBoard, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
     assert.ok(report.timings, 'master status reports its timings');
     const phases = report.timings.steps.map(step => step.step);
     for (const phase of ['herdr', 'credentials', 'snapshot', 'reconcile reviews', 'reconcile producers', 'setup', 'containment', 'worktrees', 'build status', 'attention: interventions', 'attention: decisions', 'attention: derived'])
       assert.ok(phases.includes(phase), `status times its ${phase} phase: ${phases.join(', ')}`);
     const statusSlowest = [...report.timings.steps].sort((a, b) => b.ms - a.ms)[0];
-    assert.equal(statusSlowest.step, 'attention: derived', `the executor read is the slowest phase: ${describeTimings(report.timings)}`);
+    assert.equal(statusSlowest.step, 'board', `the board read is the slowest phase: ${describeTimings(report.timings)}`);
     assert.ok(statusSlowest.ms >= 1_200);
-    assert.deepEqual(report.timings.calls.map(call => [call.kind, call.name, call.step]), [['server', 'GET actions', 'attention: derived']]);
+    assert.deepEqual(report.timings.calls.map(call => [call.kind, call.name, call.step]), [['server', 'GET board', 'board']]);
     assert.ok(report.timings.calls[0].ms >= 1_200 && report.timings.calls[0].ms < 5_000, JSON.stringify(report.timings.calls));
     assert.ok(report.timings.totalMs >= statusSlowest.ms);
   } finally { await cleanup(); }

@@ -6,7 +6,7 @@ import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { checkoutRelease, cliRelease, defaultImageFor, releaseInfo, stampedRelease, type Release } from '../src/release.js';
+import { checkoutRelease, cliRelease, defaultImageFor, packageVersion, releaseInfo, stampedRelease, type Release } from '../src/release.js';
 import { renderVersion, versionReport } from '../src/cli/version.js';
 import { DEFAULT_IMAGE } from '../src/install/adapters.js';
 import { healthRoutes } from '../src/server/routes/health.js';
@@ -39,9 +39,9 @@ test('unit:version-command — a checkout is the latest dated tag on its HEAD, e
   assert.deepEqual(checkoutRelease(outside, 'f'.repeat(40)), { version: `unreleased ${'f'.repeat(12)}`, revision: 'f'.repeat(40), released: false });
 });
 
-test('unit:version-command — install defaults take the image of the CLI\'s release, else stable', () => {
+test('unit:version-command — install defaults take the image of the CLI\'s release, else the package.json version release.yml publishes', () => {
   assert.equal(defaultImageFor({ version: '2026.10.17.2', released: true }), 'ghcr.io/cryptob1/graphyard:2026.10.17.2');
-  assert.equal(defaultImageFor({ version: 'unreleased abc', released: false }), 'ghcr.io/cryptob1/graphyard:stable');
+  assert.equal(defaultImageFor({ version: 'unreleased abc', released: false }), `ghcr.io/cryptob1/graphyard:${packageVersion}`);
   const own = checkoutRelease(resolve('.'));
   assert.equal(DEFAULT_IMAGE, defaultImageFor(cliRelease()));
   if (!process.env.GRAPHYARD_VERSION) assert.equal(DEFAULT_IMAGE, defaultImageFor(own));
@@ -80,7 +80,7 @@ test('unit:version-command — an image without .git is the release its build st
   assert.deepEqual(legacy, { version: '0.1.0', revision: 'b'.repeat(40), released: true });
   const candidate = stampedRelease({ GRAPHYARD_VERSION: 'unreleased abcdef123456', GRAPHYARD_BUILD_REVISION: 'c'.repeat(40) }, noRevision);
   assert.equal(candidate?.released, false);
-  assert.equal(defaultImageFor(candidate!), 'ghcr.io/cryptob1/graphyard:stable');
+  assert.equal(defaultImageFor(candidate!), `ghcr.io/cryptob1/graphyard:${packageVersion}`);
   for (const unstamped of [{}, { GRAPHYARD_VERSION: '' }, { GRAPHYARD_VERSION: '0.0.0-dev' }, { GRAPHYARD_VERSION: 'stable' }]) assert.equal(stampedRelease(unstamped, noRevision), null);
   assert.equal(stampedRelease({ GRAPHYARD_VERSION: '2026.10.17' }, () => 'd'.repeat(40))?.revision, 'd'.repeat(40), 'without a stamped revision the checkout\'s names it');
   const saved = { version: process.env.GRAPHYARD_VERSION, revision: process.env.GRAPHYARD_BUILD_REVISION };

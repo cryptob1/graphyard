@@ -2,8 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatchSort, dispatchStarvationMs } from '../src/coordination.js';
 import { dispatchSchedule } from '../src/master/status.js';
-import { applyCandidateRevert } from '../src/release-revert.js';
-import { recordSubmission } from '../src/pipeline-speed.js';
+import { recordRework, recordSubmission } from '../src/pipeline-speed.js';
 import { coordinationWork } from '../src/server/work-view.js';
 import type { Work } from '../src/model.js';
 
@@ -26,6 +25,15 @@ function work(key: string, overrides: Partial<Work> = {}): Work {
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
   } as Work;
+}
+/** A delivered item reopened for rework after its merge was reverted (the retired candidate revert did this). */
+function reopenReverted(work: Work, now: Date) {
+  recordRework(work, now);
+  work.stage = 'ready'; work.stageEnteredAt = now.toISOString();
+  delete work.delivery;
+  work.submission = null; work.candidate = null; work.observation = null;
+  work.mergeAuthorization = null; work.mergeExecution = null; work.reviewRequest = null;
+  work.reworkRequested = false;
 }
 /** A returned rework: the earlier attempt's submission stands, sent back for a new claim. */
 const rework = (key: string, plannedFiles: string[], overrides: Partial<Work> = {}) =>
@@ -64,7 +72,7 @@ test('unit:dispatch-reworks-before-fresh-items — dispatchSort offers every sam
   // revert reopened has no standing submission there, yet still ranks as submitted.
   const reverted = work('GY-reverted', { plannedFiles: ['src/', 'tests/', hotFile], createdAt: iso(-60_000), stageEnteredAt: iso(-60_000), stage: 'done', submission: { epoch: 1, pr: 9 }, delivery: { mergeSha: 'abc123' } as Work['delivery'] });
   recordSubmission(reverted, 1, new Date(clock - 120_000));
-  assert.ok(applyCandidateRevert(reverted, { mergeSha: 'abc123', revertSha: 'def456' } as Parameters<typeof applyCandidateRevert>[1], new Date(clock - 60_000)).reopened, 'the revert reopens the reverted delivery');
+  reopenReverted(reverted, new Date(clock - 60_000));
   const view = [reverted, starvingFresh, expiredRetry].map(item => coordinationWork(structuredClone(item), { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 }));
   assert.ok(view.every(item => item.pipeline === undefined) && view[0].submission === null, 'the coordination view carries neither the timeline nor a standing submission');
   assert.deepEqual(dispatchSort(view, heat, clock).map(item => item.key), ['GY-reverted', 'GY-starvingFresh', 'GY-retryExpired'],
