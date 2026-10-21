@@ -261,13 +261,29 @@ export const reworkBoundHead = (input: unknown): string | null => {
   const binding = (input as { binding?: unknown } | null)?.binding;
   return typeof binding === 'string' ? /^([0-9a-f]{40}):/.exec(binding)?.[1] ?? null : null;
 };
+/**
+ * GY-2605: an item whose own record reserves its release to the owner (GY-1857): an `Owner hold:` title,
+ * a description or criterion saying it leaves the backlog only when the owner releases it, or a manual
+ * proof that records the owner scheduling it. Only the owner, a declared human admin session, releases it,
+ * or anyone once the item carries an owner-recorded decision (GY-2606).
+ */
+const ownerHoldWording = /\b(?:leaves the backlog only when|stays in the backlog until) the owner releases it\b/i;
+export const ownerHeld = (work: Pick<Work, 'title' | 'description' | 'criteria'>) => /^owner hold:/i.test(work.title)
+  || ownerHoldWording.test([work.description ?? '', ...work.criteria.map(criterion => criterion.text)].join('\n'))
+  || work.criteria.some(criterion => criterion.proofs.some(proof => proof.startsWith('manual:owner-schedules')));
+/** GY-2606: a provided answer to a human-only request on the item, which only a declared human session records (human-request.ts `parkRule`). */
+export const ownerRecordedDecision = (work: Pick<Work, 'humanRequest' | 'humanRequests'>) =>
+  [work.humanRequest, ...work.humanRequests ?? []].some(request => request?.answer?.outcome === 'provided');
+export const ownerHoldRefusal = (work: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'humanRequest' | 'humanRequests'>, actor?: Pick<Principal, 'id' | 'role' | 'sessionKind'>) =>
+  !ownerHeld(work) || ownerRecordedDecision(work) || (actor?.role === 'admin' && actor.sessionKind === 'human') ? null
+    : `${work.key} is under an owner hold: its record reserves the release to the owner, so ${actor?.id ?? 'an agent decision'} may not release it. It stays in the backlog until the owner releases it with their own human admin session`;
 /** The item must still be in the state the decision was requested against. */
 export function decisionPrecondition(action: DecisionAction, input: any, work: Work): string | null {
   if (action === 'recover') return work.stage === 'done' && work.containmentQuarantine ? null : 'Containment recovery applies to delivered work that is still quarantined';
   if (work.stage === 'done') return 'Delivered work is immutable; create a follow-up task';
   if ((action === 'release' || action === 'unblock' || action === 'resolve' || (action === 'close' && input.expectedRevision !== undefined)) && input.expectedRevision !== work.revision) return `Task revision changed (now ${work.revision}); reload and request again`;
   if (action === 'release' && (work.stage !== 'backlog' || work.ready)) return 'Only unreleased backlog work can be released';
-  if (action === 'release') { const owned = loopOwnedRefusal(work); if (owned) return owned; }
+  if (action === 'release') { const owned = loopOwnedRefusal(work) ?? ownerHoldRefusal(work); if (owned) return owned; }
   if (action === 'unblock' && !work.blocker) return 'Task has no blocker to clear';
   if (action === 'resolve' && !standingEscalations(work).some(entry => entry.trigger === input.trigger)) return `No standing ${input.trigger} escalation; standing: ${standingEscalations(work).map(entry => entry.trigger).join(', ') || 'none'}`;
   if (action === 'requirements' && input.expectedPolicyRevision !== work.policyRevision) return `Policy revision changed (now ${work.policyRevision}); reload and request again`;

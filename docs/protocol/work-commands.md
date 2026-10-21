@@ -7,7 +7,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin`, operator agents additively; stale revisions refused first.
 - `decomposition` (coordinator): `decided` (`payload.children`) [splits](#splitting-an-item).
-- `ready`, `unblock` `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3); two-party `release`/`unblock`/pinned `close` decisions survive bookkeeping, others settle `stale`; loop-owned items refuse them.
+- `ready`, `unblock` `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3); two-party `release`/`unblock`/pinned `close` decisions survive bookkeeping, others settle `stale`; loop-owned items refuse them, and owner-held ones (`Owner hold:` title, "until the owner releases it", `manual:owner-schedules…`) refuse all but a human admin session until a provided answer to a human-only request on the item records the owner's decision.
 - `resolve`: human `admin`, or an attestation explaining `lease-loss`; head-bound `rework` waits while another candidate stands.
 - `rework`, `recover` (delivered quarantine): `{"reason":…,"previousWorkerStopped":true}`; `repair` (coordinator/admin) rebuilds a head carrying another item's unlanded commits.
 - `claim` `{}`; `heartbeat`; `release` `{"epoch":1}` (`"cause"` or `"failure":{…}` → `workspace.failed`); `blocked` `{"epoch":1,…}` (reason releases, null clears); `blocker-probe` (`pass` clears a routine [blocker](#blocked-work-unblocks-itself)); `review-launch`/`review-verdict`/`review-withdraw` ([review](../coordination.md#review-gate-verdicts-not-threads)); `workspace` `{epoch, host, path, branch}`.
