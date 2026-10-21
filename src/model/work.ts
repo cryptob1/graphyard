@@ -189,8 +189,6 @@ export interface Work extends Create {
   // Append-only identities that have held an assignment. Trusted proof producers
   // must stay independent of every one of them, not only the latest assignment.
   implementers?: string[];
-  /** The principal whose create made the item (GY-2610): the loop closes every open item the install's E2E principal created, its cases' fixtures, so none is ever released or dispatched. Unset on items created before. */
-  createdBy?: string;
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
