@@ -15,7 +15,7 @@ graphyard runner bundle-digest ./oracle
 
 ### The acknowledgement is retried, never repeated
 
-Each send carries request key `ATTEMPT_ID-ack`, identical body; an already-acknowledged answer is success, other 2xx refuse. A confirmed refusal is a decision, never retried; transport failures, timeouts, 408, 429, 5xx retry: At most **5 sends**, paused 1, 2, 4 and 8 seconds apart; no send starts more than **60 seconds** after the first. No heartbeat or attestor go-ahead until the acknowledgement is confirmed.
+Each send carries request key `ATTEMPT_ID-ack`, identical body; an already-acknowledged answer is success, other 2xx refuse. A confirmed refusal is a decision, never retried; transport failures, timeouts, 408, 429, 5xx retry: At most **5 sends**, paused 1, 2, 4 and 8 seconds apart; no send starts more than **60 seconds** after the first. Until the acknowledgement is confirmed, no heartbeat is sent nor the attestor told to proceed.
 
 ### Attempt boundary
 
