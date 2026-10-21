@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { isReleaseCandidateTest, listTestFiles, preMergeTestFiles, readDurations, releaseCandidateTests, repositoryRoot, shardFiles } from '../scripts/ci-tests.mjs';
+import { isReleaseCandidateTest, listTestFiles, preMergeTestFiles, releaseCandidateTests, repositoryRoot } from '../scripts/ci-tests.mjs';
 import { policySchema } from '../src/model/policy.js';
 import { readWorkflow } from '../src/protection.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -66,7 +66,7 @@ test('unit:fast-gate-required-set — GY-2009 removes Actions PR gates; pre-merg
   const selected = readFileSync(out, 'utf8').split('\n').filter(Boolean);
   assert.deepEqual(selected, preMergeTestFiles());
   assert.deepEqual(selected, listTestFiles().filter(file => !(file in releaseCandidateTests)));
-  for (const file of listTestFiles().filter(file => file !== 'tests/timing-stability.test.ts'))
+  for (const file of listTestFiles())
     if (/\bassertTiming\(/.test(read(file))) assert.ok(isReleaseCandidateTest(file), `${file} asserts a timing budget, so it runs on the release candidate`);
 });
 

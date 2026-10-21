@@ -1,42 +1,27 @@
 import { test } from 'node:test';
-import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { baselineSentinel, dependencyMap, listTestFiles, mergeDurations, readDurations, selectAffected, selectForRun, shardFiles, shardImbalance } from '../scripts/ci-tests.mjs';
+import { dependencyMap, listTestFiles, selectAffected, selectForRun, shardFiles } from '../scripts/ci-tests.mjs';
 import { nestedFirst, nestedPortGap, nodeTestArgs, runTests } from './helpers/run-tests.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-499: the required `test` check ran the whole suite on one runner in about fifteen minutes, on
 // every rework round, base refresh and queue tip. It is now an aggregate over a matrix of shard jobs
-// balanced by recorded per-file durations, and a pull request's own run executes only the test files
-// its change affects. One case per proof: unit:ci-sharded, unit:affected-tests-selected.
+// balanced by file count, and a pull request's own run executes only the test files its change
+// affects. One case per proof: unit:ci-sharded, unit:affected-tests-selected.
 
-const workflowJob = (text: string, id: string) => {
-  const start = text.indexOf(`\n  ${id}:\n`);
-  assert.ok(start >= 0, `ci.yml has a ${id} job`);
-  const rest = text.slice(start + 1), end = rest.slice(1).search(/\n {2}[\w-]+:\n/);
-  return end < 0 ? rest : rest.slice(0, end + 1);
-};
-
-test('unit:ci-sharded — duration-balanced shards finish within 20% of each other (GY-2009: Actions ci.yml gate removed; merge writer trial shards tests)', async () => {
+test('unit:ci-sharded — shards balanced by file count, every file on exactly one (GY-2009: Actions ci.yml gate removed; merge writer trial shards tests)', async () => {
   assert.ok(!existsSync(new URL('../.github/workflows/ci.yml', import.meta.url)), 'ci.yml is gone');
-  // The recorded durations cover the suite, and the seven shards they give finish within 20%.
-  const tests = listTestFiles(), durations = readDurations();
-  const recorded = tests.filter(file => Number.isFinite(durations[file]));
-  assert.ok(recorded.length >= tests.length * 0.9, `tests/helpers/timing-baseline.json records ${recorded.length} of ${tests.length} test files; refresh it with node scripts/ci-tests.mjs durations`);
-  const shards = shardFiles(tests, durations, 7);
+  const tests = listTestFiles();
+  const shards = shardFiles(tests, 7);
   assert.equal(shards.length, 7);
-  assert.deepEqual(shards.flatMap(entry => entry.files).sort(), tests, 'every test file runs on exactly one shard');
-  assert.ok(shardImbalance(shards) <= 0.2, `shards finish within 20% of each other: ${shards.map(entry => Math.round(entry.durationMs / 1000)).join('s, ')}s`);
-
-  // Longest first onto the lightest shard; an unrecorded file weighs the median. Each shard lists its
-  // files longest first, and runs through ordered-tests.mjs, which starts them in that order
-  // (`node --test` would sort them by path), so no long file starts last.
-  const split = shardFiles(['a', 'b', 'c', 'd', 'e', 'new'], { a: 50, b: 40, c: 30, d: 20, e: 10 }, 2);
-  assert.deepEqual(split.map(entry => entry.files), [['a', 'new', 'e'], ['b', 'c', 'd']]);
-  assert.deepEqual(split.map(entry => entry.durationMs), [90, 90]);
+  assert.deepEqual(shards.flat().sort(), tests, 'every test file runs on exactly one shard');
+  const sizes = shards.map(shard => shard.length);
+  assert.ok(Math.max(...sizes) - Math.min(...sizes) <= 1, `shards hold as near as possible the same number of files: ${sizes.join(', ')}`);
+  // Deterministic: the files sorted and dealt round-robin, a repeated file once.
+  assert.deepEqual(shardFiles(['b', 'a', 'c', 'd', 'e', 'a'], 2), [['a', 'c', 'e'], ['b', 'd']]);
 
   // The runner runs one shard of the selection, and nothing at all for an empty one.
   const cwd = await temporaryDirectory('ci-shards');
@@ -48,10 +33,6 @@ test('unit:ci-sharded — duration-balanced shards finish within 20% of each oth
   assert.equal(nodeTestArgs(cwd, ['--shard', '3/3', '--files-from', 'list.txt']).empty, true);
   assert.equal(nodeTestArgs(cwd, ['--files-from', 'none.txt']).empty, true);
   assert.ok(nodeTestArgs(cwd, ['--durations', 'd.jsonl', 'tests/one.test.ts']).args.some(arg => arg.endsWith('file-durations.mjs')));
-
-  // A shard's measured durations refresh the baseline, and the rest of the record is kept.
-  const merged = mergeDurations({ schema: 1, files: { 'tests/a.test.ts': 5, 'tests/gone.test.ts': 9 } }, ['{"file":"tests/b.test.ts","durationMs":1234.4,"passed":true}\n'], ['tests/a.test.ts', 'tests/b.test.ts']);
-  assert.deepEqual(merged, { schema: 1, files: { 'tests/a.test.ts': 5, 'tests/b.test.ts': 1234, [baselineSentinel]: 0 } });
 });
 
 async function fixture(files: Record<string, string>) {
@@ -101,9 +82,9 @@ test('unit:affected-tests-selected — a pull request runs only the tests that r
   // On this repository: a test that imports a module is selected by a change to it, a module
   // imported only through another is followed, and a change reaching no test runs everything.
   const tests = listTestFiles(), map = dependencyMap(undefined, tests);
-  const direct = selectAffected(['src/cli/timing-failures.ts'], map, tests);
+  const direct = selectAffected(['src/tmp-reclaim.ts'], map, tests);
   assert.equal(direct.mode, 'affected');
-  assert.ok(direct.files.includes('tests/timing-stability.test.ts'), 'imported through tests/helpers/timing-report.ts');
+  assert.ok(direct.files.includes('tests/ci-shards.test.ts'), 'imported through tests/helpers/run-tests.ts');
   assert.ok(direct.files.length < tests.length, `${direct.files.length} of ${tests.length}`);
   const own = selectAffected(['tests/ci-shards.test.ts'], map, tests);
   assert.equal(own.mode, 'affected'); assert.ok(own.files.includes('tests/ci-shards.test.ts'), 'a changed test file selects itself');
@@ -122,24 +103,4 @@ test('a test run started inside another test run reserves its ports above the pa
   const run = await runTests({ cwd: project, args: ['tests/port.test.ts'], stdio: 'pipe', ports: { span: 20 } });
   assert.equal(run.code, 0, run.stdout + run.stderr);
   assert.ok(run.base >= parent + nestedPortGap, `nested window ${run.base} lies above the parent's ${parent} and its offsets`);
-});
-
-test('unit:timing-baseline-merges — two changes appending timing lines at the same spot merge into valid JSON with no conflict, and the sentinel stays last', async () => {
-  const written = mergeDurations({ files: { 'tests/a.test.ts': 1 } }, ['{"file":"tests/b.test.ts","durationMs":2}'], ['tests/a.test.ts', 'tests/b.test.ts']);
-  assert.equal(Object.keys(written.files).at(-1), baselineSentinel, 'the writer keeps the sentinel last');
-  assert.equal(readDurations()[baselineSentinel], undefined, 'readers never see the sentinel');
-  const attributes = await readFile(new URL('../.gitattributes', import.meta.url), 'utf8');
-  assert.match(attributes, /^tests\/helpers\/timing-baseline\.json merge=union$/m);
-  const directory = await temporaryDirectory('baseline-union');
-  const git = (...args: string[]) => execFileSync('git', args, { cwd: directory, encoding: 'utf8' }).trim();
-  git('init', '-q', '-b', 'main'); git('config', 'user.email', 't@t'); git('config', 'user.name', 't');
-  const baseline = (extra: Record<string, number>) => `${JSON.stringify({ files: { 'tests/a.test.ts': 1, ...extra, [baselineSentinel]: 0 } }, null, 2)}\n`;
-  const target = join(directory, 'tests/helpers/timing-baseline.json');
-  await mkdir(dirname(target), { recursive: true }); await writeFile(join(directory, '.gitattributes'), attributes); await writeFile(target, baseline({}));
-  git('add', '-A'); git('commit', '-qm', 'base'); git('checkout', '-qb', 'x');
-  await writeFile(target, baseline({ 'tests/x.test.ts': 5 })); git('commit', '-qam', 'x'); git('checkout', '-q', 'main');
-  await writeFile(target, baseline({ 'tests/y.test.ts': 7 })); git('commit', '-qam', 'y');
-  const tree = git('merge-tree', '--write-tree', 'main', 'x').split('\n')[0];
-  const merged = JSON.parse(git('cat-file', '-p', `${tree}:tests/helpers/timing-baseline.json`)).files;
-  assert.deepEqual([merged['tests/x.test.ts'], merged['tests/y.test.ts']], [5, 7], 'both appended lines survive');
 });

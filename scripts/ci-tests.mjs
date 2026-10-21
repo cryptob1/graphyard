@@ -1,9 +1,7 @@
-// Which test files a CI run executes, and on which shard (GY-499). The required `test` check is an
-// aggregating job over a matrix of shard jobs (.github/workflows/ci.yml); each shard runs the files
-// this module assigns it, balanced by the per-file durations recorded in
-// tests/helpers/timing-baseline.json. On a pull request's own CI only the test files the change can
-// affect run; pushes to main, merge-queue tips and any change this module cannot map run every
-// pre-merge file. The release-candidate suites (`releaseCandidateTests`) never run here.
+// Which test files a CI run executes, and on which shard (GY-499). Each shard runs the files this
+// module assigns it, balanced by file count. On a pull request's own CI only the test files the
+// change can affect run; pushes to main, merge-queue tips and any change this module cannot map run
+// every pre-merge file. The release-candidate suites (`releaseCandidateTests`) never run here.
 //
 //   node scripts/ci-tests.mjs select --out FILE           the files this CI run executes, one per line
 //   node scripts/ci-tests.mjs release-candidate [--suite soak|timing-budget] --out FILE
@@ -13,7 +11,6 @@
 //                                                         the pre-merge files it runs, one per line (every one when full),
 //                                                         never the advisory budget tests (`advisoryTests`)
 //   node scripts/ci-tests.mjs advisory                     the advisory budget tests, in the `affected` shape
-//   node scripts/ci-tests.mjs durations RECORD.jsonl...   write measured per-file durations into the baseline
 //
 // The dependency map is built from the source itself: every relative import, and every path a file
 // names in text (`'../docs/x.md'`, `join(root, 'src')`, `${root}/src/cli.ts`), is an edge; a
@@ -22,18 +19,11 @@
 // again on the merge-queue tip, so a dependency the map misses is caught before anything lands.
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, posix, relative, resolve } from 'node:path';
+import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const defaultShardCount = 4;
 export const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-export const baselinePath = 'tests/helpers/timing-baseline.json';
-/**
- * The baseline's last `files` key, never a test file. With it last, every real line ends in a comma, so
- * .gitattributes' `merge=union` merges two changes that touch neighbouring lines into valid JSON
- * instead of a conflict: the file is shard weights only, so an update lost to the union costs nothing.
- */
-export const baselineSentinel = '~';
 /** The subject Graphyard gives the commit of a speculative merge-queue tip (src/github.ts). */
 export const speculativeTipSubject = /^Graphyard speculative tip for /;
 
@@ -61,12 +51,12 @@ export const releaseCandidateTests = {
 };
 
 /**
- * The budget tests that are advisory under the control-plane merger (GY-1528): a document or module
- * outgrowing its budget is a chore, never a reason to refuse or revert a merge. The merge writer's
- * trial (`affected`) leaves them out, and the loop runs them once after each merge, filing one chore
- * item per failing file naming it and the merge commit. GitHub's CI selection (`select`) still runs them.
+ * The budget tests that are advisory under the control-plane merger (GY-1528): a module outgrowing
+ * its budget is a chore, never a reason to refuse or revert a merge. The merge writer's trial
+ * (`affected`) leaves them out, and the loop runs them once after each merge. GitHub's CI selection
+ * (`select`) still runs them.
  */
-export const advisoryTests = ['tests/module-budgets.test.ts', 'tests/hotspots.test.ts', 'tests/interventions-hotspot-split.test.ts'];
+export const advisoryTests = ['tests/interventions-hotspot-split.test.ts'];
 export const isAdvisoryTest = file => advisoryTests.includes(file);
 
 /** The test files the required `test` check runs: every file except the release-candidate suites. */
@@ -76,33 +66,14 @@ export function preMergeTestFiles(root = repositoryRoot) {
 
 // ---- Shards ------------------------------------------------------------------------------------
 
-/** The recorded wall time of each test file in milliseconds, from the timing baseline. */
-export function readDurations(root = repositoryRoot) {
-  const file = join(root, baselinePath);
-  if (!existsSync(file)) return {};
-  const { [baselineSentinel]: _sentinel, ...files } = JSON.parse(readFileSync(file, 'utf8')).files ?? {};
-  return files;
-}
-
-const median = values => { const sorted = [...values].sort((a, b) => a - b); return sorted.length ? sorted[Math.floor(sorted.length / 2)] : 1000; };
-
 /**
- * Splits `files` into `count` shards whose recorded durations are as even as the files allow:
- * longest first, each onto the shard with the least time so far. A file with no recorded duration
- * (one added since the baseline was recorded) counts as the median file. Deterministic, so every
- * shard job computes the same split independently. Each shard keeps its files longest first:
- * node:test starts files in the order it is given them, a few at a time, so a long file placed
- * last would start late and hold its shard open long after the others finish.
+ * Splits `files` into `count` shards of as near as possible the same size: the files sorted, dealt
+ * round-robin. Deterministic, so every shard job computes the same split independently.
  */
-export function shardFiles(files, durations, count = defaultShardCount) {
+export function shardFiles(files, count = defaultShardCount) {
   if (!Number.isInteger(count) || count < 1) throw new Error(`Shard count must be a positive integer: ${count}`);
-  const fallback = median(Object.values(durations).filter(value => Number.isFinite(value)));
-  const weight = file => Number.isFinite(durations[file]) ? durations[file] : fallback;
-  const shards = Array.from({ length: count }, () => ({ files: [], durationMs: 0 }));
-  for (const file of [...new Set(files)].sort((a, b) => weight(b) - weight(a) || a.localeCompare(b))) {
-    const lightest = shards.reduce((best, shard) => shard.durationMs < best.durationMs ? shard : best);
-    lightest.files.push(file); lightest.durationMs += weight(file);
-  }
+  const shards = Array.from({ length: count }, () => []);
+  [...new Set(files)].sort().forEach((file, at) => shards[at % count].push(file));
   return shards;
 }
 
@@ -112,23 +83,6 @@ export function parseShard(text) {
   const index = Number(match?.[1]), count = Number(match?.[2]);
   if (!match || index < 1 || count < 1 || index > count) throw new Error(`--shard takes I/N with 1 <= I <= N: ${text}`);
   return { index, count };
-}
-
-/** How far apart the shards finish, as a fraction of the longest: (longest - shortest) / longest. */
-export const shardImbalance = shards => { const times = shards.map(shard => shard.durationMs), max = Math.max(...times); return max ? (max - Math.min(...times)) / max : 0; };
-
-/** Merges node:test file-duration records (tests/helpers/file-durations.mjs) into the baseline's `files`. */
-export function mergeDurations(baseline, records, testFiles) {
-  const measured = {};
-  for (const line of records.join('\n').split('\n')) {
-    if (!line.trim()) continue;
-    const { file, durationMs } = JSON.parse(line);
-    if (typeof file === 'string' && Number.isFinite(durationMs)) measured[file] = Math.max(measured[file] ?? 0, Math.round(durationMs));
-  }
-  const files = {};
-  for (const file of testFiles) { const value = measured[file] ?? baseline.files?.[file]; if (value !== undefined) files[file] = value; }
-  files[baselineSentinel] = 0;
-  return { ...baseline, files };
 }
 
 // ---- Affected tests ----------------------------------------------------------------------------
@@ -288,25 +242,18 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const files = tests.filter(file => suite === null ? isReleaseCandidateTest(file) : releaseCandidateKind(file) === suite), out = option('--out');
     if (out) writeFileSync(out, files.map(file => `${file}\n`).join('')); else console.log(files.join('\n'));
   } else if (command === 'shards') {
-    const shards = shardFiles(preMergeTestFiles(), readDurations(), Number(args[0] ?? defaultShardCount));
-    shards.forEach((shard, at) => console.log(`shard ${at + 1}: ${shard.files.length} files, ${Math.round(shard.durationMs / 1000)}s recorded`));
-    console.log(`imbalance ${(shardImbalance(shards) * 100).toFixed(1)}%`);
+    const shards = shardFiles(preMergeTestFiles(), Number(args[0] ?? defaultShardCount));
+    shards.forEach((shard, at) => console.log(`shard ${at + 1}: ${shard.length} files`));
   } else if (command === 'affected') {
-    // The trials' selection (the shadow gate's and the merge writer's) never runs the advisory budget tests (GY-1528).
+    // The merge writer's trial selection never runs the advisory budget tests (GY-1528).
     const selection = selectAffected(args, dependencyMap(), preMergeTestFiles().filter(file => !isAdvisoryTest(file)));
-    // The files follow in both modes, so a caller (the shadow gate's trial) runs exactly the pre-merge selection and never the release-candidate suites.
+    // The files follow in both modes, so a caller (the merge writer's trial) runs exactly the pre-merge selection and never the release-candidate suites.
     console.log(`${selection.mode}: ${selection.reason}`); if (selection.files.length) console.log(selection.files.join('\n'));
   } else if (command === 'advisory') {
     // The advisory budget tests the loop runs once after each control-plane merge (GY-1528), in the `affected` output's shape.
     const files = advisoryTests.filter(file => tests.includes(file));
     console.log(`advisory: ${files.length} advisory budget test file(s)`); if (files.length) console.log(files.join('\n'));
-  } else if (command === 'durations') {
-    if (!args.length) throw new Error('Usage: ci-tests durations RECORD.jsonl...');
-    const file = join(repositoryRoot, baselinePath);
-    const merged = mergeDurations(JSON.parse(readFileSync(file, 'utf8')), args.map(path => readFileSync(path, 'utf8')), tests);
-    writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`);
-    console.log(`Recorded durations for ${Object.keys(merged.files).length} of ${tests.length} test files in ${relative(process.cwd(), file)}`);
   } else {
-    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--suite soak|timing-budget] [--out FILE] | shards [N] | affected FILE... | advisory | durations RECORD.jsonl...');
+    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--suite soak|timing-budget] [--out FILE] | shards [N] | affected FILE... | advisory');
   }
 }
