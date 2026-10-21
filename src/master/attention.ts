@@ -4,7 +4,7 @@ import { blockerView } from '../model/blocker-class.js';
 import { humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import { type Work, standingEscalations } from '../model.js';
-import { refusedReconciliation } from '../merge-queue.js';
+import { refusedReconciliation } from '../model/merge-authorization.js';
 import { missingBaseAncestry } from '../merge-base-ancestry.js';
 import { type ProductionReport, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';

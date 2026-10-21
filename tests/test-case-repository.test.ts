@@ -35,7 +35,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('test-cases'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('test_cases_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/test_cases_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository);
+  engine = new Engine(store, 120, repository);
   validation = new Validation(engine, principals, repository);
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

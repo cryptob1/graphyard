@@ -405,7 +405,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.submissionObserver = null;
   engine.principals = [{ id: 'human-operator', role: 'admin', sessionKind: 'human' as const }, { id: 'engineer-a', role: 'worker', sessionKind: 'ai' as const }];
 });

@@ -267,7 +267,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
 
 /**
  * The board from the status read every client has (`humanOnly`, `productionEnvironment`,
- * `production`, `ciAppIds`): what `GET /api/board` serves, and what `master status` builds for
+ * `production`): what `GET /api/board` serves, and what `master status` builds for
  * itself when the server it talks to predates the route.
  */
 export const boardFromStatus = (work: Work[], now: number, status: any) => buildBoard(work, now, status?.humanOnly, releaseView(status), status?.scopeDecisions);

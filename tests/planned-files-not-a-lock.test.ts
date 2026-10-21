@@ -13,7 +13,7 @@ import { reworkBriefSection } from '../src/master/rework-brief.js';
 import { continueAfterDecline } from '../src/master/runtime-prompt.js';
 import { completeCommand } from '../src/cli/complete.js';
 import { managedInstructions } from '../src/repository-setup.js';
-import { criteriaRuleSection } from '../src/review-threads.js';
+import { criteriaRuleSection } from '../src/reviewer.js';
 import type { CliContext } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

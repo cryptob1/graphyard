@@ -497,7 +497,7 @@ test('unit:system-driven-items the master\'s own next steps name the loop step f
   assert.doesNotMatch(workAttentionOwner(item({ systemDriven: true }), 'launch-review').next, /then graphyard master review GY-7$/);
   assert.equal(workAttentionOwner(item({ systemDriven: false }), 'launch-review').next, 'Fix the refusal reason, then graphyard master review GY-7');
   // An ordinary pending review names the loop's relaunch too, not a `master review` the CLI refuses.
-  const atReview = (systemDriven: boolean) => item({ systemDriven, stage: 'review', gates: [{ name: 'review', passed: false, reasons: ['A new independent GitHub approval is required'] }] as any });
+  const atReview = (systemDriven: boolean) => item({ systemDriven, stage: 'review', gates: [{ name: 'review', passed: false, reasons: ['A new independent approval is required'] }] as any });
   assert.match(workAttentionOwner(atReview(true), 'gate').next, /the loop relaunches the review on its own; graphyard master review GY-7 only once the loop has stopped relaunching its request/);
   assert.doesNotMatch(workAttentionOwner(atReview(true), 'gate').next, /relaunches a refused review/);
   assert.match(workAttentionOwner(atReview(false), 'gate').next, /graphyard master review GY-7 relaunches a refused review/);

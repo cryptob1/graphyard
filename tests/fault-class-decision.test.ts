@@ -17,7 +17,7 @@ import { maxApproverLaunches } from '../src/daemon/decisions.js';
 // GY-1346's bound is read through the namespace too, so the base exercise loads this file and its replays fail on their assertions.
 import * as decisions from '../src/daemon/decisions.js';
 import { humanNeededAttention, mergeWriterMotionBoundMs, mergeWriterMovement, mergeWriterStallAttention, owedAttention } from '../src/cli/owed-report.js';
-import { githubUnobservedRefusal, pushRefusal, trialRefusal } from '../src/model/gates.js';
+import { unobservedCandidateRefusal, pushRefusal, trialRefusal } from '../src/model/gates.js';
 // GY-2053's own exports are read through namespaces (and its summary type as a type), so the base exercise loads this file and each new replay fails on its assertion.
 import * as owed from '../src/cli/owed-report.js';
 import * as mergeWriterModule from '../src/daemon/cycle-merge-writer.js';
@@ -1469,8 +1469,8 @@ test('unit:unheld-push-refusal-still-counts — a push refusal whose head the wr
   // summary — an older caller, or a status read before the writer ran — every push refusal stands as before.
   const unobserved = pushRefused('GY-2004', new Date(now - 31 * 60_000).toISOString(), gy2053Heads);
   const action = unobserved.nextAction as NextAction;
-  Object.assign(unobserved, { nextAction: { ...action, refusal: githubUnobservedRefusal, inputs: { ...action.inputs, kind: 'escalate', trigger: 'merge', detail: githubUnobservedRefusal } } });
-  Object.assign(unobserved.actionQueue!.actions[0], { refusal: githubUnobservedRefusal });
+  Object.assign(unobserved, { nextAction: { ...action, refusal: unobservedCandidateRefusal, inputs: { ...action.inputs, kind: 'escalate', trigger: 'merge', detail: unobservedCandidateRefusal } } });
+  Object.assign(unobserved.actionQueue!.actions[0], { refusal: unobservedCandidateRefusal });
   assert.equal(owed.mergeWriterHolds(unobserved, writer, now), null, 'only the exact push refusal is the writer\'s next step');
   assert.deepEqual(observedFaults([unobserved], gy2053Pass, writer).counted.map(fault => fault.kind), ['owed-decision']);
   assert.equal(owed.mergeWriterHolds(front, null, now), null);
@@ -1809,7 +1809,7 @@ test('manual:fault-class-decision — the base-failure hold grounds nothing past
   assert.deepEqual([expired, trialfailed, otherhead].map(work => owed.baseFailureHoldUntil(work, now)), [null, null, null], 'only a base-failure refusal of the exact candidate head bounds the line');
   // The hold bounds only the writer's trial-refusal line: any other refusal of the item stands as it did.
   const unobserved = item({});
-  const refusal = githubUnobservedRefusal;
+  const refusal = unobservedCandidateRefusal;
   const action: NextAction = { kind: 'escalate', work: unobserved.id, key: unobserved.key, gate: 'test', refusal,
     reason: `${unobserved.key} is refused at the test gate and no executor step answers it: ${refusal}`,
     inputs: { kind: 'escalate', trigger: 'test', detail: refusal } as NextAction['inputs'], llmRole: null, binding: 'test:unobserved' };

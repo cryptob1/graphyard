@@ -143,7 +143,7 @@ const reviewerBot = 'graphyard-reviewer[bot]';
 /** A submitted item as the record held it at the instant: gates evaluated, dispatch and action queue reconciled. */
 function recorded(work: Work, at: string) {
   const now = new Date(at);
-  Object.assign(work, evaluate(work, [work], now, [15368]));
+  Object.assign(work, evaluate(work, [work], now));
   reconcileAutoDispatch(work, [work], now);
   reconcileActions(work, [work], now);
   return work;
@@ -161,7 +161,7 @@ for (const instance of instances.filter(entry => entry.kind === 'actorless')) {
         item.observation!.at = shift(instance.at, -5 * 60_000 - 13_000);
         item.baseRefresh = { from: { sha: tip, baseSha: base }, base, baseTree: base, policyRevision: 1, at: shift(instance.at, -5 * 60_000 + 6_000), head: own, conflict: null, carry: null,
           restore: { contaminated: tip, foreign: ['GY-1'], own, cause: 'ejection', requested: null, reason: `ejected from the merge queue: Landing speculative tip ${tip.slice(0, 12)} on ${base.slice(0, 12)} would revert work outside its planned files`, performedAt: shift(instance.at, -5 * 60_000 + 6_000), outcome: 'restored' } } as Work['baseRefresh'];
-        Object.assign(item, evaluate(item, [item], new Date(instance.at), [15368]));
+        Object.assign(item, evaluate(item, [item], new Date(instance.at)));
         // As the instance recorded it: no request of any kind raised for the tip, and no row queued.
         item.autoDispatch = { review: null, producers: [], history: [] };
         return item;

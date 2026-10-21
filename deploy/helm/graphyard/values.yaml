@@ -20,7 +20,6 @@ config:
   githubBaseBranch: main
   githubAppId: ""
   githubInstallationId: ""
-  githubCiAppIds: "15368"
   reviewerApps: "[]"          # JSON array; identities only, never keys
   extraEnv: {}                # additional plain environment variables
 

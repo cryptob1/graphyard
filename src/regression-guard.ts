@@ -193,12 +193,12 @@ export function describeRefusal(finding: ScopeFinding, all: Work[]) {
 /**
  * GY-744. An open candidate in the head's history that git shows already landed: its head, or its
  * pull request's merge commit, is an ancestor of the base branch tip. The owning item's recorded
- * state lags a merge made outside the queue, so the landing check (merge-queue.ts LandingCheck)
+ * state lags a merge made outside the queue, so the landing check (model/landing-check.ts)
  * asks git before naming any candidate unlanded; such a peer is neither `foreign` nor `carried`,
  * none of its files is read as a revert, and its merge is reconciled at once (engine.ts).
  */
 export interface LandedCandidate { key: string; pr: number; head: string; mergeSha: string | null }
-declare module './merge-queue.js' {
+declare module './model/landing-check.js' {
   interface LandingCheck {
     /** The open candidates in this head's history that git shows already on the base branch tip (GY-744). */
     landed?: LandedCandidate[];
@@ -208,7 +208,7 @@ declare module './merge-queue.js' {
 const landedKeys = (observation: Pick<Observation, 'landing'>) => new Set((observation.landing?.landed ?? []).map(entry => entry.key));
 
 /**
- * The landing re-check (GY-97; see merge-queue.ts LandingCheck): what the candidate would revert
+ * The landing re-check (GY-97; see model/landing-check.ts): what the candidate would revert
  * on the commit it would actually land on, as opposed to the base it is bound to. One entry per
  * file, naming the item that owns it. `adverse` is false for a file the observation could not
  * compare: that refuses the build gate like any uncompared file.

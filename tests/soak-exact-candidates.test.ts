@@ -64,7 +64,7 @@ test('unit:soak-exact-candidates — two simulated days of the real promotion cy
   let store: Store, http: ReturnType<typeof server>, url = '';
   const startPlane = async () => {
     store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${pgPort}/soak_exact`); await store.init();
-    http = server(new Engine(store, [15368], 120, 'owner/project'), [operator, coordinator]);
+    http = server(new Engine(store, 120, 'owner/project'), [operator, coordinator]);
     await new Promise<void>(done => http.listen(0, '127.0.0.1', done));
     url = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   };

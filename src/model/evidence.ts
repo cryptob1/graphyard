@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import type { Work } from './work.js';
-import type { CiRun } from './ci-proofs.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { reservedForAttestation, type ClosedQuestionRecord } from './closed-question.js';
 import { inheritedObligations } from './bootstrap.js';
@@ -44,11 +43,6 @@ export interface Evidence {
   /** GY-1841: the evaluation that judged this result under the recovery rule, every attempt kept with its time, outcome and cause. */
   evaluation?: EvaluationRecord;
   /**
-   * CI-produced evidence: the GitHub Actions job that executed the registered contract on this
-   * commit, as the control plane read it back from GitHub before accepting the record. Only the
-   * CI producer principal writes this lane; see docs/protocol/evidence.md.
-   */
-  ciRun?: CiRun;
   /** What a validation result was attributed to: the exact manifest, compatibility signature and independently observed target; see docs/delivery.md, "Attribution". */
   attribution?: EvidenceAttribution;
   /**

@@ -110,11 +110,7 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
   const record: ReviewVerdicts = work.reviewVerdicts && binds(work.reviewVerdicts, work) ? work.reviewVerdicts
     : { sha: candidate!.sha, baseSha: candidate!.baseSha, policyRevision: work.policyRevision, verdicts: [] };
   const requestId = answeredRequest(work);
-  // GitHub reports one review per identity, its latest, so a recorded approval that GitHub
-  // dismissed and the same identity then re-posted (the restored or carried approval the merge
-  // broker posts through the reviewer App) is never seen as DISMISSED in `reviews`: the re-post
-  // hides it. The observation lists every dismissed review, so the withdrawal is still read and
-  // the re-post is not taken for a second verdict on the request (GY-486).
+  // A withdrawn verdict is listed by id (review-verdict.ts), so the withdrawal is read even when a later review of the same identity replaced it in `reviews` (GY-486).
   const dismissed = new Set(observation!.dismissedReviewIds ?? []);
   for (const verdict of record.verdicts) if (dismissed.has(verdict.id)) verdict.dismissed = true;
   for (const review of observation!.reviews) {

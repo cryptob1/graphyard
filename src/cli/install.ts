@@ -7,7 +7,6 @@ import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference
 import { acquireApplyLock, applyInstall, applyRosterChange, buildPlan, installHerdrOnly, installIdFor, installProfilesOnly, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
 import { importPrincipalToken, installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
 import { delegationLimitAssignments } from '../install/limits.js';
-import { ciProducerProvisioningSteps, readRoster, registerCiProducer } from '../install/ci-proofs.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { runDoctor } from './install-doctor.js';
@@ -203,14 +202,9 @@ export const installCommands = defineCommands([
             const result = await applyProposal(root, stored.proposal, { url, installed });
             return print({ proposal: stored.file, ...result, installed: installed.directory });
           }
-          // Apply rewrites the registry from the reviewed proposal; the CI producer's token is read
-          // first so a re-run keeps the repository secret valid, then the entry is merged back in.
-          const roster = await readRoster(resolve(root, '.graphyard/principals.json'));
           const result = await applyProposal(root, stored.proposal, { url, writeCredentials: true });
           if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
-          const ciProofs = await registerCiProducer(result.principalsFile, roster);
-          return print({ proposal: stored.file, ...result, ciProofs: { ...ciProofs, next: ciProducerProvisioningSteps(stored.proposal.repository, url) },
-            capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
+          return print({ proposal: stored.file, ...result, capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
         }
         await saveProposal(root, fresh);
         const applied = await loadAppliedSetup(root);

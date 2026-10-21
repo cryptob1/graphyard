@@ -207,7 +207,7 @@ test('manual:intervention-pattern-scope-widening-review — a duplicate planned 
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('scope-widening-review'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('scope_widening_review_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/scope_widening_review_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, 'owner/scope-widening-review'); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, 'owner/scope-widening-review'); engine.submissionObserver = null;
   const master: Principal = { id: operator, role: 'admin', sessionKind: 'ai' };
   const revise = (work: Work, plannedFiles: string[], criteria: { id: string; text: string; proofs: string[] }[], reason: string) =>
     engine.execute(master, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, reason, criteria, dependencies: [], plannedFiles, exclusiveResources: [], producerProofs: [] }, randomUUID());

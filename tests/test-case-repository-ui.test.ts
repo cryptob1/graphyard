@@ -37,7 +37,7 @@ function linkedItem(): Work {
     candidate: { sha: head, baseSha: base, pr: 162, branch: 'graphyard/gy-162-1', author: 'builder' }, policyRevision: 1,
     observation: { ...(base0.observation ?? {}), candidate: { sha: head, baseSha: base, pr: 162, branch: 'graphyard/gy-162-1', author: 'builder' }, files: ['src/checkout.ts', 'tests/e2e/cart-totals.spec.ts'] } as Work['observation'],
     evidence: [
-      evidence('e2e:checkout-pays', { ciRun: undefined, provenance: { provider: 'github-actions', repository: 'o/r', workflowCommit: head, runId: '4242', runAttempt: 2, artifact: { id: 1, name: 'report', digest: 'sha256:x', url: 'https://example.test/a', createdAt: iso(0) } } }),
+      evidence('e2e:checkout-pays', { provenance: { provider: 'github-actions', repository: 'o/r', workflowCommit: head, runId: '4242', runAttempt: 2, artifact: { id: 1, name: 'report', digest: 'sha256:x', url: 'https://example.test/a', createdAt: iso(0) } } }),
       evidence('e2e:refund-issued', { result: 'fail' }),
       evidence('e2e:receipt-mailed', { executed: 3, skipped: 1 }),
       // A pass on an older head, and a builder's own assertion on this one: neither is a result on the current head.

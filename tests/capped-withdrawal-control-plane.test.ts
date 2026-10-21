@@ -104,7 +104,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('capped-withdrawal-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('capped_withdrawal_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/capped_withdrawal_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -172,7 +172,7 @@ test('unit:capped-withdrawal-without-github — an approver refusing a capped re
   withdrawnItem.observation!.reviews = withdrawnItem.observation!.reviews.map(review => ({ ...review, state: 'DISMISSED' }));
   assert.equal(standingVerdict(withdrawnItem), null);
   assert.equal(cappedReview(withdrawnItem, config), null);
-  assert.ok(!evaluate(withdrawnItem, [withdrawnItem], new Date(Date.parse(at())), [15368]).gates.find(gate => gate.name === 'review')!.reasons.includes('Outstanding change requests must be resolved through a new review'));
+  assert.ok(!evaluate(withdrawnItem, [withdrawnItem], new Date(Date.parse(at()))).gates.find(gate => gate.name === 'review')!.reasons.includes('Outstanding change requests must be resolved through a new review'));
 
   // The re-review launch lists the refused findings as FOLLOW-UP: the withdrawal's request is the launch's prompt section.
   const rereviewRequest = cappedRefusalRequest(withdrawnItem, H, config, [decision('refused')], [followUp])!;

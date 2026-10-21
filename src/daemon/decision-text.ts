@@ -1,49 +1,10 @@
-// Concern: the wording of a routine decision — its bounded reason and detail, the review threads it names, and the refused or standing decisions a retry cites.
+// Concern: the wording of a routine decision — its bounded reason and detail, and the refused or standing decisions a retry cites.
 import { RefusedResponse, type Work } from '../model.js';
-import { botThread, describeThread, openThreads, type ReviewThread } from '../merge-queue.js';
-import { reworkRoundsOf } from '../review-cap.js';
 import { actionDetailMax } from './state.js';
 import type { RoutineDecisionAction } from './decisions.js';
 
 /** The control plane's bound on a decision's reason (`src/model/approval.ts`); a longer one is refused on every retry. */
 export const decisionReasonMax = 2000;
-/**
- * The snapshot as the cycle decides from it: each item's unresolved threads without the ones its
- * approval named as follow-up (GY-166). Those are the review loop's to file and resolve, not a
- * worker's to fix, so a thread-rework decision is never requested for them. Only the cycle's copy
- * changes; GitHub still blocks the merge on each until the loop has resolved it.
- */
-export function setAsideFollowUpThreads<S extends { work: Work[] }>(snapshot: S, followUps: Map<string, Set<string>> | undefined): S {
-  if (!followUps?.size) return snapshot;
-  return { ...snapshot, work: snapshot.work.map(item => {
-    const ids = followUps.get(item.key), conversations = item.observation?.conversations;
-    if (!ids?.size || !conversations?.unresolved.some(thread => thread.id && ids.has(thread.id))) return item;
-    return { ...item, observation: { ...item.observation!, conversations: { ...conversations, unresolved: conversations.unresolved.filter(thread => !thread.id || !ids.has(thread.id)) } } };
-  }) };
-}
-/** How many rework rounds an item takes before a bot's review thread stops being grounds for another. */
-export const botThreadReworkRounds = 2;
-/**
- * The open threads on the current head the loop requests rework for: every one within the first
- * `botThreadReworkRounds` rework rounds, and after that only a person's — a bot's thread is then
- * advisory, and only the reviewer's own CHANGES_REQUESTED sends the item back.
- */
-export function reworkThreads(work: Work): ReviewThread[] {
-  const threads = openThreads(work);
-  return reworkRoundsOf(work) >= botThreadReworkRounds ? threads.filter(thread => !botThread(thread)) : threads;
-}
-/** How many unresolved threads a rework reason names; the binding still carries every one, and the worker reads them all from the pull request. */
-const reworkThreadsNamed = 5;
-/**
- * The unresolved threads a rework request names, bounded: their authors and paths are contributor
- * text of any length and count, and a reason past the control plane's bound is refused on every
- * retry, so the item would never reach its approver or its rework worker.
- */
-export function threadReworkSummary(sha: string, threads: ReviewThread[]): string {
-  const named = threads.slice(0, reworkThreadsNamed).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
-  const more = threads.length - named.length;
-  return `${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} still open on ${sha.slice(0, 12)} after its review settled: ${named.join('; ')}${more ? `; and ${more} more on the pull request` : ''}. Rework the candidate to address the findings, never dismiss them`;
-}
 /**
  * A decision reason within the control plane's bound. What the requester adds around the loop's own
  * grounds — the observation it decided from, the refusals it answers — is kept whole, because the

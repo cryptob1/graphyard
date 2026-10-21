@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { mergeableNow } from '../merge-queue.js';
 import { isClosed } from './closure.js';
 import { standingEscalations } from './escalation.js';
 import type { FaultClass, FaultKind, FaultObservation } from './fault-classes.js';
@@ -190,18 +189,9 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   const mergeBound = limits.mergeableWithoutRefusalMinutes * 60_000, waiting = new Set<string>(), stalled: { key: string; ms: number }[] = [];
   for (const item of work.filter(open)) {
     const observation = item.observation, candidate = item.candidate;
-    // Once GitHub was asked, its own MergeStateStatus says whether it can merge the head (CLEAN, UNSTABLE, HAS_HOOKS),
-    // as `master status` judges a stalled merge (merge-queue.ts `mergeStalls`); a queued entry waits on its merge group.
-    // A BLOCKED head is deliberately not counted, though master status names one past ten minutes
-    // (GY-430): BLOCKED is GitHub refusing the merge for a rule it enforces, an attention item for the
-    // operator, and the control plane already answers it by asking for the head-bound merge after
-    // `blockedAutoMergeProbeMs`, which lands or records GitHub's refusal. This invariant is the
-    // control plane's own defect: GitHub says it can merge and nothing refuses it (GY-1060).
-    const github = observation?.githubQueue && observation.githubQueue.head === candidate?.sha ? observation.githubQueue : null;
-    const mergeable = item.stage === 'merge' && !!candidate && !!observation && observation.mergeable === true && !observation.merged && observation.candidate.sha === candidate.sha
-      && (!github || !github.queue && mergeableNow(github));
-    // A gate still failing is a recorded refusal (its reasons are on the item), and so is GitHub's refusal of the request.
-    const refused = !item.gates.every(gate => gate.passed) || item.violations.length > 0 || !!github?.refused;
+    const mergeable = item.stage === 'merge' && !!candidate && !!observation && observation.mergeable === true && !observation.merged && observation.candidate.sha === candidate.sha;
+    // A gate still failing is a recorded refusal (its reasons are on the item).
+    const refused = !item.gates.every(gate => gate.passed) || item.violations.length > 0;
     if (!mergeable || refused) continue;
     waiting.add(item.id);
     const entry = record.mergeable[item.id]?.sha === candidate!.sha ? record.mergeable[item.id] : { sha: candidate!.sha, since: at };

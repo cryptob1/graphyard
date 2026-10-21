@@ -12,14 +12,9 @@ import { defaultProductionEnvironment, flowExitAt, noProductionHold, productionH
  */
 export interface ReleaseView extends ProductionHold {
   environment: string;
-  /**
-   * The CI Apps whose check runs the test gate counts (status `ciAppIds`), so a check reads failed
-   * only on a trusted App's own failure; null when status has not said.
-   */
-  ciAppIds: readonly number[] | null;
 }
 
-export const noRelease: ReleaseView = { environment: defaultProductionEnvironment, ...noProductionHold, ciAppIds: null };
+export const noRelease: ReleaseView = { environment: defaultProductionEnvironment, ...noProductionHold };
 
 /** The release view from the status read every page already has. */
 export function releaseView(status: any): ReleaseView {
@@ -30,7 +25,6 @@ export function releaseView(status: any): ReleaseView {
     // Merged items production is observed not to serve yet (still moving, at Deploy), those with an
     // open deployment incident (blocked at Deploy), and when the watch last looked.
     ...productionHold(status?.production),
-    ciAppIds: Array.isArray(status?.ciAppIds) ? status.ciAppIds.filter((id: unknown): id is number => typeof id === 'number') : null,
   };
 }
 

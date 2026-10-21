@@ -80,7 +80,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('zero-touch-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('zero_touch_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/zero_touch_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   // The server as src/server/main.ts starts it without GITHUB_APP_ID: no GitHub at all.
   http = server(engine, credentials, null);

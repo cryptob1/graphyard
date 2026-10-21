@@ -42,7 +42,7 @@ test('integration:loop-defers-time-bound-post-deploy-blocker — the loop holds 
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('loop-defer'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('loop_defer');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/loop_defer`); await store.init(); stores.push(store);
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   const now = async () => ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
   const blocked = async (criteria: unknown[], reason: string) => {
     let work = await engine.execute(admin, 'create', null, { title: `Item ${randomUUID().slice(0, 8)}`, type: 'chore', criteria }, randomUUID());

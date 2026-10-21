@@ -35,7 +35,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('direct-merge'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('direct_merge_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/direct_merge_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -127,7 +127,7 @@ test('integration:direct-merge-environment — GRAPHYARD_DIRECT_MERGE_SINCE alon
   const previous = process.env.GRAPHYARD_DIRECT_MERGE_SINCE;
   process.env.GRAPHYARD_DIRECT_MERGE_SINCE = '2024-01-01T00:00:00Z';
   try {
-    const deployed = new Engine(store, [15368], 120, repository); deployed.submissionObserver = null;
+    const deployed = new Engine(store, 120, repository); deployed.submissionObserver = null;
     assert.equal(deployed.directMergeEnvironment?.setBy, 'deployment environment');
     await deployed.reconcile();
     const delivered = await reload(held.work.id);

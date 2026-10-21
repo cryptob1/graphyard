@@ -47,7 +47,7 @@ test('unit:unproduced-manual-proof-owned-by-loop — an unproduced manual proof 
   assert.deepEqual(unproducedManualProofs(work, [work], now), [proof]);
   // GitHub delivery is the only mode (GY-1235): re-evaluated, the record carries no acceptance gate,
   // so the unproduced proof holds nothing and nobody — person or loop — is owed a step for it.
-  const result = evaluate(work, [work], now, [15368]);
+  const result = evaluate(work, [work], now);
   assert.equal(result.gates.some(gate => gate.name === 'acceptance'), false, 'no acceptance gate');
   const current = { ...work, stage: result.stage, gates: result.gates } as Work;
   assert.deepEqual(unproducedManualProofs(current, [current], now), [], 'nothing waits on the proof');

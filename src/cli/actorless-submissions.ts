@@ -1,6 +1,6 @@
 import { agentOwner, type AttentionItem } from '../master.js';
 import { reviewNeed, type ReviewState } from '../model/dispatch.js';
-import { pendingBaseRefresh } from '../merge-queue.js';
+import { pendingBaseRefresh } from '../model/base-refresh.js';
 import { standingEscalations } from '../model/escalation.js';
 import { baseHoldSightedAt } from '../model/behind-base.js';
 import type { Work } from '../model/work.js';

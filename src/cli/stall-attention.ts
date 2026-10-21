@@ -1,18 +1,16 @@
 import { type AttentionItem } from '../master.js';
 import { type Work } from '../model/work.js';
-import { mergeStallAttention } from './status-attention.js';
 import type { IntegrationJob } from '../coordination.js';
 import { firstObservationOwed, observationBandLag } from '../observation-priority.js';
 import { leaseHealthStatus } from './lease-health-attention.js';
 
 /**
- * What waits on something no worker fixes (GY-344, GY-492, GY-558, GY-566): a mergeable pending
- * merge, observation lag past each band's bound, slow lease renewals and the conflict hotspots, raised
- * beside the stalls.
+ * What waits on something no worker fixes (GY-492, GY-558, GY-566): observation lag past each
+ * band's bound, slow lease renewals and the conflict hotspots, raised beside the stalls.
  */
 export function stallAttention(snapshot: { work: Work[]; now: string }, coordinator: Parameters<typeof leaseHealthStatus>[0], derivedStalls: readonly AttentionItem[], hotspotAttention: readonly AttentionItem[]) {
   const observation = observationThroughputStatus(snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...mergeStallAttention(snapshot), ...observation.attention, ...health.attention, ...hotspotAttention];
+  const stalledItems = [...derivedStalls, ...observation.attention, ...health.attention, ...hotspotAttention];
   return { observation, health, stalledItems };
 }
 

@@ -88,10 +88,10 @@ test('unit:github-client-removed — the GitHub API client modules are gone, no 
   const { commands } = await import('../src/cli/index.js');
   assert.equal(commands.some(command => command.name === 'onboard'), false, 'graphyard onboard is not registered');
 
-  // The live control plane registers no GitHub webhook module: those paths answer 404, signed or not, as any unknown path does.
+  // The live control plane registers no GitHub webhook module: a delivery is refused like any unauthenticated API call, and the paths are unknown to an authenticated caller.
   for (const path of ['github/webhook', 'github/installation']) {
     const unsigned = await fetch(`${url}/api/${path}`, { method: 'POST', body: '{}', headers: { 'content-type': 'application/json', 'x-github-event': 'pull_request', 'x-hub-signature-256': 'sha256=00' } });
-    assert.equal(unsigned.status, 404, `${path} answers 404 to GitHub's delivery`);
+    assert.equal(unsigned.status, 401, `${path} refuses GitHub's delivery`);
     assert.equal((await request(coordinator, path, {})).status, 404, `${path} answers 404 to an authenticated caller`);
   }
 });
@@ -149,7 +149,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('github-client-removed'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository);
+  engine = new Engine(store, 120, repository);
   engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = controlPlane(engine, credentials, null);
@@ -187,7 +187,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
     stored.submission = { ...stored.submission!, pr: 2010 };
     stored.candidate = { ...stored.candidate!, pr: 2010 };
     stored.headObserved = { at, pr: 2010, sha: head };
-    stored.observation = { ...stored.observation!, checks: githubChecks, reviews: [{ reviewer: 'alice', sha: head, state: 'CHANGES_REQUESTED' }], prState: 'open', draft: false, mergeable: false, mergeabilityUnknown: false, protected: true } as Work['observation'];
+    stored.observation = { ...stored.observation!, checks: githubChecks, reviews: [{ reviewer: 'alice', sha: head, state: 'CHANGES_REQUESTED' }], prState: 'open', draft: false, mergeable: false, protected: true } as Work['observation'];
     stored.mainGuardReverts = [{ mergeSha: sha('e1'), pr: 1999, state: 'merged', revertSha: sha('e2'), failing: ['test'] }];
     stored.checkReruns = [{ sha: head, check: 'typecheck', failedRunId: 7001, state: 'failed', at: new Date(clock - 86_400_000).toISOString() }];
     await save(db, stored, 'github', 'github.observed', now);
@@ -201,7 +201,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   assert.equal(loaded.mainGuardReverts.length, 1, 'main-guard history loads');
   const history = (await store.pool.query('SELECT kind FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows.map((row: { kind: string }) => row.kind);
   assert.ok(history.includes('github.observed'), `the stored history carries the GitHub observation: ${history.join(', ')}`);
-  const evaluated = evaluate(loaded, [loaded], now, [15368]);
+  const evaluated = evaluate(loaded, [loaded], now);
   const reasons = (name: string) => evaluated.gates.find(gate => gate.name === name)?.reasons ?? [];
   assert.ok(reasons('test').some(reason => /merge writer has not trialled/.test(reason)), `the test gate waits on the merge writer: ${JSON.stringify(evaluated.gates)}`);
   assert.ok(!reasons('test').some(reason => /typecheck|CI check/.test(reason)), 'a PR-era failed check refuses nothing');
@@ -294,56 +294,6 @@ async function worktree(id: string, epoch: number): Promise<{ path: string; bran
   try { await createWorktree(cli, subject); } finally { process.chdir(previous); }
   return printed[0];
 }
-
-test('unit:pr-era-history-loads — an item a stored pull-request adoption names starts from the adopted head, completes --head, and reworks and completes --head again, all from the shared object store with no pull-request read, worker-ref fetch or push', { timeout: 120_000 }, async () => {
-  // The adopted pull request's branch and head, in the shared object store only: origin never held them.
-  const adoptedBranch = 'feature/adopted', adoptTree = join(fixture, 'adopt-tree');
-  git(checkout, 'worktree', 'add', '-q', '-b', adoptedBranch, adoptTree, baseTip);
-  git(adoptTree, 'config', 'user.email', 't@example.com'); git(adoptTree, 'config', 'user.name', 'T');
-  const adopted = await commit(adoptTree, 'src/b.ts', 'export const b = 1;\n', 'the adopted work');
-  git(checkout, 'worktree', 'remove', adoptTree);
-
-  let work = await engine.execute(operator, 'create', null, { title: 'Adopted before GY-2010', plannedFiles: ['src/b.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }, randomUUID());
-  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
-  await store.transaction(async db => {
-    const stored: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document;
-    stored.prAdoption = { pr: 1849, head: adopted, branch: adoptedBranch, repository, adoptedBy: coordinator.id, adoptedAt: at };
-    await save(db, stored, coordinator.id, 'work.adopted', now);
-  });
-  const originRefs = () => git(origin, 'for-each-ref', '--format=%(refname)');
-  const before = originRefs();
-
-  // The first attempt starts at the adopted head, and its commit completes as a head.
-  assert.equal((await engine.pullAssignment(worker, { work: work.id }, randomUUID())).assigned?.id, work.id);
-  const first = await worktree(work.id, 1);
-  assert.equal(first.branch, adoptedBranch, 'the attempt works on the adopted branch');
-  assert.equal(git(first.path, 'rev-parse', 'HEAD'), adopted, 'and starts from the adopted head');
-  git(first.path, 'config', 'user.email', 't@example.com'); git(first.path, 'config', 'user.name', 'T');
-  const answered = await commit(first.path, 'src/b.ts', 'export const b = 2;\n', 'answer the adoption');
-  work = await engine.execute(worker, 'submit', work.id, completionBody(['1', '--head', answered], () => answered), randomUUID());
-  assert.equal(work.candidate?.sha, answered, 'the adopted item completes --head');
-  assert.equal(work.observation?.source, 'control-plane', 'observed from the shared object store');
-
-  // A rework round the PR era left on it: the next attempt starts from the registered head and completes --head again.
-  await store.transaction(async db => {
-    const stored: Work = (await db.query('SELECT document FROM work_items WHERE id=$1 FOR UPDATE', [work.id])).rows[0].document;
-    stored.reworkRequested = true; stored.lease = null;
-    await save(db, stored, coordinator.id, 'rework', now);
-  });
-  await engine.execute(worker, 'claim', work.id, {}, randomUUID());
-  const epoch = (await store.workDocument(work.id))!.epoch;
-  const second = await worktree(work.id, epoch);
-  assert.equal(git(second.path, 'rev-parse', 'HEAD'), answered, 'the rework starts from the registered submission head');
-  git(second.path, 'config', 'user.email', 't@example.com'); git(second.path, 'config', 'user.name', 'T');
-  const reworked = await commit(second.path, 'src/b.ts', 'export const b = 3;\n', 'the rework');
-  work = await engine.execute(worker, 'submit', work.id, completionBody([String(epoch), '--head', reworked], () => reworked), randomUUID());
-  assert.equal(work.candidate?.sha, reworked, 'the reworked adopted item completes --head');
-  assert.equal(work.reworkRequested, false);
-
-  assert.equal(originRefs(), before, 'origin’s refs never moved: nothing was pushed');
-  assert.equal(existsSync(workerPushes), false, 'no worker-ref push reached origin');
-  assert.equal(spawnSync('git', ['-C', checkout, 'rev-parse', '--verify', '-q', `refs/remotes/origin/${adoptedBranch}`]).status === 0, false, 'no worker ref was fetched');
-});
 
 test('unit:shadow-gate-removed — the shadow gate is gone: its modules and routes are deleted, the loop runs no shadow trial step and touches no shadow port, and its report leaves the run summary', { timeout: 120_000 }, async () => {
   for (const path of ['src/daemon/cycle-shadow.ts', 'src/merge-writer/shadow.ts', 'src/server/shadow-verdict.ts']) assert.equal(existsSync(new URL(path, root)), false, `${path} is deleted`);

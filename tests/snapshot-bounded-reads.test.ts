@@ -55,7 +55,7 @@ before(async () => {
   await database.createDatabase('graphyard_bounded_reads');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_bounded_reads`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = credentials;
   engine.submissionObserver = null;
   http = server(engine, credentials);

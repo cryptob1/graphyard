@@ -422,7 +422,7 @@ test('API requires authentication and bounded larger histories are explicitly pa
   assert.match(pulse.partialReason!, /counts are lower bounds/i);
   assert.match(pulse.partialReason!, /durations are not bounds/i);
   assert.doesNotMatch(pulse.partialReason!, /statistics are lower-bound/i);
-  const http = server(new Engine(store, [15368], 120, 'owner/project'), [{ id: 'reader', role: 'reader', token: 'r'.repeat(32) }, { id: 'producer', role: 'producer', deploymentProviders: ['railway'], token: 'p'.repeat(32) }, { id: 'collector', role: 'producer', proofs: ['integration:pulse'], token: 'c'.repeat(32) }]);
+  const http = server(new Engine(store, 120, 'owner/project'), [{ id: 'reader', role: 'reader', token: 'r'.repeat(32) }, { id: 'producer', role: 'producer', deploymentProviders: ['railway'], token: 'p'.repeat(32) }, { id: 'collector', role: 'producer', proofs: ['integration:pulse'], token: 'c'.repeat(32) }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${(http.address() as any).port}`;
   try {

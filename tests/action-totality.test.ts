@@ -53,7 +53,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('action-totality'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [CI_APP], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
@@ -95,7 +95,7 @@ test('integration:no-failing-gate-without-action — an item whose review gate r
   const item = await candidate({ reviews: [] });
   const profiles = [{ name: 'reviewer-a', runtime: 'claude', reviewerApp: 'app-a', timeoutSeconds: 1800 }];
   const graded = (probe: Work, all: Work[] = []): Work => {
-    const result = evaluate(probe, [...all, probe], now, [CI_APP]);
+    const result = evaluate(probe, [...all, probe], now);
     return { ...probe, stage: result.stage, gates: result.gates, violations: result.violations };
   };
   // The head's mechanical proofs have passed: review follows them (GY-115), so the provider states
@@ -165,7 +165,7 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
   const item = await candidate();
   const other = await candidate();
   const grade = (probe: Work, all: Work[]): Work => {
-    const result = evaluate(probe, all, now, [CI_APP]);
+    const result = evaluate(probe, all, now);
     return { ...probe, stage: result.stage, gates: result.gates, violations: result.violations };
   };
   const unproven = { ...item, evidence: [] } as Work;

@@ -57,7 +57,7 @@ function midReview(base: Work): Work {
         'AC-1: unit:item-page-sections needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
         'AC-2: unit:item-page-technical-collapsed needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
       ] },
-      { name: 'merge', passed: false, reasons: ['GitHub has not been observed at the current candidate', 'Pull request is not mergeable against the current base'] },
+      { name: 'merge', passed: false, reasons: ['The merge writer has not observed the current candidate', 'Pull request is not mergeable against the current base'] },
     ],
     sessions: [{ id: 'graphyard-cursor-1:1', tab: null, head: null, host: 'vishrog', kind: 'implementation', pane: 'w1V:p32M', role: null, epoch: null, state: 'running', attach: 'herdr pane attach w1V:p32M --workspace w1V',
       endedAt: null, outcome: null, runtime: 'claude', subject: 'GY-171: item page hierarchy', agentName: null, principal: 'graphyard-cursor-1', startedAt: at(-20 * minute), updatedAt: at(-20 * minute), workspace: 'w1V', transcript: null }],
@@ -89,7 +89,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
     const gate = item.gates.find(entry => entry.name === name)!;
     for (const line of plainLines(gate, item, NOW)) assert.ok(groups[0].lines.includes(line), `${name}: ${line}`);
   }
-  assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-checking GitHub', 'The pull request conflicts with the main branch']);
+  assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-reading the candidate', 'The pull request conflicts with the main branch']);
   const left = html.slice(html.indexOf('aria-label="What is left"'), html.indexOf('aria-label="Requirements"'));
   assert.match(left, /<small>5 things<\/small>/);
   assert.match(left, /<section class="left-step" aria-label="Checking state"><h3>Checking <small>\u00b7 cleared by Reviewer agent<\/small><\/h3>/);
@@ -182,7 +182,7 @@ test('the Activity section reads the kinds the ledger records — command names 
   // Typed over every command: a command added to the engine without a plain label fails typecheck here.
   const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true, mechanicalplan: true,
     heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, defer: true, window: true, dispatchblock: true, scope: true, autoscope: true, evidence: true,
-    reading: true, revoke: true, session: true, request: true, adopt: true };
+    reading: true, revoke: true, session: true, request: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),
     ['Created', 'Released for work', 'Picked up by a builder', 'Handed in', 'Sent back for changes', 'Review requested', 'Merged', 'Live in production', 'Asked you for a decision', 'Graphyard checked GitHub']);
@@ -207,7 +207,7 @@ test('What is left names who clears each state from the refusal itself: exhauste
   const base = midReview(all.find(entry => entry.key === 'GY-15')!);
   const gate = (name: string, reasons: string[]) => ({ name, passed: reasons.length === 0, reasons });
   // Every reviewer profile exhausted, current step Review: the panel and "Who acts next" agree on the master agent.
-  const exhausted = { ...base, gates: [gate('ready', []), gate('build', []), gate('test', []), gate('acceptance', []), gate('merge', ['GitHub has not been observed at the current candidate']),
+  const exhausted = { ...base, gates: [gate('ready', []), gate('build', []), gate('test', []), gate('acceptance', []), gate('merge', ['The merge writer has not observed the current candidate']),
     gate('review', ['Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider'])] } as unknown as Work;
   const work = [...all, exhausted];
   const [current] = whatIsLeft(exhausted, NOW);
@@ -235,7 +235,7 @@ test('What is left names who clears each state from the refusal itself: exhauste
   const blocker = 'Needs the staging database credentials';
   const blocked = { ...base, submission: null, candidate: null, observation: null, reworkRequested: false, blocker, lease: { owner: 'graphyard-codex-1', epoch: 1, expiresAt: at(30 * minute) },
     gates: [gate('ready', [blocker]), gate('build', ['Worker has not submitted implementation for this attempt', 'Pull request has not been independently observed']),
-      gate('review', ['Independent approval of the current commit is required']), gate('test', []), gate('acceptance', []), gate('merge', ['GitHub has not been observed at the current candidate'])] } as unknown as Work;
+      gate('review', ['Independent approval of the current commit is required']), gate('test', []), gate('acceptance', []), gate('merge', ['The merge writer has not observed the current candidate'])] } as unknown as Work;
   const blockedAll = [...all, blocked];
   const [held] = whatIsLeft(blocked, NOW);
   assert.deepEqual([held.label, held.who], ['Todo', 'Master agent']);

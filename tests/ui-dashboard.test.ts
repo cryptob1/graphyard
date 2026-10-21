@@ -299,6 +299,8 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
   const withReasons = (item: Work, reasons: Record<string, string[]>) => ({ ...item, gates: item.gates.map(gate => reasons[gate.name] ? { ...gate, passed: reasons[gate.name].length === 0, reasons: reasons[gate.name] } : gate) }) as Work;
   const handedIn = find('GY-22', work);
   const ci = (name: string) => `Required CI check ${name} has not passed on the current candidate`;
+  const trial = (item: Work) => `merge writer has not trialled ${item.candidate!.sha.slice(0, 12)} on ${item.candidate!.baseSha.slice(0, 12)}`;
+  const refusedTrial = (item: Work) => ({ ...item, mergeLedger: { ...(item.mergeLedger ?? {}), state: 'refused', head: item.candidate!.sha } }) as unknown as Work;
   // Checking folds validate, test, review, proof and merge (GY-1979), so every gate case below is
   // Checking, and the label names the gate it waits on. A merge the release does not serve yet is Done.
   const cases: [string, Work, string, string, string][] = [
@@ -306,17 +308,8 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
     ['scope check', withReasons(handedIn, { build: ['Candidate diff has not been compared with the planned files'] }), 'checking', 'Checking · checking which files it changes', 'Graphyard (automatic)'],
     ['out of scope', withReasons(handedIn, { build: ['Candidate changes 2 files outside plannedFiles: a, b'] }), 'checking', 'Checking · it changes files outside its plan', 'Builder agent'],
     ['CI running', handedIn, 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
-    ['CI failed', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1 }, { name: 'typecheck', result: 'success', appId: 1 }] } } as Work, 'checking', 'Checking · the check test failed', 'Builder agent'],
-    ['CI re-run after a failure', { ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'in_progress', appId: 1, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
-    ['CI re-run after a success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'success', appId: 1, id: 1 }, { name: 'test', result: 'queued', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, { test: [ci('test'), ci('typecheck')] }), 'checking', 'Checking · 0 of 2 checks done', 'Automated checks'],
-    ['CI fixed on a re-run', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 1, id: 2 }, { name: 'typecheck', result: 'in_progress', appId: 1, id: 3 }] } } as Work, { test: [ci('typecheck')] }), 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
-    // Only the trusted CI App's runs count, as in the test gate, whose reasons name the checks not yet passed:
-    // a newer run of the same name from another App neither completes a check nor fails it.
-    ['CI pending behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'in_progress', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
-    ['CI pending behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'queued', appId: 1, id: 1 }, { name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
-    ['CI failed behind an untrusted success', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 1, id: 1 }, { name: 'test', result: 'success', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'checking', 'Checking · the check test failed', 'Builder agent'],
-    // No trusted run yet, only another App's failure under the same name: the gate says only that the trusted check has not passed.
-    ['CI absent from the trusted App behind an untrusted failure', withReasons({ ...handedIn, observation: { ...handedIn.observation!, checks: [{ name: 'test', result: 'failure', appId: 99, id: 2 }, { name: 'typecheck', result: 'success', appId: 1, id: 3 }] } } as Work, { test: [ci('test')] }), 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
+    // The merge writer's trial decides a check (GY-2010): a refused trial of this head failed the checks it names.
+    ['CI failed', withReasons(refusedTrial(handedIn), { test: [trial(handedIn)] }), 'checking', 'Checking · the check test failed', 'Builder agent'],
     ['review requested', find('GY-15', work), 'checking', 'Checking · waiting for the reviewer', 'Reviewer agent'],
     ['proofs pending', find('GY-16', work), 'checking', 'Checking · 2 of 3 proofs passed', 'Prover agent'],
     // An obligation inherited from another change's deferred proof counts in the total and stays open until proven.
@@ -331,7 +324,7 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
     ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'checking', 'Checking · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
   ];
   // The CI Apps the test gate trusts, as status carries them.
-  const trusted = { ...noRelease, ciAppIds: [1] };
+  const trusted = noRelease;
   for (const [name, item, current, label, who] of cases) {
     const steps = prSteps(item, NOW, trusted);
     assert.deepEqual(steps.steps.map(step => step.id), [...stateIds], name);
@@ -853,42 +846,28 @@ test('GY-161 review: a merged item is Done whichever delivery state it is in, an
   // The footer's "Latest" is the newest merge, dated from that merge, not from the Unix epoch (GY-168).
   const footer = /aria-label="Shipped this week">[\s\S]*$/.exec(withLive)![0];
   assert.match(footer, new RegExp(`data-latest="${live.key}"><span class="mono">${live.key}</span> <span data-title="true">[^<]*</span></button> · merged ${formatAge(mergedAt(live), NOW)} ago`), footer.slice(0, 600));
-  // The item page's Checks line reads each check as the test gate does: only the trusted App's runs
-  // count, so a newer untrusted run of the same name neither passes nor fails a check.
+  // The item page's Checks line reads each check as the test gate does (GY-2010): a check the gate
+  // still names is running until the merge writer's trial, and one it no longer names has passed.
   const handedIn = find('GY-22');
-  const withChecks = (checks: unknown[], test: string[]) => ({ ...handedIn, observation: { ...handedIn.observation!, checks }, gates: handedIn.gates.map(gate => gate.name === 'test' ? { ...gate, passed: test.length === 0, reasons: test } : gate) }) as Work;
+  const withReasons2 = (test: string[]) => ({ ...handedIn, gates: handedIn.gates.map(gate => gate.name === 'test' ? { ...gate, passed: test.length === 0, reasons: test } : gate) }) as Work;
   const ci = 'Required CI check test has not passed on the current candidate';
-  const cases: [Work, string][] = [
-    [withChecks([{ id: 1, name: 'test', result: 'in_progress', appId: 1 }, { id: 2, name: 'test', result: 'success', appId: 99 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], [ci]), 'test running · typecheck passed'],
-    [withChecks([{ id: 1, name: 'test', result: 'success', appId: 1 }, { id: 2, name: 'test', result: 'failure', appId: 99 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], []), 'test passed · typecheck passed'],
-    [withChecks([{ id: 1, name: 'test', result: 'failure', appId: 1 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], [ci]), 'test failed · typecheck passed'],
-    // Only an untrusted App published the named check, and it failed: the trusted check is still to come.
-    [withChecks([{ id: 2, name: 'test', result: 'failure', appId: 99 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }], [ci]), 'test running · typecheck passed'],
-  ];
-  // The status the item page reads names the trusted CI Apps; the server carries its own list.
-  assert.deepEqual(releaseView(boardStatus()).ciAppIds, [1, 15368]);
-  assert.match(await read('src/server/routes/status.ts'), /ciAppIds: engine\.ciAppIds/);
+  const cases: [Work, string][] = [[withReasons2([ci]), 'test running · typecheck passed'], [withReasons2([]), 'test passed · typecheck passed']];
   for (const [item, line] of cases) {
-    assert.equal(checkStates(item, [1]).map(check => `${check.name} ${check.state}`).join(' · '), line);
+    assert.equal(checkStates(item).map(check => `${check.name} ${check.state}`).join(' · '), line);
     const detail = markup(createElement(WorkDetails, { ...dashboard({ work: [item] }), item }));
     assert.match(detail, new RegExp(`<dt>Checks</dt><dd>${line}</dd>`));
   }
 });
 
-
-test('GY-161 review: a check fails on the latest trusted run across Apps; closed work has no state; a pending rework replays at Build; step moves are read page by page; a merge after the watch\'s last pass is Done with the release line carrying the deployment', async () => {
-  // The latest run across every trusted App decides, as the test gate's `latestCheck` does: an
-  // older pending run from one App never hides a newer failure from another.
+test('GY-161 review: a check fails on the merge writer\'s refused trial; closed work has no state; a pending rework replays at Build; step moves are read page by page; a merge after the watch\'s last pass is Done with the release line carrying the deployment', async () => {
+  // The merge writer's refused trial of this head fails its checks; a pending trial leaves them running (GY-2010).
   const handedIn = find('GY-22');
-  const ci = 'Required CI check test has not passed on the current candidate';
-  const withChecks = (checks: unknown[]) => ({ ...handedIn, observation: { ...handedIn.observation!, checks }, gates: handedIn.gates.map(gate => gate.name === 'test' ? { ...gate, passed: false, reasons: [ci] } : gate) }) as Work;
-  const trusted = { ...noRelease, ciAppIds: [1, 15368] };
-  const newerFailure = withChecks([{ id: 1, name: 'test', result: 'in_progress', appId: 1 }, { id: 2, name: 'test', result: 'failure', appId: 15368 }, { id: 3, name: 'typecheck', result: 'success', appId: 1 }]);
-  assert.equal(checkStates(newerFailure, trusted.ciAppIds).find(check => check.name === 'test')!.state, 'failed');
-  const failedSteps = prSteps(newerFailure, NOW, trusted);
+  const trial = `merge writer has not trialled ${handedIn.candidate!.sha.slice(0, 12)} on ${handedIn.candidate!.baseSha.slice(0, 12)}`;
+  const trialled = (state: 'intent' | 'refused') => ({ ...handedIn, mergeLedger: { ...(handedIn.mergeLedger ?? {}), state, head: handedIn.candidate!.sha }, gates: handedIn.gates.map(gate => gate.name === 'test' ? { ...gate, passed: false, reasons: [trial] } : gate) }) as unknown as Work;
+  assert.equal(checkStates(trialled('refused')).find(check => check.name === 'test')!.state, 'failed');
+  const failedSteps = prSteps(trialled('refused'), NOW, noRelease);
   assert.equal(failedSteps.current, 'checking'); assert.equal(failedSteps.label, 'Checking · the check test failed'); assert.equal(failedSteps.who, 'Builder agent');
-  const newerPending = withChecks([{ id: 1, name: 'test', result: 'failure', appId: 1 }, { id: 2, name: 'test', result: 'queued', appId: 15368 }]);
-  assert.equal(checkStates(newerPending, trusted.ciAppIds).find(check => check.name === 'test')!.state, 'running', 'a newer re-run replaces the older failure');
+  assert.equal(checkStates(trialled('intent')).find(check => check.name === 'test')!.state, 'running', 'a pending trial leaves the check running');
 
   // Closed without merging: no step done or current, never "Merged", nobody acts, no step bar.
   const closed = { ...handedIn, stage: 'done', delivery: undefined, closure: { kind: 'obsolete', ref: null, reason: 'No longer needed', by: 'operator', at: new Date(NOW - hour).toISOString(), from: 'review' } } as unknown as Work;

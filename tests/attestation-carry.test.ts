@@ -39,7 +39,7 @@ const attested = (work: Work): Evidence => ({ id: 'ev-attest', proof: PROOF, sha
   attestation: { decision: 'd-4994f0b0', requestedBy: 'master-operator', approvedBy: 'approver' } });
 const merge = (to: string, diff: TipMerge['diff'], baseChanges: string[] = ['src/server/routes/github.ts']): TipMerge =>
   ({ from: A, parents: [A, M2], author: 'graphyard-owner-repo[bot]', authoredByApp: true, conflicts: false, baseChanges, diff });
-/** What bindBaseRefresh records: the carry decided from the head as it stands, then the refreshed candidate. */
+/** What a base refresh recorded: the carry decided from the head as it stands, then the refreshed candidate. */
 function refreshed(work: Work, to: string, tip: TipMerge): Work {
   const carry = decideCarry({ from: { sha: A, baseSha: M }, to: { sha: to, baseSha: M2 }, policyRevision: work.policyRevision, at, merge: tip,
     predecessor: { key: null, validated: true }, reviewedFiles: work.observation!.files, approval: { provider: 'github', reviewer: 'reviewer', sha: A },
@@ -47,7 +47,7 @@ function refreshed(work: Work, to: string, tip: TipMerge): Work {
   const candidate = { ...work.candidate!, sha: to, baseSha: M2 };
   return { ...work, candidate, observation: observation(candidate, []), baseRefresh: { from: { sha: A, baseSha: M }, base: M2, baseTree: sha('7f'), policyRevision: work.policyRevision, at, head: to, conflict: null, merge: tip, carry } } as Work;
 }
-const gates = (work: Work) => Object.fromEntries(evaluate(work, [work], now, ciAppIds).gates.map(gate => [gate.name, gate]));
+const gates = (work: Work) => Object.fromEntries(evaluate(work, [work], now).gates.map(gate => [gate.name, gate]));
 /** Whether the attested proof stands on the head. Proofs gate no merge since GY-1235, so its current evidence is read directly. */
 const proven = (work: Work) => currentEvidence(work, PROOF, now)?.result === 'pass';
 

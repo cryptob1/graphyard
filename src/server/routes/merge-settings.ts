@@ -1,39 +1,22 @@
 import { demand } from '../../model.js';
 import { defineRoutes, parseJson } from '../routes.js';
-import { rerunFailedChecksEvent } from '../../merge-queue.js';
-import { maxRerunFailedChecks } from '../../master/profiles.js';
 import { AutoMergeSettings, mergeHold } from '../../merger-mode.js';
 import { workDocument } from '../../store/bounded-snapshot.js';
 
-/** The installation's merge settings the master loop and an admin publish: the merge queue's rerun bound and automatic merging (GY-1927). */
+/** The installation's merge settings the master loop and an admin publish: automatic merging (GY-1927). */
 export const mergeSettingsRoutes = defineRoutes('merge-settings', [
   {
-    // The master loop publishes `mergeQueue.rerunFailedChecks` (GY-516) from its own configuration,
-    // which lives only on the master's host: how many times a failed required check is rerun on its
-    // sha. It is recorded once per change in the installation ledger and applied to every
-    // evaluation from then on; a restarted server reads it back from there. The retired keys an
-    // older master may still send — `optimistic` and `optimisticExclude` (GY-1233), `batchSize` and
-    // `parallelTips` of Graphyard's removed merge queue (GY-1236) — are ignored.
+    // The master loop still publishes `mergeQueue.rerunFailedChecks` (GY-516) from its own
+    // configuration. Nothing reads it since the merge writer reruns a trial's failing files itself:
+    // the setting, like the retired `optimistic`, `optimisticExclude`, `batchSize` and `parallelTips`
+    // keys (GY-1233, GY-1236), is accepted and ignored.
     method: 'POST', path: '/api/merge-queue',
     async handle(context) {
-      const { actor, services: { engine } } = context;
+      const { actor } = context;
       demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-      const body = await parseJson(context, 16384, '{}');
-      const { batchSize, parallelTips, rerunFailedChecks } = body ?? {};
-      demand(batchSize !== undefined || parallelTips !== undefined || rerunFailedChecks !== undefined, 'rerunFailedChecks is required', 400);
-      if (rerunFailedChecks !== undefined) demand(Number.isSafeInteger(rerunFailedChecks) && rerunFailedChecks >= 0 && rerunFailedChecks <= maxRerunFailedChecks, `rerunFailedChecks must be an integer from 0 to ${maxRerunFailedChecks}`, 400);
-      let recorded = false;
-      // Each value is applied only once the ledger holds it (GY-384): a failed INSERT leaves the
-      // evaluation on the recorded value and the master unpublished, so its next cycle retries.
-      const record = async (kind: string, field: string, value: number, previous: number, apply: () => void) => {
-        const latest = (await engine.store.pool.query('SELECT 1 FROM events WHERE work_id IS NULL AND kind=$1 LIMIT 1', [kind])).rowCount;
-        if (latest && JSON.stringify(previous) === JSON.stringify(value)) return apply();
-        await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ [field]: value, previous: latest ? previous : null })]);
-        apply();
-        recorded = true;
-      };
-      if (rerunFailedChecks !== undefined) await record(rerunFailedChecksEvent, 'rerunFailedChecks', rerunFailedChecks, await engine.loadRerunFailedChecks(), () => { engine.rerunFailedChecks = rerunFailedChecks; });
-      return { mergeQueue: { rerunFailedChecks: engine.rerunFailedChecks }, recorded };
+      const { rerunFailedChecks } = await parseJson(context, 16384, '{}') ?? {};
+      demand(rerunFailedChecks !== undefined, 'rerunFailedChecks is required', 400);
+      return { mergeQueue: { rerunFailedChecks }, recorded: false };
     },
   },
   {

@@ -2,7 +2,7 @@
 import { type Work, currentEvidence } from '../model.js';
 import { routableScopeRequest, scopeDecisionBinding, scopeDecisionSample, scopeDecisionBudgetMs, scopeBlockedBudgetMs, redecidableScopeRefusal, unplannedPaths } from '../model/scope.js';
 import { askIdentity, plannedFilesCovered } from '../model/scope-collapse.js';
-import { pendingBaseRefresh } from '../merge-queue.js';
+import { pendingBaseRefresh } from '../model/base-refresh.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';

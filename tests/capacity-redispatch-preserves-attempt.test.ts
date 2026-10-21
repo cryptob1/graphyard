@@ -55,7 +55,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('capacity_redispatch');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/capacity_redispatch`);
   await store.init();
-  engine = new Engine(store, [15368], 300, repository);
+  engine = new Engine(store, 300, repository);
   engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

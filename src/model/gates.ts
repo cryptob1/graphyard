@@ -14,11 +14,7 @@ import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
   interface Observation {
-    // GitHub has not computed mergeability yet (`pr.mergeable === null`): it recomputes lazily after
-    // the base moves. Unknown is neither mergeable nor conflicting; it is re-read on the next
-    // observation rather than refused as not mergeable (GY-548). Recorded by github.ts `observe`.
-    mergeabilityUnknown?: boolean;
-    /** `control-plane`: built from the coordinator's object store by the merge writer's observeHead (GY-1523); unset on an observation GitHub supplied. */
+    /** `control-plane`: built from the coordinator's object store by the merge writer's observeHead (GY-1523); unset on a pull-request-era observation. */
     source?: 'control-plane';
   }
 }
@@ -43,10 +39,8 @@ export function mergeLedgerRefusals(ledger: MergeLedgerState | null | undefined,
   return { test: trialled ? [] : [trialRefusal(candidate.sha, candidate.baseSha)], merge: pushed ? [] : [pushRefusal(candidate.sha)] };
 }
 
-/** The merge gate's refusal until the candidate has been observed at exactly the current head and base tip. */
-export const githubUnobservedRefusal = 'GitHub has not been observed at the current candidate';
-/** Kept for pull-request-era records that still name unknown mergeability; gates no longer refuse on it (GY-2010). */
-export const mergeabilityComputingRefusal = 'GitHub is computing mergeability against the current base; the next observation reads it again';
+/** The test and merge gates' refusal until the merge writer has observed the candidate at exactly the current head and base tip. */
+export const unobservedCandidateRefusal = 'The merge writer has not observed the current candidate';
 
 // ---- Risk lanes (GY-883) -------------------------------------------------------------------------
 
@@ -55,10 +49,10 @@ export const mergeabilityComputingRefusal = 'GitHub is computing mergeability ag
 export { laneRequirements };
 
 /**
- * The item's stage, gates and lane, judged from the record alone. GitHub merges each candidate
- * whose gates pass (docs/delivery.md); nothing here places it in a queue of Graphyard's own.
+ * The item's stage, gates and lane, judged from the record alone. The merge writer merges each
+ * candidate whose gates pass (docs/delivery.md); nothing here places it in a queue of Graphyard's own.
  */
-export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[]): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; postMergeReview?: PostMergeReviewState | null } {
+export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; postMergeReview?: PostMergeReviewState | null } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   // The lane rides the one landability verdict, not beside it (GY-883 AC-3): the verdict
@@ -98,20 +92,20 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
     : provider === 'agent' ? !selectedProfile
       ? `Every configured reviewer profile is exhausted for this candidate (${exhaustedReviewerProfiles(work).join(', ') || 'none configured'}); add reviewer capacity or select another review provider`
       : agentReview?.reason ?? `Verified approval from reviewer profile ${selectedProfile.name} is required for the current commit`
-    : work.formalReviewResetRequired ? 'A new independent GitHub approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
-  // An approval naming mechanical nits waits for its worker-bot round before GitHub may merge (GY-971).
+    : work.formalReviewResetRequired ? 'A new independent approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
+  // An approval naming mechanical nits waits for its worker-bot round before the merge writer may merge (GY-971).
   const mechanicalHold = reviewPassed ? mechanicalReviewHold(work, now.getTime()) : null;
   // Review by risk (GY-1525): a head the control plane observed itself is judged by the class of its
   // merge delta (model/risk-class.ts), not by the path lane. A sensitive delta needs the exact-head
   // approval before it merges; a normal one passes here and owes one post-merge review
   // (model/post-merge-review.ts), which the evaluation marks on the item — unless the repository
   // declares `review.normalChanges: pre-merge` (GY-1843), when a normal one needs its approval too
-  // and owes none after. GitHub mode is untouched.
+  // and owes none after. A pull-request-era observation is untouched.
   const byRisk = current && obs!.source === 'control-plane' && work.policy.review ? riskOf(work) : null;
   const beforeMerge = byRisk ? reviewedBeforeMerge(byRisk.risk) : true;
   const riskRefusal = reviewPassed || !beforeMerge ? [] : byRisk?.risk === 'sensitive' ? [sensitiveReviewRefusal(byRisk.reasons)] : [reviewRefusal];
   const postMerge = byRisk ? postMergeReviewMark(work, beforeMerge ? 'sensitive' : byRisk.risk, reviewPassed) : {};
-  // A change request holds only when this mode still requires a pre-merge review: github mode, a
+  // A change request holds only when this mode still requires a pre-merge review: a pull-request-era observation, a
   // sensitive control-plane delta, or any delta under a pre-merge repository. A normal-risk change
   // request reviewed after merge is attention for the post-merge pass, never a merge gate (GY-1525).
   const changeRequestHold = changesRequested && beforeMerge
@@ -125,12 +119,12 @@ export function evaluate(work: Work, all: Work[], now: Date, ciAppIds: number[])
   // gates for every observed candidate — including a document that still carries pull-request-era
   // checks, PR numbers and mergeability. Those fields load; they do not refuse progression.
   const ledger = current ? mergeLedgerRefusals(work.mergeLedger, obs!.candidate) : null;
-  const checkReasons = ledger ? ledger.test : current ? [] : [githubUnobservedRefusal];
-  gates.push({ name: 'test', ciAppIds: [...ciAppIds], reasons: checkReasons, passed: checkReasons.length === 0 });
+  const checkReasons = ledger ? ledger.test : current ? [] : [unobservedCandidateRefusal];
+  gates.push({ name: 'test', reasons: checkReasons, passed: checkReasons.length === 0 });
   // A standing escalation or lead hold is a refusal to deliver, and its own reason is reported.
   // Unresolved review threads are the reviewer's inputs, not merge blockers.
   const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
-  add('merge', [...(!current ? [githubUnobservedRefusal] : []), ...(ledger ? ledger.merge : []), ...delivery]);
+  add('merge', [...(!current ? [unobservedCandidateRefusal] : []), ...(ledger ? ledger.merge : []), ...delivery]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');

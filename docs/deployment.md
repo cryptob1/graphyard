@@ -25,7 +25,7 @@ A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deplo
 
 ### Deployment incident
 
-`/healthz` `commit` behind tip: `railway deployment list` shows failures; redeploy ([manual fallback](#manual-fallback)). The serving environment name comes from `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`. `/api/github/webhook` is not served (404).
+`/healthz` `commit` behind tip: `railway deployment list` shows failures; redeploy ([manual fallback](#manual-fallback)). The serving environment name comes from `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`. `/api/github/*` is not served.
 
 ## Backup, upgrade, rollback
 
