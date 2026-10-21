@@ -190,8 +190,7 @@ test('unit:continuous-deploy-rolls-back — a tip failing health or the deploy i
   clock.now += 60_000;
   const third = await upgradePass();
   assert.equal(third.upgraded?.outcome, 'skipped');
-  assert.match(third.upgraded?.outcome === 'skipped' ? third.upgraded.reason : '', /its end-to-end run already failed and deploying the same commit again changes nothing, so it waits for the base branch to move/,
-    'GY-2518: the second failure was the end-to-end step, so the tip is spent on it, not on the attempt count');
+  assert.match(third.upgraded?.outcome === 'skipped' ? third.upgraded.reason : '', /it failed twice, so it waits for the base branch to move/, 'a tip that failed twice is spent on the attempt count');
   assert.deepEqual(calls, [], 'a tip that failed twice is not attempted again');
   assert.equal(fake.head, released);
 
