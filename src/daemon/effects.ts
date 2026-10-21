@@ -192,6 +192,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
   hostMemory?: () => Promise<HostMemoryReading | null>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
+  /** GY-2610: close one item as the coordinator (POST /api/work/ID/close), under its own idempotency key. */
+  closeWork?: (work: Work, body: { kind: 'obsolete'; reason: string }, key: string) => Promise<Work>;
   /** GY-1740: hold an unleased post-deploy follow-up on the instant its blocker names, clearing it (`window`). */ deferWindow?: (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => Promise<Work>;
   /**
    * Requests one routine decision with the master's own operator-agent identity and returns it.
