@@ -51,4 +51,4 @@ Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (
 
 ## Coordinator recovery
 
-Self-merge stalled the loop, or main-watch froze: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin.
+Self-merge stalled the loop, or main-watch froze: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin, keeping the new pin, the one it replaced and the one the running loop loaded from.
