@@ -465,7 +465,7 @@ test('unit:system-driven-items master decide merge stays open where the loop sen
   const loop = (requestsDecisions?: boolean) => ({ sessions: [], failures: {}, now: Date.now(), requestsDecisions });
   assert.equal(handDecision(item({ systemDriven: true }), 'merge', null, loop(true)), 'merge-decision');
   assert.equal(handDecision(merged, 'merge', null, loop(true)), null);
-  assert.match(mergeDecisionRecovery(merged, loop(true))!, /merged on GitHub though its gates had not passed on that head; only a two-party merge decision reconciles it/);
+  assert.match(mergeDecisionRecovery(merged, loop(true))!, /was merged though its gates had not passed on that head; only a two-party merge decision reconciles it/);
   assert.equal(handDecision(item({ systemDriven: true }), 'merge', null, loop(false)), null);
   assert.match(mergeDecisionRecovery(item({ systemDriven: true }), loop(false))!, /no master operator-agent identity/);
   const master = await masterHarness({ work: [merged] }, { operatorAgent: true });

@@ -89,7 +89,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
     const gate = item.gates.find(entry => entry.name === name)!;
     for (const line of plainLines(gate, item, NOW)) assert.ok(groups[0].lines.includes(line), `${name}: ${line}`);
   }
-  assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-reading the candidate', 'The pull request conflicts with the main branch']);
+  assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-reading the latest code', 'The pull request conflicts with the main branch']);
   const left = html.slice(html.indexOf('aria-label="What is left"'), html.indexOf('aria-label="Requirements"'));
   assert.match(left, /<small>5 things<\/small>/);
   assert.match(left, /<section class="left-step" aria-label="Checking state"><h3>Checking <small>\u00b7 cleared by Reviewer agent<\/small><\/h3>/);

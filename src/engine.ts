@@ -1831,7 +1831,7 @@ export class Engine {
       if (command === 'workspace') {
         demand(validBranch(data.branch), 'Only a Graphyard branch can be reserved');
         demand(!work.workspaces.some(w => w.epoch === data.epoch), 'This assignment already has a workspace');
-        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlapping');
+        demand(!all.some(w => w.workspaces.some(s => (s.branch === data.branch && (w.id !== work!.id || !work!.reworkRequested)) || s.host === data.host && pathsOverlap(s.path, data.path))), 'Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace');
         if (work.submission) demand(data.branch === work.workspaces.find(w => w.epoch === work!.submission!.epoch)?.branch, 'Rework must use the already linked PR branch in a fresh workspace');
         const { preserved, ...workspace } = data;
         work.workspaces.push({ ...workspace, owner: actor.id });

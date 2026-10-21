@@ -271,14 +271,14 @@ test('unit:ci-rework-after-review-refusal — a stored failed check requests no 
   assert.equal(refusedOnOtherGrounds(`${shaA}:threads:1,2`, `${shaA}:threads:3`), false, 'a moved thread set is the same grounds');
 });
 
-test('unit:ci-rework-after-review-refusal — master status names the failed-check rework, never the refused review rework, and asks nobody to answer the refusal by hand', async () => {
+test('unit:ci-rework-after-review-refusal — master status names the review rework (a pull-request-era check refusal is history, not a rework), never the refused review rework, and asks nobody to answer the refusal by hand', async () => {
   const work = failingHead(clock), now = new Date(clock);
   const action = nextAction(work, [work], now)!;
   assert.equal(action.kind, 'request-rework');
-  assert.equal(action.gate, 'test', 'the failed required check is the rework named, not the review change request');
-  assert.match(action.reason, /Required CI check test has not passed/);
-  assert.match(humanNeeded(action)!.resolve, /^the loop requests this rework for the failed trial itself/);
-  // A review change request alone is still named as before.
+  assert.equal(action.gate, 'review', 'the review change request is the rework named: a stored pull-request-era check result names none');
+  assert.match(action.reason, /requested changes on/);
+  assert.doesNotMatch(humanNeeded(action)!.resolve, /failed trial/);
+  // A review change request alone is named the same way.
   const reviewOnly = { ...work, gates: work.gates.filter(gate => gate.name !== 'test') } as Work;
   assert.equal(nextAction(reviewOnly, [reviewOnly], now)?.gate, 'review');
   // The refused capped rework raises no "answer the refusal" attention; another refused rework still does.

@@ -309,7 +309,7 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
     ['out of scope', withReasons(handedIn, { build: ['Candidate changes 2 files outside plannedFiles: a, b'] }), 'checking', 'Checking · it changes files outside its plan', 'Builder agent'],
     ['CI running', handedIn, 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
     // The merge writer's trial decides a check (GY-2010): a refused trial of this head failed the checks it names.
-    ['CI failed', withReasons(refusedTrial(handedIn), { test: [trial(handedIn)] }), 'checking', 'Checking · the check test failed', 'Builder agent'],
+    ['CI failed', withReasons(refusedTrial(handedIn), { test: [trial(handedIn)] }), 'checking', 'Checking · the check test, typecheck failed', 'Builder agent'],
     ['review requested', find('GY-15', work), 'checking', 'Checking · waiting for the reviewer', 'Reviewer agent'],
     ['proofs pending', find('GY-16', work), 'checking', 'Checking · 2 of 3 proofs passed', 'Prover agent'],
     // An obligation inherited from another change's deferred proof counts in the total and stays open until proven.
@@ -866,7 +866,7 @@ test('GY-161 review: a check fails on the merge writer\'s refused trial; closed 
   const trialled = (state: 'intent' | 'refused') => ({ ...handedIn, mergeLedger: { ...(handedIn.mergeLedger ?? {}), state, head: handedIn.candidate!.sha }, gates: handedIn.gates.map(gate => gate.name === 'test' ? { ...gate, passed: false, reasons: [trial] } : gate) }) as unknown as Work;
   assert.equal(checkStates(trialled('refused')).find(check => check.name === 'test')!.state, 'failed');
   const failedSteps = prSteps(trialled('refused'), NOW, noRelease);
-  assert.equal(failedSteps.current, 'checking'); assert.equal(failedSteps.label, 'Checking · the check test failed'); assert.equal(failedSteps.who, 'Builder agent');
+  assert.equal(failedSteps.current, 'checking'); assert.equal(failedSteps.label, 'Checking · the check test, typecheck failed'); assert.equal(failedSteps.who, 'Builder agent');
   assert.equal(checkStates(trialled('intent')).find(check => check.name === 'test')!.state, 'running', 'a pending trial leaves the check running');
 
   // Closed without merging: no step done or current, never "Merged", nobody acts, no step bar.

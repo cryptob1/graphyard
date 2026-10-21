@@ -96,7 +96,7 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   const waiting = shape('GY-82', {});
   const status = buildMasterStatus({ work: [stuck, waiting], now: at }, [], []);
   const row = status.work.find(entry => entry.key === 'GY-81')!;
-  assert.match(row.attention!, /GY-81 was merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head: Merge observed without a prior authorization/);
+  assert.match(row.attention!, /GY-81 was merged \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head: Merge observed without a prior authorization/);
   assert.match(row.attention!, /held at the merge stage; /);
   assert.equal(row.attentionOwner?.role, 'master'); assert.equal(row.attentionOwner?.approvedBy, 'approver');
   assert.match(row.attentionOwner!.next, /^graphyard master decide GY-81 merge REASON, then graphyard master approver GY-81 DECISION/);
@@ -105,7 +105,7 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   const item = status.attentionItems.find(entry => entry.subject === 'GY-81')!;
   assert.equal(item.text, row.attention); assert.equal(item.human, false);
   const other = status.work.find(entry => entry.key === 'GY-82')!;
-  assert.equal(other.merged, null); assert.doesNotMatch(other.attention ?? '', /merged on GitHub/);
+  assert.equal(other.merged, null); assert.doesNotMatch(other.attention ?? '', /was merged \(/);
   assert.equal(status.counts.mergedUnreconciled, 1); assert.equal(status.counts.mergeCandidates, 1);
   // A refused reconciliation is carried into the line, so the master reads why before deciding again.
   const refusedRow = buildMasterStatus({ work: [{ ...stuck, violations: [unauthorizedMergeViolation, 'Reconciliation by decision d1 refused: gate acceptance had not passed: proof missing'] }], now: at }, [], []).work[0];
@@ -117,7 +117,7 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   const state = emptyDaemonState(config);
   const cycle = await runCycle(config, state, effects);
   const escalation = cycle.actions.find(action => action.kind === 'escalation' && action.work === 'GY-81')!;
-  assert.match(escalation.detail, /merged on GitHub \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head/);
+  assert.match(escalation.detail, /was merged \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head/);
   assert.match(escalation.detail, /graphyard master decide GY-81 merge REASON, then graphyard master approver GY-81 DECISION/);
   const again = await runCycle(config, state, effects);
   assert.equal(again.actions.some(action => action.kind === 'escalation' && action.work === 'GY-81'), false, 'the escalation is recorded once');

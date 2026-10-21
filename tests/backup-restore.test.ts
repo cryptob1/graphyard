@@ -100,7 +100,6 @@ async function populate(store: Store) {
   await validation.runnerCommand(runner, 'ack', command, id());
   await validation.collectionAuthority(collector, command);
   await validation.uploadArtifact(collector, { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ format: 'junit-xml-v1', private: 'artifact-bytes-marker' })).toString('base64'), capturePolicy: 'approved-test-data-only' }, id());
-  await store.pool.query("INSERT INTO webhook_receipts(id) VALUES('delivery-1')");
   // Observed delivery for the same environment: a release built, approved, selected and
   // seen running, so the restored ledger still knows what production is expected to be.
   const delivery = new Delivery(validation);

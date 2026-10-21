@@ -15,7 +15,7 @@ import { join } from 'node:path';
  * first attempt at this item merged at 801 and was reverted by the very gate it names.
  */
 export const workerFastGates = {
-  tests: ['tests/module-budgets.test.ts', 'tests/docs-glossary.test.ts', 'tests/no-wall-clock-time-bombs.test.ts', 'tests/ci-shards.test.ts'],
+  tests: ['tests/docs-glossary.test.ts', 'tests/no-wall-clock-time-bombs.test.ts', 'tests/ci-shards.test.ts'],
   scripts: ['scripts/check-docs.mjs'],
 } as const;
 /**

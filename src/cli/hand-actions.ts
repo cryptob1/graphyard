@@ -66,7 +66,7 @@ export function handDecision(work: Work, action: string | undefined, input: unkn
  * the decision to the approver by hand.
  */
 export function mergeDecisionRecovery(work: Work, loop: Pick<LoopSessions, 'requestsDecisions'>): string | null {
-  if (mergedWithoutAuthorization(work)) return `${work.key} was merged on GitHub though its gates had not passed on that head; only a two-party merge decision reconciles it`;
+  if (mergedWithoutAuthorization(work)) return `${work.key} was merged though its gates had not passed on that head; only a two-party merge decision reconciles it`;
   if (loop.requestsDecisions === false) return 'no master operator-agent identity is provisioned, so the loop cannot request the merge decision itself';
   return null;
 }

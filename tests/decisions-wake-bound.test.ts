@@ -76,7 +76,7 @@ test('unit:slow-loop-step-bounded — an observation wake whose resync never ans
   const result = await returns(runCycle(config(), state, fx, () => clock));
   assert.ok(performance.now() - started < 5_000, 'the step returned instead of waiting on the resync timeout');
   assert.deepEqual(slow.calls.length, 1, 'the waker woke the observation once, under the per-call bound');
-  assert.ok(records(result, 'GY-1865').some(action => action.state === 'done' && /rework waits for a fresh GitHub observation/.test(action.detail)), 'the rework still waits for the reading it asked for');
+  assert.ok(records(result, 'GY-1865').some(action => action.state === 'done' && /rework waits for a fresh observation/.test(action.detail)), 'the rework still waits for the reading it asked for');
   assert.deepEqual(Object.values(state.approvals), [], 'no watch exists until a decision stands');
   // The next cycle rejoins the wake still in flight instead of starting a second resync for the same item.
   await returns(runCycle(config(), state, fx, () => clock + 60_000));
