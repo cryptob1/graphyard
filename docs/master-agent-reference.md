@@ -11,7 +11,7 @@ Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choi
 
 ## Conflict avoidance
 
-Dispatch is optimistic (overlap holds nothing), smallest planned scope first; `git merge-tree` reports `conflicts`.
+Dispatch is optimistic (overlap holds nothing); `git merge-tree` reports `conflicts`.
 
 ## GitHub administration through the browser
 

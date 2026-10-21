@@ -42,7 +42,7 @@ function held(heldMs: number, overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-1457', key: 'GY-1457', title: 'GY-1457', description: '', type: 'bug', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-heldMs - minute), updatedAt: iso(-10_000), stageEnteredAt: iso(-heldMs), ready: true, epoch: 1,
     lease: { owner: 'graphyard-claude-1', epoch: 1, expiresAt: iso(110_000) },
     lastAssignment: { owner: 'graphyard-claude-1', epoch: 1, claimedAt: iso(-heldMs) },
@@ -192,7 +192,7 @@ async function overwrite(work: Work, mutate: (document: Work) => void) {
   return document;
 }
 async function claimed(title: string) {
-  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
+  let work = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   work = await engine.execute(worker, 'claim', work.id, {}, id());
   return engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/srv/worktrees/${work.key}-${work.epoch}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, id());

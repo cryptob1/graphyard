@@ -198,7 +198,7 @@ function sharedHerdr() {
 }
 const sweepConfig = (workspace: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], herdrWorkspace: workspace });
-const unleased = { id: 'work-GY-20', key: 'GY-20', title: 'A pane', description: '', type: 'bug', priority: 0, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [],
+const unleased = { id: 'work-GY-20', key: 'GY-20', title: 'A pane', description: '', type: 'bug', priority: 0, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
   stage: 'build', revision: 1, policyRevision: 1, createdAt: new Date(clockStart).toISOString(), updatedAt: new Date(clockStart).toISOString(), stageEnteredAt: new Date(clockStart).toISOString(),
   ready: true, epoch: 1, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], sessions: [] } as unknown as Work;
 

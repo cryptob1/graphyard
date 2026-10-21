@@ -58,7 +58,7 @@ let http: ReturnType<typeof server>, url: string;
 const credentials = roster.map(principal => ({ ...principal, token: `delegation-${principal.id}-${'x'.repeat(32)}` }));
 let pr = 500;
 const id = () => randomUUID();
-const input = (title: string, slice?: SliceId) => ({ title, ...(slice ? { slice } : {}), plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+const input = (title: string, slice?: SliceId) => ({ title, ...(slice ? { slice } : {}), criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
 const proof = (overrides: Record<string, unknown> = {}) => ({ proof: 'unit:works', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, ...overrides });
 function observation(work: Work, sha = head): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
@@ -181,7 +181,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   let item = await engine.execute(admin, 'create', null, input('lead-enforcement', 'product'), id());
   item = await engine.execute(admin, 'ready', item.id, {}, id());
   for (const [command, body] of [['claim', {}], ['evidence', proof()], ['ready', {}], ['submit', { epoch: 1, pr: 1 }],
-    ['requirements', { expectedPolicyRevision: 1, reason: 'lead rewrite', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], dependencies: [], plannedFiles: [], exclusiveResources: [] }]] as const)
+    ['requirements', { expectedPolicyRevision: 1, reason: 'lead rewrite', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], dependencies: [], exclusiveResources: [] }]] as const)
     await assert.rejects(engine.execute(lead, command as never, item.id, body, id()), /Slice leads cannot perform lifecycle mutations/, command);
   // A lead identity that also holds producer credentials cannot self-prove its slice.
   const leadProducer: Principal = { ...lead, role: 'producer', proofs: ['unit:works'] };
@@ -702,11 +702,11 @@ test('integration:lead-ruling-history — rulings cite a rule and a reason and c
 });
 
 test('unit:dynamic-merge-ordering — order follows dependencies and current conflicts, not registration order', () => {
-  const work = (key: string, overrides: Partial<Work> = {}) => ({ id: key, key, stage: 'merge', priority: 2, dependencies: [], plannedFiles: [], workspaces: [], evidence: [], criteria: [], scenarioRequirements: [], gates: [], violations: [], lease: null, submission: null, ready: true, ...overrides }) as unknown as Work;
+  const work = (key: string, overrides: Partial<Work> = {}) => ({ id: key, key, stage: 'merge', priority: 2, dependencies: [], workspaces: [], evidence: [], criteria: [], scenarioRequirements: [], gates: [], violations: [], lease: null, submission: null, ready: true, ...overrides }) as unknown as Work;
   const dependency = work('GY-2', { stage: 'done' });
   const laterReady = work('GY-9', { dependencies: [dependency.id], priority: 0 });
-  const conflicted = work('GY-1', { plannedFiles: ['src/shared/'] });
-  const peer = work('GY-3', { plannedFiles: ['src/shared/file.ts'], stage: 'build', lease: { owner: 'x', epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() } });
+  const conflicted = work('GY-1', {  });
+  const peer = work('GY-3', { stage: 'build', lease: { owner: 'x', epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() } });
   const registration = [conflicted, dependency, peer, laterReady];
   const order = mergeOrder(registration);
   assert.equal(order[0], 'GY-9');
@@ -723,7 +723,7 @@ test('unit:dynamic-merge-ordering — order follows dependencies and current con
     policyRevision: 1, gates: [{ name: 'merge', passed: false, reasons: [pushRefusal(head)] }],
     observation: { at: observedAt } as Observation, ...overrides,
   } as Partial<Work>);
-  const first = mergeable('GY-11', { plannedFiles: ['src/shared/'] });
+  const first = mergeable('GY-11', {  });
   const second = mergeable('GY-12', { priority: 0 });
   assert.deepEqual(currentMergeCandidates([first, second, peer], observedAt).map(item => item.key), ['GY-12', 'GY-11']);
 });
@@ -775,7 +775,7 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   assert.equal(concern.escalation, null);
   // Suspected requirement weakening, detected from the revision itself.
   let weakened = await engine.execute(admin, 'create', null, { ...input('escalation-weakening', 'product'), criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'integration:works'] }, { id: 'AC-2', text: 'Stays safe', proofs: ['unit:safety'] }] }, id());
-  weakened = await engine.execute(admin, 'requirements', weakened.id, { expectedPolicyRevision: 1, reason: 'Narrowing the contract', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], dependencies: [], plannedFiles: [], exclusiveResources: [] }, id());
+  weakened = await engine.execute(admin, 'requirements', weakened.id, { expectedPolicyRevision: 1, reason: 'Narrowing the contract', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], dependencies: [], exclusiveResources: [] }, id());
   assert.equal(weakened.escalation!.trigger, 'requirement-weakening');
   assert.match(weakened.escalation!.reason, /AC-2/);
   assert.match(weakened.escalation!.reason, /AC-1/);

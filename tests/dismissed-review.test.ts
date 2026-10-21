@@ -34,7 +34,7 @@ function observation(candidate: { sha: string; baseSha: string }, at: string): O
 /** One submitted, observed candidate whose only proof is manual: the review request stands alone. */
 function work(overrides: Partial<Work> = {}, at = iso(0)): Work {
   const candidate = { sha: H, baseSha: B, pr: 84, branch: 'graphyard/gy-84-1', author: 'implementer' };
-  return { id: 'work-84', key: 'GY-84', title: 'Dismissed approval', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-84', key: 'GY-84', title: 'Dismissed approval', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Relaunch', proofs: ['manual:dismissed-review'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 3, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-84', branch: 'graphyard/gy-84-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 84 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

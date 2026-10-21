@@ -32,7 +32,7 @@ function work(key: string, head: string, overrides: Partial<Observation> = {}, l
   const item = {
     id: key.toLowerCase(), key, title: key, description: '', type: 'feature', priority: 2, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:policy'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/engine.ts'], stage: 'review', revision: 4, policyRevision: 1, createdAt: now.toISOString(), updatedAt: now.toISOString(),
+    stage: 'review', revision: 4, policyRevision: 1, createdAt: now.toISOString(), updatedAt: now.toISOString(),
     stageEnteredAt: now.toISOString(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'machine', path: `/tmp/${key}`, branch: `graphyard/${key}`, epoch: 1, owner: 'agent' }],
     candidate: { sha: head, baseSha: main, pr: 1, branch: `graphyard/${key}`, author: 'agent' },

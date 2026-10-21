@@ -268,7 +268,7 @@ test('integration:proof-grants-gap-report a manual proof a producer must run is 
   assert.deepEqual((await create()).proofGaps, []);
   const revised = await engine.execute(operator, 'requirements', work.id, {
     expectedPolicyRevision: work.policyRevision, reason: 'Restate the outcome after granting the producer lane', producerProofs: [proof],
-    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }], dependencies: [], plannedFiles: [], exclusiveResources: [],
+    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }], dependencies: [], exclusiveResources: [],
   }, id()) as Work;
   assert.deepEqual(revised.proofGaps, []);
 });
@@ -308,7 +308,7 @@ test('integration:proof-grants-gap-report closing the gap with a grant clears it
   await grant(operator, ci.id, [proof]);
   const revised = await engine.execute(operator, 'requirements', work.id, {
     expectedPolicyRevision: work.policyRevision, reason: 'Restate the outcome after granting proof authority',
-    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }], dependencies: [], plannedFiles: [], exclusiveResources: [],
+    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }], dependencies: [], exclusiveResources: [],
   }, id());
   assert.deepEqual(revised.proofGaps, []);
 });
@@ -324,7 +324,7 @@ test('integration:proof-grants-gap-report a policy-required post-deployment proo
   await grant(operator, ci.id, ['e2e:deploy-smoke']);
   const revised = await engine.execute(operator, 'requirements', work.id, {
     expectedPolicyRevision: work.policyRevision, reason: 'Restate the outcome after granting smoke authority',
-    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [covered] }], dependencies: [], plannedFiles: [], exclusiveResources: [],
+    criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [covered] }], dependencies: [], exclusiveResources: [],
   }, id()) as Work;
   assert.deepEqual(revised.proofGaps, []);
 });

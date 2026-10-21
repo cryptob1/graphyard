@@ -51,7 +51,7 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 121, branch: 'graphyard/gy-121-1', author: 'implementer' };
-  return { id: 'work-121', key: 'GY-121', title: 'Producers die at the start bound', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-121', key: 'GY-121', title: 'Producers die at the start bound', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Bounded', proofs: ['unit:launch-command-bounded', 'integration:launch-refusal-names-the-screen'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-121', branch: 'graphyard/gy-121-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 121 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

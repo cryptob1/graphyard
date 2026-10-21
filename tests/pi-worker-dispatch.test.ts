@@ -63,34 +63,34 @@ test('unit:pi-first-worker-order — a normal risk planned change on its first t
   // GY-1772: the class of the planned files decides, not the lane; a low lane with a sensitive planned path is strong, a high lane with normal planned files is fast.
   const normal = ['src/master/dispatch.ts', 'tests/pi-worker-dispatch.test.ts'], sensitive = ['src/master/dispatch.ts', 'src/store/work-store.ts'];
   for (const lane of ['low', 'medium', 'high']) for (const reworkRounds of [0, 1]) {
-    const choice = pick(registry, { lane, plannedFiles: normal, pipeline: { reworkRounds } });
+    const choice = pick(registry, { lane, pipeline: { reworkRounds } });
     assert.equal(choice.account?.name, 'pi-a', `lane ${lane}, normal planned files, attempt ${reworkRounds + 1} goes to Pi`);
   }
-  assert.equal(pick(registry, { lane: 'low', plannedFiles: sensitive, pipeline: { reworkRounds: 0 } }).account?.name, 'claude-b', 'a sensitive planned change goes to the strong accounts');
-  assert.equal(pick(registry, { lane: 'low', plannedFiles: [], pipeline: { reworkRounds: 0 } }).account?.name, 'claude-b', 'an item planning no files goes to the strong accounts');
-  assert.equal(pick(registry, { lane: 'low', plannedFiles: normal, pipeline: { reworkRounds: 2 } }).account?.name, 'claude-b', 'a third attempt goes to the strong accounts');
-  assert.equal(pick(registry, { lane: 'medium', plannedFiles: normal, pipeline: { reworkRounds: 4 } }).account?.name, 'claude-b');
+  assert.equal(pick(registry, { lane: 'low', pipeline: { reworkRounds: 0 } }).account?.name, 'claude-b', 'a sensitive planned change goes to the strong accounts');
+  assert.equal(pick(registry, { lane: 'low', pipeline: { reworkRounds: 0 } }).account?.name, 'claude-b', 'an item planning no files goes to the strong accounts');
+  assert.equal(pick(registry, { lane: 'low', pipeline: { reworkRounds: 2 } }).account?.name, 'claude-b', 'a third attempt goes to the strong accounts');
+  assert.equal(pick(registry, { lane: 'medium', pipeline: { reworkRounds: 4 } }).account?.name, 'claude-b');
   // Attempts that ended without a rework round (an expired or blocked epoch) count too: the third attempt goes to the strong accounts.
   const attempt = (end: string) => ({ epoch: 1, owner: 'w', end, claimedAt: '', endedAt: '' });
-  assert.equal(pick(registry, { lane: 'low', plannedFiles: normal, pipeline: { reworkRounds: 0, attempts: [attempt('expired'), attempt('blocked')] } }).account?.name, 'claude-b', 'two failed attempts leave the third on the strong accounts');
-  assert.equal(pick(registry, { lane: 'low', plannedFiles: normal, pipeline: { reworkRounds: 0, attempts: [attempt('expired')] } }).account?.name, 'pi-a', 'one earlier attempt leaves the second on Pi');
+  assert.equal(pick(registry, { lane: 'low', pipeline: { reworkRounds: 0, attempts: [attempt('expired'), attempt('blocked')] } }).account?.name, 'claude-b', 'two failed attempts leave the third on the strong accounts');
+  assert.equal(pick(registry, { lane: 'low', pipeline: { reworkRounds: 0, attempts: [attempt('expired')] } }).account?.name, 'pi-a', 'one earlier attempt leaves the second on Pi');
 
   // No eligible Pi account: the strong accounts take a normal first attempt, and nothing is refused.
   const withoutPi = structuredClone(registry);
   for (const account of withoutPi.accounts.filter(entry => entry.runtime === 'pi')) account.enabled = false;
-  const fallback = pick(withoutPi, { lane: 'low', plannedFiles: normal, pipeline: { reworkRounds: 0 } });
+  const fallback = pick(withoutPi, { lane: 'low', pipeline: { reworkRounds: 0 } });
   assert.equal(fallback.account?.name, 'claude-b');
   assert.match(fallback.skipped.map(entry => entry.account).join(), /pi-a,pi-b/);
 
   // A strong item is held when no strong account is eligible: Pi never takes it.
   const strongSpent = structuredClone(registry);
   for (const account of strongSpent.accounts.filter(entry => entry.runtime !== 'pi')) account.enabled = false;
-  const held = pick(strongSpent, { lane: 'low', plannedFiles: sensitive, pipeline: { reworkRounds: 0 } });
+  const held = pick(strongSpent, { lane: 'low', pipeline: { reworkRounds: 0 } });
   assert.equal(held.account, null, 'a sensitive item waits for a strong account instead of falling to Pi');
   // The attempt count the coordination view keeps (the view drops the pipeline) counts as attempts, and so do launches this dispatch already spent.
-  assert.equal(pick(registry, { lane: 'low', plannedFiles: normal, attemptCount: 2 }).account?.name, 'claude-b');
-  assert.equal(pick(registry, { lane: 'low', plannedFiles: normal, attemptCount: 1 }).account?.name, 'pi-a');
-  assert.equal(workerPreference({ plannedFiles: normal, attemptCount: 0 }, 2), 'strong', 'two failed Pi starts leave the third launch to the strong accounts');
+  assert.equal(pick(registry, { lane: 'low', attemptCount: 2 }).account?.name, 'claude-b');
+  assert.equal(pick(registry, { lane: 'low', attemptCount: 1 }).account?.name, 'pi-a');
+  assert.equal(workerPreference({ attemptCount: 0 }, 2), 'strong', 'two failed Pi starts leave the third launch to the strong accounts');
 
   // Other roles keep their stored order whatever is preferred.
   registry.roles.push({ name: 'reviewer', accounts: ['claude-b', 'pi-a'], concurrency: 2 } as AgentRegistry['roles'][number]);
@@ -136,7 +136,7 @@ test('unit:pi-launch-failure-falls-back — a Pi launch that never starts, or is
   await writeFile(credentialFile, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
   await mkdir(join(root, 'assigned'), { recursive: true });
   const profile: WorkerProfile = { name: 'registry-worker', principal: 'graphyard-worker-1', agentName: 'eng-pi', mode: 'launch', kind: 'pi', credentialFile, agentArgs: [], approvals: 'auto', environment: {} };
-  const item = { id: 'work-1746', key: 'GY-1746', title: 'Pi first', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/master/'], lane: 'low', pipeline: { reworkRounds: 0, attempts: [] },
+  const item = { id: 'work-1746', key: 'GY-1746', title: 'Pi first', description: '', type: 'feature', priority: 1, dependencies: [], lane: 'low', pipeline: { reworkRounds: 0, attempts: [] },
     criteria: [{ id: 'AC-3', text: 'Fallback', proofs: ['unit:pi-launch-failure-falls-back'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] } as any;
 
@@ -204,7 +204,7 @@ test('unit:pi-coordination-view-attempts — the coordination view keeps the att
 test('unit:pi-coordination-projection-attempts — the saved-document projection keeps the attempt count a worker preference reads', async () => {
   const { coordinationProjection } = await import('../src/store/locked-read.js');
   const { workerPreference } = await import('../src/model/worker-preference.js');
-  const projected = coordinationProjection({ key: 'GY-1', lane: 'low', plannedFiles: ['src/master/dispatch.ts'], stage: 'ready', evidence: [], pipeline: { reworkRounds: 0, attempts: [{}, {}] } } as any) as any;
+  const projected = coordinationProjection({ key: 'GY-1', lane: 'low', stage: 'ready', evidence: [], pipeline: { reworkRounds: 0, attempts: [{}, {}] } } as any) as any;
   assert.equal(projected.attemptCount, 2);
   assert.deepEqual(projected.plannedFiles, ['src/master/dispatch.ts'], 'the projection keeps the planned files the preference reads (GY-1772)');
   assert.equal(workerPreference(projected), 'strong', 'two ended attempts and no rework round still send the third to the strong profiles');

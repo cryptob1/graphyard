@@ -33,7 +33,7 @@ const candidate = { sha: head, baseSha: base, pr: 1814, branch: 'graphyard/gy-18
 const approval = { reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'APPROVED', id: reviewId, submittedAt, mechanical: 2 };
 /** The item as the control plane holds it: `mechanicalPlan` absent unless a test reports one. */
 const item = (extra: Partial<Work> = {}): Work => ({
-  id: 'work-1814', key, title: 'Widget', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+  id: 'work-1814', key, title: 'Widget', description: '', type: 'bug', priority: 1, dependencies: [], 
   criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
   stage: 'review', revision: 3, policyRevision: 1, createdAt: iso(now - 2 * hour), updatedAt: iso(now - minute), stageEnteredAt: iso(now - minute),
   ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 1814 }, reworkRequested: false,

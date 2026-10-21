@@ -72,7 +72,7 @@ function verdictItem(key: string, now: number): Work {
   const candidate = { sha: head, baseSha: base, pr: 9, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
   return {
     id: `work-${key}`, key, title: 'Stranded approval', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:approved-decision-applies-on-cycle'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:approved-decision-applies-on-cycle'] }], policy: { checks: ['test'], review: true }, 
     stage: 'test', revision: 7, policyRevision: 1, createdAt: iso(-7_200_000), updatedAt: iso(0), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 9 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { candidate, checks: [], reviews: [{ id: 41, reviewer: 'graphyard-reviewer[bot]', sha: head, state: 'CHANGES_REQUESTED', submittedAt: iso(-60_000) }],
@@ -156,7 +156,7 @@ async function start() {
   };
   /** A submitted item; a high-lane path makes its rework wait for an independent approver. */
   const submitted = async (title: string, paths = ['src/server/routes/decisions-fixture.ts']) => {
-    let work = await call(master.token, 'work', { title, plannedFiles: paths, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Decision application fixture' }) as Work;
+    let work = await call(master.token, 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Decision application fixture' }) as Work;
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
     work = await engine.execute(implementer, 'workspace', work.id, { epoch: work.epoch, host: 'decisions-host', path: `/tmp/decisions/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, randomUUID());
@@ -286,7 +286,7 @@ test('integration:approved-resume-idempotent — the resume replays the decision
   assert.deepEqual(await counts(refused.work, refused.decision.id, 'rework'), { outcomes: 1, applications: 0 });
   // A revision race: a release approved against a revision the item has since moved past settles
   // stale through recordStale's entry, and stops blocking a fresh release request.
-  const proposed = await call(master.token, 'work', { title: 'resume-stale', plannedFiles: ['src/server/routes/decisions-fixture.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Decision application fixture' }) as Work;
+  const proposed = await call(master.token, 'work', { title: 'resume-stale', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Decision application fixture' }) as Work;
   const release = await call(master.token, `work/${proposed.key}/decide`, { action: 'release', input: { expectedRevision: proposed.revision }, reason: 'Ready to build' });
   const approving = await faulting('ready', () => new Error('connection terminated while releasing'), () => send(approver.token, `work/${proposed.key}/approve`, { decision: release.id, reason: 'Release it' }));
   assert.notEqual(approving.status, 200);
@@ -303,7 +303,7 @@ test('integration:approved-resume-idempotent — the resume replays the decision
   // (GY-1296). Lost before the engine call, the resume applies it rather than settling it stale; lost after the engine call
   // committed under the rebased revision, the resume finds the decision-keyed call and settles applied, never stale.
   for (const ran of [false, true]) {
-    const item = await call(master.token, 'work', { title: `resume-bookkeeping-${ran}`, plannedFiles: ['src/server/routes/decisions-fixture.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Decision application fixture' }) as Work;
+    const item = await call(master.token, 'work', { title: `resume-bookkeeping-${ran}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Decision application fixture' }) as Work;
     const asked = await call(master.token, `work/${item.key}/decide`, { action: 'release', input: { expectedRevision: item.revision }, reason: 'Ready to build' });
     await report(item, asked.id);
     const interrupted = await faulting('ready', () => new Error('connection terminated while releasing'), () => send(approver.token, `work/${item.key}/approve`, { decision: asked.id, reason: 'Release it' }), ran);
@@ -394,7 +394,7 @@ const loopConfig = () => masterConfigSchema.parse({ version: 1, url: 'https://gr
 function conflicted(): Work {
   const candidate = { sha: head, baseSha: base, pr: 42, branch, author: 'worker' };
   return {
-    id: 'work-GY-949', key: 'GY-949', title: 'Conflicted candidate', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/loop.ts'],
+    id: 'work-GY-949', key: 'GY-949', title: 'Conflicted candidate', description: '', type: 'bug', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true }, stage: 'merge', ready: true, epoch: 1,
     revision: 7, policyRevision: 1, createdAt: iso(clock - 72 * 60 * minute), updatedAt: iso(clock - minute), stageEnteredAt: iso(clock - 48 * 60 * minute), lease: null, workspaces: [],
     submission: { epoch: 1, pr: 42 }, candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], containmentQuarantine: null,
@@ -579,7 +579,7 @@ async function controlPlane() {
   /** A high-lane submitted candidate: its rework waits for an independent approver. */
   const submitted = async (title: string) => {
     const paths = [`src/server/routes/${title}.ts`];
-    const created = await send(master.token, 'work', { title, plannedFiles: paths, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Application fixture' });
+    const created = await send(master.token, 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Application fixture' });
     assert.equal(created.status, 200, JSON.stringify(created.body));
     let work = await engine.execute(operator, 'ready', created.body.id, {}, randomUUID());
     work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
@@ -634,7 +634,7 @@ test('unit:approved-rework-rerequest-reconciles — once the candidate moved, th
   const { engine, store, send, decisions, stranded, master } = await settlementPlane();
   const { work, standing } = await stranded('moved-candidate');
   // The candidate moves after the approval (a new head, as GY-949's c7c93c895f68): the approval judged one that no longer stands.
-  const current = (await store.list()).find(item => item.id === work.id)!, moved = observed(current.plannedFiles, '9'.repeat(40));
+  const current = (await store.list()).find(item => item.id === work.id)!, moved = observed(current.observation!.files, '9'.repeat(40));
   const pushed = await engine.observe(work.id, current.revision, { ...moved, candidate: { ...moved.candidate, pr: current.candidate!.pr, branch: current.candidate!.branch } });
   assert.equal(pushed.candidate?.sha, '9'.repeat(40), 'the candidate moved');
   const again = await send(master.token, `work/${work.key}/decide`, { action: 'rework', input: { previousWorkerStopped: true }, reason: 'The reviewer requested changes on the current head' });

@@ -13,7 +13,7 @@ function workWithFiles(key: string, files: string[], sha: string): Work {
   return {
     id: `id-${key}`, key, title: `Work ${key}`, description: '', type: 'feature',
     priority: 1, dependencies: [], criteria: [], policy: { checks: [], review: false },
-    plannedFiles: files, stage: 'build', revision: 1, policyRevision: 1,
+    stage: 'build', revision: 1, policyRevision: 1,
     createdAt: '2030-01-01T00:00:00Z', updatedAt: '2030-01-01T00:00:00Z',
     stageEnteredAt: '2030-01-01T00:00:00Z', ready: true, epoch: 1, lease: null,
     workspaces: [], candidate: { sha, baseSha: 'base', pr: 1, branch: 'main', author: 'test' },

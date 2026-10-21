@@ -12,7 +12,6 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import type { NextAction } from '../src/model/action-kinds.js';
 import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction, settleDelivered } from '../src/model/actions.js';
 import { nextAction } from '../src/model/next-action.js';
-import { plannedFilesMax } from '../src/model/scope.js';
 import { livenessCarry, livenessOf, livenessRetryLimit, livenessViolations, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
 import { livenessStatus } from '../src/cli/liveness-report.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -64,7 +63,7 @@ const observation = (work: Work, extra: Partial<Observation> = {}): Observation 
 
 const released = async () => {
   const n = ++serial;
-  const created = await engine.execute(operator, 'create', null, { title: `Liveness ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
+  const created = await engine.execute(operator, 'create', null, { title: `Liveness ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
   return engine.execute(operator, 'ready', created.id, {}, id());
 };
 const claimed = async () => engine.execute(worker, 'claim', (await released()).id, {}, id());
@@ -78,13 +77,6 @@ async function candidate(evidence: 'pass' | 'fail' | null, extra: Partial<Observ
     ...(evidence === 'pass' ? { exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } } : {}) }, id());
   return engine.observe(w.id, (await reload(w)).revision, observation(w, extra));
 }
-async function refusedScope() {
-  const w = await claimed();
-  await engine.execute(worker, 'scope', w.id, { epoch: w.epoch, paths: ['web/unrelated.tsx'], reason: 'The page is easier to change here too' }, id());
-  const decided = await engine.execute(coordinator, 'autoscope', w.id, { epoch: w.epoch, treeRead: true }, id());
-  assert.equal(decided.scopeRequest?.decision?.state, 'refused', 'the rule refused a path the item does not imply');
-  return decided;
-}
 async function staleWait() {
   // A draft pull request: no producer request may stand for its head, so the item waits on an
   // event outside it. Entered an hour ago, the wait is past its bound.
@@ -95,7 +87,7 @@ async function staleWait() {
 }
 // ---- AC-1 ---------------------------------------------------------------------------------------
 
-test('unit:liveness-violations-detected — every open item holds exactly one obligation (a live leased session, an open action row, or a named wait with a dueAt) and an item holding none is a violation, classified by its state: a failed proof with no rework, a refused scope request, and a wait past its dueAt', async () => {
+test('unit:liveness-violations-detected — every open item holds exactly one obligation (a live leased session, an open action row, or a named wait with a dueAt) and an item holding none is a violation, classified by its state: a failed proof with no rework and a wait past its dueAt', async () => {
   const now = () => new Date();
   // Healthy items each hold one obligation, with a due time.
   const ready = await released();
@@ -107,7 +99,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   const building = await judge(await claimed());
   assert.equal(building.violation, null);
   assert.equal(building.obligation!.kind, 'session', 'the leased worker owns the build');
-  const backlog = await engine.execute(operator, 'create', null, { title: 'Backlog', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
+  const backlog = await engine.execute(operator, 'create', null, { title: 'Backlog', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
   assert.deepEqual(await judge(backlog), { work: backlog.id, key: backlog.key, obligation: null, violation: null }, 'backlog is not open work');
 
   // A candidate passing every gate but the merge writer's owes nobody a step (GY-2010): the writer
@@ -124,12 +116,10 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
 
   // The stranded states, each as the incident left the record.
   const failed = await candidate('fail');
-  const scope = await refusedScope();
   const stale = await staleWait();
-  for (const item of [failed, scope]) await strand(item);
+  await strand(failed);
 
-  const expected: [Work, ViolationClass, string][] = [[failed, 'failed-proof', 'request-rework'],
-    [scope, 'refused-scope', 'escalate'], [stale, 'stale-wait', 'escalate']];
+  const expected: [Work, ViolationClass, string][] = [[failed, 'failed-proof', 'request-rework'], [stale, 'stale-wait', 'escalate']];
   const found = livenessViolations(await store.list(), now());
   for (const [item, kind, successor] of expected) {
     const verdict = await judge(item);
@@ -140,25 +130,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
     assert.ok(found.some(entry => entry.key === item.key), `${item.key} is listed among the violations`);
   }
   assert.deepEqual(found.map(entry => entry.key).sort(), expected.map(([item]) => item.key).sort(), 'and nothing healthy is');
-  // What each is owed, precisely: the refused scope request a scope decision naming the command,
-  // the stale wait an escalation.
-  // The live attempt's additive request is the independent approver's to judge (GY-176 routes it);
-  // one the loop cannot route (here it also asks for a criteria change) names the master's command.
-  const decision = (await judge(scope)).violation!.successor!;
-  assert.ok(decision.inputs.kind === 'escalate' && decision.inputs.trigger === 'scope' && decision.inputs.detail.includes(`graphyard master decisions ${scope.key}`) && !decision.inputs.detail.includes('graphyard master scope'), JSON.stringify(decision));
-  const everything = await store.list(), stored = everything.find(item => item.id === scope.id)!;
-  const unroutable = { ...stored, scopeRequest: { ...stored.scopeRequest!, criteria: [{ id: 'AC-9', text: 'A new criterion' }] } } as Work;
-  const master = livenessOf(unroutable, everything.map(item => item.id === scope.id ? unroutable : item), new Date()).violation!.successor!;
-  assert.ok(master.inputs.kind === 'escalate' && master.inputs.detail.includes(`graphyard master scope ${scope.key}`), JSON.stringify(master));
-  // The over-cap refusal GY-906 made terminal: no fold represents the ask under the cap, so the
-  // escalation names the requirements revision that can fold or split it, never the plain union
-  // `master scope` posts, which the same bound refuses (GY-936).
-  const capped = { ...stored, plannedFiles: Array.from({ length: plannedFilesMax }, (_, index) => `tests/bulk/case-${index}.ts`),
-    scopeRequest: { ...stored.scopeRequest!, paths: ['src/other/next.ts'] } } as unknown as Work;
-  const cappedSuccessor = livenessOf(capped, everything.map(item => item.id === scope.id ? capped : item), new Date()).violation!.successor!;
-  assert.ok(cappedSuccessor.inputs.kind === 'escalate' && cappedSuccessor.inputs.trigger === 'scope'
-    && cappedSuccessor.inputs.detail.includes(`graphyard master requirements ${scope.key} FILE REASON`)
-    && !cappedSuccessor.inputs.detail.includes(`graphyard master scope ${scope.key}`), JSON.stringify(cappedSuccessor));
+  // What the stale wait is owed, precisely: an escalation.
   const escalation = (await judge(stale)).violation!.successor!;
   assert.ok(escalation.inputs.kind === 'escalate' && escalation.inputs.trigger === 'stale-wait', JSON.stringify(escalation));
 
@@ -166,7 +138,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   // reason, and a wait on an item that does not exist.
   const at = new Date().toISOString();
   const shell = (key: string, overrides: Partial<Work>) => ({ id: `id-${key}`, key, title: key, type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'review', ready: true,
-    createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], plannedFiles: ['src/'], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+    createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
     submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true }, gates: [], ...overrides } as unknown as Work);
   const mute = shell('GY-MUTE', { gates: [{ name: 'review', passed: false, reasons: [] }] });
   const orphan = shell('GY-ORPHAN', { stage: 'build', gates: [{ name: 'ready', passed: false, reasons: ['Dependency GY-GONE is unfinished'] }] });
@@ -176,10 +148,10 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
 
 // ---- AC-2 ---------------------------------------------------------------------------------------
 
-test('unit:violations-get-successor-actions — one reconciliation tick opens exactly one successor for each violation (request-rework, scope decision, escalate), deduplicated by reason across ticks, and an action failing N times for one unchanged reason is converted to escalate instead of retried', async () => {
-  const failed = await candidate('fail'), scope = await refusedScope(), stale = await staleWait();
-  for (const item of [failed, scope]) await strand(item);
-  const cases: [Work, ViolationClass, string, string | null][] = [[failed, 'failed-proof', 'request-rework', null], [scope, 'refused-scope', 'escalate', 'scope'], [stale, 'stale-wait', 'escalate', 'stale-wait']];
+test('unit:violations-get-successor-actions — one reconciliation tick opens exactly one successor for each violation (request-rework, escalate), deduplicated by reason across ticks, and an action failing N times for one unchanged reason is converted to escalate instead of retried', async () => {
+  const failed = await candidate('fail'), stale = await staleWait();
+  await strand(failed);
+  const cases: [Work, ViolationClass, string, string | null][] = [[failed, 'failed-proof', 'request-rework', null], [stale, 'stale-wait', 'escalate', 'stale-wait']];
   for (const [item, kind] of cases) assert.equal((await judge(item)).violation?.class, kind, `${item.key} starts in violation`);
 
   await engine.reconcile();
@@ -244,7 +216,7 @@ test('unit:violations-get-successor-actions — resync and request-review rows r
     const now = () => new Date(clock);
     const at = new Date(t0).toISOString();
     const work = { id: `id-${kind}`, key: `GY-${kind.toUpperCase()}`, title: kind, type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1, stage: 'review', ready: true,
-      createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], plannedFiles: ['src/'], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
+      createdAt: at, updatedAt: at, stageEnteredAt: at, criteria: [], dependencies: [], evidence: [], workspaces: [], violations: [], blocker: null, lease: null,
       submission: { epoch: 1, pr: 1 }, candidate: null, observation: null, policy: { checks: [], review: true }, gates: [] } as unknown as Work;
     const inputs = kind === 'resync' ? { kind, pr: 1, sha: null, baseSha: null, baseTip: null, observedAt: null }
       : { kind, provider: 'reviewer', requestId: 'request-1', pr: 1, sha: 'a'.repeat(40), baseSha: base, policyRevision: 1 };

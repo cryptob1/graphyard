@@ -74,8 +74,10 @@ export interface PreferenceWork { /** Accepted so a whole item can be handed ove
  * to start.
  */
 export const workerPreference = (work: PreferenceWork, startFailures = 0): 'fast' | 'strong' => {
-  const named = namedPaths([work.description ?? '', ...(work.criteria ?? []).map(criterion => criterion.text)].join('\n'));
+  const text = [work.description ?? '', ...(work.criteria ?? []).map(criterion => criterion.text)].join('\n'), named = namedPaths(text);
+  // A root file prose names without a dot or a slash (`Dockerfile`) is judged as a word.
+  const words = text.match(/[A-Za-z][\w.-]*/g) ?? [];
   // Attempts already made count whether they ended in a rework round or in an expired or blocked epoch.
-  return !named.length || named.some(entry => entrySensitive(entry))
+  return !named.length || [...named, ...words].some(entry => entrySensitive(entry))
     || Math.max(work.pipeline?.reworkRounds ?? work.reworkRounds ?? 0, work.pipeline?.attempts?.length ?? work.attemptCount ?? 0) + startFailures >= piAttempts ? 'strong' : 'fast';
 };

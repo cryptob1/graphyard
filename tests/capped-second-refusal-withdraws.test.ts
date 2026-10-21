@@ -35,7 +35,7 @@ function capped(body: string, reviewId = 4242, submittedAt = '2026-10-14T17:30:0
   const candidate = { sha: H, baseSha: B, pr: 1205, branch: 'graphyard/gy-1802-2', author: 'implementer' };
   const observation = { candidate, checks: [], reviews: [{ reviewer, sha: H, state: 'CHANGES_REQUESTED', id: reviewId, submittedAt, body }], merged: false, mergeSha: null,
     mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: '2026-10-14T17:31:00Z', prState: 'open', draft: false, baseTip: B, baseTree: B, baseTipContained: true } as unknown as Observation;
-  return { id: 'work-1802', key: 'GY-1802', title: 'Soak leak', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-1802', key: 'GY-1802', title: 'Soak leak', description: '', type: 'bug', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'The widget counts every frob.', proofs: ['unit:frob-count'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'review', revision: 40, policyRevision: 1, createdAt: '2026-10-13T00:00:00Z', updatedAt: '2026-10-14T17:31:00Z', stageEnteredAt: '2026-10-14T17:31:00Z', ready: true, epoch: 5,
     lease: null, workspaces: [], candidate, submission: { epoch: 5, pr: 1205 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null,

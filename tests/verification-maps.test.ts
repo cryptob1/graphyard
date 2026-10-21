@@ -40,7 +40,7 @@ const map = (path: string, paths: string[], words = 5): VerificationMap => ({
   sections: { Tests: `${path}-tests ${'t '.repeat(words)}`.trim(), Drive: `${path}-drive`, Invariants: `${path}-invariants`, Gotchas: `${path}-gotchas` },
 });
 
-test('unit:verification-map-selection — maps are selected by plannedFiles globs, directory scopes match globs beneath them, and the role digest is bounded to 3 whole maps and 600 words', async () => {
+test('unit:verification-map-selection — maps are selected by the globs of the paths an item names, directory scopes match globs beneath them, and the role digest is bounded to 3 whole maps and 600 words', async () => {
   const { selectVerificationMaps, verificationDigestWordBudget, verificationMapDigest } = await maps();
   const store = map('verification/store.md', ['src/store/**']), server = map('verification/server.md', ['src/server/**', 'src/server.ts']), master = map('verification/master.md', ['src/master/**']);
   assert.deepEqual(selectVerificationMaps([store, server, master], ['src/store/locks.ts']).map(entry => entry.path), ['verification/store.md']);
@@ -104,25 +104,26 @@ test('unit:verification-maps-in-prompts — worker and reviewer requests inline 
   const { parseVerificationMap, verificationMapDigest } = await maps();
   const parsed = [parseVerificationMap('verification/store.md', sample('src/store/**'))!];
   const config = { cliPath: '/bin/graphyard.mjs' }, profile = { principal: 'graphyard-claude-2' };
-  const work = { key: 'GY-1495', title: 'Maps', plannedFiles: ['src/store/locks.ts'] };
+  const work = { key: 'GY-1495', title: 'Maps', description: 'Bound the lock read in src/store/locks.ts.' };
+  const paths = ['src/store/locks.ts'];
   const before = workerPrompt(config, work, profile, 1, null, null, 'a'.repeat(40), null);
   const withMaps = workerPrompt(config, work, profile, 1, null, null, 'a'.repeat(40), null, parsed);
-  const digest = verificationMapDigest(parsed, work.plannedFiles, 'worker');
+  const digest = verificationMapDigest(parsed, paths, 'worker');
   assert.ok(digest && withMaps.includes(digest));
   assert.equal(withMaps.replace(digest, ''), before);
   const memory = emptyProjectMemory('2026-10-07T00:00:00Z');
-  recordDecisionInMemory(memory, { id: 'd', key: 'GY-1', action: 'scope', reason: 'Widen to src/a.ts', state: 'applied', approvedBy: 'approver-1', at: '2026-10-07T00:00:00Z' });
+  recordDecisionInMemory(memory, { id: 'd', key: 'GY-1', action: 'rework', reason: 'Rework the lock read', state: 'applied', approvedBy: 'approver-1', at: '2026-10-07T00:00:00Z' });
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha: 'a'.repeat(40) });
   assert.ok(workerPrompt(config, work, profile, 1, null, memory, 'a'.repeat(40), null, parsed).includes(`${memoryDigest}${digest}`), 'the digest directly follows the project-memory digest');
-  const unmatched = { ...work, plannedFiles: ['web/main.tsx'] };
+  const unmatched = { ...work, description: 'Bound the board in web/main.tsx.' };
   assert.equal(workerPrompt(config, unmatched, profile, 1, null, null, 'a'.repeat(40), null, parsed), workerPrompt(config, unmatched, profile, 1, null, null, 'a'.repeat(40), null));
 
   const binding = { key: 'GY-1495', pr: 1, sha: 'b'.repeat(40), baseSha: 'a'.repeat(40), policyRevision: 1 };
   const repository = { repository: 'owner/project' };
   const plain = reviewPrompt(repository, binding);
-  const reviewed = reviewPrompt(repository, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { maps: parsed, plannedFiles: work.plannedFiles });
-  const reviewerDigest = verificationMapDigest(parsed, work.plannedFiles, 'reviewer');
+  const reviewed = reviewPrompt(repository, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { maps: parsed, paths });
+  const reviewerDigest = verificationMapDigest(parsed, paths, 'reviewer');
   assert.ok(reviewerDigest && reviewed.includes(`gh pr diff 1 --repo owner/project. ${reviewerDigest}`), 'the digest follows the memory section');
   assert.equal(reviewed.replace(reviewerDigest, ''), plain);
-  assert.equal(reviewPrompt(repository, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { maps: parsed, plannedFiles: ['web/main.tsx'] }), plain);
+  assert.equal(reviewPrompt(repository, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { maps: parsed, paths: ['web/main.tsx'] }), plain);
 });

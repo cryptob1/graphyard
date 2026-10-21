@@ -52,7 +52,7 @@ function item(shape: Shape, extra: Partial<Work> = {}): Work {
   return {
     id: shape.key.toLowerCase(), key: shape.key, title: shape.key, description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: proofs.map((proof, index) => ({ id: `AC-${index + 1}`, text: 'proven', proofs: [proof] })),
-    policy: { checks: [], review: false }, plannedFiles: shape.planned ?? ['src/server/routes/own.ts'], stage: 'merge', revision: 4, policyRevision: 1,
+    policy: { checks: [], review: false }, stage: 'merge', revision: 4, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, candidate,
     workspaces: shape.workspace === false ? [] : [{ host: 'machine-a', path: `/tmp/${shape.key}`, epoch: 1, owner: 'worker', branch: candidate.branch }],
     submission: shape.submitted === false ? null : { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [],

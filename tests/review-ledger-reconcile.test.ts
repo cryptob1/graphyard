@@ -43,7 +43,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
-  return { id: 'work-64', key: 'GY-64', title: 'Reviewer ledger', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-64', key: 'GY-64', title: 'Reviewer ledger', description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['integration:review-ledger-reconcile'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'review', revision: 7, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

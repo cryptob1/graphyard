@@ -218,7 +218,7 @@ test('unit:goal-pipeline-outright-refusals — a plan whose post is refused with
   const planAuthor: Principal = { id: 'refusal-planner', role: 'operator-agent', sessionKind: 'ai' } as Principal;
   const approver: Principal = { id: 'refusal-approver', role: 'admin', sessionKind: 'ai' } as Principal;
   const item = (ref: string, outcomes: string[], plannedFiles: string[]) => ({ ref, title: `Build ${ref}`, plain: `Customers get the ${ref} part.`, description: `The ${ref} part`, type: 'feature' as const, priority: 2, outcomes,
-    cases: outcomes.map(id => `${id}-case`), criteria: [{ id: 'AC-1', text: `${ref} works`, proofs: ['unit:planned-behaviour'] }], plannedFiles, dependsOn: [] as string[] });
+    cases: outcomes.map(id => `${id}-case`), criteria: [{ id: 'AC-1', text: `${ref} works`, proofs: ['unit:planned-behaviour'] }], dependsOn: [] as string[] });
   for (const status of [401, 403, 409, 422]) {
     clearPlans();
     const at = new Date().toISOString();

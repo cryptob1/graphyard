@@ -288,7 +288,6 @@ test('unit:session-request-carries-project-memory — memory updates from settle
         sha: '1234567890123456789012345678901234567890',
         baseSha: '0987654321098765432109876543210987654321',
       },
-      plannedFiles: ['src/deploy.ts'],
     } as any,
   ];
 

@@ -80,7 +80,7 @@ function submitted(instance: Instance, overrides: Partial<Work> = {}): Work {
   const conflicts = instance.conflicts ?? [], last = conflicts.at(-1);
   const baseRefresh = last ? { from: { sha: instance.sha!, baseSha: last.baseSha }, base: last.base, baseTree: last.base, policyRevision: 1, at: last.at, head: null,
     conflict: conflictText(instance.sha!, last.base), conflictPaths: ['src/daemon/cycle.ts', 'src/daemon/state.ts'], trigger: 'conflict confirmed', conflictSince: conflicts[0]!.at } : null;
-  return { id: `work-${instance.subject}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+  return { id: `work-${instance.subject}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'build', revision: 1, policyRevision: 1,
     createdAt: instance.claimedAt, updatedAt: instance.observedAt, stageEnteredAt: instance.claimedAt, ready: true, epoch: instance.epoch, lease: null, workspaces: [],
     candidate, submission: { epoch: instance.epoch, pr: instance.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null, escalations: [],
@@ -93,7 +93,7 @@ function unsubmitted(instance: Instance, overrides: Partial<Work> = {}): Work {
   const session = { id: `${owner}:${instance.epoch}`, kind: 'implementation', principal: owner, epoch: instance.epoch, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane: 'w1V:pM9Q',
     agentName: owner, role: null, head: null, attach: 'herdr pane attach w1V:pM9Q', transcript: null, subject: instance.subject, state: 'running', observed: 'working', observedAt: instance.sessionObservedAt,
     outcome: null, startedAt: instance.claimedAt, updatedAt: instance.sessionObservedAt, endedAt: null };
-  return { id: `work-${instance.subject}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+  return { id: `work-${instance.subject}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, stage: 'build', revision: 1, policyRevision: 1,
     createdAt: instance.claimedAt, updatedAt: instance.sessionObservedAt, stageEnteredAt: instance.claimedAt, ready: true, epoch: instance.epoch,
     lease: { owner, epoch: instance.epoch, expiresAt: instance.leaseExpiresAt }, lastAssignment: { owner, epoch: instance.epoch, claimedAt: instance.claimedAt },
@@ -251,7 +251,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 test('integration:base-hold-observed — the observation write records when the current head was first read withheld behind the base, keeps it across a base move, and clears it when GitHub reports the head mergeable', async () => {
   await holds();
   const head = 'a'.repeat(40), base = 'b'.repeat(40), moved = 'c'.repeat(40);
-  let item = await engine.execute(operator, 'create', null, { title: 'Base hold', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:base-hold-fixture'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title: 'Base hold', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:base-hold-fixture'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/base-hold/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}` }, randomUUID());

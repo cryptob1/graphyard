@@ -118,7 +118,7 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
           'Authorization': `Bearer ${'a'.repeat(32)}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ title: 'Coordination test', plannedFiles: [], criteria: [] }),
+        body: JSON.stringify({ title: 'Coordination test', criteria: [] }),
       });
       assert.equal(mutationRes.status, 503);
       assert.equal(mutationRes.headers.get('retry-after'), '5');
@@ -165,7 +165,7 @@ test('unit:startup-validation-gates-coordination — until the startup validatio
           'Authorization': `Bearer ${'a'.repeat(32)}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ title: 'Coordination test 2', plannedFiles: [], criteria: [] }),
+        body: JSON.stringify({ title: 'Coordination test 2', criteria: [] }),
       });
       assert.notEqual(mutationAfter.status, 503);
     } finally {

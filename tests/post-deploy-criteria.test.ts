@@ -6,7 +6,7 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
-const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/approval.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/planned-files-intent.js'), ...await import('../src/model/goal-plan.js') });
+const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/approval.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/master/intent.js'), ...await import('../src/model/goal-plan.js') });
 
 // unit:post-deploy-criteria (GY-1660) — a criterion only the live install can satisfy after merge
 // and deploy deadlocked reviewer and worker (GY-1652 AC-3, GY-1657 AC-1..4). It is refused at
@@ -44,9 +44,9 @@ test('unit:post-deploy-criteria — the refusal holds on every requirements path
     const refused = criterionSchema.safeParse(criterion);
     assert.equal(refused.success, false, `${criterion.id} is refused by the criterion schema every requirements input uses`);
     assert.match(refused.error!.issues.map(issue => issue.message).join('\n'), /manual:post-deploy\/NAME/);
-    const decision = decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [criterion], dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] });
+    const decision = decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [criterion], dependencies: [], exclusiveResources: [], producerProofs: [] });
     assert.equal(decision.success, false, 'an approved master decide requirements cannot carry it either');
-    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [buildable, { ...criterion, proofs: ['manual:post-deploy/observed'] }], dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] }).success, true);
+    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [buildable, { ...criterion, proofs: ['manual:post-deploy/observed'] }], dependencies: [], exclusiveResources: [], producerProofs: [] }).success, true);
   }
 });
 
@@ -112,7 +112,7 @@ test('manual:intervention-pattern-escalation-build — GY-1660: each linked buil
     assert.equal(postMergeProofRefusal(criterion), null, `${instance} passed the base's write-time rule`);
     // Candidate: undeclared, no create, requirements revision or requirements decision can record it…
     assert.equal(criterionSchema.safeParse(criterion).success, false, `${instance} is refused undeclared`);
-    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [criterion], dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] }).success, false, instance);
+    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [criterion], dependencies: [], exclusiveResources: [], producerProofs: [] }).success, false, instance);
     // …and declared, it is recorded, the reviewer judges it on pre-merge evidence, and it gates no merge.
     const declared = { ...criterion, proofs: [`manual:post-deploy/${criterion.proofs[0].split(':')[1]}`] };
     assert.equal(criterionSchema.safeParse(declared).success, true, `${instance} is accepted declared`);
@@ -133,16 +133,16 @@ test('unit:post-deploy-criteria — a declared post-deploy proof gates no merge 
   assert.ok(!reasons(declared).includes('manual:post-deploy/'), reasons(declared));
 });
 
-test('unit:post-deploy-criteria — master requirements refuses an undeclared live observation before reading the tree or posting', async () => {
+test('unit:post-deploy-criteria — master requirements refuses an undeclared live observation before posting', async () => {
   const { derivedIntent } = await modules();
   const directory = await temporaryDirectory('post-deploy-intent');
   const file = join(directory, 'intent.json');
-  await writeFile(file, JSON.stringify({ criteria: [gy1657], dependencies: [], plannedFiles: [] }));
-  const work = { id: 'a1b2c3d4-0000-4000-8000-000000000001', key: 'GY-7', policyRevision: 1, criteria: [], dependencies: [], plannedFiles: [] };
-  const deps = { coordinator: async () => ({ work: [work] }), mutate: async () => assert.fail('nothing is posted'), token: async () => 'token', tree: async () => assert.fail('the tree is not read') };
-  await assert.rejects(derivedIntent(directory, { baseBranch: 'main' }, 'requirements', ['GY-7', file, 'revise'], deps), /^Error: AC-2 \("the master loop restarts"\) is a live-install or post-deploy observation/);
+  await writeFile(file, JSON.stringify({ criteria: [gy1657], dependencies: [] }));
+  const work = { id: 'a1b2c3d4-0000-4000-8000-000000000001', key: 'GY-7', policyRevision: 1, criteria: [], dependencies: [] };
+  const deps = { coordinator: async () => ({ work: [work] }), mutate: async () => assert.fail('nothing is posted'), token: async () => 'token' };
+  await assert.rejects(derivedIntent('requirements', ['GY-7', file, 'revise'], deps), /^Error: AC-2 \("the master loop restarts"\) is a live-install or post-deploy observation/);
   await writeFile(file, JSON.stringify({ title: 'New', criteria: [gy1657] }));
-  await assert.rejects(derivedIntent(directory, { baseBranch: 'main' }, 'create', [file, 'file it'], deps), /AC-2 \("the master loop restarts"\)/);
+  await assert.rejects(derivedIntent('create', [file, 'file it'], deps), /AC-2 \("the master loop restarts"\)/);
 });
 
 test('unit:post-deploy-criteria — the reviewer judges a declared criterion on the head\'s pre-merge evidence and never holds the merge for the live observation', async () => {
@@ -172,7 +172,7 @@ function delivered(overrides: Partial<Work> = {}): Work {
   const at = new Date(Date.now() - 3_600_000).toISOString();
   return { id: 'e4b2a3c8-1c0e-4d0a-9b4e-1f2a3b4c5d6e', key: 'GY-42', title: 'Harness remedy', description: '', type: 'bug', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'A test covers it', proofs: ['unit:covered'] }, { ...gy1652, proofs: ['manual:post-deploy/harness-drift-cleared'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'done', revision: 3, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate: null,
+    policy: { checks: ['test'], review: true }, stage: 'done', revision: 3, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], delivery: { mergedAt: at, mergeSha, authorizationRevision: 2 }, ...overrides } as Work;
 }
 
@@ -259,7 +259,7 @@ function basePhrase(text: string): string | null {
   }
   return null;
 }
-const revision = (criteria: { id: string; text: string; proofs: string[] }[]) => ({ expectedPolicyRevision: 1, criteria, dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] });
+const revision = (criteria: { id: string; text: string; proofs: string[] }[]) => ({ expectedPolicyRevision: 1, criteria, dependencies: [], exclusiveResources: [], producerProofs: [] });
 
 test('manual:intervention-pattern-escalation-build — GY-1685: each linked build-stage escalation is reproduced against the base rule and cannot recur on the candidate', async () => {
   const { createSchema, criterionSchema, decisionInputs, liveObservationPhrase, postDeployOnlyRefusal, postMergeProofRefusal, postDeployReviewSection } = await modules();
@@ -337,22 +337,22 @@ test('unit:post-deploy-criteria — an item of nothing but declared post-deploy 
   assert.match(postDeployOnlyRefusal(only.slice(0, 1))!, /^AC-1 is a declared post-deploy verification/);
   assert.equal(postDeployOnlyRefusal([]), null);
   assert.equal(postDeployOnlyRefusal([buildable, ...only]), null, 'one buildable criterion makes it an item');
-  const revision = (criteria: typeof only) => ({ expectedPolicyRevision: 1, criteria, dependencies: [], plannedFiles: [], exclusiveResources: [], producerProofs: [] });
+  const revision = (criteria: typeof only) => ({ expectedPolicyRevision: 1, criteria, dependencies: [], exclusiveResources: [], producerProofs: [] });
   assert.equal(createSchema.safeParse(intent(only)).success, false);
   assert.equal(decisionInputs.requirements.safeParse(revision(only)).success, false, 'a requirements decision cannot leave an item with only declared verifications');
   assert.equal(decisionInputs.requirements.safeParse(revision([buildable, ...only])).success, true);
-  const plan = { ref: 'verify', title: 'Verify', plain: 'Checks the live rate.', outcomes: ['o1'], cases: ['c1'], plannedFiles: ['src/x.ts'], criteria: only };
+  const plan = { ref: 'verify', title: 'Verify', plain: 'Checks the live rate.', outcomes: ['o1'], cases: ['c1'], criteria: only };
   assert.equal(planItemSchema.safeParse(plan).success, false, 'a goal plan item of only declared verifications is refused');
   assert.equal(planItemSchema.safeParse({ ...plan, criteria: [buildable, ...only] }).success, true);
-  // master create and master requirements refuse it before reading the tree or posting, like an undeclared observation.
+  // master create and master requirements refuse it before posting, like an undeclared observation.
   const directory = await temporaryDirectory('post-deploy-only-intent');
   const file = join(directory, 'intent.json');
-  const work = { id: 'a1b2c3d4-0000-4000-8000-000000000002', key: 'GY-8', policyRevision: 1, criteria: [], dependencies: [], plannedFiles: [] };
-  const deps = { coordinator: async () => ({ work: [work] }), mutate: async () => assert.fail('nothing is posted'), token: async () => 'token', tree: async () => assert.fail('the tree is not read') };
+  const work = { id: 'a1b2c3d4-0000-4000-8000-000000000002', key: 'GY-8', policyRevision: 1, criteria: [], dependencies: [] };
+  const deps = { coordinator: async () => ({ work: [work] }), mutate: async () => assert.fail('nothing is posted'), token: async () => 'token' };
   await writeFile(file, JSON.stringify({ title: 'Verify', criteria: only }));
-  await assert.rejects(derivedIntent(directory, { baseBranch: 'main' }, 'create', [file, 'file it'], deps), /^Error: AC-1, AC-2 are all declared post-deploy verifications/);
-  await writeFile(file, JSON.stringify({ criteria: only, dependencies: [], plannedFiles: [] }));
-  await assert.rejects(derivedIntent(directory, { baseBranch: 'main' }, 'requirements', ['GY-8', file, 'revise'], deps), /^Error: AC-1, AC-2 are all declared post-deploy verifications/);
+  await assert.rejects(derivedIntent('create', [file, 'file it'], deps), /^Error: AC-1, AC-2 are all declared post-deploy verifications/);
+  await writeFile(file, JSON.stringify({ criteria: only, dependencies: [] }));
+  await assert.rejects(derivedIntent('requirements', ['GY-8', file, 'revise'], deps), /^Error: AC-1, AC-2 are all declared post-deploy verifications/);
   // GY-1660's own follow-up stands: the one verify-deployment files is anchored to its head, so it is no declared verification and is accepted.
   const [owed] = postDeployChecks(delivered(), release);
   assert.equal(owed.result, 'owed');

@@ -4,7 +4,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { broadScope, concurrentOverlap, dispatchOrder, scopeBreadth } from '../src/coordination.js';
+import { concurrentOverlap } from '../src/coordination.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { candidateConflicts, fetchCandidateHeads, gitConflictProbe } from '../src/conflicts.js';
 import { assertDispatchable, buildMasterStatus, dispatchSchedule, dispatchWork, masterConfigSchema, sequenceAdvice, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
@@ -22,66 +22,46 @@ const later = iso(600_000), earlier = iso(-600_000);
 function work(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0),
+    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
   } as Work;
 }
-const claimed = (key: string, plannedFiles: string[], overrides: Partial<Work> = {}) => work(key, { stage: 'build', plannedFiles, epoch: 1, lease: { owner: `${key}-worker`, epoch: 1, expiresAt: later }, ...overrides });
-const submitted = (key: string, plannedFiles: string[], sha = 'a'.repeat(40), overrides: Partial<Work> = {}) => work(key, { stage: 'review', plannedFiles, epoch: 1, submission: { epoch: 1, pr: 7 },
-  candidate: { sha, baseSha: 'b'.repeat(40), pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' }, ...overrides });
+const claimed = (key: string, overrides: Partial<Work> = {}) => work(key, { stage: 'build', epoch: 1, lease: { owner: `${key}-worker`, epoch: 1, expiresAt: later }, ...overrides });
+/** A submitted candidate observed to change `files`. */
+const submitted = (key: string, files: string[], sha = 'a'.repeat(40), overrides: Partial<Work> = {}) => {
+  const candidate = { sha, baseSha: 'b'.repeat(40), pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' };
+  return work(key, { stage: 'review', epoch: 1, submission: { epoch: 1, pr: 7 }, candidate, observation: { candidate, files, checks: [], reviews: [] } as any, ...overrides });
+};
+/** A claimed rework whose earlier candidate was observed to change `files`. */
+const reworking = (key: string, files: string[], sha = 'f'.repeat(40)) => submitted(key, files, sha, { stage: 'build', reworkRequested: true, lease: { owner: `${key}-worker`, epoch: 2, expiresAt: later } });
 
-test('unit:overlap-detection — planned-file overlap is reported against claimed and unmerged submitted items only, and holds nothing', () => {
-  const item = work('GY-1', { plannedFiles: ['src/cli/', 'docs/coordination.md'] });
-  const live = claimed('GY-2', ['src/cli/master.ts']);
-  const open = submitted('GY-3', ['docs/'], 'c'.repeat(40), { observation: { files: ['docs/coordination.md', 'docs/README.md'] } as any });
-  const ready = work('GY-4', { plannedFiles: ['src/cli/'] });
-  const expired = claimed('GY-5', ['src/cli/'], { lease: { owner: 'gone', epoch: 1, expiresAt: earlier } });
-  const delivered = work('GY-6', { stage: 'done', plannedFiles: ['src/cli/'], submission: { epoch: 1, pr: 1 } });
-  const disjoint = claimed('GY-7', ['web/pages/']);
-  const quarantined = work('GY-8', { stage: 'build', plannedFiles: ['docs/coordination.md'], lease: { owner: 'old', epoch: 1, expiresAt: earlier }, containmentQuarantine: { owner: 'old', epoch: 1, at: earlier, settlementHash: 'a'.repeat(64) } as any });
-  const all = [item, live, open, ready, expired, delivered, disjoint, quarantined];
-  const ahead = concurrentOverlap(item, all, clock);
-  assert.deepEqual(ahead.map(entry => [entry.key, entry.state, entry.paths, entry.theirs]), [
-    ['GY-2', 'claimed', ['src/cli/'], ['src/cli/master.ts']],
+test('unit:overlap-detection — overlap is reported from the files candidates were observed to change, against in-flight items only, and holds nothing', () => {
+  const item = submitted('GY-1', ['src/cli/master.ts', 'docs/coordination.md'], '1'.repeat(40), { reworkRequested: true });
+  const live = reworking('GY-2', ['src/cli/master.ts']);
+  const open = submitted('GY-3', ['docs/coordination.md', 'docs/README.md'], 'c'.repeat(40));
+  const ready = work('GY-4');
+  const expired = submitted('GY-5', ['src/cli/master.ts'], '5'.repeat(40), { reworkRequested: true, lease: { owner: 'gone', epoch: 1, expiresAt: earlier } });
+  const delivered = submitted('GY-6', ['src/cli/master.ts'], '6'.repeat(40), { stage: 'done' });
+  const disjoint = submitted('GY-7', ['web/pages/index.tsx'], '7'.repeat(40));
+  const all = [item, live, open, ready, expired, delivered, disjoint];
+  assert.deepEqual(concurrentOverlap(item, all, clock).map(entry => [entry.key, entry.state, entry.paths, entry.theirs]), [
+    ['GY-2', 'claimed', ['src/cli/master.ts'], ['src/cli/master.ts']],
     ['GY-3', 'submitted', ['docs/coordination.md'], ['docs/coordination.md']],
-    ['GY-8', 'claimed', ['docs/coordination.md'], ['docs/coordination.md']],
-  ], 'a ready peer, an expired lease, delivered work and a disjoint scope are not ahead of the item; a submitted item is judged by the files its candidate changed, not the docs/ it declared');
+  ], 'a ready peer, an expired rework, delivered work and disjoint files are not ahead of the item');
   assert.doesNotThrow(() => assertDispatchable(item, all, iso(0)), 'the overlap is reported, never held on');
-  assert.deepEqual(concurrentOverlap(ready, [ready, item], clock), [], 'two ready items are not in flight; dispatchOrder decides between them');
-  assert.deepEqual(concurrentOverlap(work('GY-9'), all, clock), [], 'an item with no planned files overlaps nothing');
-  const rework = submitted('GY-10', ['src/cli/'], 'd'.repeat(40), { reworkRequested: true, observation: { files: ['src/cli/index.ts'], prState: 'open' } as any });
-  assert.deepEqual(concurrentOverlap(rework, [rework, live], clock), [], 'rework is judged by the files its candidate changed, not the src/cli/ it declared: GY-2 on src/cli/master.ts is no overlap');
-  const same = claimed('GY-11', ['src/cli/index.ts']);
-  assert.deepEqual(concurrentOverlap(rework, [rework, same], clock).map(entry => entry.key), ['GY-11'], 'a claimed item on the same file is reported');
-  assert.doesNotThrow(() => assertDispatchable(rework, [rework, same], iso(0)), 'and holds nothing');
-  assert.deepEqual(concurrentOverlap(work('GY-12', { plannedFiles: ['src/cli/index.ts'] }), [rework], clock), [], 'a reworked candidate nobody has claimed is a peer waiting for a worker, not in flight');
-});
-
-test('unit:overlap-detection — scope breadth flags root-level directories and orders smallest scope first within a priority', () => {
-  assert.ok(broadScope('src/') && broadScope('docs/*') && broadScope('tests/**') && broadScope('/'));
-  assert.ok(!broadScope('src/cli/') && !broadScope('src/master.ts') && !broadScope('docs/protocol/'));
-  assert.deepEqual(scopeBreadth(['src/', 'src/cli/', 'docs/coordination.md', 'tests/']), { files: 1, directories: 3, broad: ['src/', 'tests/'], highConflict: true });
-  assert.deepEqual(scopeBreadth(['src/sync.ts']), { files: 1, directories: 0, broad: [], highConflict: false });
-  const wide = work('GY-wide', { plannedFiles: ['src/', 'tests/'] });
-  const directory = work('GY-dir', { plannedFiles: ['src/cli/', 'src/master.ts'] });
-  const files = work('GY-files', { plannedFiles: ['src/sync.ts', 'src/coordination.ts', 'tests/sync.test.ts'] });
-  const single = work('GY-single', { plannedFiles: ['docs/coordination.md'], createdAt: iso(-60_000) });
-  const olderSingle = work('GY-older', { plannedFiles: ['docs/master-agent.md'], createdAt: iso(-120_000) });
-  const urgent = work('GY-urgent', { plannedFiles: ['src/', 'docs/', 'tests/'], priority: 0 });
-  const order = [wide, directory, files, single, olderSingle, urgent].sort(dispatchOrder).map(item => item.key);
-  assert.deepEqual(order, ['GY-urgent', 'GY-older', 'GY-single', 'GY-files', 'GY-dir', 'GY-wide'], 'operator priority first, then fewest root directories, directories, files, then age');
+  assert.deepEqual(concurrentOverlap(work('GY-9'), all, clock), [], 'an item with no observed candidate overlaps nothing');
+  assert.deepEqual(concurrentOverlap(submitted('GY-12', ['src/cli/master.ts'], '2'.repeat(40), { reworkRequested: true }), [expired], clock), [], 'a reworked candidate nobody has claimed is a peer waiting for a worker, not in flight');
 });
 
 test('unit:overlap-detection — dispatch never holds an overlapping item, exclusive resources still refuse, and the dispatch plan carries no holds', async () => {
-  const item = work('GY-1', { plannedFiles: ['src/cli/'] });
-  const live = claimed('GY-2', ['src/cli/master.ts']);
+  const item = submitted('GY-1', ['src/cli/master.ts'], '1'.repeat(40), { reworkRequested: true });
+  const live = reworking('GY-2', ['src/cli/master.ts']);
   assert.doesNotThrow(() => assertDispatchable(item, [item, live], iso(0)));
-  const reserved = claimed('GY-3', ['web/'], { exclusiveResources: ['staging'] });
+  const reserved = claimed('GY-3', { exclusiveResources: ['staging'] });
   assert.throws(() => assertDispatchable(work('GY-4', { exclusiveResources: ['staging'] }), [reserved], iso(0)), /exclusive resources/);
-  const plan = dispatchSchedule([item, live, work('GY-5', { plannedFiles: ['docs/', 'docs/coordination.md'] }), work('GY-6', { plannedFiles: ['README.md'] })], clock);
-  assert.deepEqual(plan.order.map(entry => entry.key), ['GY-6', 'GY-1', 'GY-5'], 'the claimed item is not in the plan; the overlapping item keeps its place in the order');
-  assert.deepEqual(plan.highConflict, [{ key: 'GY-5', broad: ['docs/'] }]);
+  const plan = dispatchSchedule([item, live, work('GY-5'), work('GY-6')], clock);
+  assert.deepEqual(plan.order.map(entry => entry.key), ['GY-1', 'GY-5', 'GY-6'], 'the claimed item is not in the plan; the overlapping item keeps its place in the order');
 
   // `master dispatch` launches the overlapping item with no override and records the overlap.
   const root = await temporaryDirectory('overlap'); const credentialDirectory = await temporaryDirectory('overlap-credentials');
@@ -92,7 +72,7 @@ test('unit:overlap-detection — dispatch never holds an overlapping item, exclu
     const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
     const herdr = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'p1', tab_id: 't1' }, tab: { tab_id: 't1' } } : {} });
     const prepare = async () => ({ epoch: 2, path: join(root, 'assigned'), base: 'c'.repeat(40) });
-    const result = await dispatchWork(root, item, profile, [], herdr, [item, live], prepare, async () => {}, 1, iso(0));
+    const result = await dispatchWork(root, item, profile, [], herdr, [item, live], prepare, async () => {}, 1, iso(0), { readDecisions: async () => [] });
     assert.match(result.ownership, /supervising/);
     assert.deepEqual(result.overlap?.concurrent.map(entry => entry.key), ['GY-2']); assert.match(result.overlap?.note ?? '', /lands second/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
@@ -103,17 +83,17 @@ function daemonConfig(credentialFile: string, workers: WorkerProfile[]): MasterC
 }
 const launchProfile = (name: string, credentialFile: string): WorkerProfile => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex', credentialFile, agentArgs: [], approvals: 'auto', environment: {} });
 
-test('integration:overlap-scheduler — the durable loop offers ready items smallest scope first and dispatches an overlapping item beside the one in flight', async () => {
+test('integration:overlap-scheduler — the durable loop offers ready items oldest first and dispatches an overlapping item beside the one in flight', async () => {
   const directory = await temporaryDirectory('overlap-daemon');
   try {
     const token = join(directory, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
     const credential = join(directory, 'worker.token'); await writeFile(credential, workerToken, { mode: 0o600 });
     const master = daemonConfig(token, [launchProfile('one', credential), launchProfile('two', credential), launchProfile('three', credential)]);
-    const wide = work('GY-wide', { plannedFiles: ['web/', 'browser-tests/'], createdAt: iso(-7_200_000) });
-    const small = work('GY-small', { plannedFiles: ['docs/coordination.md'], createdAt: iso(-60_000) });
-    const overlapping = work('GY-overlap', { plannedFiles: ['src/cli/workspace.ts'], createdAt: iso(-7_200_000) });
-    const inFlight = submitted('GY-inflight', ['src/cli/']);
-    let snapshotWork = [wide, small, overlapping, inFlight];
+    const older = work('GY-older', { createdAt: iso(-7_200_000) });
+    const newer = work('GY-newer', { createdAt: iso(-60_000) });
+    const overlapping = submitted('GY-overlap', ['src/cli/index.ts'], '9'.repeat(40), { createdAt: iso(-3_600_000), reworkRequested: true });
+    const inFlight = submitted('GY-inflight', ['src/cli/index.ts']);
+    let snapshotWork = [older, newer, overlapping, inFlight];
     const log: string[] = [];
     const effects: DaemonEffects = {
       agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
@@ -124,29 +104,28 @@ test('integration:overlap-scheduler — the durable loop offers ready items smal
     };
     const state = emptyDaemonState(master);
     await runCycle(master, state, effects, () => clock);
-    assert.deepEqual(log, ['GY-overlap→one', 'GY-small→two', 'GY-wide→three'], 'smallest scope first (the older of two single files first); the item overlapping GY-inflight is not held');
+    assert.deepEqual(log, ['GY-overlap→one', 'GY-older→two', 'GY-newer→three'], 'the returned rework first, then oldest first; the item overlapping GY-inflight is not held');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('integration:overlap-scheduler — master status shows what each item runs beside, broad scopes, and the conflict set of every open candidate', async () => {
-  const held = work('GY-held', { plannedFiles: ['src/cli/master.ts', 'docs/'] });
-  const live = claimed('GY-live', ['src/cli/']);
+test('integration:overlap-scheduler — master status shows what each item runs beside and the conflict set of every open candidate', async () => {
+  const held = submitted('GY-held', ['src/cli/master.ts'], 'f'.repeat(40), { reworkRequested: true });
+  const live = reworking('GY-live', ['src/cli/master.ts'], '0'.repeat(40));
   const left = submitted('GY-left', ['src/sync.ts'], 'c'.repeat(40));
   const right = submitted('GY-right', ['src/sync.ts'], 'd'.repeat(40));
   const apart = submitted('GY-apart', ['web/'], 'e'.repeat(40));
-  const report = candidateConflicts([held, live, left, right, apart], (a, b) => [a, b].includes('e'.repeat(40)) ? [] : ['src/sync.ts']);
+  const report = candidateConflicts([left, right, apart], (a, b) => [a, b].includes('e'.repeat(40)) ? [] : ['src/sync.ts']);
   assert.deepEqual(report, { 'GY-left': { conflicts: [{ key: 'GY-right', files: ['src/sync.ts'] }], unprobed: [] }, 'GY-right': { conflicts: [{ key: 'GY-left', files: ['src/sync.ts'] }], unprobed: [] }, 'GY-apart': { conflicts: [], unprobed: [] } });
   const unprobed = candidateConflicts([left, right], () => null);
   assert.deepEqual(unprobed['GY-left'], { conflicts: [], unprobed: ['GY-right'] }, 'an unfetched head is reported as unprobed, never as conflict-free');
-  const status = buildMasterStatus({ work: [held, live, left, right, apart], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
+  const status = buildMasterStatus({ work: [held, live, left, right, apart, work('GY-ready')], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
   const row = (key: string) => status.work.find(entry => entry.key === key)!;
   assert.deepEqual(row('GY-held').overlap.concurrent.map(entry => [entry.key, entry.paths]), [['GY-live', ['src/cli/master.ts']]]);
-  assert.deepEqual(row('GY-held').scope, { files: 1, directories: 1, broad: ['docs/'], highConflict: true });
-  assert.deepEqual(row('GY-live').overlap.concurrent, [], 'GY-held is not in flight');
+  assert.deepEqual(row('GY-live').overlap.concurrent, [], 'GY-held, sent back for rework and unclaimed, is not in flight');
   assert.deepEqual(row('GY-left').conflicts, { candidates: ['GY-right'], files: [{ key: 'GY-right', files: ['src/sync.ts'] }], unprobed: [], probed: true });
-  assert.deepEqual(row('GY-apart').conflicts?.candidates, []); assert.equal(row('GY-held').conflicts, null, 'only open candidates have a conflict set');
-  assert.deepEqual(status.schedule.order.map(entry => entry.key), ['GY-held']); assert.deepEqual(status.schedule.highConflict, [{ key: 'GY-held', broad: ['docs/'] }]);
-  assert.deepEqual(status.conflicts.sequence, ['GY-apart', 'GY-left', 'GY-right'], 'the fewest-conflict candidate lands first');
+  assert.deepEqual(row('GY-apart').conflicts?.candidates, []); assert.equal(row('GY-ready').conflicts, null, 'only open candidates have a conflict set');
+  assert.deepEqual(status.schedule.order.map(entry => entry.key), ['GY-held', 'GY-ready']);
+  assert.deepEqual(status.conflicts.sequence, ['GY-apart', 'GY-held', 'GY-live', 'GY-left', 'GY-right'], 'the fewest-conflict candidate lands first');
   assert.deepEqual(status.conflicts.conflicting, [{ key: 'GY-left', conflicts: ['GY-right'] }, { key: 'GY-right', conflicts: ['GY-left'] }]);
   assert.deepEqual(sequenceAdvice([]), { sequence: [], conflicting: [] });
   const unavailable = buildMasterStatus({ work: [left], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined);
@@ -177,20 +156,18 @@ test('integration:overlap-scheduler — the conflict probe is a real in-memory g
 test('unit:overlap-holds-nothing — whatever the priority or pull-request state, an overlapping item is dispatchable', () => {
   const hotspot = 'src/master-daemon.ts';
   const ahead = [
-    claimed('GY-161', ['web/', 'tests/'], { priority: 0 }),
-    claimed('GY-179', [hotspot], { priority: 0 }),
+    claimed('GY-161', { priority: 0 }),
+    reworking('GY-179', [hotspot]),
     submitted('GY-166', ['src/'], '1'.repeat(40), { priority: 0, observation: { files: [hotspot], prState: 'open' } as any }),
     submitted('GY-168', ['src/'], '2'.repeat(40), { priority: 0, observation: { files: [hotspot], prState: 'closed' } as any, lease: { owner: 'w', epoch: 2, expiresAt: later } }),
   ];
   const candidates = [
-    work('GY-172', { priority: 2, plannedFiles: ['tests/'] }),
-    work('GY-177', { priority: 2, plannedFiles: [hotspot] }),
+    work('GY-172', { priority: 2 }),
+    work('GY-177', { priority: 2 }),
     submitted('GY-175', ['src/'], '3'.repeat(40), { priority: 2, reworkRequested: true, observation: { files: [hotspot], prState: 'open' } as any }),
   ];
   const all = [...ahead, ...candidates];
-  for (const item of candidates) {
-    assert.ok(concurrentOverlap(item, all, clock).length > 0, `${item.key} overlaps work in flight`);
-    assert.doesNotThrow(() => assertDispatchable(item, all, iso(0)), `${item.key} is dispatchable`);
-  }
+  assert.ok(concurrentOverlap(candidates[2], all, clock).length > 0, 'GY-175 overlaps work in flight');
+  for (const item of candidates) assert.doesNotThrow(() => assertDispatchable(item, all, iso(0)), `${item.key} is dispatchable`);
   assert.deepEqual(dispatchSchedule(all, clock).order.map(entry => entry.key).sort(), ['GY-172', 'GY-175', 'GY-177']);
 });

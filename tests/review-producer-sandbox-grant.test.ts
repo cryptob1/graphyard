@@ -60,7 +60,7 @@ let serial = 0;
 const request = () => ({ id: `request-${++serial}`, kind: 'producer', sha: H, baseSha: B, policyRevision: 2, pr: 88, group: 'integration', proofs: ['integration:session-grant'], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' }) as any;
 function work(key: string, asked?: unknown): Work {
   const candidate = { sha: H, baseSha: B, pr: 88, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
-  return { id: `id-${key}`, key, title: 'Session grant', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: [],
+  return { id: `id-${key}`, key, title: 'Session grant', description: '', type: 'bug', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:session-grant'] }], policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 2,
     createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 88 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     blocker: null, gates: [], violations: [], implementers: ['implementer'],

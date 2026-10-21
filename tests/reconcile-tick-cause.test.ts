@@ -38,7 +38,7 @@ after(async () => {
 });
 
 let created = 0;
-const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Cause ${++created}`, plannedFiles: [`src/cause-${created}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-tick-cause'] }], ...extra }, randomUUID());
+const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Cause ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-tick-cause'] }], ...extra }, randomUUID());
 /**
  * Run passes until one is quiet (reads nothing, is not full, writes nothing and evaluates less than
  * the fleet: an item with a standing escalation stays due every pass), so the next pass starts from
@@ -180,7 +180,7 @@ test('unit:own-write-no-full-pass — a face the tick\'s own write moved and a f
   // Readers the engine defines without a reference: one waits on the exclusive resource the leased
   // item holds (`resourceConflicts`), one plans a file in its scope (`fileConflicts`, `landingRegressions`).
   const sharer = await create({ exclusiveResources: ['printer'] });
-  const neighbour = await create({ plannedFiles: [...leased.plannedFiles] });
+  const neighbour = await create({  });
   const others: Work[] = [];
   for (let n = 0; n < 3; n++) others.push(await create());
   await engine.execute(operator, 'ready', leased.id, {}, randomUUID());

@@ -24,7 +24,7 @@ const reasons = {
 function subject(overrides: Partial<Work> = {}, observation: Partial<NonNullable<Work['observation']>> = {}): Work {
   const files = observation.scopeFiles ?? [file('src/model/gates.ts'), file('tests/gates.test.ts'), file('docs/coordination.md', 3, 1)];
   return {
-    candidate, plannedFiles: ['src/model/gates.ts', 'tests/', 'docs/'],
+    candidate, 
     policy: { checks: ['test', 'typecheck'], review: true } as Work['policy'],
     criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }] as Work['criteria'],
     gates: [
@@ -64,7 +64,7 @@ test('unit:candidate-blast-radius-summary schema, deployment and workflow change
   assert.equal(schema.headline, 'Merge danger: high · one-way door');
   assert.equal(schema.doorway, 'One-way door: it changes the database schema, which acts outside the code once it lands.');
   assert.equal(schema.reverts, 'If it lands and misbehaves, reverting its merge commit restores those 2 files, but not data already migrated in a live database.');
-  const infra = blastRadius(subject({ plannedFiles: [] }, { scopeFiles: [file('Dockerfile'), file('.github/workflows/ci.yml')] }));
+  const infra = blastRadius(subject({  }, { scopeFiles: [file('Dockerfile'), file('.github/workflows/ci.yml')] }));
   assert.match(infra.doorway, /installation and deployment and the GitHub workflows/);
   assert.match(infra.reverts, /but not infrastructure a deploy has already applied and anything the workflows published/);
 });

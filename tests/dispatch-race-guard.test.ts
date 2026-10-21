@@ -30,7 +30,7 @@ function item(overrides: Partial<Work> = {}): Work {
   const at = iso(-3_600_000);
   return {
     id: workId, key: 'GY-7', title: 'Guarded item', description: '', type: 'feature', stage: 'ready', ready: true, blocker: null, priority: 1, epoch: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:guard'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], workspaces: [], evidence: [],
+    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:guard'] }], policy: { checks: ['test'], review: true }, workspaces: [], evidence: [],
     gates: [], violations: [], createdAt: at, updatedAt: at, stageEnteredAt: at, lease: null, candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], observation: null, revision: 1, policyRevision: 1, ...overrides,
   } as Work;
@@ -39,7 +39,7 @@ function item(overrides: Partial<Work> = {}): Work {
 function dispatchRow(overrides: Partial<ActionRow> = {}): ActionRow {
   return {
     id: actionId('dispatch', workId, 'dispatch:0'), kind: 'dispatch', work: workId, key: 'GY-7',
-    inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] },
+    inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1 },
     gate: 'build', refusal: 'Worker has not submitted implementation for this attempt', reason: 'GY-7 is ready and unassigned: Worker has not submitted implementation for this attempt',
     binding: 'dispatch:0', requestedBy: 'graphyard', requestedAt: iso(-60_000), state: 'pending', claim: null, attempts: 0,
     history: [{ at: iso(-60_000), event: 'requested', requester: 'graphyard', executor: null, result: null, reason: 'GY-7 is ready and unassigned' }], ...overrides,

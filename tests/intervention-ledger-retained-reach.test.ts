@@ -28,7 +28,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('intervention-ledger-retained-reach'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('intervention_ledger_retained_reach_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/intervention_ledger_retained_reach_test`); await store.init();
-  await store.pool.query('INSERT INTO work_items(id, document) VALUES($1, $2)', [workId, JSON.stringify({ id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2, plannedFiles: [] })]);
+  await store.pool.query('INSERT INTO work_items(id, document) VALUES($1, $2)', [workId, JSON.stringify({ id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2 })]);
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
@@ -128,7 +128,7 @@ test('manual:intervention-pattern-within-threshold — the reach is the cutoff r
   const now = Date.now(), since = iso(now - 7 * day);
   // A row written with its document, whose `updatedAt` precedes the insertion by five seconds: the row's own instant.
   const documented = iso(now - hour), documentedAt = iso(now - hour - 5_000);
-  await write('scope', documented, { work: { id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2, plannedFiles: [], updatedAt: documentedAt } });
+  await write('scope', documented, { work: { id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2, updatedAt: documentedAt } });
   // Two rows inserted in one instant, as one transaction's writes share `created_at`.
   const shared = iso(now - hour / 2);
   await write('scope', shared, { details: { epoch: 2 } });

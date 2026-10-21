@@ -4,14 +4,13 @@ import { diagnose, fileConflicts, proofPreview, resourceConflicts } from '../src
 import type { Work } from '../src/model.js';
 const now = Date.parse('2026-01-01T00:10:00Z');
 function work(id: string): Work {
-  return { id, key: id, stage: 'ready', ready: true, plannedFiles: [], dependencies: [], lease: null, workspaces: [], submission: null, evidence: [], scenarioRequirements: [], criteria: [{ id: 'AC-1', text: 'Actual result', proofs: ['integration:result'] }], policyRevision: 2, candidate: { sha: 'a', baseSha: 'b' }, gates: [], violations: [] } as unknown as Work;
+  return { id, key: id, stage: 'ready', ready: true, dependencies: [], lease: null, workspaces: [], submission: null, evidence: [], scenarioRequirements: [], criteria: [{ id: 'AC-1', text: 'Actual result', proofs: ['integration:result'] }], policyRevision: 2, candidate: { sha: 'a', baseSha: 'b' }, gates: [], violations: [] } as unknown as Work;
 }
 test('overlap includes actual diffs and directory scopes, excludes siblings and completed work', () => {
-  const a = work('A'), b = work('B'); a.plannedFiles = ['src/api/', 'docs/*']; b.observation = { files: ['src/api/create.ts'] } as any;
+  const a = work('A'), b = work('B'); a.observation = { files: ['src/api/'] } as any; b.observation = { files: ['src/api/create.ts'] } as any;
   assert.deepEqual(fileConflicts(a, [a, b]), [{ key: 'B', paths: ['src/api/'] }]);
   b.observation!.files = ['src/apis/create.ts']; assert.deepEqual(fileConflicts(a, [a, b]), []);
-  b.plannedFiles = ['docs/guide.md']; assert.equal(fileConflicts(a, [a, b]).length, 1);
-  b.stage = 'done'; assert.deepEqual(fileConflicts(a, [a, b]), []);
+  b.stage = 'done'; b.observation!.files = ['src/api/create.ts']; assert.deepEqual(fileConflicts(a, [a, b]), []);
 });
 test('proof preview refuses stale, untrusted, skipped and later failed evidence', () => {
   const w = work('A'); assert.equal(proofPreview(w)[0].status, 'unmeasured');

@@ -109,7 +109,7 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   const live: HerdrAgent = { name: profile.agentName, pane_id: 'pane-1', agent_status: 'working' };
   const finished: HerdrAgent = { name: profile.agentName, pane_id: 'pane-1', agent_status: 'done' };
   const filed = await ok(operator, 'POST', 'work', {
-    title: 'bounds', plannedFiles: ['src/model/capacity.ts'],
+    title: 'bounds', 
     criteria: [{ id: 'AC-1', text: 'bounds', proofs: ['unit:capacity-hold-respects-machine-bounds'] }],
   }) as Work;
   const ready = await ok(operator, 'POST', `work/${filed.id}/ready`, {}) as Work;

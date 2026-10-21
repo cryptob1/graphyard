@@ -32,7 +32,7 @@ const totalBytes = 1_022_000_000_000, threshold = 10_000_000_000, band = diskRec
 const workspace = (path: string, branch: string, epoch: number) => ({ host: 'vishrog', path, branch, epoch, owner: 'graphyard-worker-1' });
 const work = (key: string, path: string, branch: string, overrides: Partial<Work> = {}): Work =>
   ({ id: `id-${key}`, key, title: `Item ${key}`, description: '', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, 
     stage: 'build', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '',
     ready: false, epoch: 1, lease: null, workspaces: [workspace(path, branch, 1)], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides }) as Work;

@@ -63,7 +63,7 @@ test('unit:worker-request-names-fast-gates — the request names the fast mechan
   // An input that adds sections adds the section once, never a second copy.
   const withSections = workerPrompt(
     { cliPath: cli, repository: 'owner/graphyard', fastGates: true },
-    { key: 'GY-1', title: 'Fast gates', plannedFiles: ['src/x.ts'], documentation: { id: 'DOCS', paths: ['docs/'], text: 'Documentation reflects this change', changelog: null } },
+    { key: 'GY-1', title: 'Fast gates', documentation: { id: 'DOCS', paths: ['docs/'], text: 'Documentation reflects this change', changelog: null } },
     { principal: 'graphyard-test-1' }, 2,
     { shared: [{ name: 'node_modules', source: '/opt/graphyard/node_modules', how: 'reachable' }] },
   );
@@ -136,7 +136,7 @@ test('unit:worker-prompt-names-review-self — every worker request names review
   // the same instruction, naming its own key.
   const full = workerPrompt(
     { cliPath: cli, repository: 'owner/graphyard', fastGates: true },
-    { key: 'GY-2', title: 'Anything', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], plannedFiles: ['src/x.ts'], documentation: { id: 'DOCS', text: 'Documentation reflects this change', paths: ['docs/'], changelog: null } },
+    { key: 'GY-2', title: 'Anything', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], documentation: { id: 'DOCS', text: 'Documentation reflects this change', paths: ['docs/'], changelog: null } },
     { principal: 'graphyard-test-1' }, 3,
   );
   assert.ok(full.includes(sentence(cli, 'GY-2')), 'any item\'s request names review self with its own key');

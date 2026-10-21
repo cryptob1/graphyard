@@ -44,7 +44,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 69, branch: 'graphyard/gy-69-1', author: 'implementer' };
-  return { id: 'work-69', key: 'GY-69', title: 'Master loop resilience', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-69', key: 'GY-69', title: 'Master loop resilience', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Retry', proofs: ['integration:producer-session-retry', 'unit:autonomous-session-prompts'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-69', branch: 'graphyard/gy-69-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 69 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

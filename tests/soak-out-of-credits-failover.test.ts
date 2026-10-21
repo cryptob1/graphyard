@@ -161,13 +161,13 @@ test('unit:soak-invariants-hold — over two days, every reviewer and approver s
   for (; now < soakStart + days * 24 * hour; now += step) {
     // New work arrives: a review request on a fresh item, or a machine-filed item the loop puts a close decision to.
     if (now >= nextReview && now < soakStart + arrivalsUntil) {
-      const created = await ok(operator, 'POST', 'work', { title: `credits soak review ${++requests}`, plannedFiles: [`src/credits-soak-${requests}.ts`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
+      const created = await ok(operator, 'POST', 'work', { title: `credits soak review ${++requests}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
       const work = await ok(operator, 'POST', `work/${created.id}/ready`, {}) as Work;
       await launchReview(work.key, `review-request-${requests}`);
       nextReview += reviewEveryMs;
     }
     if (now >= nextDecision && now < soakStart + arrivalsUntil) {
-      const filed = await ok(operator, 'POST', 'work', { title: `credits soak close ${++filings}`, plannedFiles: [`src/credits-soak-close-${filings}.ts`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
+      const filed = await ok(operator, 'POST', 'work', { title: `credits soak close ${++filings}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
         origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: `src/a.ts — finding ${filings}` }] } } }) as Work;
       await ok(coordinator, 'POST', `work/${filed.id}/triage`, { judgement: { outcome: 'close', reason: 'Not worth doing once the parent shipped' } });
       nextDecision += decisionEveryMs;

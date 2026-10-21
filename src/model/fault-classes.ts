@@ -64,7 +64,7 @@ export const faultCatalogue = {
   'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'review-settlement', 'escalation:security-concern', 'action:review'],
   'decision': ['approver-launch', 'request-remedy', 'decision-refused', 'decision-stale', 'decision-unanswered', 'owed-decision', 'agent-request', 'context-overflow', 'intervention-pattern',
     'action:decision', 'action:escalation'],
-  'scope': ['scope-violation', 'escalation:requirement-weakening'],
+  'scope': ['scope-violation', 'escalation:requirement-weakening', 'action:scope'],
   'overlap-hold': ['hold-overdue'],
   'observation': ['github-budget', 'integration-job', 'action:refresh'],
   'deployment': ['production', 'throughput', 'plane-unavailable', 'action:deployment', 'action:smoke'],

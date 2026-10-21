@@ -32,7 +32,7 @@ function item(overrides: Partial<Work> = {}): Work {
   return {
     id: overrides.id ?? '11111111-1111-4111-8111-111111111111', key: 'GY-1', title: 'Research phase', description: 'Research before build', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'A research step runs before build.', proofs: ['unit:research-brief-recorded'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/research.ts'], stage: 'ready', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 3, policyRevision: 1,
     createdAt: new Date(NOW).toISOString(), updatedAt: new Date(NOW).toISOString(), stageEnteredAt: new Date(NOW).toISOString(), ready: true,
     epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
     ...overrides,

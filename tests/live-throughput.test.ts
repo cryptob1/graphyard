@@ -63,7 +63,7 @@ const patch = (item: Work, document: Record<string, unknown>) => store.pool.quer
 const criteria = [{ id: 'AC-1', text: 'Throughput', proofs: ['integration:live-throughput-population'] }];
 
 async function ready(title: string) {
-  const created = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/throughput.ts'], criteria }, randomUUID());
+  const created = await engine.execute(operator, 'create', null, { title, criteria }, randomUUID());
   return engine.execute(operator, 'ready', created.id, {}, randomUUID());
 }
 
@@ -461,7 +461,7 @@ test('unit:throughput-claim-visible — master status carries GY-87\'s throughpu
     await writeDaemonState(master, emptyDaemonState(master));
     const delivered = { id: 'd', key: 'GY-1', title: 'Delivered', stage: 'done', type: 'chore', priority: 2, ready: true, epoch: 1, revision: 4, policyRevision: 1,
       createdAt: '2026-09-21T08:00:00.000Z', updatedAt: '2026-09-21T09:00:00.000Z', stageEnteredAt: '2026-09-21T09:00:00.000Z',
-      policy: { checks: ['test'], review: true }, criteria: [{ id: 'AC-1', text: 'Delivered', proofs: [] }], plannedFiles: [], dependencies: [], description: '',
+      policy: { checks: ['test'], review: true }, criteria: [{ id: 'AC-1', text: 'Delivered', proofs: [] }], dependencies: [], description: '',
       lease: null, workspaces: [], candidate: null, submission: { epoch: 1, pr: 11 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null,
       blocker: null, gates: [], violations: [], delivery: { mergedAt: '2026-09-21T09:00:00.000Z', mergeSha: commit('GY-1'), authorizationRevision: 1 } };
     const masterApi = async (path: string) => path === 'work-snapshot' ? { work: [delivered], now: new Date().toISOString() } : { decisions: [] };

@@ -115,7 +115,7 @@ class FallbackPane {
 
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const item = { id: 'work-499', key: 'GY-499', title: 'OpenCode sessions never count as started', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+const item = { id: 'work-499', key: 'GY-499', title: 'OpenCode sessions never count as started', description: '', type: 'bug', priority: 0, dependencies: [], 
   criteria: [{ id: 'AC-1', text: 'Start check', proofs: ['unit:opencode-start-recognized'] }], policy: { checks: ['test'], review: true },
   stage: 'ready', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
   reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] } as any;

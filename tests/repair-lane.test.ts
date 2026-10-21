@@ -33,7 +33,7 @@ test('unit:repair-lane-removed — the module is gone and unimported, repair-mer
   // An item stored before the removal — its document as work_items holds it — loads and evaluates.
   const candidate = { sha: head, baseSha: base, pr: 206, branch: 'graphyard/gy-9-1', author: 'worker' };
   const stored = JSON.stringify({ id: 'work-9', key: 'GY-9', title: 'Fix the merge path', description: '', type: 'bug', priority: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Merges', proofs: ['unit:merges'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/merge-queue.ts'], repair: 'merge-path', stage: 'build', revision: 9, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, repair: 'merge-path', stage: 'build', revision: 9, policyRevision: 1,
     createdAt: '2026-09-25T00:00:00.000Z', updatedAt: '2026-09-25T00:00:00.000Z', stageEnteredAt: '2026-09-25T00:00:00.000Z', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 206 },
     reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: { at: '2026-09-25T00:01:00.000Z', candidate, reviews: [], checks: [], protected: true, mergeable: true, merged: false, prState: 'open', draft: false } as unknown as Observation,

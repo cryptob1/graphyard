@@ -71,7 +71,7 @@ async function call(credential: string, path: string, body: unknown, status: num
 }
 const reload = async (workId: string) => (await store.list()).find(item => item.id === workId)!;
 async function claimed(subject: string) {
-  let work: Work = await engine.execute(operator, 'create', null, { title: `${subject} replay`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let work: Work = await engine.execute(operator, 'create', null, { title: `${subject} replay`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   return engine.execute(worker, 'claim', work.id, {}, randomUUID());
 }

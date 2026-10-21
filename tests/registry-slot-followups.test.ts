@@ -75,7 +75,7 @@ function observation(candidate: { sha: string; baseSha: string; pr: number; bran
 /** A submitted head with a standing review request and a unit producer request. */
 function requested(): Work {
   const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
-  const make = (evidence: Work['evidence']) => ({ id: 'work-64', key: 'GY-64', title: 'Slots', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  const make = (evidence: Work['evidence']) => ({ id: 'work-64', key: 'GY-64', title: 'Slots', description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:slots'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1,
     createdAt: iso(0), updatedAt: iso(0), stageEnteredAt: iso(0), ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false,
     scenarioRequirements: [], evidence, observation: observation(candidate), blocker: null, violations: [],

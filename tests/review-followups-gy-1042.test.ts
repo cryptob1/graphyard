@@ -80,7 +80,7 @@ before(async () => {
 });
 after(async () => { boundLockedCache(); if (store) await store.close(); if (database) await database.stop(); });
 
-const create = (title: string, plannedFiles: string[]) => engine.execute(operator, 'create', null, { title, plannedFiles, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }] }, randomUUID());
+const create = (title: string, plannedFiles: string[]) => engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }] }, randomUUID());
 /** `db` with every query's text recorded. */
 const recorded = (db: Queryable, texts: string[]): Queryable => ({ query: (text, values) => { texts.push(text); return db.query(text, values); } });
 const projects = (texts: string[]) => texts.filter(text => /CROSS JOIN LATERAL/.test(text)).length;

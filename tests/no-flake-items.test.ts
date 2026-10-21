@@ -27,7 +27,7 @@ const flakyName = 'unit:fleet-panel-renders — the fleet panel renders';
 /** An item as the snapshot lists it, around the fields the old flake filer read. */
 const item = (fields: Record<string, unknown>) => ({
   description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item'] }],
-  policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
+  policy: { checks: ['test', 'typecheck'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
   stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false,
   scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], ...fields,
 }) as unknown as Work;

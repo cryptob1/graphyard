@@ -25,7 +25,6 @@ import { performSelfUpgrade } from '../src/daemon/upgrade.js';
 import { loopSupervision, loopSupervisionAttention } from '../src/supervisor.js';
 import { fleetStatus } from '../src/master/attention.js';
 import type { FleetView } from '../src/model/registry.js';
-import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { postRun } from '../src/daemon/doctor.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { NOW, boardApi, boardStatus, boardWork } from '../browser-tests/ui-board.js';
@@ -52,7 +51,7 @@ function config(): MasterConfig {
 function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'backlog', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'backlog', revision: 1, policyRevision: 1,
     createdAt: iso(-hour), updatedAt: iso(0), stageEnteredAt: iso(-hour), ready: false, epoch: 0, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [], ...overrides,
@@ -75,11 +74,11 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
     ['escalation triggers', escalationTriggers.map(escalationFaultKind)],
     ['failed loop actions', daemonActionKinds.map(daemonActionFaultKind)],
     ['loop attention', ['loop-liveness', 'loop-cost', 'loop-failures', 'delivery-budget', 'loop-cursor', 'dispatch-failures']],
-    ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'scope-request', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
+    ['master status builders', ['disk-pressure', 'resource-bound', 'ledger-refusal', 'consent-hold', 'review-conflict', 'unobtainable-review', 'decision-refused', 'decision-stale', 'decision-unanswered',
       'approver-launch', 'request-remedy', 'stalled-action', 'stalled-item', 'unanswered-request', 'stuck-request', 'overlong-session', 'context-overflow', 'timing-failure', 'agent-request', 'owed-decision', 'generated-files',
       'github-budget', 'intervention-pattern', 'throughput', 'executor', 'setup', 'installation', 'sudo', 'unrunnable-remedy', 'role-capacity', 'concurrency-starved', 'fleet', 'fleet-capacity', 'actorless',
       'nonexercising-proof', 'retry-stopped', 'review-settlement', 'launch-review']],
-    ['work item record', ['containment', 'human-request', 'scope-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
+    ['work item record', ['containment', 'human-request', 'proof-gap', 'role-capacity', 'scope-violation', 'blocker', 'sandbox-blocker', 'workflow-permission']],
   ];
   // GY-1338: a failed `fault` or `diagnosis` action names a step, not a cause, so it is catalogued as unclassified.
   const unclassifiedActions = ['action:fault', 'action:diagnosis'];
@@ -89,7 +88,7 @@ test('unit:fault-classes — every existing attention kind maps to exactly one c
   }
   assert.equal(faultClassOf('lease-loss'), 'unclassified', 'a kind nobody catalogued is unclassified, never silently put somewhere');
   assert.equal(faultClassOf('escalation:lease-loss'), 'session-liveness');
-  assert.equal(faultClassOf('scope-request'), 'scope');
+  assert.equal(faultClassOf('scope-violation'), 'scope');
   assert.equal(faultClassOf('hold-overdue'), 'overlap-hold');
 });
 
@@ -101,15 +100,14 @@ test('unit:fault-classes — attention items, escalations and pipeline faults ca
   const liveness = loopLiveness(state, clock, 20_000, 'machine-a');
   for (const entry of loopAttention({ liveness })) assert.equal(entry.faultClass, 'loop', entry.text);
   const worded = classifyAttention([
-    { subject: 'GY-4', text: 'graphyard-claude-1 needs files outside plannedFiles: src/cli/x.ts — the command moved' },
     { subject: 'GY-5', text: 'Review of GY-5 head 0123456789ab (PR #9) is conflicted: two verdicts' },
     { subject: 'github', text: 'GitHub requests are paused until 12:00' },
     { subject: 'GY-6', text: 'GY-6 has held its review gate for 3 hours with no action named and nothing moving it: x' },
     { subject: 'GY-6', text: 'GY-6 candidate 0123456789ab has been submitted for 9m with no review request, no producer request, no rework request and no named wait; missing a reviewer' },
     { subject: 'somewhere', text: 'A line nobody catalogued' },
   ]);
-  assert.deepEqual(worded.map(entry => entry.faultClass), ['scope', 'review-convergence', 'observation', 'stalled-gate', 'stalled-gate', 'unclassified']);
-  assert.equal(worded[4].kind, 'actorless');
+  assert.deepEqual(worded.map(entry => entry.faultClass), ['review-convergence', 'observation', 'stalled-gate', 'stalled-gate', 'unclassified']);
+  assert.equal(worded[3].kind, 'actorless');
   // GY-729: GY-185 reworded the stalled-action line and the signature still named the old wording, so
   // every stalled action since read as unclassified. These are the three recorded instances verbatim.
   const stalledLines = classifyAttention([
@@ -179,25 +177,22 @@ test('unit:launch-wait-classified — the review launch-wait line classifies by 
 
 test('unit:fault-classes — master status and the dashboard group open problems by class with a count', () => {
   const items = [
-    { subject: 'GY-1', text: 'graphyard-claude-1 needs files outside plannedFiles: a.ts — x', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'graphyard master scope GY-1' },
-    { subject: 'GY-2', text: 'graphyard-claude-2 needs files outside plannedFiles: b.ts — y', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'graphyard master scope GY-2' },
+    { subject: 'GY-1', text: 'Review of GY-1 head 0123456789ab (PR #9) is conflicted: two verdicts', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'graphyard master rereview GY-1' },
+    { subject: 'GY-2', text: 'Review of GY-2 head 0123456789ab (PR #10) is conflicted: two verdicts', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'graphyard master rereview GY-2' },
     { subject: 'GY-3', text: 'GY-3 is held by a registered resource at its bound: review ledger. Reclaim', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'Reclaim', kind: 'resource-bound' as const },
     { subject: 'loop', text: 'The master loop has not cycled', role: 'master' as const, approvedBy: null, human: false, humanOnly: null, next: 'restart', kind: 'loop-liveness' as const },
   ];
   const report = faulted(items);
   assert.ok(report.attentionItems.every(entry => faultClasses.includes(entry.faultClass)), 'every listed item carries its class');
-  assert.deepEqual(report.faults.map(group => [group.faultClass, group.count]), [['scope', 2], ['resources', 1], ['loop', 1]]);
+  assert.deepEqual(report.faults.map(group => [group.faultClass, group.count]), [['review-convergence', 2], ['resources', 1], ['loop', 1]]);
   assert.deepEqual(report.faults[0].subjects, ['GY-1', 'GY-2']);
   assert.equal(report.faults.reduce((total, group) => total + group.count, 0), report.attentionItems.length, 'the counts add up to the list');
 
   // The dashboard's Work page: the same grouping over each open item's own record.
   const work = boardWork() as unknown as Work[];
   const open = work.filter(entry => entry.stage !== 'done');
-  // Requests open past the loop's bound (GY-1085): one still being decided within it is no fault.
-  open[0].scopeRequest = { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'graphyard-claude-1', at: new Date(NOW - hour).toISOString() } as Work['scopeRequest'];
-  open[1].scopeRequest = { epoch: 1, paths: ['docs/y.md'], reason: 'docs', requestedBy: 'graphyard-claude-2', at: new Date(NOW - hour).toISOString() } as Work['scopeRequest'];
-  open[0].lease = { owner: 'graphyard-claude-1', epoch: 1, expiresAt: new Date(NOW + hour).toISOString() };
-  open[1].lease = { owner: 'graphyard-claude-2', epoch: 1, expiresAt: new Date(NOW + hour).toISOString() };
+  open[0].violations = ['GY-1 rewrote shipped work it does not own'];
+  open[1].violations = ['GY-2 rewrote shipped work it does not own'];
   const expected = groupFaults(open.flatMap(entry => workFaults(entry, NOW)));
   const noop = () => {};
   const render = (work: Work[], status: object = boardStatus('admin')) => renderToStaticMarkup(createElement(OverviewPage, {
@@ -210,7 +205,7 @@ test('unit:fault-classes — master status and the dashboard group open problems
   const page = render(work);
   assert.match(page, /aria-label="Problems by class"/);
   const scope = expected.find(group => group.faultClass === 'scope')!;
-  assert.ok(scope.count >= 2, 'both scope requests are counted');
+  assert.ok(scope.count >= 2, 'both violations are counted');
   for (const group of expected) assert.match(page, new RegExp(`data-fault-class="${group.faultClass}"[^>]*>(?:(?!</li>)[\\s\\S])*<strong>${group.count}</strong>`), `${group.faultClass} shows its count`);
   // One open problem is its own row already: there is nothing to group.
   const fixture = boardWork() as unknown as Work[];
@@ -327,7 +322,7 @@ test('unit:recurring-class-item — a class past the threshold files no item; it
   assert.deepEqual(summary.faults.classes.find(entry => entry.faultClass === 'stalled-gate'), { faultClass: 'stalled-gate', instances: 4, latest: later.at }, 'master status reads the count and the latest instance');
 
   // Another class is judged on its own.
-  const scope = (key: string) => item(key, { scopeRequest: { epoch: 1, paths: ['docs/x.md'], reason: 'docs', requestedBy: 'w', at: iso(0) }, lease: { owner: 'w', epoch: 1, expiresAt: iso(2 * hour) } } as Partial<Work>);
+  const scope = (key: string) => item(key, { violations: [`${key} rewrote shipped work it does not own`] } as Partial<Work>);
   backlog = [...backlog, scope('GY-8'), scope('GY-9'), scope('GY-10')];
   now = clock + 30 * 60_000;
   await runCycle(config(), state, effects, () => now);
@@ -355,7 +350,7 @@ test('unit:recurring-class-item — retained action history is not a standing fa
 
 test('unit:recurring-class-item — a fault that clears and returns is a new instance', () => {
   const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
-  const observation = { kind: 'scope-request' as const, faultClass: 'scope' as const, subject: 'GY-1', text: 'needs files' };
+  const observation = { kind: 'scope-violation' as const, faultClass: 'scope' as const, subject: 'GY-1', text: 'rewrote shipped work' };
   assert.equal(trackFaults(record, [observation], iso(0)).length, 1);
   assert.equal(trackFaults(record, [observation], iso(60_000)).length, 0, 'still standing: the same instance');
   assert.equal(record.instances[0].lastSeenAt, iso(60_000));
@@ -368,7 +363,7 @@ test('unit:recurring-class-item — a fault that clears and returns is a new ins
   for (let index = 0; index < 1200; index++) trackFaults(record, [observation, churn(index)], iso(240_000 + index));
   assert.ok(record.instances.length <= 1001, `history stays bounded: ${record.instances.length}`);
   assert.equal(trackFaults(record, [observation], iso(2_000_000)).length, 0, 'the fault that never cleared is still one instance');
-  assert.equal(record.instances.filter(entry => entry.kind === 'scope-request' && entry.at === iso(180_000)).length, 1);
+  assert.equal(record.instances.filter(entry => entry.kind === 'scope-violation' && entry.at === iso(180_000)).length, 1);
 });
 
 test('unit:recurring-class-item — derived and status-level faults reach recurrence tracking', async () => {
@@ -411,11 +406,8 @@ test('unit:recurring-class-item — a typed wait is one fault, not also a generi
   const parked = item('GY-11', { blocker: describeHumanRequest({ kind: 'money-or-accounts', needed: 'a paid Railway plan' }),
     humanRequest: { id: 'h1', kind: 'money-or-accounts', reason: 'the deploy needs a paid plan', needed: 'a paid Railway plan', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) } } as Partial<Work>);
   assert.deepEqual(workFaults(parked, clock).map(fault => fault.kind), ['human-request'], 'the park is one human-decision fault');
-  const refused = item('GY-12', { blocker: `${scopeRefusalBlocker}: docs/ is outside the implied scope`,
-    scopeRequest: { paths: ['docs/'], reason: 'docs', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) }, lease: { owner: 'graphyard-worker-1', epoch: 1, expiresAt: iso(hour) } } as Partial<Work>);
-  assert.deepEqual(workFaults(refused, clock).map(fault => fault.kind), ['scope-request'], 'the refused scope request is one scope fault');
   // A blocker that is not a typed wait's restatement still counts.
-  assert.deepEqual(workFaults(item('GY-13', { blocker: 'npm test fails on a missing fixture', scopeRequest: parked.scopeRequest } as Partial<Work>), clock).map(fault => fault.kind), ['blocker']);
+  assert.deepEqual(workFaults(item('GY-13', { blocker: 'npm test fails on a missing fixture' } as Partial<Work>), clock).map(fault => fault.kind), ['blocker']);
   // Three parked items count toward human-decision only, so they can file at most one item.
   const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
   trackFaults(record, cycleFaults(emptyDaemonState(config()), ['GY-21', 'GY-22', 'GY-23'].map(key => ({ ...parked, id: `work-${key}`, key })), clock), iso(0));
@@ -719,20 +711,6 @@ test('unit:recurring-class-item — a filing row a restart left behind is retire
   assert.deepEqual(recurringFaultClasses(state), ['stalled-gate'], 'the class still reaches the threshold, as the attention line');
 });
 
-test('unit:recurring-class-item — a scope request from an attempt that no longer holds the lease is no standing fault', () => {
-  const request = { paths: ['docs/'], reason: 'docs', requestedBy: 'graphyard-worker-1', epoch: 1, at: iso(-hour) };
-  const faults = (lease: Work['lease']) => workFaults(item('GY-14', { scopeRequest: request, lease } as Partial<Work>), clock).map(fault => fault.kind);
-  assert.deepEqual(faults({ owner: 'graphyard-worker-1', epoch: 1, expiresAt: iso(hour) }), ['scope-request'], 'the live attempt\'s request stands');
-  assert.deepEqual(faults({ owner: 'graphyard-worker-1', epoch: 1, expiresAt: iso(-1) }), [], 'an expired lease leaves the request moot');
-  assert.deepEqual(faults({ owner: 'graphyard-worker-2', epoch: 2, expiresAt: iso(hour) }), [], 'a later attempt\'s lease does not revive it');
-  assert.deepEqual(faults(null), [], 'nor does no lease at all');
-  // Three expired attempts' requests file no scope item.
-  const record = { instances: [] as FaultInstance[], open: {} as Record<string, string>, failing: {} as Record<string, string> };
-  const moot = ['GY-31', 'GY-32', 'GY-33'].map(key => item(key, { scopeRequest: request, lease: null } as Partial<Work>));
-  trackFaults(record, cycleFaults(emptyDaemonState(config()), moot, clock), iso(0));
-  assert.deepEqual(recurringFaultClasses({ faults: record } as DaemonState), []);
-});
-
 test('unit:recurring-class-item — a starved reviewer or producer role reaches the loop as a capacity instance', async () => {
   const waiting = (key: string, id: string) => item(key, { stage: 'review', autoDispatch: { review: { id, state: 'requested', provider: 'github', requestedAt: iso(-hour) }, producers: [], history: [] } } as unknown as Partial<Work>);
   const work = [waiting('GY-1', 'r1'), waiting('GY-2', 'r2')];
@@ -995,7 +973,7 @@ test(`manual:fault-class-configuration — ${instances.dirty[0]}: a dirty checko
   function requestItem(key: string, group: 'unit' | 'manual', proofs: string[], requestedAt: number, evidence: Evidence[] = []): { work: Work; request: DispatchRequest } {
     const at = iso(requestedAt - 60_000), candidate = { sha: H, baseSha: B, pr: 500, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
     const request: DispatchRequest = { id: `${key}-producer`, kind: 'producer', sha: H, baseSha: B, policyRevision: 1, pr: 500, group, proofs, requestedAt: iso(requestedAt), reason: `${group} proofs requested`, state: 'requested' };
-    const work = { id: `work-${key}`, key, title: key, description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+    const work = { id: `work-${key}`, key, title: key, description: '', type: 'bug', priority: 1, dependencies: [], 
       criteria: [{ id: 'AC-1', text: 'The behaviour', proofs }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'test', revision: 5, policyRevision: 1,
       createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: `/w/${key}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }],
       candidate, submission: { epoch: 1, pr: 500 }, reworkRequested: false, scenarioRequirements: [], evidence, observation: candidateObservation(key, candidate, at), blocker: null,

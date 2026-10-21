@@ -44,7 +44,7 @@ function capped(body: string, reviewId = 4242, reviewer = reviewerBot): Work {
   const candidate = { sha: H, baseSha: B, pr: 0, branch: 'graphyard/gy-2078-1', author: 'graphyard-opencode-1' };
   const observation = { source: 'control-plane', candidate, checks: [], reviews: [{ reviewer, sha: H, state: 'CHANGES_REQUESTED', id: reviewId, submittedAt: at(), body, blocking: blockingFindings(body), source: 'control-plane' }],
     merged: false, mergeSha: null, mergeable: true, protected: false, files: ['src/a.ts'], scopeFiles: [], at: at(60_000), baseTip: B, baseTipContained: true } as never as Work['observation'];
-  return { id: 'work-2078', key: 'GY-2078', title: 'Hotspot budgets', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-2078', key: 'GY-2078', title: 'Hotspot budgets', description: '', type: 'bug', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'The widget counts every frob.', proofs: ['unit:frob-count'] }], policy: { checks: ['test'], review: true, reviewProvider: 'control-plane' },
     stage: 'review', revision: 40, policyRevision: 1, createdAt: at(-3_600_000), updatedAt: at(60_000), stageEnteredAt: at(60_000), ready: true, epoch: 5,
     lease: null, workspaces: [], candidate, submission: { epoch: 5, pr: 0 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null, gates: [], violations: [],
@@ -122,7 +122,7 @@ const events = async (id: string, kind: string) => (await store.pool.query('SELE
 function planeItem(key: string, overrides: Record<string, unknown> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 0, branch: 'graphyard/gy-2078-1', author: 'graphyard-opencode-1' };
   return { id: randomUUID(), key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, 
     stage: 'review', revision: 3, policyRevision: 1, createdAt: at(), updatedAt: at(), stageEnteredAt: at(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-2078-1', epoch: 1, owner: 'graphyard-opencode-1' }], candidate, submission: { epoch: 1, pr: 0 }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['graphyard-opencode-1'],

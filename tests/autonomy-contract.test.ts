@@ -43,7 +43,7 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 184, branch: 'graphyard/gy-184-1', author: 'implementer' };
-  return { id: 'work-184', key: 'GY-184', title: 'Autonomy is a product contract', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-184', key: 'GY-184', title: 'Autonomy is a product contract', description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Contract', proofs: ['unit:every-role-carries-autonomy-contract'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-184', branch: 'graphyard/gy-184-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 184 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

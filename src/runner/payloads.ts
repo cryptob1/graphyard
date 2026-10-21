@@ -47,7 +47,7 @@ const line = (max: number) => z.string().trim().min(1).max(max);
 export const decomposedChildSchema = z.object({
   title: line(200), description: line(6000).optional(),
   criteria: z.array(z.string().trim().regex(/^[A-Z]+-\d+$/)).min(1).max(20),
-  plannedFiles: z.unknown().optional().transform(() => undefined),
+  plannedFiles: z.unknown().transform(() => undefined).optional(),
   after: z.array(z.number().int().min(0).max(9)).max(9).default([]),
 }).strict();
 export const decompositionPayloadSchema = z.object({ reason: line(2000), children: z.array(decomposedChildSchema).max(10) }).strict()

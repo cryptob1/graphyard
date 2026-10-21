@@ -139,7 +139,7 @@ test('unit:e2e-case-sync-revisions — e2e sync registers each case as a scenari
   await assert.rejects(syncCases(apiAs(worker), unregistered), /Operator permission required/, 'only an operator registers cases');
 
   // An item requiring e2e:sync-a pins revision 1; editing the case publishes revision 2 and leaves revision 1 and the pin as they were.
-  const pinned = await engine.execute(operator, 'create', null, { title: 'Pinned to sync-a', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'sync-a passes', proofs: ['e2e:sync-a'] }] }, randomUUID()) as Work;
+  const pinned = await engine.execute(operator, 'create', null, { title: 'Pinned to sync-a', criteria: [{ id: 'AC-1', text: 'sync-a passes', proofs: ['e2e:sync-a'] }] }, randomUUID()) as Work;
   assert.equal(pinned.scenarioRequirements[0].revision, 1);
   await writeFile(join(dir, caseDirectory, 'sync-a.json'), JSON.stringify(http200('sync-a', { steps: [{ kind: 'http', method: 'GET', path: '/api/tests', status: 200, expect: [{ path: 'window', equals: 20 }] }] })));
   const edited = await loadCases(dir);
@@ -150,7 +150,7 @@ test('unit:e2e-case-sync-revisions — e2e sync registers each case as a scenari
   assert.notEqual(revisions[0].hash, revisions[1].hash);
   await assert.rejects(store.pool.query("UPDATE scenarios SET document = document WHERE id='sync-a'"), /append-only/, 'a revision never changes');
   assert.equal((await engine.store.list()).find(w => w.id === pinned.id)!.scenarioRequirements[0].revision, 1, 'the existing proof keeps pinning revision 1');
-  const later = await engine.execute(operator, 'create', null, { title: 'Pinned to the edit', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'sync-a passes', proofs: ['e2e:sync-a'] }] }, randomUUID()) as Work;
+  const later = await engine.execute(operator, 'create', null, { title: 'Pinned to the edit', criteria: [{ id: 'AC-1', text: 'sync-a passes', proofs: ['e2e:sync-a'] }] }, randomUUID()) as Work;
   assert.equal(later.scenarioRequirements[0].revision, 2, 'new work pins the edited revision');
   // The shipped cases register cleanly too.
   assert.ok((await syncCases(api, await loadCases(root))).every(result => result.revision === 1 && result.change !== 'revised'));

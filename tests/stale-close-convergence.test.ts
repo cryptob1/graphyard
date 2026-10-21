@@ -36,7 +36,7 @@ const worker = { name: 'worker-1', principal: 'principal-1', agentName: 'graphya
 function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/daemon/cycle-decisions.ts'], stage: 'build', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 1, policyRevision: 1,
     createdAt: iso(clock - 60 * minute), updatedAt: iso(clock), stageEnteredAt: iso(clock - 60 * minute), ready: true, epoch: 1, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [], ...overrides,
@@ -258,7 +258,7 @@ test('unit:decision-stale-named-wait-single-attention — repeated stale settles
 
 test('integration:advancing-steps-defer-to-pending-close — dispatch: a claimable item a close was requested on by hand between two cycles gets no worker', async () => {
   // The usual target of a duplicate close: a ready item no one holds.
-  const claimable = () => item('GY-1437', { stage: 'ready', ready: false, plannedFiles: [] });
+  const claimable = () => item('GY-1437', { stage: 'ready', ready: false });
   // Without a close, the item is dispatched once it is claimable.
   const control = world([claimable(), item('GY-1438', { ready: false })], [], { workers: [worker] });
   await control.cycle();
@@ -343,7 +343,7 @@ test('integration:advancing-steps-defer-to-pending-close — review cap: a chang
 });
 
 test('integration:advancing-steps-defer-to-pending-close — dispatch: a launch queued behind busy launches reads the history again before it claims', async () => {
-  const claimable = () => item('GY-1437', { stage: 'ready', ready: false, plannedFiles: [] });
+  const claimable = () => item('GY-1437', { stage: 'ready', ready: false });
   let release!: () => void, made: { id: string } | null = null;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const launcher = new Launcher();

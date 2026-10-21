@@ -28,7 +28,7 @@ export function fenced(key: string, lapsedMs: number, overrides: Partial<Work> =
   return {
     id: `work-${key}`, key, title: `${key} fenced`, description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'build', revision: 9, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 9, policyRevision: 1,
     createdAt: iso(-120 * minute), updatedAt: iso(0), stageEnteredAt: iso(-30 * minute), ready: true, epoch: 4, lease: null,
     lastAssignment: { owner: 'worker-a', epoch: 4, claimedAt: iso(-30 * minute) },
     workspaces: [{ host, path, epoch: 4, owner: 'worker-a', branch: `graphyard/${key.toLowerCase()}-1` }],

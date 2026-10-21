@@ -30,7 +30,7 @@ const proof = 'manual:post-deploy/webhook-deliveries-clean-24h', own = 'manual:w
 const base = (n: number, extra: Partial<Work> = {}): Work => ({
   id: `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`, key: `GY-${n}`, title: `Item ${n}`, description: '', type: 'chore', priority: 1, stage: 'ready', ready: true, epoch: 0, revision: 3, policyRevision: 1,
   createdAt: iso(now - 30 * hour), updatedAt: iso(now - 2 * hour), stageEnteredAt: iso(now - 2 * hour), lease: null, lastAssignment: null, systemDriven: true, implementers: [],
-  workspaces: [], sessions: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], criteria: [], plannedFiles: [],
+  workspaces: [], sessions: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], criteria: [], 
   policy: { checks: ['test', 'typecheck'], review: true }, dependencies: [],
   gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
   ...extra,
@@ -77,7 +77,7 @@ test('integration:loop-records-due-observation-reading — the deployment-verifi
   const { loopObservation } = model as unknown as { loopObservation: (work: Work, at: Date, all: Work[]) => { due: boolean } | null };
   const passing = followUp(1724), failing = followUp(1726), untakeable = followUp(1727), windowed = followUp(1728, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'later' } });
   // GY-1725 as it stands: an unsubmitted pre-GY-1762 worker candidate left in build is read the same way.
-  const inBuild = followUp(1725, { stage: 'build', epoch: 3, plannedFiles: ['verification/post-deploy-github-budget-row.md'], candidate: { pr: 1172, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-1725-3', createdAt: iso(now - 5 * hour) } } as Partial<Work>);
+  const inBuild = followUp(1725, { stage: 'build', epoch: 3, candidate: { pr: 1172, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-1725-3', createdAt: iso(now - 5 * hour) } } as Partial<Work>);
   // The parent already carries a trusted passing observation of the proof on the serving release: the filer reads it observed, and no reader runs.
   const observedParent = { ...parent, id: '22222222-2222-4222-8222-222222222222', key: 'GY-1749', evidence: [{ id: randomUUID(), proof, sha: serving, baseSha: mergeSha, policyRevision: 1, producer: 'graphyard-producer', trusted: true, result: 'pass', executed: 1, skipped: 0, at: iso(now - hour) }] } as Work;
   const observed = followUp(1759, { description: `Post-deploy follow-up: post-deploy:${observedParent.id}:AC-2:${proof}:${filed}\n\nowed` });
@@ -304,7 +304,7 @@ after(async () => { await store?.close(); await database?.stop(); });
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 /** An item created through the engine, then written as the control plane would have left it: the fixture for what the reading binds to. */
 async function plant(shape: Work): Promise<Work> {
-  const created = await engine.execute(operator, 'create', null, { title: shape.title, plannedFiles: ['src/readings/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:readings'] }] }, randomUUID()) as Work;
+  const created = await engine.execute(operator, 'create', null, { title: shape.title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:readings'] }] }, randomUUID()) as Work;
   const { id, key, ...rest } = shape;
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [created.id, JSON.stringify({ ...created, ...rest, id: created.id, key: created.key })]);
   return reload(created.id);

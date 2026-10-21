@@ -51,7 +51,7 @@ function conflicted(key: string, head: string, bound: string, base: string, obse
   return {
     id: `00000000-0000-4000-8000-${key.replace(/\D/g, '').padStart(12, '0')}`, key, title: key, description: '', type: 'bug', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/loop.ts', ...paths], stage: 'merge', revision: 5, policyRevision: 1, createdAt: observedAt, updatedAt: observedAt,
+    stage: 'merge', revision: 5, policyRevision: 1, createdAt: observedAt, updatedAt: observedAt,
     stageEnteredAt: observedAt, ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 42 },
     candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, baseRefresh, blocker: null, violations: [],
     gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'merge', passed: false, reasons: ['Pull request is not mergeable against the current base'] }],
@@ -145,7 +145,7 @@ test('manual:fault-class-decision — action:decision|GY-1417|2026-10-07T07:06:0
     files: ['src/loop.ts'], scopeFiles: [], at: iso(-20_000) } as Observation;
   const item = {
     id: '00000000-0000-4000-8000-000000001417', key: 'GY-1417', title: 'GY-1417', description: '', type: 'bug', priority: 2, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/loop.ts'], stage: 'review', revision: 5,
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true }, stage: 'review', revision: 5,
     policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-1_800_000), ready: true, epoch: 7, lease: null, workspaces: [],
     submission: { epoch: 7, pr: 893 }, candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null, violations: [],
     gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }],

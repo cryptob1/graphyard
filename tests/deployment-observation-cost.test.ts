@@ -31,7 +31,7 @@ function config(credentialFile: string, overrides: Partial<Omit<MasterConfig, 'r
 function delivery(key: string, mergeSha: string, mergedAt: string): Work {
   return {
     id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 1,
-    dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
     stage: 'done', revision: 3, policyRevision: 1, createdAt: mergedAt, updatedAt: mergedAt, stageEnteredAt: mergedAt,
     ready: false, epoch: 1, lease: null, workspaces: [], candidate: null, submission: { epoch: 1, pr: 1 },
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,

@@ -32,7 +32,7 @@ function attempt(overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-1155', key: 'GY-1155', title: 'An ended attempt settles its fence', description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Settles', proofs: ['unit:ended-attempt-fence-settled-at-once'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'build', revision: 4, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 4, policyRevision: 1,
     createdAt: iso(-60 * minute), updatedAt: iso(0), stageEnteredAt: iso(-30 * minute), ready: true, epoch,
     lease: { owner: 'worker-a', epoch, expiresAt: iso(10 * minute) },
     lastAssignment: { owner: 'worker-a', epoch, claimedAt: iso(-30 * minute) },

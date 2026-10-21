@@ -30,7 +30,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 421, branch: 'graphyard/gy-421-1', author: 'implementer' };
-  return { id: 'work-421', key: 'GY-421', title: 'Exhaustion notice', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-421', key: 'GY-421', title: 'Exhaustion notice', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Notice', proofs: ['unit:exhaustion-only-provider-notice', 'unit:tmp-reclaim'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 421 }, reworkRequested: false, scenarioRequirements: [], evidence: [] as Evidence[],

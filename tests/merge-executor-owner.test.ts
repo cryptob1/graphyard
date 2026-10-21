@@ -68,7 +68,7 @@ async function mergeDecision(work: Work, reason: string) {
 /** A submitted candidate observed at its head: every gate passes, or with `reviewed` false the review gate does not. */
 async function candidate(reviewed = true) {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Merge executor ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { title: `Merge executor ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/merge-executor-${n}`, branch: `graphyard/gy-92-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, id());
@@ -85,7 +85,7 @@ async function candidate(reviewed = true) {
 
 test('unit:stuck-merge-attention — master status names an item held at the merge stage by an observed unauthorized merge as the violation with its recovery command, apart from a candidate GitHub has yet to merge, and the loop names the violation once', async () => {
   const at = new Date().toISOString();
-  const shape = (key: string, overrides: Partial<Work>): Work => ({ id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
+  const shape = (key: string, overrides: Partial<Work>): Work => ({ id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
     policy: { checks: ['test'], review: true }, stage: 'merge', revision: 12, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: new Date(Date.now() - 7_200_000).toISOString(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: `graphyard/${key.toLowerCase()}-1`, epoch: 1, owner: 'implementer' }], candidate: { sha: head, baseSha: base, pr: 81, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' },
     submission: { epoch: 1, pr: 81 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [],

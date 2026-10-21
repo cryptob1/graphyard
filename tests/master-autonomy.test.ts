@@ -102,7 +102,7 @@ test('integration:master-autonomy-setup — onboarding provisions the master and
 
     // Routine operations as the master's own identity: create, release, unblock, add requirements.
     const intent = join(root, 'intent.json');
-    await writeFile(intent, JSON.stringify({ title: 'Autonomous item', plannedFiles: ['src/autonomous.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true } }));
+    await writeFile(intent, JSON.stringify({ title: 'Autonomous item', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true } }));
     let work = await runAutonomyCommand(root, config, 'create', [intent, 'Operator goal: ship autonomous delivery'], dependencies()) as Work;
     assert.equal(work.stage, 'backlog');
     work = await runAutonomyCommand(root, config, 'release', [work.key, 'Next by priority'], dependencies()) as Work;
@@ -188,7 +188,7 @@ test('integration:master-autonomy-setup — onboarding provisions the master and
 
 function item(overrides: Partial<Work> = {}): Work {
   return { id: `id-${overrides.key ?? 'GY-1'}`, key: 'GY-1', title: 'Item', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/item.ts'], stage: 'build', revision: 3, policyRevision: 1, createdAt: '2030-01-01T00:00:00Z', updatedAt: '2030-01-01T00:00:00Z',
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1, createdAt: '2030-01-01T00:00:00Z', updatedAt: '2030-01-01T00:00:00Z',
     stageEnteredAt: '2030-01-01T00:00:00Z', ready: true, epoch: 1, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: null, blocker: null, gates: [], violations: [], ...overrides } as Work;
 }

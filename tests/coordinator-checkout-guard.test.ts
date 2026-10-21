@@ -162,10 +162,10 @@ test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from
     // The loop: refused, with the attention naming the paths and the live leases whose planned
     // files they match — and no cycle, so no dirty code runs.
     const work = [
-      { key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) }, plannedFiles: ['src/loop.ts'] },
-      { key: 'GY-853', id: 'w2', lease: { epoch: 1, owner: 'graphyard-codex-1', expiresAt: iso(hour) }, plannedFiles: ['web/app.ts'] },
-      { key: 'GY-854', id: 'w3', lease: { epoch: 2, owner: 'graphyard-claude-2', expiresAt: iso(-hour) }, plannedFiles: ['src/loop.ts'] },
-      { key: 'G-Y855', id: 'w4', lease: null, plannedFiles: ['tests/scratch.test.ts'] },
+      { key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) } },
+      { key: 'GY-853', id: 'w2', lease: { epoch: 1, owner: 'graphyard-codex-1', expiresAt: iso(hour) } },
+      { key: 'GY-854', id: 'w3', lease: { epoch: 2, owner: 'graphyard-claude-2', expiresAt: iso(-hour) } },
+      { key: 'G-Y855', id: 'w4', lease: null },
     ];
     const state = emptyDaemonState(config);
     const log: string[] = [];

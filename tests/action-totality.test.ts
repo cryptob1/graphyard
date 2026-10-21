@@ -60,7 +60,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 
 let sequence = 0;
 async function submitted() {
-  let item = await engine.execute(operator, 'create', null, { title: `Totality ${++sequence}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title: `Totality ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/totality/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}` }, randomUUID());
@@ -186,10 +186,10 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'base refresh conflicted', work: { ...unproven, baseRefresh: { from: { sha: head, baseSha: base }, base, baseTree: sha40('7e'), policyRevision: unproven.policyRevision, at: now.toISOString(), head: null,
       conflict: `Candidate ${head.slice(0, 12)} cannot be brought onto base branch tip ${base.slice(0, 12)} without resolving a conflict, which is content nobody reviewed or proved: merge conflict. Run graphyard sync ${unproven.key}, resolve it and push; the approval and proofs bound to ${head.slice(0, 12)} do not survive the resolution.` } } as Work },
     { name: 'diff never compared', work: { ...unproven, observation: { ...unproven.observation!, scopeFiles: undefined } } as Work },
-    { name: 'out of scope against the bound base', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [scopeFile] } } as Work },
-    { name: 'would revert work on the commit it lands on', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile] } } } as Work },
-    { name: 'files another candidate\'s commits carried', work: { ...unproven, plannedFiles: ['docs/'], observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile], foreign: [{ key: 'GY-FOREIGN', pr: 9, head: sha40('0f') }] } } } as Work,
-      all: [{ ...other, id: randomUUID(), key: 'GY-FOREIGN', plannedFiles: ['src/a.ts'] } as Work, unproven] },
+    { name: 'out of scope against the bound base', work: { ...unproven, observation: { ...unproven.observation!, scopeFiles: [scopeFile] } } as Work },
+    { name: 'would revert work on the commit it lands on', work: { ...unproven, observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile] } } } as Work },
+    { name: 'files another candidate\'s commits carried', work: { ...unproven, observation: { ...unproven.observation!, scopeFiles: [], landing: { base: sha40('cc'), files: [landingFile], foreign: [{ key: 'GY-FOREIGN', pr: 9, head: sha40('0f') }] } } } as Work,
+      all: [{ ...other, id: randomUUID(), key: 'GY-FOREIGN' } as Work, unproven] },
     // A unit or integration proof that failed on the head returns it to its worker before review (GY-115).
     { name: 'mechanical proof failed', work: { ...unproven, evidence: [{ ...proven.evidence[0], id: randomUUID(), result: 'fail' as const }] } as Work },
     { name: 'no approval', work: { ...unproven, observation: { ...unproven.observation!, reviews: [] } } as Work },
@@ -279,7 +279,7 @@ test('unit:actionless-item-visible — an item with no action and nothing moving
   const shell = (key: string, overrides: Partial<Work>): Work => ({
     id: `id-${key}`, key, title: `Item ${key}`, type: 'feature', priority: 1, epoch: 1, revision: 1, policyRevision: 1,
     stage: 'review', ready: true, createdAt: held, updatedAt: held, stageEnteredAt: held,
-    criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], plannedFiles: ['src/'], dependencies: [], evidence: [],
+    criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], dependencies: [], evidence: [],
     workspaces: [], violations: [], gates: [], blocker: null, lease: null, submission: null, candidate: null, observation: null,
     policy: { checks: ['test'], review: true }, ...overrides,
   } as unknown as Work);

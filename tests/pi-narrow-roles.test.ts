@@ -93,7 +93,7 @@ async function installation(runtimes?: { approver?: 'herdr' | 'pi'; producer?: '
 function work(key: string, group: string, proofs: string[], overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 169, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
   const request = { id: `request-${key}-${group}`, kind: 'producer', sha: H, baseSha: B, policyRevision: 4, pr: 169, group, proofs, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' };
-  return { id: `id-${key}`, key, title: 'Narrow roles', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: [],
+  return { id: `id-${key}`, key, title: 'Narrow roles', description: '', type: 'feature', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-2', text: 'Typed tools', proofs: ['unit:pi-graphyard-tools'] }, { id: 'AC-5', text: 'Guard', proofs: ['unit:pi-destructive-guard'] }, { id: 'AC-3', text: 'Roles', proofs: ['integration:pi-narrow-roles'] }],
     policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 4, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate,
     submission: { epoch: 1, pr: 169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['implementer'],

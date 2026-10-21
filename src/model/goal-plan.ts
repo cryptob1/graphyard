@@ -42,7 +42,7 @@ export const planItemSchema = z.object({
   cases: z.array(caseId).min(1).max(30),
   criteria: criteriaSchema(20),
   // GY-1992: plannedFiles is retired; a plan drafted before then still parses, and the field is dropped.
-  plannedFiles: z.unknown().optional().transform(() => undefined),
+  plannedFiles: z.unknown().transform(() => undefined).optional(),
   dependsOn: z.array(planRef).max(20).default([]),
 }).strict();
 export type PlanItem = z.infer<typeof planItemSchema>;

@@ -43,7 +43,7 @@ function item(key: string, now: number): Work {
     : { reviewer: 'graphyard-reviewer[bot]', sha, state: 'APPROVED', id: 7000 + Number(key.slice(3)), submittedAt: iso(start - 5 * minute) };
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true },
-    plannedFiles: [`src/${key.toLowerCase()}.ts`], stage: 'review', revision: 100, policyRevision: 1, createdAt: iso(start - 2 * hour), updatedAt: iso(now), stageEnteredAt: iso(start - hour),
+    stage: 'review', revision: 100, policyRevision: 1, createdAt: iso(start - 2 * hour), updatedAt: iso(now), stageEnteredAt: iso(start - hour),
     ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [],
     reworkRounds: key === capped ? 3 : 0, escalation: null, escalations: [],
     observation: { candidate, checks: [{ appId: 15368, name: 'test', result: 'success' }], reviews: [review], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [],
@@ -73,7 +73,7 @@ test('unit:soak-invariants-hold — over a simulated working day each close seri
   const touch = (target: Work) => { seq += 1; moved.push(target.id); };
   // The bot round GY-971 planned on every approved head: the advancing step a standing close must hold.
   const mechanical = work.filter(entry => entry.key !== capped).map(entry => ({ key: entry.key, pr: entry.candidate!.pr, head: entry.candidate!.sha, reviewId: 7000 + Number(entry.key.slice(3)), epoch: 1,
-    at: iso(start - 4 * minute), mechanical: [{ path: entry.plannedFiles[0], line: 3, category: 'formatting' }], substantive: [], paths: [entry.plannedFiles[0]] })) as unknown as MechanicalFixRequest[];
+    at: iso(start - 4 * minute), mechanical: [{ path: `src/${entry.key.toLowerCase()}.ts`, line: 3, category: 'formatting' }], substantive: [], paths: [`src/${entry.key.toLowerCase()}.ts`] })) as unknown as MechanicalFixRequest[];
   const record = (target: Work, action: string, reason: string, input: Record<string, unknown>, requestedBy: string) => {
     const id = `decision-${++sequence}`;
     ledger.push({ id, work: target.key, action, state: 'requested', input: action === 'close' ? { expectedRevision: target.revision, ...input } : input, reason, requestedBy, requestedAt: iso(now), outcome: null, approvedBy: null });

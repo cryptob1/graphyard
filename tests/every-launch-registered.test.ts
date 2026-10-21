@@ -93,7 +93,7 @@ function herdr(onStart: (pane: string) => Promise<void>) {
 test('integration:every-launch-registered — an approver launched through master approver is recorded before its runtime starts, observed by the loop\'s session report, and closed once its decision is judged and its pane is gone', async () => {
   const { root, master, cleanup } = await host();
   try {
-    let item = await engine.execute(operator, 'create', null, { title: 'Approve something', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Judged', proofs: ['unit:judged'] }] }, randomUUID());
+    let item = await engine.execute(operator, 'create', null, { title: 'Approve something', criteria: [{ id: 'AC-1', text: 'Judged', proofs: ['unit:judged'] }] }, randomUUID());
     item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
     const decision = randomUUID(), id = approverSessionId(decision), name = approverSessionName(item, decision);
     const handleOf = async () => (await reload(item.id)).sessions?.find(handle => handle.id === id);
@@ -143,7 +143,7 @@ test('integration:every-launch-registered — an approver launched through maste
 test('integration:every-launch-registered — the loop\'s reviewer launches, its quota failover relaunch and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
   const { root, master, cleanup } = await host();
   try {
-    let item = await engine.execute(operator, 'create', null, { title: 'Launch paths', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Registered', proofs: ['unit:registered'] }] }, randomUUID());
+    let item = await engine.execute(operator, 'create', null, { title: 'Launch paths', criteria: [{ id: 'AC-1', text: 'Registered', proofs: ['unit:registered'] }] }, randomUUID());
     item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
     const sha = 'a'.repeat(40);
     const request = { id: randomUUID(), kind: 'review', provider: 'github', sha, baseSha: 'b'.repeat(40), policyRevision: 1, pr: 7, state: 'requested', requestedAt: new Date().toISOString(), reason: 'the head needs a review' };

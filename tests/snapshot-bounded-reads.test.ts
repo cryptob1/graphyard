@@ -12,19 +12,19 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { approveScopeRequest, masterStatusReport } from '../src/cli/master-status.js';
+import { masterStatusReport } from '../src/cli/master-status.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-864: CLI reads use a bounded snapshot: master status, master scope and the worker commands
+ * GY-864: CLI reads use a bounded snapshot: master status and the worker commands
  * in src/cli/workspace.ts read the trimmed coordination snapshot or a single item by key, never
  * the full work-snapshot; and GET /api/work-snapshot is paged (cursor and page size) so any
  * remaining full reader streams instead of loading every document at once.
  *
  * unit:cli-reads-bounded-snapshot — against a recording control plane holding 900 items whose
- * delivered documents weigh 300 KB each, master status, master scope and the worker's sync are
+ * delivered documents weigh 300 KB each, master status and the worker's sync are
  * driven for real: each issues no full work-snapshot read, and the bytes each reads stay flat
  * while the delivered weight grows.
  *
@@ -83,7 +83,7 @@ function recordingControlPlane() {
     const key = `GY-${index + 1}`, delivered = index < state.delivered;
     return {
       id: `work-${index + 1}`, key, stage: delivered ? 'done' : 'build', title: `Item ${index + 1}`,
-      plannedFiles: ['docs/'], dependencies: [], criteria: [], gates: [], violations: [], workspaces: [], evidence: [],
+      dependencies: [], criteria: [], gates: [], violations: [], workspaces: [], evidence: [],
       policy: { checks: [], review: false },
       revision: 1, policyRevision: 1, epoch: 0,
       lease: key === 'GY-900'
@@ -91,7 +91,6 @@ function recordingControlPlane() {
         : delivered ? null : { owner: 'worker', epoch: 1, expiresAt: new Date(Date.now() + 600_000).toISOString() },
       candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null,
       ready: false, blocker: null, priority: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(),
-      ...(key === 'GY-900' ? { scopeRequest: { epoch: 4, paths: ['docs/b.md'], reason: 'the extra doc is part of the layout work', requestedBy: 'worker', at: new Date().toISOString() } } : {}),
       ...(delivered ? { delivery: { mergeSha: hex('a'), mergedAt: new Date().toISOString() } } : {}),
     } as unknown as Work;
   });
@@ -120,7 +119,7 @@ function recordingControlPlane() {
     }
     if (request.method === 'GET' && path === '/api/work') return json(response, items());
     if (request.method === 'GET' && path === '/api/status') return json(response, { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } });
-    if (request.method === 'POST') return json(response, { plannedFiles: ['docs/a.md', 'docs/b.md'], recorded: true });
+    if (request.method === 'POST') return json(response, { recorded: true });
     return json(response, { decisions: [] });
   });
   const listen = new Promise<string>(resolve => httpServer.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(httpServer.address() as { port: number }).port}`)));
@@ -162,22 +161,12 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
     assert.ok(second.bytes <= first.bytes && second.bytes < 5_000_000 && weight() < 15_000_000, `the bytes master status reads stay flat (${second.bytes} against ${first.bytes}) while the delivered weight drops from over 250 MB to under 15 MB`);
     control.state.delivered = 890;
 
-    // Master scope: the one item by key, and no snapshot read at all.
-    control.state.reads.length = 0; control.state.violations.length = 0;
-    const workRoot = await temporaryDirectory('bounded-reads-scope');
-    const decided = await approveScopeRequest(workRoot, { url: origin } as unknown as MasterConfig, ['GY-900', 'The extra doc is part of the layout work'],
-      { coordinator: path => fetch(`${origin}/api/${path}`).then(response => response.json()), operatorToken: async () => 'operator-agent-token-'.padEnd(40, 'o') });
-    assert.deepEqual(control.state.violations, [], 'master scope issues no full work-snapshot read');
-    assert.deepEqual(control.state.reads.map(read => read.path), ['single GY-900'], 'master scope reads the one item by key');
-    assert.equal(decided.recorded, true);
-    await rm(workRoot, { recursive: true, force: true });
-
     // The worker's sync: the attribution read on a conflict is the trimmed coordination view.
     const cwd = await temporaryDirectory('bounded-reads-sync');
     const originRepo = join(cwd, 'origin'), clone = join(cwd, 'clone');
     const git = async (repo: string, ...args: string[]) => (await execFile('git', ['-c', 'user.name=Test', '-c', 'user.email=test@localhost', ...args], { cwd: repo })).stdout.trim();
     const commit = async (repo: string, message: string) => { await execFile('git', ['add', '-A'], { cwd: repo }); await git(repo, 'commit', '-q', '-m', message); return git(repo, 'rev-parse', 'HEAD'); };
-    const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/'], workspaces: [{ epoch: 1, host: hostname(), path: clone, branch: 'graphyard/gy-1-1' }] };
+    const task = { id: 'task', key: 'GY-1', workspaces: [{ epoch: 1, host: hostname(), path: clone, branch: 'graphyard/gy-1-1' }] };
     const syncServer = createServer((request: IncomingMessage, response: ServerResponse) => {
       const [path] = (request.url ?? '').split('?');
       response.setHeader('Content-Type', 'application/json');
@@ -240,7 +229,7 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
 test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with cursor and pageSize', async () => {
   for (let index = 0; index < 30; index++) {
     const item = await engine.execute(operator, 'create', null, {
-      title: `Paged item ${index + 1}`, plannedFiles: ['src/'],
+      title: `Paged item ${index + 1}`, 
       criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }],
     }, randomUUID()) as Work;
     if (index % 3 === 0) await engine.execute(operator, 'ready', item.id, {}, randomUUID());
@@ -303,7 +292,7 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   await get('work-snapshot?view=full');
   const before = { full: await documentsReadFor('work-snapshot?view=full&pageSize=7&cursor=3'), bounded: await documentsReadFor('work-snapshot?pageSize=7&cursor=3') };
   for (let index = 0; index < 30; index++) {
-    await engine.execute(operator, 'create', null, { title: `Growth item ${index + 1}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }] }, randomUUID());
+    await engine.execute(operator, 'create', null, { title: `Growth item ${index + 1}`, criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }] }, randomUUID());
   }
   await get('work-snapshot?view=full');
   const grown = { full: await documentsReadFor('work-snapshot?view=full&pageSize=7&cursor=3'), bounded: await documentsReadFor('work-snapshot?pageSize=7&cursor=3') };
@@ -347,7 +336,7 @@ test('integration:api-work-bounded-read — GET /api/work serves the fleet (open
   const heavy = 'h'.repeat(16 * 1024), settledCount = 1000, now = Date.now();
   const stamp = (offsetMs = 0) => new Date(now - offsetMs).toISOString();
   const document = (index: number, overrides: Record<string, unknown>) => ({
-    id: randomUUID(), key: `GY-${5000 + index}`, title: `Fleet item ${index}`, plannedFiles: ['src/'], dependencies: [], criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }],
+    id: randomUUID(), key: `GY-${5000 + index}`, title: `Fleet item ${index}`, dependencies: [], criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }],
     gates: [], violations: [], workspaces: [], evidence: [], policy: { checks: [], review: false }, revision: 3, policyRevision: 1, epoch: 1, lease: null,
     actionQueue: { actions: [], history: [] }, reworkRequested: false, scenarioRequirements: [], observation: null, ready: true, blocker: null, priority: 1,
     createdAt: stamp(3 * 86_400_000), updatedAt: stamp(86_400_000), stageEnteredAt: stamp(86_400_000),

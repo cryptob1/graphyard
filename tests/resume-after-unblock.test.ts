@@ -36,7 +36,7 @@ function held(overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-252', key: 'GY-252', title: 'Follow-ups', description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-minutes(600)), updatedAt: iso(0), stageEnteredAt: iso(-minutes(300)), ready: true, epoch: 1,
     lease: { owner: 'alpha-principal', epoch: 1, expiresAt: iso(minutes(600)) },
     // Claimed inside the 60-minute worker bound (GY-1460), so only the idle path acts on it however long the test runs.
@@ -70,7 +70,7 @@ function harness(item: { current: Work[] }, agent: HerdrAgent, extra: Partial<Da
   return { log, effects };
 }
 
-test('unit:resume-prompt-after-unblock — one re-prompt after a blocker clears or a scope request is answered, none for an active worker, none twice', async () => {
+test('unit:resume-prompt-after-unblock — one re-prompt after a blocker clears, none for an active worker, none twice', async () => {
   const { directory, master } = await setup();
   try {
     const item = { current: [held({ blocker: 'plannedFiles must include src/b.ts before I can submit' })] };
@@ -100,17 +100,6 @@ test('unit:resume-prompt-after-unblock — one re-prompt after a blocker clears 
     await runCycle(master, state, effects, () => clock + 90_000);
     assert.equal(log.prompts.length, 1, 'no second re-prompt for the same resolution');
 
-    // A scope request answered by widening: the next re-prompt names the paths now planned.
-    item.current = [held({ candidate: { sha: 'b'.repeat(40), baseSha: 'c'.repeat(40), pr: 255 } as Work['candidate'], scopeRequest: { epoch: 1, paths: ['src/b.ts'], reason: 'needed', requestedBy: 'alpha-principal', at: iso(100_000) } })];
-    await runCycle(master, state, effects, () => clock + 120_000);
-    assert.equal(log.prompts.length, 1);
-    item.current = [held({ candidate: { sha: 'b'.repeat(40), baseSha: 'c'.repeat(40), pr: 255 } as Work['candidate'], plannedFiles: ['src/a.ts', 'src/b.ts'],
-      scopeDecision: { state: 'approved', reason: 'criteria name it', at: iso(130_000), decidedBy: 'graphyard', waitedMs: 30_000, paths: ['src/b.ts'], requestedBy: 'alpha-principal', requestedAt: iso(100_000) } as Work['scopeDecision'] })];
-    await runCycle(master, state, effects, () => clock + 150_000);
-    assert.equal(log.prompts.length, 2, 'the answered scope request is a new resolution, re-prompted once');
-    assert.match(log.prompts[1], /its scope request was applied: plannedFiles now include src\/b\.ts/);
-    assert.ok(log.prompts[1].includes(`complete GY-252 1 255`), 'the pull request Graphyard has seen is named in the command');
-
     // A worker already active is not re-prompted: the resolution is consumed without a paste. This
     // is a fresh attempt (epoch 2): blocking again on epoch 1 after its clearance would end that
     // attempt instead (GY-867, tests/reblocked-attempt.test.ts).
@@ -122,19 +111,9 @@ test('unit:resume-prompt-after-unblock — one re-prompt after a blocker clears 
     await runCycle(master, state, effects, () => clock + 210_000);
     agent.agent_status = 'idle';
     await runCycle(master, state, effects, () => clock + 240_000);
-    assert.equal(log.prompts.length, 2, 'an active worker is not re-prompted, then or later');
+    assert.equal(log.prompts.length, 1, 'an active worker is not re-prompted, then or later');
     assert.ok(Object.values(state.actions).some(action => /is already active, so it is not re-prompted/.test(action.detail)), 'the skipped re-prompt is recorded with why');
 
-    // A scope request asked and answered between two cycles was never marked (GY-544): the decision
-    // the item keeps for this epoch still earns its one re-prompt, and only one.
-    agent.agent_status = 'idle';
-    item.current = [held({ plannedFiles: ['src/a.ts', 'src/b.ts', 'src/c.ts'],
-      scopeDecision: { state: 'approved', reason: 'criteria name it', at: iso(260_000), decidedBy: 'graphyard', waitedMs: 5_000, paths: ['src/c.ts'], requestedBy: 'alpha-principal', requestedAt: iso(255_000), epoch: 1 } as Work['scopeDecision'] })];
-    await runCycle(master, state, effects, () => clock + 270_000);
-    assert.equal(log.prompts.length, 3, 'the unmarked answer is re-prompted within one cycle');
-    assert.match(log.prompts[2], /its scope request was applied: plannedFiles now include src\/c\.ts/);
-    await runCycle(master, state, effects, () => clock + 300_000);
-    assert.equal(log.prompts.length, 3, 'and not twice');
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -154,7 +133,7 @@ test('unit:idle-lease-reclaimed — a worker idle with a live lease is re-prompt
     await runCycle(master, state, effects, () => clock + minutes(31));
     assert.equal(log.prompts.length, 1, 'past twenty-five minutes it is re-prompted once');
     assert.match(log.prompts[0], /shows no activity for another 14 minutes, the attempt ends/, 'it names the time left on the bound that runs from the idle mark');
-    assert.match(log.prompts[0], /no activity from it since .* while it holds GY-252 \(epoch 1\) with no open blocker or scope request/);
+    assert.match(log.prompts[0], /no activity from it since .* while it holds GY-252 \(epoch 1\) with no open blocker;/);
     assert.ok(log.prompts[0].includes(`node ${launcher} complete GY-252 1 PR_NUMBER`));
     const idle = log.sessions.find(handle => /^idle-with-lease: agent-alpha in pane w1:p4J1/.test(handle.outcome ?? ''));
     assert.ok(idle, 'master status reads the handle as idle-with-lease, naming the pane');

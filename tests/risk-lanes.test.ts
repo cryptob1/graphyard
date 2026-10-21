@@ -38,7 +38,7 @@ const observed = (paths: string[]): Observation => ({
 const item = (paths: string[], proofs: string[] = ['unit:core-flow', 'manual:safety-attestation'], planned: string[] = []): Work => ({
   id: 'w', key: 'GY-1', title: 'lane fixture', type: 'feature', description: '', priority: 2,
   dependencies: [], criteria: [{ id: 'AC-1', text: 'The core flow is proven.', proofs }], policy: { checks: ['test'], review: true },
-  plannedFiles: planned, stage: 'review', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
+  stage: 'review', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
   workspaces: [{ host: 'test', path: '/tmp/fixture', branch: 'graphyard/gy-1-1', epoch: 1, owner: 'worker' }],
   submission: { pr: 7, epoch: 1 }, candidate: { sha: head, baseSha: base, pr: 7, branch: 'graphyard/gy-1-1', author: 'worker' },
   reworkRequested: false, scenarioRequirements: [], evidence: [], observation: observed(paths), blocker: null, gates: [], violations: [],
@@ -186,7 +186,7 @@ test('unit:lane-sets-required-gates — an e2e proof and an inherited bootstrap 
   const source = {
     id: 's', key: 'GY-0', title: 'deferral source', type: 'feature', description: '', priority: 2, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'The contract is proven.', proofs: ['unit:deferred-contract'], bootstrap: defer }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/model/policy.ts'], stage: 'done', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'done', revision: 1, policyRevision: 1,
     ready: true, epoch: 1, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(),
@@ -237,7 +237,7 @@ async function startLanes() {
   await call(credentials[0].token, 'operator-agents', { id: master.id, displayName: master.id, capabilities: master.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: master.token, reason: 'The master requests reworks' });
   let pr = 880;
   const submitted = async (title: string, paths: string[]) => {
-    let work = await call(master.token, 'work', { title, plannedFiles: paths, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Lane fixture' }) as Work;
+    let work = await call(master.token, 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Lane fixture' }) as Work;
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
     work = await engine.execute(implementer, 'workspace', work.id, { epoch: work.epoch, host: 'lane-host', path: `/tmp/lanes/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, randomUUID());

@@ -105,7 +105,7 @@ function delivered(n: number, now: number): Work {
   return {
     id: uuid(n), key, title: `Item ${key} of the seeded history`, description: `What ${key} was for. `.repeat(10), type: 'feature', priority: 2, dependencies: [],
     criteria: [{ id: 'AC-1', text: `The behaviour ${key} asked for holds`, proofs: ['unit:proof-1'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: [n === 1 ? `${SLICE}/delivered.ts` : 'src/module.ts'], revision: 30, policyRevision: 1, createdAt: iso(created), updatedAt: iso(merged), stageEnteredAt: iso(merged),
+    revision: 30, policyRevision: 1, createdAt: iso(created), updatedAt: iso(merged), stageEnteredAt: iso(merged),
     ready: true, epoch: 2, stage: 'done', lease: null, workspaces: [{ host: 'machine-a', path: `/srv/worktrees/${key}-2`, epoch: 2, owner: 'graphyard-worker-1', branch: `graphyard/${key.toLowerCase()}-2` }],
     candidate, submission: { epoch: 2, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], blocker: null, gates: [], violations: [], closure: null,
     // GY-1824: each delivery carries the serving release the executor's verify-deployment row
@@ -170,7 +170,7 @@ before(async () => {
   const engine = instance.http.services.engine;
   for (let index = 0; index < OPEN; index++) {
     const area = index < 2 ? SLICE : `area-${index % 12}`;
-    let work = await engine.execute(operator, 'create', null, { title: `Open item ${index + 1}`, plannedFiles: [`${area}/file-${index}.ts`],
+    let work = await engine.execute(operator, 'create', null, { title: `Open item ${index + 1}`, 
       criteria: [{ id: 'AC-1', text: 'The plane carries it', proofs: ['integration:plane-load-multi-user'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     openItems.push(work);

@@ -69,7 +69,7 @@ async function spied<T>(run: () => Promise<T>) {
 }
 
 async function claimed(title: string) {
-  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Measured', proofs: ['integration:timeline-backfill'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Measured', proofs: ['integration:timeline-backfill'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   return engine.execute(worker, 'claim', work.id, {}, randomUUID());
 }

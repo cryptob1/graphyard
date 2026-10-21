@@ -57,7 +57,7 @@ function gy1419(tip: string, observedAt: number, systemDriven = true): Work {
   return {
     id: 'a8ec9c1d-2b3f-4362-8bd6-8a11ce8c63c7', key: 'GY-1419', title: 'graphyard up and the Setup wizard', description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:up'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/up.ts', ...paths], stage: 'build', revision: 40, policyRevision: 6, createdAt: iso(at('05:00:00')), updatedAt: iso(observedAt),
+    stage: 'build', revision: 40, policyRevision: 6, createdAt: iso(at('05:00:00')), updatedAt: iso(observedAt),
     stageEnteredAt: iso(recorded[tip]), ready: true, epoch: 6, lease: null, workspaces: [], submission: { epoch: 6, pr: 904 }, systemDriven,
     candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, baseRefresh, blocker: null, violations: [],
     gates: [{ name: 'build', passed: false, reasons: [conflict] }, { name: 'merge', passed: false, reasons: ['Pull request is not mergeable against the current base'] }],

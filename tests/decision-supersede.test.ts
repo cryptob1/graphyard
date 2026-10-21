@@ -71,7 +71,7 @@ async function start() {
   for (const agent of [master, approver]) await call(credentials[0].token, 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: agent.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'Supersede fixture' });
   let pr = 1290;
   const submitted = async (title: string) => {
-    let work = await call(master.token, 'work', { title, plannedFiles: paths, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Supersede fixture' }) as Work;
+    let work = await call(master.token, 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Supersede fixture' }) as Work;
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
     const branch = `graphyard/${work.key.toLowerCase()}-${work.epoch}`;

@@ -13,7 +13,7 @@ function item(checks: Check[], extra: Partial<Work> = {}): Work {
   const candidate = { sha: head, baseSha: base, pr: 198, branch: 'graphyard/gy-245-1', author: 'worker' };
   return {
     id: 'gy-245', key: 'GY-245', title: 'Single merger', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [], policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'test', revision: 4, policyRevision: 2,
+    criteria: [], policy: { checks: ['test', 'typecheck'], review: true }, stage: 'test', revision: 4, policyRevision: 2,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate,
     submission: { epoch: 1, pr: 198 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { candidate, checks: checks.map(check => ({ appId: 15368, ...check })), reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,

@@ -79,7 +79,7 @@ const evidenceArtifact = z.object({
 export const launchFenceMs = 120_000;
 export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).max(200), pid: z.number().int().positive() }).strict();
 // GY-1992: plannedFiles and scope widening are retired. An intent or a held decision recorded before then may still name them; they are ignored.
-const retiredField = z.unknown().optional().transform(() => undefined);
+const retiredField = z.unknown().transform(() => undefined).optional();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),

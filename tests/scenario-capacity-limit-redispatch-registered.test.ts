@@ -134,7 +134,6 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
   await assert.rejects(
     api('work', {
       title: 'Unregistered sibling',
-      plannedFiles: ['src/scenarios.ts'],
       criteria: [{ id: 'AC-1', text: 'needs a missing scenario', proofs: ['e2e:not-a-registered-scenario'] }],
     }),
     /Register E2E scenario not-a-registered-scenario/,
@@ -142,7 +141,6 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
 
   const pinned = await api('work', {
     title: 'Pinned to capacity-limit-redispatch',
-    plannedFiles: ['src/scenarios.ts'],
     criteria: [{ id: 'AC-1', text: 'capacity-limit-redispatch is registered', proofs: [`e2e:${id}`] }],
   }) as Work;
   assert.equal(pinned.scenarioRequirements.length, 1);

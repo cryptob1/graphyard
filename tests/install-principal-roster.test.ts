@@ -541,7 +541,7 @@ test('manual:local-plane-principals-restored — a local plane booted on the old
       .grant(adminActor, 'production-acceptance-producer', { patterns: ['unit:*', 'integration:*', 'manual:*'], reason: 'Designated independent proof producer' }, randomUUID());
     const oldEngine = new Engine(planeStore, [15368], 120, REPOSITORY);
     const open = async (title: string) => {
-      const created = await oldEngine.execute(adminActor, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:roster-restore', 'integration:roster-restore'] }] }, randomUUID());
+      const created = await oldEngine.execute(adminActor, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:roster-restore', 'integration:roster-restore'] }] }, randomUUID());
       return oldEngine.execute(adminActor, 'ready', created.id, {}, randomUUID());
     };
     const items = [await open('Needs unit and integration proof'), await open('Dispatched to the former worker')];

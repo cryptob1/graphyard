@@ -20,7 +20,7 @@ const worktrees = '/repo/.graphyard/worktrees';
 function item(key: string, lease: Work['lease'] = null): Work {
   return {
     id: `work-${key}`, key, title: 'Exited panes close', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Closed', proofs: ['unit:exited-worker-pane-closed'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Closed', proofs: ['unit:exited-worker-pane-closed'] }], policy: { checks: ['test'], review: true }, 
     stage: lease ? 'build' : 'review', revision: 4, policyRevision: 1, createdAt: iso(-7_200_000), updatedAt: iso(), stageEnteredAt: iso(-3_600_000), ready: true, epoch: lease?.epoch ?? 4,
     lease, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [],

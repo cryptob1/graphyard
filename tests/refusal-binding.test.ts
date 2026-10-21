@@ -34,7 +34,7 @@ function item(sha: string, baseSha = base, observedAt = iso(-20_000)): Work {
   return {
     id: '00000000-0000-4000-8000-000000000042', key: 'GY-42', title: 'Refusals judge head, base and grounds', description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/loop.ts'], stage: 'review', revision: 5, policyRevision: 1, createdAt: iso(-4 * 60 * minute), updatedAt: iso(0),
+    stage: 'review', revision: 5, policyRevision: 1, createdAt: iso(-4 * 60 * minute), updatedAt: iso(0),
     stageEnteredAt: iso(-30 * minute), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 42 },
     candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null, violations: [],
     gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }],
@@ -135,7 +135,7 @@ function verdictItem(reviews: { state: string; reviewer: string; submittedAt?: s
   const candidate = { sha: shaA, baseSha: base, pr: 154, branch: 'graphyard/gy-42-1', author: 'worker' };
   return {
     id: 'gy-42', key: 'GY-42', title: 'Held fixes', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'review', revision: 4, policyRevision: 2,
+    criteria: [], policy: { checks: ['test'], review: true }, stage: 'review', revision: 4, policyRevision: 2,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 2, lease: null, workspaces: [], candidate,
     submission: { epoch: 2, pr: 154 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { clockOffset: { min: 0, max: 0 }, candidate, checks: [], reviews: reviews.map(review => ({ submittedAt: at, ...review, sha: shaA })), merged: false, mergeSha: null, mergeable: true, protected: true,

@@ -22,7 +22,7 @@ const item = (n: number, extra: Partial<Work> = {}): Work => ({
   id: `00000000-0000-4000-8000-00000000000${n}`, key: `GY-${n}`, title: `Observation ${n}`, description: '', type: 'chore', priority: 2, stage: 'ready', ready: true, epoch: 0, revision: 5, policyRevision: 1,
   createdAt: iso(now - 40 * hour), updatedAt: iso(now - 33 * hour), stageEnteredAt: iso(now - 33 * hour), lease: null, lastAssignment: null, systemDriven: true,
   workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], criteria: manual,
-  policy: { checks: ['test', 'typecheck'], review: true }, dependencies: [], plannedFiles: [],
+  policy: { checks: ['test', 'typecheck'], review: true }, dependencies: [], 
   gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
   ...extra,
 }) as unknown as Work;
