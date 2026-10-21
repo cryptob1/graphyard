@@ -83,7 +83,7 @@ test('unit:planned-files-removed — master create and master requirements neith
   await writeFile(revision, JSON.stringify({ criteria, plannedFiles: plan }));
   const revised = await intent('requirements', [created.result.key, revision, 'revise']);
   assert.equal(revised.result.policyRevision, created.result.policyRevision + 1);
-  assert.ok(!('plannedFiles' in revised.result), JSON.stringify(revised.result.plannedFiles));
+  assert.ok(!('plannedFiles' in revised.result), 'nothing is stored');
   assert.ok(revised.posts.every(post => !('plannedFiles' in post.data)), JSON.stringify(revised.posts));
   // The engine ignores it too, whoever sends it.
   const direct = await engine.execute(operator, 'create', null, { title: 'Direct', criteria, plannedFiles: plan }, randomUUID());
