@@ -82,7 +82,7 @@ export const goalCommands = defineCommands([{
     '                                REASON, never by the requester or an implementer',
     '  goal amend GOAL-N --apply-decision REQUEST_ID',
     '                                Retire the protected outcomes (and their cases) that the',
-    '                                operator\'s answered goals-and-priorities request names',
+    '                                operator\'s "Go ahead as asked" request says to retire',
   ],
   readsConnection: () => true,
   run: context => goal(context),

@@ -164,6 +164,8 @@ export interface GoalContext {
 }
 /** Whether `text` names `id` as a whole word: `candidate-gates` is not named by `candidate-gates-promotion`. */
 const names = (text: string, id: string) => new RegExp(`(?<![\\w-])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text);
+/** The clauses of `text` that open with `verb`, each running to the next `;`, sentence end, `or`, `but`, `keep` or `retire`: `retire a, b and c, or keep them` retires a, b and c. */
+const clauses = (text: string, verb: string) => [...text.matchAll(new RegExp(`(?<![\\w-])${verb}(?![\\w-])(.*?)(?=[;.](?:\\s|$)|(?<![\\w-])(?:or|but|keep|retire)(?![\\w-])|$)`, 'gis'))].map(match => match[1]);
 
 /** A new goal, in acceptance drafting. */
 export function recordGoal(input: unknown, key: string, context: GoalContext): Goal {
@@ -236,12 +238,16 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
     const decision = context.decision;
     demand(decision && decision.request.id === id, `No human-only request ${id}; name the id of the operator's answered goals-and-priorities request`, 404);
     const { request, work } = decision, answer = request.answer;
-    demand(request.kind === 'goals-and-priorities' && answer?.outcome === 'provided' && answer.choice && !answer.note,
-      `Request ${id} on ${work} is not an approved goals-and-priorities decision (${answer ? `answered: ${answer.text}` : 'unanswered'}); only one the operator answered with a choice as asked amends a goal`, 422);
+    // Only the default "Go ahead as asked", unqualified, approves exactly what the request asked; any other choice says something else.
+    demand(request.kind === 'goals-and-priorities' && !request.choices?.length && answer?.outcome === 'provided' && answer.choice?.id === 'agree' && !answer.note,
+      `Request ${id} on ${work} is not an approved goals-and-priorities decision (${answer ? `answered: ${answer.text}` : 'unanswered'}); only one the operator answered "Go ahead as asked" amends a goal`, 422);
     demand(protectingStages.includes(goal.stage), `${goal.key} protects no case yet; its acceptance change has not merged`);
     demand(!(goal.amendments ?? []).some(entry => entry.decision === id), `Decision ${id} is already applied to ${goal.key}`);
-    const outcomes = goal.protected.outcomes.filter(outcome => names(request.needed, outcome));
-    demand(names(request.needed, goal.key) && outcomes.length, `Request ${id} on ${work} names no protected outcome of ${goal.key} (${goal.protected.outcomes.join(', ')}); it asked: ${request.needed}`, 422);
+    // What it retires is what its `retire` clauses name, never every outcome it mentions; one it also keeps is ambiguous.
+    const named = (verb: string) => goal.protected.outcomes.filter(outcome => clauses(request.needed, verb).some(clause => names(clause, outcome)));
+    const outcomes = named('retire'), kept = named('keep').filter(outcome => outcomes.includes(outcome));
+    demand(names(request.needed, goal.key) && outcomes.length, `Request ${id} on ${work} retires no protected outcome of ${goal.key} (${goal.protected.outcomes.join(', ')}); it asked: ${request.needed}`, 422);
+    demand(!kept.length, `Request ${id} on ${work} both retires and keeps ${kept.join(', ')}; ask the operator again with one answer per outcome`, 422);
     const cases = (goal.acceptance?.outcomes ?? []).filter(outcome => outcomes.includes(outcome.id)).map(outcome => outcome.case.id);
     next.protected = { cases: goal.protected.cases.filter(entry => !cases.includes(entry)), outcomes: goal.protected.outcomes.filter(entry => !outcomes.includes(entry)) };
     next.amendments = [...(goal.amendments ?? []), { decision: id, work, outcomes, cases, approvedBy: answer.by, approvedAt: answer.at, by: actor.id, at }];
@@ -285,12 +291,12 @@ const touches = (file: Pick<ScopeFile, 'status' | 'baseSha' | 'sha'>) => file.st
  * contract bindings the candidate modifies or deletes, each refusal naming the case, the outcome and
  * the goal. A change the item holds an approved case change for passes, unless that change's
  * approver has since implemented the item. e2e/contract.json — changed, deleted or renamed away —
- * passes only when the item's approved case changes cover every case the goal protects, since the
- * observation carries no contents to tell which binding moved — or when the operator's decision
- * raised on this item amended the goal (GY-2602): that item drops the retired bindings, while the
- * cases still protected keep refusing their own files.
+ * is judged by the protected bindings it moves when the control plane's observation read the
+ * contract's contents (GY-2602), and otherwise passes only when the item's approved case changes
+ * cover every case the goal protects. An outcome an operator's decision retired (`goal amend`) is
+ * no longer protected, so its case and binding move freely.
  */
-export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Work, 'implementers' | 'lease' | 'lastAssignment'>>, observation: Pick<Observation, 'files' | 'scopeFiles'> | null, goals: readonly Goal[]): string[] {
+export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Work, 'implementers' | 'lease' | 'lastAssignment'>>, observation: Pick<Observation, 'files' | 'scopeFiles' | 'contractMoved'> | null, goals: readonly Goal[]): string[] {
   if (!observation) return [];
   const guarding = goals.filter(goal => protectingStages.includes(goal.stage) && goal.protected.cases.length);
   if (!guarding.length) return [];
@@ -311,9 +317,12 @@ export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Wor
       }
     }
     const renamedAway = file.status === 'renamed' && file.previousPath === contractFile && file.path !== contractFile;
-    if ((file.path === contractFile && touches(file)) || renamedAway) for (const goal of guarding.filter(entry => !(entry.amendments ?? []).some(amendment => amendment.work === work.key))) {
-      const ungranted = goal.protected.cases.filter(id => !granted(goal, id));
-      if (ungranted.length) refusals.push(`${protectedCasePrefix}${contractFile} ${file.status === 'removed' || renamedAway ? 'deletes' : 'modifies'} the contract binding${goal.protected.outcomes.length === 1 ? '' : 's'} ${goal.protected.outcomes.join(', ')} of ${goal.key}, and no approved case change covers ${ungranted.join(', ')}; ${how(goal)}`);
+    if ((file.path === contractFile && touches(file)) || renamedAway) for (const goal of guarding) {
+      const moved = observation.contractMoved;
+      const outcomes = moved ? goal.protected.outcomes.filter(id => moved.includes(id)) : goal.protected.outcomes;
+      const cases = moved ? (goal.acceptance?.outcomes ?? []).filter(outcome => outcomes.includes(outcome.id)).map(outcome => outcome.case.id) : goal.protected.cases;
+      const ungranted = cases.filter(id => !granted(goal, id));
+      if (ungranted.length) refusals.push(`${protectedCasePrefix}${contractFile} ${file.status === 'removed' || renamedAway ? 'deletes' : 'modifies'} the contract binding${outcomes.length === 1 ? '' : 's'} ${outcomes.join(', ')} of ${goal.key}, and no approved case change covers ${ungranted.join(', ')}; ${how(goal)}`);
     }
   }
   return refusals;

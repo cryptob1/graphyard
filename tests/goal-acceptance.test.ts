@@ -12,7 +12,7 @@ import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { acceptanceDraftSchema, applyGoalCommand, draftFiles, maxDraftRounds, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
 import { registryRoles, roleSchema } from '../src/model/registry.js';
-import { checkContract, parseCase, parseContract } from '../src/e2e/case.js';
+import { checkContract, movedBindings, parseCase, parseContract } from '../src/e2e/case.js';
 import { goalCommands } from '../src/cli/goal.js';
 import { acceptanceEffects, acceptanceStep, clearDrafts, draftsSettled, acceptanceTool, acceptanceJudgementTool, UnopenableDraft, type AcceptanceEffects } from '../src/daemon/acceptance.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
@@ -422,7 +422,7 @@ async function parkedOn(needed: string) {
 
 test('integration:goal-amend-applies-approved-retirement — `graphyard goal amend GOAL-N --apply-decision ID` removes exactly the outcomes and cases the operator\'s approved decision names, records the decision on the goal\'s history, and refuses an unknown or unapproved decision', async () => {
   const goal = await amendedGoal('rc-promotion');
-  const { work, request } = await parkedOn(`A decision to amend ${goal.key}: retire its protected outcome rc-promotion (case rc-promotion), or keep it and drop the item`);
+  const { work, request } = await parkedOn(`A decision to amend ${goal.key}: retire its protected outcome rc-promotion (case rc-promotion); keep rc-promotion-audit`);
   // Unanswered, it is no decision yet.
   const open = await call(master, 'POST', `goals/${goal.key}/amend`, { decision: request.id });
   assert.equal(open.status, 422); assert.match(open.text, /not an approved goals-and-priorities decision \(unanswered\)/);
@@ -434,9 +434,14 @@ test('integration:goal-amend-applies-approved-retirement — `graphyard goal ame
   const refused = await call(master, 'POST', `goals/${goal.key}/amend`, { decision: declined.request.id });
   assert.equal(refused.status, 422); assert.match(refused.text, /answered: Decline/);
   assert.equal((await call(worker, 'POST', `goals/${goal.key}/amend`, { decision: request.id })).status, 403, 'a worker does not amend a goal');
+  // A request that both retires and keeps an outcome is no decision about it.
+  const ambiguous = await parkedOn(`Amend ${goal.key}: retire rc-promotion-audit, or keep rc-promotion-audit and drop the item`);
+  await ok(operator, 'POST', `work/${ambiguous.work.key}/answer`, { request: ambiguous.request.id, choice: 'agree' });
+  const both = await call(master, 'POST', `goals/${goal.key}/amend`, { decision: ambiguous.request.id });
+  assert.equal(both.status, 422); assert.match(both.text, /both retires and keeps rc-promotion-audit/);
 
   const amended: Goal = await cli(master, ['amend', goal.key, '--apply-decision', request.id]);
-  assert.deepEqual(amended.protected, { cases: ['rc-promotion-audit'], outcomes: ['rc-promotion-audit'] }, 'rc-promotion-audit is not named: `rc-promotion` names only itself');
+  assert.deepEqual(amended.protected, { cases: ['rc-promotion-audit'], outcomes: ['rc-promotion-audit'] }, 'the request retires rc-promotion and keeps rc-promotion-audit');
   assert.equal(amended.amendments?.length, 1);
   assert.deepEqual({ ...amended.amendments![0], at: null, approvedAt: null }, { decision: request.id, work: work.key, outcomes: ['rc-promotion'], cases: ['rc-promotion'], approvedBy: operator.id, approvedAt: null, by: master.id, at: null });
   const shown = await ok(master, 'GET', `goals/${goal.key}`);
@@ -446,16 +451,25 @@ test('integration:goal-amend-applies-approved-retirement — `graphyard goal ame
   assert.equal(again.status, 409); assert.match(again.text, /already applied/);
 });
 
-test('unit:protected-case-refusals-honor-amendment — once the approved retirement is applied, deleting the retired cases and their contract bindings passes for the item the decision was raised on, while a case still protected refuses as before', async () => {
+test('unit:protected-case-refusals-honor-amendment — once the approved retirement is applied, deleting the retired cases and their contract bindings passes, while a case or binding still protected refuses as before', async () => {
   const goal = await amendedGoal('rc-retire');
-  const { work, request, observe } = await parkedOn(`Amend ${goal.key}: retire outcome rc-retire and its case rc-retire`);
+  const { work, request, observe } = await parkedOn(`Amend ${goal.key}: retire outcome rc-retire and its case rc-retire; keep rc-retire-audit`);
+  const contract = (ids: string[]) => JSON.stringify({ outcomes: ids.map(id => ({ id, title: id, criteria: [], cases: [id] })) });
+  const base = contract(['rc-retire', 'rc-retire-audit']);
+  assert.deepEqual(movedBindings(base, contract(['rc-retire-audit'])), ['rc-retire']);
+  assert.deepEqual(movedBindings(base, null), ['rc-retire', 'rc-retire-audit'], 'a deleted contract moves every binding');
+  assert.deepEqual(movedBindings(null, base), [], 'a new contract moves none');
+  const read = (files: ReturnType<typeof changed>[], moved?: string[]) => ({ ...observe(files as never), ...(moved ? { contractMoved: moved } : {}) });
   const deletion = [changed('e2e/cases/rc-retire.json', 'removed'), changed('e2e/contract.json')];
-  assert.match(protectedCaseRefusals(work, observe(deletion as never), [goal]).join('; '), /deletes required case rc-retire .*e2e\/contract.json modifies the contract bindings/);
+  assert.match(protectedCaseRefusals(work, read(deletion, ['rc-retire']), [goal]).join('; '), /deletes required case rc-retire .*e2e\/contract.json modifies the contract binding rc-retire of/);
   await ok(operator, 'POST', `work/${work.key}/answer`, { request: request.id, choice: 'agree' });
   const amended: Goal = await ok(master, 'POST', `goals/${goal.key}/amend`, { decision: request.id });
-  assert.deepEqual(protectedCaseRefusals(work, observe(deletion as never), [amended]), []);
-  assert.match(protectedCaseRefusals(work, observe([changed('e2e/cases/rc-retire-audit.json', 'removed')] as never), [amended]).join('; '), /Protected case: e2e\/cases\/rc-retire-audit.json deletes required case rc-retire-audit/);
-  // Another item's contract edit is still judged against the cases the goal protects.
+  assert.deepEqual(protectedCaseRefusals(work, read(deletion, ['rc-retire']), [amended]), []);
+  // The binding still protected refuses for this item too: moved, deleted with the contract, or unreadable.
+  assert.match(protectedCaseRefusals(work, read([changed('e2e/cases/rc-retire-audit.json', 'removed')]), [amended]).join('; '), /Protected case: e2e\/cases\/rc-retire-audit.json deletes required case rc-retire-audit/);
+  assert.match(protectedCaseRefusals(work, read([changed('e2e/contract.json')], ['rc-retire', 'rc-retire-audit']), [amended]).join('; '), /modifies the contract binding rc-retire-audit of/);
+  assert.match(protectedCaseRefusals(work, read([changed('e2e/contract.json', 'removed')], movedBindings(base, null)!), [amended]).join('; '), /deletes the contract binding rc-retire-audit of/);
+  assert.match(protectedCaseRefusals(work, read([changed('e2e/contract.json')]), [amended]).join('; '), /modifies the contract binding rc-retire-audit of/, 'without the contract\'s contents, any edit refuses');
   const other = await claimed(['e2e/']);
-  assert.match(protectedCaseRefusals(other.work, other.observe([changed('e2e/contract.json')] as never), [amended]).join('; '), /modifies the contract binding rc-retire-audit/);
+  assert.deepEqual(protectedCaseRefusals(other.work, { ...other.observe([changed('e2e/contract.json')] as never), contractMoved: ['rc-retire'] }, [amended]), [], 'a retired binding is free for any item');
 });
