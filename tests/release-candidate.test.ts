@@ -4,8 +4,6 @@ import { execFileSync, spawn, type spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { join } from 'node:path';
-import { createRailwayContext, project } from 'railway/iac';
-import railway, { releaseBranches } from '../.railway/railway.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { commands } from '../src/cli/index.js';
 import {
@@ -81,8 +79,6 @@ function uatApi(options: { dropFromList?: boolean } = {}) {
 const someCandidate = (sha = 'c'.repeat(40)): ReleaseCandidate => ({ id: '20261001T120000Z', sha, cutAt: '2026-10-01T12:00:00.000Z', trigger: 'manual', since: null, items: [] });
 const recordingSuite = (name: string, passed: boolean, urls: string[]): Suite => ({ name, run: async url => { urls.push(url); return { name, passed, detail: passed ? 'ok' : `${name} assertion failed` }; } });
 const at = (iso: string) => () => new Date(iso);
-const program = (environment: string) => railway(createRailwayContext({ environment }), project) as any;
-const serviceOf = async (environment: string) => (await program(environment)).resources.find((resource: any) => resource.address === 'service.graphyard');
 
 test('integration:release-candidate-cut — a candidate is cut from main\'s tip on schedule or on demand, recorded with its exact SHA and delivered items, and merges keep flowing', async () => {
   const repo = await repository();
@@ -187,11 +183,6 @@ test('integration:uat-deploys-candidate — the candidate SHA is deployed to Rai
     { base: 'main', push: true, timeoutMs: 0, fetcher: wrong.fetcher, sleep: async () => {} });
   assert.equal(refused.record.result, 'failed'); assert.match(refused.record.suites[0].detail, /not candidate/);
 
-  const uatService = await serviceOf('uat'), production = await serviceOf('production');
-  assert.equal(uatService.source.branch, releaseBranches.uat);
-  assert.deepEqual(Object.keys(uatService.variables).filter(name => name.startsWith('GITHUB_')), [], 'UAT holds no GitHub credential that could write to the production repository');
-  assert.ok('DATABASE_URL' in uatService.variables && (await program('uat')).resources.some((resource: any) => /^database\.Postgres(-\w+)?$/.test(resource.address)), 'UAT runs on its environment\'s own Postgres');
-  assert.ok('GITHUB_APP_ID' in production.variables, 'production keeps its App');
 });
 
 test('integration:promote-exact-sha — production deploys only a UAT-passed candidate by its exact SHA, and verification records that SHA', async () => {
@@ -228,9 +219,6 @@ test('integration:promote-exact-sha — production deploys only a UAT-passed can
   assert.throws(() => promote(repo.git, next.candidate.id, { base: 'main', push: true, now: new Date('2026-10-01T15:00:00Z') }), /stale info|rejected/);
   assert.equal(remoteRef(repo.origin, `refs/heads/${productionBranch}`), handMoved);
 
-  assert.equal((await serviceOf('production')).source.branch, releaseBranches.production, 'production no longer auto-deploys main');
-  const config = await readFile(new URL('../.railway/railway.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(config, /branch: "main"/);
 });
 
 test('integration:failed-candidate-fix-forward — a failed candidate files one follow-up naming the suite and SHA, leaves its deliveries alone, and the next cut proceeds', async () => {

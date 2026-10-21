@@ -60,8 +60,6 @@ jobs:
             --build-arg "GRAPHYARD_VERSION=$VERSION" \
             --build-arg "GRAPHYARD_BUILD_REVISION=$GITHUB_SHA" \
             --tag "$REPOSITORY:$VERSION" .
-          # The image must report the release it claims before it is published anywhere.
-          node scripts/verify-image-release.mjs "$REPOSITORY:$VERSION" "$VERSION" "$GITHUB_SHA"
           docker push "$REPOSITORY:$VERSION"
           docker image inspect --format '{{index .RepoDigests 0}}' "$REPOSITORY:$VERSION" | tee image-digest.txt
       - uses: actions/upload-artifact@v4

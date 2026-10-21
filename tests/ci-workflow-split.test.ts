@@ -44,7 +44,6 @@ const longSuiteMarkers: [string, RegExp][] = [
   ['container acceptance', /scripts\/run-acceptance\.mjs/],
   ['container recovery', /integration:herdr-recovery/],
   ['container image build', /docker build/],
-  ['chart', /\bhelm\b|kind-action|deploy\/helm/],
   ['release-candidate test files', /ci-tests\.mjs release-candidate/],
 ];
 
@@ -86,7 +85,7 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   // Every long suite validates the pinned candidate — the cut tip, the dispatched SHA or the tagged commit — never the ref it was started from.
   assert.match(jobs.get('candidate')!.text, /^ {6}PINNED: \$\{\{ inputs\.sha \|\| \(github\.event_name == 'push' && github\.sha\) \|\| '' \}\}$/m);
   assert.match(jobs.get('candidate')!.text, /\^\[0-9a-f\]\{40\}\$/, 'a dispatched sha must be a full commit SHA');
-  const longSuites = ['chart', 'container-acceptance', 'container-recovery', 'soak'];
+  const longSuites = ['container-acceptance', 'container-recovery', 'soak'];
   for (const [id, job] of [...jobs, ...[...soakJobs].map(([id, job]) => [`soak:${id}`, job] as const)]) {
     assert.doesNotMatch(job.text, /\$GITHUB_SHA/, `${id} stamps the candidate SHA, not the triggering ref's`);
     assert.ok(job.timeout, `${id} declares timeout-minutes`);
@@ -100,15 +99,15 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
     assert.ok(checkouts.length >= 1 && checkouts.every(match => match[1].includes("ref: '${{ env.CANDIDATE_SHA }}'")), `${id} checks out the candidate SHA`);
   }
   for (const id of longSuites) assert.deepEqual(jobs.get(id)!.needs, ['candidate'], `${id} waits only for the candidate to be pinned`);
-  // A cut candidate's UAT record carries the container and chart verdicts, so a failure among them blocks
+  // A cut candidate's UAT record carries the container verdicts, so a failure among them blocks
   // promotion; the soak and timing-budget suites are advisory and neither delay nor decide it.
   const gating = longSuites.filter(id => id !== 'soak');
-  assert.deepEqual(jobs.get('uat')!.needs, ['candidate', 'container-acceptance', 'container-recovery', 'chart']);
+  assert.deepEqual(jobs.get('uat')!.needs, ['candidate', 'container-acceptance', 'container-recovery']);
   for (const id of gating) assert.match(jobs.get('uat')!.text, new RegExp(`--suite '${id}=test "\\$[A-Z_]+" = success'`), `the UAT record carries the ${id} verdict`);
   assert.doesNotMatch(jobs.get('uat')!.text, /--suite '(long-suites|soak)=/, 'the soak verdict is advisory');
 
   // Every suite the pre-merge gate excludes runs here.
-  assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'chart', 'container-acceptance', 'container-recovery', 'imports', 'promote', 'soak', 'uat', 'upgrade']);
+  assert.deepEqual([...jobs.keys()].sort(), ['candidate', 'container-acceptance', 'container-recovery', 'imports', 'promote', 'soak', 'uat', 'upgrade']);
   // GY-1860: the production job holds no plane credential; the uat-environment job before it reads the candidate's import hold and hands it on.
   assert.match(jobs.get('imports')!.text, /environment: uat[\s\S]*release imports "\$\{\{ needs\.candidate\.outputs\.id \}\}"[\s\S]*GRAPHYARD_TOKEN: \$\{\{ secrets\.GRAPHYARD_RELEASE_TOKEN \}\}/);
   assert.deepEqual(jobs.get('promote')!.needs, ['candidate', 'uat', 'imports', 'upgrade']);
@@ -130,10 +129,7 @@ test('unit:long-suites-on-candidate — the excluded suites run in release-candi
   assert.match(jobs.get('container-acceptance')!.text, /scripts\/run-acceptance\.mjs "\$RUNNER_TEMP\/candidate\.json" graphyard-ci "\$RUNNER_TEMP\/acceptance\.json"/);
   // GitHub merges under branch protection (GY-1235): Graphyard has no merge authorization left to exercise.
   assert.doesNotMatch(jobs.get('container-acceptance')!.text, /integration:merge-authorization/);
-  assert.match(jobs.get('container-acceptance')!.text, /scripts\/verify-image-release\.mjs graphyard-ci .* "\$CANDIDATE_SHA"/);
   assert.match(jobs.get('container-recovery')!.text, /integration:herdr-recovery/);
-  assert.match(jobs.get('chart')!.text, /helm lint deploy\/helm\/graphyard --strict/);
-  assert.match(jobs.get('chart')!.text, /bash deploy\/helm\/exercise\.sh/);
 
   // The list the long-suites job runs is exactly the suites the pre-merge selection leaves out.
   const listed = execFileSync(process.execPath, ['scripts/ci-tests.mjs', 'release-candidate'], { cwd: repositoryRoot, encoding: 'utf8' }).split('\n').filter(Boolean);

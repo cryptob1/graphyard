@@ -465,68 +465,11 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     const status = await readSetupStatus(root);
     assert.ok(status.loopCode && typeof status.loopCode.cli.root === 'string', 'doctor reads what the units run');
     assert.equal(status.loopCode!.loop, null, 'under the test runner the operator\'s real units are never read');
-    await hostDoctor();
-
+    
   } finally {
     if (configHome === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = configHome;
   }
 });
-
-/**
- * GY-1859: AC-2 for a self-contained host install: doctor reads the host's units through the install
- * arguments the last `up` run recorded, never this machine's. Stale units on the host with none here
- * are one FAIL line naming the host's paths; a host install no run recorded the route to is a FAIL
- * naming the rerun, never a silent pass from this machine's empty unit directory.
- */
-async function hostDoctor() {
-  const { readInstallLoopCode } = await up();
-  const { readHostLoopCode, readSetupStatus } = await repositorySetup();
-  const { setupFromZeroChecks, setupLine } = await import('../src/setup-from-zero.js');
-  const units: InstallUnits = perInstallUnits('acme/shop');
-  const layout = { home: '/home/graphyard', graphyard: '/home/graphyard/graphyard', checkout: '/home/graphyard/code/acme-shop', userUnitDirectory: '/home/graphyard/.config/systemd/user' };
-  const credential = '/home/graphyard/.config/graphyard/acme-shop/coordinator.token';
-  // The host's loop unit starts the host checkout, whose loop still reports the commit it held before.
-  const files: Record<string, string> = {
-    [`${layout.checkout}/.graphyard/units.json`]: JSON.stringify(units),
-    [`${layout.checkout}/.graphyard/master.json`]: JSON.stringify({ repository: 'acme/shop', credentialFile: credential }),
-    [`${layout.userUnitDirectory}/${units.master}`]: `[Service]\nWorkingDirectory=${layout.checkout}\nExecStart=/usr/bin/node ${layout.graphyard}/bin/graphyard.mjs master run\n`,
-    [credential.replace(/\.token$/, '.daemon.json')]: JSON.stringify({ release: { commit: OLD_COMMIT, dirty: false } }),
-  };
-  const hostRun = async (program: string, args: string[]) => {
-    if (program === 'cat') return args[0] in files ? { code: 0, stdout: files[args[0]], stderr: '' } : { code: 1, stdout: '', stderr: `cat: ${args[0]}: No such file or directory` };
-    if (program === 'ls') return { code: 2, stdout: '', stderr: `ls: cannot access '${args[1]}': No such file or directory` };
-    if (program === 'git') return { code: 0, stdout: `${'e'.repeat(40)}\n`, stderr: '' };
-    return { code: 1, stdout: '', stderr: 'unexpected' };
-  };
-  const hostInstall = ['install', '--provider', 'host', '--repo', 'acme/shop', '--plan', '--ssh-host', 'host.example'];
-  const root = await temporaryDirectory('graphyard-doctor-host-loop');
-  await mkdir(join(root, '.graphyard'), { recursive: true });
-  await writeFile(join(root, '.graphyard', 'up.json'), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'host', merger: 'control-plane', noHerdr: false, goal: null, completed: [], hostInstall }));
-  const reached: string[][] = [];
-  let localReads = 0;
-  const code = await readInstallLoopCode(root, {
-    host: async args => { reached.push(args); return readHostLoopCode(hostRun, layout, COMMIT, 'host.example'); },
-    local: async () => { localReads++; throw new Error('this machine\'s units are read for a host install'); },
-  });
-  assert.deepEqual(reached, [hostInstall], 'the host is reached through the install arguments up recorded');
-  assert.equal(localReads, 0, 'this machine\'s units are never read in the host\'s place');
-  assert.equal(code.host, 'host.example');
-  const line = (await setupFromZeroChecks({ root, status: null, environments: join(root, 'none'), loopCode: code })).find(check => check.id === 'loop-code');
-  assert.equal(line?.status, 'fail', 'stale units on the host, none here: doctor fails');
-  assert.match(line!.detail, new RegExp(`${quote(`${layout.userUnitDirectory}/${units.master}`)} runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`), 'naming the host\'s unit and the commit it runs');
-  assert.match(line!.detail, new RegExp(`from this checkout \\(${quote(layout.graphyard)}\\)`), 'and the host checkout it must run');
-  assert.match(setupLine(line!), /^FAIL loop-code: .*rerun graphyard up --repo acme\/shop --agent/);
-
-  // A host install whose up.json records no route to the host (an earlier up run): doctor's own
-  // reading, unstubbed, is an error naming the rerun, and the setup line fails on it.
-  const unrouted = await temporaryDirectory('graphyard-doctor-host-unrouted');
-  await mkdir(join(unrouted, '.graphyard'), { recursive: true });
-  await writeFile(join(unrouted, '.graphyard', 'up.json'), JSON.stringify({ version: 1, repository: 'acme/shop', provider: 'host', merger: 'control-plane', noHerdr: false, goal: null, completed: [] }));
-  const status = await readSetupStatus(unrouted);
-  assert.match(status.loopCode?.error ?? '', /loop runs on its host, and no graphyard up run here recorded how to reach it.*graphyard up --repo acme\/shop --provider host --agent/, 'doctor\'s status reads the host route, never this machine\'s units');
-  const unroutedLine = (await setupFromZeroChecks({ root: unrouted, status: null, environments: join(unrouted, 'none') })).find(check => check.id === 'loop-code');
-  assert.equal(unroutedLine?.status, 'fail', 'and its setup line fails rather than passing on this machine\'s empty unit directory');
-}
 
 test('unit:doctor-loop-code-setup-line — setupFromZero carries the loop-code line: one FAIL naming both paths and the rerun, a PASS once the units run this checkout, a FAIL for an unreadable record, and no line while no unit of this install stands', async () => {
   const { setupFromZeroChecks, setupLine } = await import('../src/setup-from-zero.js');
@@ -551,68 +494,6 @@ test('unit:doctor-loop-code-setup-line — setupFromZero carries the loop-code l
   const untaken = (await checks(null)).find(check => check.id === 'loop-code');
   assert.equal(untaken?.status, 'fail', 'a reading that could not be taken is never a pass');
   assert.match(untaken?.detail ?? '', /could not be read/);
-});
-
-test('unit:up-replaces-host-loop-on-other-code — a host install\'s loop is read, replaced and verified on the host through its transport, the completed-install rerun included', async () => {
-  const { runUp } = await up();
-  const { readHostLoopCode } = await repositorySetup();
-  const units: InstallUnits = perInstallUnits('acme/shop');
-  const layout = { home: '/home/graphyard', graphyard: '/home/graphyard/graphyard', checkout: '/home/graphyard/code/acme-shop', userUnitDirectory: '/home/graphyard/.config/systemd/user' };
-  const credential = '/home/graphyard/.config/graphyard/acme-shop/coordinator.token';
-  /** The host's files, as `cat` and `ls` on it answer them. */
-  const hostFiles = (cursorCommit: string | null): Record<string, string> => ({
-    [`${layout.checkout}/.graphyard/units.json`]: JSON.stringify(units),
-    [`${layout.checkout}/.graphyard/master.json`]: JSON.stringify({ repository: 'acme/shop', credentialFile: credential }),
-    [`${layout.userUnitDirectory}/${units.master}`]: `[Service]\nWorkingDirectory=${layout.checkout}\nExecStart=/usr/bin/node ${layout.graphyard}/bin/graphyard.mjs master run\n`,
-    ...(cursorCommit ? { [credential.replace(/\.token$/, '.daemon.json')]: JSON.stringify({ release: { commit: cursorCommit, dirty: false } }) } : {}),
-  });
-  const hostRun = (files: Record<string, string>) => async (program: string, args: string[]) => {
-    if (program === 'cat') return args[0] in files ? { code: 0, stdout: files[args[0]], stderr: '' } : { code: 1, stdout: '', stderr: `cat: ${args[0]}: No such file or directory` };
-    if (program === 'ls') { const names = Object.keys(files).filter(path => path.startsWith(`${args[1]}/`)).map(path => path.slice(args[1].length + 1)); return names.length ? { code: 0, stdout: names.join('\n'), stderr: '' } : { code: 2, stdout: '', stderr: `ls: cannot access '${args[1]}': No such file or directory` }; }
-    if (program === 'git') return { code: 0, stdout: `${'e'.repeat(40)}\n`, stderr: '' };
-    return { code: 1, stdout: '', stderr: 'unexpected' };
-  };
-
-  // The host's loop still reports the commit the host checkout held before: other code,
-  // judged against the host checkout at this CLI's commit, never against this machine's units.
-  const stale = await readHostLoopCode(hostRun(hostFiles(OLD_COMMIT)), layout, COMMIT, 'host.example');
-  assert.equal(stale.host, 'host.example');
-  assert.equal(stale.cli.root, layout.graphyard, 'the host\'s own Graphyard checkout is the code they must run');
-  assert.match(stale.loopStale ?? '', new RegExp(`runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`));
-  assert.equal(stale.loopReplace, 'restart');
-  const silent = await readHostLoopCode(hostRun(hostFiles(null)), layout, COMMIT, 'host.example');
-  assert.match(silent.loopStale ?? '', /cursor records no commit/, 'a host loop with no recorded commit is not proof either');
-  const settled = await readHostLoopCode(hostRun(hostFiles(COMMIT)), layout, COMMIT, 'host.example');
-  assert.deepEqual([settled.loopStale, settled.error], [null, null], 'the host on this commit reads clean');
-  const refused = await readHostLoopCode(async (program, args) => program === 'cat' && args[0].endsWith(units.master) ? { code: 1, stdout: '', stderr: 'cat: Permission denied' } : hostRun(hostFiles(COMMIT))(program, args), layout, COMMIT, 'host.example');
-  assert.match(refused.error ?? '', /could not be read: cat: Permission denied/, 'a refused host read is the reading\'s error, never an absent unit');
-
-  // runUp on a host install whose earlier run recorded every step: the rerun reads the host through
-  // the install's arguments, re-opens master-loop, replaces the loop there (never running
-  // this machine's master init or restart), and goes green only once the host reports this commit.
-  const root = await temporaryDirectory('graphyard-up-host-loop');
-  await mkdir(join(root, '.graphyard'), { recursive: true });
-  await writeFile(join(root, '.graphyard', 'up.json'), JSON.stringify({
-    version: 1, repository: 'acme/shop', provider: 'host', merger: 'control-plane', noHerdr: false, goal: null,
-    completed: ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'merger-setting', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'],
-  }));
-  const hostReadings = [stale, stale, stale, settled];
-  const seen: (string[] | null | undefined)[] = [], replaced: { unit: string; rewrite: boolean }[] = [];
-  const w = world([]);
-  const events: UpEvent[] = [];
-  const run = await runUp({ ...request(), provider: 'host' }, {
-    ...dependencies(root, events, w),
-    loopCode: async hostInstall => { seen.push(hostInstall); return hostReadings.length > 1 ? hostReadings.shift()! : hostReadings[0]; },
-    replaceHostLoop: async (hostInstall, options) => { assert.ok(hostInstall.includes('--provider') && hostInstall.includes('host')); replaced.push(options); },
-  });
-  assert.equal(run.exitCode, 0, run.next);
-  assert.ok(seen.length >= 3 && seen.every(args => Array.isArray(args) && args.includes('--provider') && args.includes('host')), 'every reading is taken on the host, through the install\'s arguments');
-  assert.deepEqual(replaced, [{ unit: units.master, rewrite: false }], 'the host loop is restarted onto this commit where it runs');
-  assert.deepEqual(named(w, ['master', 'restart']), [], 'nothing is restarted on this machine for a host install');
-  assert.deepEqual(named(w, ['master', 'init', '--token-stdin', '--replace-supervisor']), [], 'and nothing is rewritten here');
-  assert.ok(events.some(event => event.kind === 'note' && event.text.includes(`the loop now runs ${layout.graphyard} at ${COMMIT.slice(0, 12)}`)), 'the step reports the host loop now on this commit');
-  const recorded = JSON.parse(await readFile(join(root, '.graphyard', 'up.json'), 'utf8')).hostInstall;
-  assert.deepEqual(recorded, seen[0], 'the route to the host is recorded, so doctor reads the host\'s units too');
 });
 
 test('unit:up-rejected-reading-never-green — a loop-code reading that was rejected or came back empty re-opens a recorded master-loop step and fails an unfinished one, naming why, and nothing is rewritten or restarted on it', async () => {

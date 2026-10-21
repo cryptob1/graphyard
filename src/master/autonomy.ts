@@ -1,10 +1,10 @@
 // Concern: agent identities and autonomy — approver and escalation launches, and the autonomy commands.
 import { createHash, randomUUID, randomBytes } from 'node:crypto';
 import { wholeDocument } from '../model/work-summary.js';
-import { readFile, mkdir, lstat } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { z } from 'zod';
-import { type ChildRun, type ChildRunOptions, defaultChildRun } from '../child-runner.js';
+import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { distinctSessionName, sessionNameLimit, sessionName, nameForLaunch } from '../session-name.js';
 import { localDirectory } from '../onboarding.js';
 import { broadScopeRefusals } from '../coordination.js';
@@ -659,8 +659,6 @@ export interface AutonomyDependencies {
   /** The runner a launched session's runtime calls go through; the asynchronous runner when omitted. */
   runtime?: ChildRun;
   fetcher?: typeof fetch;
-  /** Runs the roster applier; the default is the asynchronous runner with the applier's output passed through. */
-  run?: (command: string, args: string[], options?: ChildRunOptions) => string | Buffer | Promise<string | Buffer>;
   /**
    * Refuses a `decide` the caller does not own (GY-175), judged on the exact work document and
    * snapshot clock the decision is then built from, so a later read cannot move the item under it.
@@ -778,12 +776,9 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   if (id === 'principals') {
     const live = (await deps.coordinator('principals')).principals;
     const preview = previewPrincipalRotation(live, await readProposedRoster(root));
-    if (!args.includes('--apply')) return { ...preview, applied: false, next: preview.applicable ? 'Rerun with --apply to deploy the roster' : 'Restore every live principal in .graphyard/credentials.json (a rotation never drops one) and keep the operator "sessionKind": "human"' };
     if (!preview.applicable) throw new Error(`Roster rotation refused: ${preview.refusals.join('; ')}`);
-    const applier = resolve(root, 'scripts/provision-railway.mjs');
-    try { await lstat(applier); } catch { throw new Error('This repository has no roster applier (scripts/provision-railway.mjs); deploy GRAPHYARD_PRINCIPALS with the configured provider'); }
-    await (deps.run ?? defaultChildRun)(process.execPath, [applier], { cwd: root, env: { ...process.env, GRAPHYARD_URL: config.url }, stdout: 'inherit', stderr: 'inherit' });
-    return { ...preview, applied: true, next: 'Redeploy the service so the roster takes effect, then graphyard master status' };
+    // The roster is deployed by the installer, never from here: GRAPHYARD_PRINCIPALS is rendered by graphyard install --apply, one entry at a time by graphyard principal add|remove.
+    return { ...preview, applied: false, next: 'Deploy the roster with graphyard install --apply (one entry at a time: graphyard principal add|remove), then graphyard master status' };
   }
   return restartMasterLoop(root, config, await deps.daemonLock());
 }

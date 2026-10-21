@@ -1,9 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import { dirname, join, sep } from 'node:path';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configuredGeneratedFiles, parseGeneratedFiles } from '../src/generated-files.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable } from '../src/install/generated-files.js';
@@ -169,57 +168,3 @@ test('integration:generated-files-setup — the server refuses an unparseable va
   assert.match(setup, /generatedFilesAssignment\(root\)/);
 });
 
-// The adapters run `npx` and `gh`, so they are exercised against a fixture repository with a
-// recording shim on PATH: what reaches `railway variable set` is the assertion, not the source
-// text. `src` and the dependency install are linked in so the copied adapter resolves them.
-async function adapterFixture(files: Record<string, string>) {
-  const root = await temporaryDirectory('adapter');
-  await symlink(join(repository, 'src'), join(root, 'src'), 'dir');
-  const resolved = createRequire(import.meta.url).resolve('tsx/esm/api');
-  await symlink(resolved.slice(0, resolved.lastIndexOf(`${sep}node_modules${sep}`) + `${sep}node_modules`.length), join(root, 'node_modules'), 'dir');
-  for (const [path, content] of Object.entries({ 'scripts/provision-railway.mjs': await readFile(join(repository, 'scripts/provision-railway.mjs'), 'utf8'), ...files })) {
-    await mkdir(dirname(join(root, path)), { recursive: true });
-    await writeFile(join(root, path), content);
-  }
-  const record = join(root, 'npx-calls.txt');
-  await mkdir(join(root, 'bin'), { recursive: true });
-  await writeFile(join(root, 'bin/npx'), `#!/bin/sh\nfor arg in "$@"; do printf '%s\\n' "$arg" >> ${JSON.stringify(record)}; done\ncat > /dev/null\n`, { mode: 0o755 });
-  return { root, record };
-}
-
-test('integration:generated-files-setup — the Railway adapter sets the derived variable beside GRAPHYARD_PRINCIPALS', async () => {
-  const credentials = JSON.stringify([{ id: 'operator', role: 'admin', token: 'a'.repeat(40) }, { id: 'agent-1', role: 'worker', token: 'b'.repeat(40) }]);
-  const declared = await adapterFixture({ 'scripts/check-docs.mjs': manifestScript, '.graphyard/credentials.json': credentials });
-  try {
-    const run = spawnSync(process.execPath, ['scripts/provision-railway.mjs'], { cwd: declared.root, encoding: 'utf8', timeout: 120_000,
-      env: { ...process.env, PATH: `${join(declared.root, 'bin')}:${process.env.PATH}`, GRAPHYARD_URL: '' } });
-    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
-    const set = (await readFile(declared.record, 'utf8')).split('\n');
-    assert.ok(set.includes('GRAPHYARD_GENERATED_FILES=docs/index.md,docs/list.md'), `the adapter set ${set.filter(entry => entry.startsWith('GRAPHYARD_')).join(' ')}`);
-    assert.ok(set.includes('GRAPHYARD_MAX_REVIEWERS=2'), 'the capacity variables are still set beside it');
-    assert.match(run.stdout, /GRAPHYARD_GENERATED_FILES=docs\/index\.md,docs\/list\.md/);
-  } finally { await rm(declared.root, { recursive: true, force: true }); }
-  // A managed repository that declares no manifest sets no exemption at all.
-  const undeclared = await adapterFixture({ '.graphyard/credentials.json': credentials });
-  try {
-    const run = spawnSync(process.execPath, ['scripts/provision-railway.mjs'], { cwd: undeclared.root, encoding: 'utf8', timeout: 120_000,
-      env: { ...process.env, PATH: `${join(undeclared.root, 'bin')}:${process.env.PATH}`, GRAPHYARD_URL: '' } });
-    assert.equal(run.status, 0, `${run.stdout}${run.stderr}`);
-    assert.ok(!(await readFile(undeclared.record, 'utf8')).includes(generatedFilesVariable));
-  } finally { await rm(undeclared.root, { recursive: true, force: true }); }
-});
-
-test('integration:generated-files-setup — every other adapter deploys the same derived value', async () => {
-  const source = (name: string) => readFile(join(repository, name), 'utf8');
-  // The integrations adapter stages variables one by one through its own secret-safe path, so the
-  // derived value travels in the same record as GRAPHYARD_PRINCIPALS and the capacity variables.
-  const integrations = await source('scripts/configure-integrations.mjs');
-  assert.match(integrations, /generated = generatedFilesAssignment\(fileURLToPath\(root\)\)/);
-  // A manifest it cannot read names itself rather than hiding behind the stage message.
-  assert.match(integrations, /catch \(error\) \{ throw Object\.assign\(new Error\(error\.message\), \{ visible: true \}\); \}/);
-  assert.match(integrations, /GRAPHYARD_PRINCIPALS: JSON\.stringify\(roster\), \.\.\.limits\.variables, \.\.\.\(generated \? \{ \[generated\.variable\]: generated\.value \} : \{\}\)/);
-  // Applying the Railway configuration must not drop what the adapters set.
-  assert.match(await source('.railway/railway.ts'), new RegExp(`${generatedFilesVariable}: preserve\\(\\)`));
-  // The Compose install copies .env.example, so the variable is declared there too.
-  assert.match(await source('.env.example'), new RegExp(`^${generatedFilesVariable}=`, 'm'));
-});

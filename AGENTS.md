@@ -12,7 +12,7 @@ Domain mutations must be transactional, append history, and enforce principal id
 
 Run `npm run build` and `npm test` for domain/API changes. Tests run a temporary real Postgres database; do not substitute production data. Tests create every temporary directory with `temporaryDirectory(label[, parent])` from `tests/helpers/temp-dirs.ts`. Update the relevant guide under `docs/` when behavior changes. Keep external I/O outside coordination transactions.
 
-No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Installation credentials belong under `~/.config/graphyard/<install>/` with mode 0600, never in a repository. Installation and deployment changes go through `src/install/`, the Dockerfile, `compose.yaml` and `deploy/helm/graphyard`; `.railway/railway.ts` describes this project's own personal Railway deployment and is not part of the generic path. Preview infrastructure changes with `graphyard install --plan` before applying (no GitHub App, branch protection or Actions gates; the merge writer deploy key is the only GitHub access), and keep the release contract (`scripts/verify-image-release.mjs`) and the chart exercise passing.
+No secrets belong in Git. `.graphyard/credentials.json` and `.env` are local-only. Installation credentials belong under `~/.config/graphyard/<install>/` with mode 0600, never in a repository. Installation and deployment changes go through `src/install/`, the Dockerfile and `compose.yaml`. Preview infrastructure changes with `graphyard install --plan` before applying (no GitHub App, branch protection or Actions gates; the merge writer deploy key is the only GitHub access).
 
 <!-- graphyard -->
 ## Graphyard coordination
