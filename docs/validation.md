@@ -41,7 +41,7 @@ Container writes; attestor, collector read; never add the runner account. Collec
 
 ## Release verdicts
 
-One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun**; **blocked**; **pending** (blocks only if a delivered outcome shares it or `e2e.pendingOutcomes: blocking`). Only failed or unaccepted flaky required cases block; promotion waits on an `evidence` decision. `POST /api/validation/import` (`external-runs:import` producers) binds external runs to a `sha`, idempotent per `producer`+`runId`; the `imports` job seals released holds.
+One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun**; **blocked**; **pending** (blocks only if a delivered outcome shares it or `e2e.pendingOutcomes: blocking`). Only failed or unaccepted flaky required cases block. `POST /api/validation/import` (`external-runs:import` producers) binds an external run to the `rc/`-tagged candidate at its `sha`, idempotent per `producer`+`runId`; a required case not passing holds that candidate until a later import passes it. Nothing promotes candidates any more: an `admin`/`operator-agent` may still seal a released hold (`POST /api/validation/import/SHA/seal`).
 
 `e2e/contract.json` lists required customer outcomes, each bound to required `uat`-targeted cases.
 
