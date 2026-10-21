@@ -7,6 +7,8 @@ Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `obs
 
 The deploy runs off the cycle: the loop cycles on, starts no second meanwhile and records the settled success or rollback.
 
+A tip whose post-deploy E2E failed is not deployed again: the same commit fails identically, so the loop waits for main to move.
+
 ### Release filing credential
 
 `GRAPHYARD_RELEASE_TOKEN` files holds/follow-ups; the loop's hourly `master setup --apply` keeps it. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.

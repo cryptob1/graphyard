@@ -328,6 +328,7 @@
     "tests/delivery-causes.test.ts": 365,
     "tests/delivery-observe-sha.test.ts": 3000,
     "tests/delivery.test.ts": 2631,
+    "tests/deploy-no-retry-failed-sha.test.ts": 451,
     "tests/deploy-smoke.test.ts": 265,
     "tests/deployment-observation-cost.test.ts": 12937,
     "tests/deployment-packaging.test.ts": 2845,

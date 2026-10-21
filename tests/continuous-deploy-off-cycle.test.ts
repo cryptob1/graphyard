@@ -155,7 +155,7 @@ test('unit:continuous-deploy-off-cycle — with an end-to-end run that outlasts 
   assert.deepEqual(result.failed, []);
 });
 
-test('unit:continuous-deploy-off-cycle-rollback — a deploy whose end-to-end run fails settles into the recorded rollback while the loop keeps cycling, the second attempt runs off the cycle too, and the spent tip is attempted no third time', async t => {
+test('unit:continuous-deploy-off-cycle-rollback — a deploy whose end-to-end run fails settles into the recorded rollback while the loop keeps cycling, and the SHA whose e2e failed is attempted no second time (GY-2518: deploying the same commit again changes nothing)', async t => {
   const { root, master } = await config();
   const fake = new FakeGit(released, tip);
   const { ports, started, calls } = fakePorts({ fails: { [tip]: 'e2e' } });
@@ -177,19 +177,17 @@ test('unit:continuous-deploy-off-cycle-rollback — a deploy whose end-to-end ru
   assert.equal(state.actions['upgrade:deploy']?.state, 'failed');
   assert.equal(fleet.self, 0, 'nothing restarted onto the failed tip');
   assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'the rollback moving the checkout back is never the guard\'s drift');
-  // The second attempt starts off the cycle, fails the same way, and the settle records it.
-  await waitFor(() => tipDeploys() === 2, 'the second attempt never started');
-  await waitFor(() => state.promotion?.deployFailed?.attempts === 2, 'the second attempt never settled');
-  assert.equal(fake.head, released);
-  // The tip has failed twice: further cycles attempt it no more, and the failure line stands for master status.
+  // GY-2518: the SHA whose e2e failed is spent on its first failure — the two-attempt retry that
+  // spent a second identical E2E run is gone. Further cycles attempt it no more, and the failure
+  // line stands for master status.
   const spentAt = state.cycle;
   await waitFor(() => state.cycle >= spentAt + 3, 'the loop never kept cycling past the spent tip');
-  assert.equal(tipDeploys(), 2, 'a tip that failed twice is not attempted again');
+  assert.equal(tipDeploys(), 1, 'the SHA whose e2e failed is never deployed again');
   assert.match(deployLine(state.promotion?.deployFailed) ?? '', /failed at e2e/);
   assert.equal(state.actions['escalation:dirty-checkout'], undefined);
   loop.stop();
   const result = await loop.done;
-  assert.ok(result.cycles.length >= 5, `the loop completed ${result.cycles.length} cycles across both attempts`);
+  assert.ok(result.cycles.length >= 4, `the loop completed ${result.cycles.length} cycles across the spent tip`);
 });
 
 test('unit:continuous-deploy-off-cycle-guard — the guard reads the deploy in flight and the promotion reading it records as the loop\'s own positions, and still refuses a foreign move', async t => {
