@@ -3,7 +3,7 @@
 
 Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
 
-**The master loop deploys continuously** (compose/local installs): each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case as the install's `<installId>-e2e` identity, closing pass or fail, obsolete, naming the run, whatever its cases created (a run killed first leaves them to the loop's next cycle, which closes every open item that identity created, so none is released or dispatched); passing, the loop restarts onto it. A case whose outcome this install cannot serve pends; any other failing case (optional too) fails it, every case and step named. The redeploy stamps from the deployed commit's tree, so `/healthz` names it while the loop runs a held snapshot. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`); two tries until main moves, unless the tip migrated the database. `release.onFailure` `hold` (default `revert`) names each failing case, step and would-be target or `no map matched`, reverting/reopening nothing; `release.revertUnmatched: false` holds an unmatched failure instead of the newest item. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline. Main moves only by the merge writer's push; the report-only main watch explains every commit. Base failures file nothing.
+**The master loop deploys continuously** (compose/local installs): each new base tip runs `graphyard upgrade`'s steps, `/healthz?strict` and every `e2e/cases/` case as the install's `<installId>-e2e` identity, closing pass or fail, obsolete, naming the run, whatever its cases created (a run killed first leaves them to the loop's next cycle, which closes every open item that identity created, so none is released or dispatched); passing, the loop restarts onto it. A case whose outcome this install cannot serve pends; any other failing case (optional too) fails it, every case and step named. The redeploy stamps from the deployed commit's tree, so `/healthz` names it while the loop runs a held snapshot. Failing, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`); two tries until main moves, unless the tip migrated the database. Only the deployed revision rolls back: nothing reverts or reopens merged items, and `release.onFailure`/`release.revertUnmatched` are still accepted but no longer consulted. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `unclaim GY-N EPOCH` gives up a lease (the old `release` command is gone); `graphyard delivery` prints the pipeline. Main moves only by the merge writer's push; the report-only main watch explains every commit. Base failures file nothing.
 
 The deploy runs off the cycle: the loop cycles on, starts no second meanwhile and records the settled success or rollback.
 
@@ -11,7 +11,7 @@ A tip whose post-deploy E2E failed is not deployed again: the same commit fails 
 
 ### Release filing credential
 
-`GRAPHYARD_RELEASE_TOKEN` files holds/follow-ups; the loop's hourly `master setup --apply` keeps it. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.
+`GRAPHYARD_RELEASE_TOKEN` files release follow-ups; the loop's hourly `master setup --apply` keeps it. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
@@ -27,7 +27,7 @@ Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign]
 
 An environment registers `{"kind":"environment","services":[…]}`; an observer `{"kind":"registration","role":"observer"}`.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; `release.onFailure` `revert`/`hold`; deployed `GRAPHYARD_REPOSITORY_POLICY`.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed `GRAPHYARD_REPOSITORY_POLICY`.
 
 `POST /api/delivery/build` records a build:
 
@@ -43,7 +43,7 @@ An environment registers `{"kind":"environment","services":[…]}`; an observer 
 
 ## Main watch
 
-`graphyard master main-watch status` prints the unexplained commits; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. `GRAPHYARD_MAIN_WATCH_FREEZE=true` freezes promotion until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`).
+`graphyard master main-watch status` prints the unexplained commits; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. The watch only reports: each unexplained commit raises one attention item until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`); nothing freezes promotion.
 
 ## Rollback
 
@@ -51,4 +51,4 @@ Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (
 
 ## Coordinator recovery
 
-Self-merge stalled the loop, or main-watch froze: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin, keeping the new pin, the one it replaced and the one the running loop loaded from.
+Self-merge stalled the loop: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin, keeping the new pin, the one it replaced and the one the running loop loaded from.

@@ -30,12 +30,12 @@ const sameCommit = (a: string | null | undefined, b: string | null | undefined) 
 /**
  * The cursor's promotion wait: null when it holds no deployment observation, or one that verified
  * no release (an unavailable observation lists every delivery as pending, served or not, so it can
- * never ground the promotion grace).
+ * never ground the promotion grace). No promotion is ever in flight or due since GY-1983 removed
+ * the release-candidate drive: the continuous deploy moves the release itself.
  */
-export function promotionWait(state: { deployment?: { source?: string; sha: string | null; pending?: string[] } | null; promotion?: { nextDueAt: string | null; inFlight: boolean } | null; upgrade?: { alignedRelease?: string | null } | null } | null | undefined): PromotionWait | null {
+export function promotionWait(state: { deployment?: { source?: string; sha: string | null; pending?: string[] } | null; upgrade?: { alignedRelease?: string | null } | null } | null | undefined): PromotionWait | null {
   if (!state?.deployment || !state.deployment.sha || state.deployment.source === 'unavailable') return null;
-  return { deployedSha: state.deployment.sha, alignedRelease: state.upgrade?.alignedRelease ?? null, pending: state.deployment.pending ?? [],
-    nextDueAt: state.promotion?.nextDueAt ?? null, inFlight: state.promotion?.inFlight === true };
+  return { deployedSha: state.deployment.sha, alignedRelease: state.upgrade?.alignedRelease ?? null, pending: state.deployment.pending ?? [], nextDueAt: null, inFlight: false };
 }
 
 /** The promotion that would serve the pending deliveries is on schedule: a candidate in validation, or not yet due. */

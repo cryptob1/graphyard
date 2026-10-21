@@ -3,14 +3,12 @@
 // this module assigns it, balanced by the per-file durations recorded in
 // tests/helpers/timing-baseline.json. On a pull request's own CI only the test files the change can
 // affect run; pushes to main, merge-queue tips and any change this module cannot map run every
-// pre-merge file. The release-candidate suites (`releaseCandidateTests`) never run here.
+// file, the soak and timing-budget suites among them.
 //
 //   node scripts/ci-tests.mjs select --out FILE           the files this CI run executes, one per line
-//   node scripts/ci-tests.mjs release-candidate [--suite soak|timing-budget] --out FILE
-//                                                         the long suites only release-candidate validation runs
 //   node scripts/ci-tests.mjs shards [N]                  the balanced shards of the full suite
 //   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs: `mode: reason`, then
-//                                                         the pre-merge files it runs, one per line (every one when full),
+//                                                         the files it runs, one per line (every one when full),
 //                                                         never the advisory budget tests (`advisoryTests`)
 //   node scripts/ci-tests.mjs advisory                     the advisory budget tests, in the `affected` shape
 //   node scripts/ci-tests.mjs durations RECORD.jsonl...   write measured per-file durations into the baseline
@@ -42,24 +40,6 @@ export function listTestFiles(root = repositoryRoot) {
   return readdirSync(join(root, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
 }
 
-/** The soak (GY-404): every tests/soak*.test.ts file, one suite per concern since GY-1363. */
-export const soakSuite = /^tests\/soak(?:-[\w-]+)?\.test\.ts$/;
-// tests/plane-load.test.ts holds the plane under ten minutes of several users at once (GY-1383).
-const timingBudgetTests = ['tests/work-snapshot-latency.test.ts', 'tests/cycle-latency.test.ts', 'tests/server-scale.test.ts', 'tests/healthz-bounded.test.ts', 'tests/interventions-scale.test.ts', 'tests/plane-load.test.ts'];
-/** A test file's release-candidate suite, `soak` or `timing-budget`, or null for a pre-merge file. */
-export const releaseCandidateKind = file => soakSuite.test(file) ? 'soak' : timingBudgetTests.includes(file) ? 'timing-budget' : null;
-export const isReleaseCandidateTest = file => releaseCandidateKind(file) !== null;
-/**
- * The suites the pre-merge gate never runs (GY-1093): the soak, and every test whose verdict is a
- * wall-clock budget, so it measures the runner as much as the change. They run only against a
- * pinned release-candidate SHA (.github/workflows/release-candidate.yml), beside the container
- * acceptance, container recovery and chart jobs, never as a required pull-request check.
- */
-export const releaseCandidateTests = {
-  ...Object.fromEntries(listTestFiles().filter(file => soakSuite.test(file)).map(file => [file, 'soak'])),
-  ...Object.fromEntries(timingBudgetTests.map(file => [file, 'timing-budget'])),
-};
-
 /**
  * The budget tests that are advisory under the control-plane merger (GY-1528): a document or module
  * outgrowing its budget is a chore, never a reason to refuse or revert a merge. The merge writer's
@@ -68,11 +48,6 @@ export const releaseCandidateTests = {
  */
 export const advisoryTests = ['tests/module-budgets.test.ts', 'tests/hotspots.test.ts', 'tests/interventions-hotspot-split.test.ts'];
 export const isAdvisoryTest = file => advisoryTests.includes(file);
-
-/** The test files the required `test` check runs: every file except the release-candidate suites. */
-export function preMergeTestFiles(root = repositoryRoot) {
-  return listTestFiles(root).filter(file => !isReleaseCandidateTest(file));
-}
 
 // ---- Shards ------------------------------------------------------------------------------------
 
@@ -273,28 +248,20 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   if (command === 'select') {
     const context = runContext();
     const needsMap = context.event === 'pull_request' && context.changed && context.queued === false && !speculativeTipSubject.test(context.headSubject ?? '');
-    // The map reaches through every test file; the selection keeps only the pre-merge ones.
-    const selection = selectForRun({ ...context, map: needsMap ? dependencyMap() : new Map(), tests: preMergeTestFiles() });
+    const selection = selectForRun({ ...context, map: needsMap ? dependencyMap() : new Map(), tests: listTestFiles() });
     const out = option('--out');
     if (out) writeFileSync(out, selection.files.map(file => `${file}\n`).join('')); else console.log(selection.files.join('\n'));
     const summary = `### Test selection\n\n${selection.mode === 'full' ? 'Full suite' : 'Affected tests only'}: ${selection.reason}.\n\n${selection.files.length} test file(s) selected.\n`;
     console.error(summary);
     if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, summary, { flag: 'a' });
-  } else if (command === 'release-candidate') {
-    // `--suite` narrows the list to one suite: the timing budgets run one file at a time, apart from
-    // the soak, since a budget measured beside another suite's load measures that load (GY-1440).
-    const suite = option('--suite');
-    if (suite !== null && !['soak', 'timing-budget'].includes(suite)) throw new Error(`--suite takes soak or timing-budget: ${suite}`);
-    const files = tests.filter(file => suite === null ? isReleaseCandidateTest(file) : releaseCandidateKind(file) === suite), out = option('--out');
-    if (out) writeFileSync(out, files.map(file => `${file}\n`).join('')); else console.log(files.join('\n'));
   } else if (command === 'shards') {
-    const shards = shardFiles(preMergeTestFiles(), readDurations(), Number(args[0] ?? defaultShardCount));
+    const shards = shardFiles(listTestFiles(), readDurations(), Number(args[0] ?? defaultShardCount));
     shards.forEach((shard, at) => console.log(`shard ${at + 1}: ${shard.files.length} files, ${Math.round(shard.durationMs / 1000)}s recorded`));
     console.log(`imbalance ${(shardImbalance(shards) * 100).toFixed(1)}%`);
   } else if (command === 'affected') {
     // The trials' selection (the shadow gate's and the merge writer's) never runs the advisory budget tests (GY-1528).
-    const selection = selectAffected(args, dependencyMap(), preMergeTestFiles().filter(file => !isAdvisoryTest(file)));
-    // The files follow in both modes, so a caller (the shadow gate's trial) runs exactly the pre-merge selection and never the release-candidate suites.
+    const selection = selectAffected(args, dependencyMap(), listTestFiles().filter(file => !isAdvisoryTest(file)));
+    // The files follow in both modes, so a caller (the shadow gate's trial) runs exactly this selection.
     console.log(`${selection.mode}: ${selection.reason}`); if (selection.files.length) console.log(selection.files.join('\n'));
   } else if (command === 'advisory') {
     // The advisory budget tests the loop runs once after each control-plane merge (GY-1528), in the `affected` output's shape.
@@ -307,6 +274,6 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     writeFileSync(file, `${JSON.stringify(merged, null, 2)}\n`);
     console.log(`Recorded durations for ${Object.keys(merged.files).length} of ${tests.length} test files in ${relative(process.cwd(), file)}`);
   } else {
-    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--suite soak|timing-budget] [--out FILE] | shards [N] | affected FILE... | advisory | durations RECORD.jsonl...');
+    throw new Error('Usage: ci-tests select [--out FILE] | shards [N] | affected FILE... | advisory | durations RECORD.jsonl...');
   }
 }

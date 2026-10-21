@@ -6,7 +6,6 @@ import { checkAgentEnvironment, discoverAgentEnvironments } from './master/envir
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
 import { mergerNotRequired } from './model/setup-checklist.js';
-import { followUpFilingExcess, followUpFilingRefusal } from './release-candidate.js';
 import type { LoopCodeReading } from './repository-setup.js';
 import { installUnitsFile, parseInstallUnits } from './install/units.js';
 import { defaultChildRun } from './child-runner.js';
@@ -25,7 +24,7 @@ export const setupSteps = {
   reviewer: 'docs/setup-from-zero.md step 4 (reviewer and revert-approver Apps)',
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
-  releaseFiling: 'docs/delivery.md#release-filing-credential',
+  releaseFiling: 'issue GRAPHYARD_RELEASE_TOKEN to an operator agent holding only intent:create (graphyard operator-agent setup FILE --token-stdin)',
   loopCode: 'rerun graphyard up --agent from this checkout (docs/setup-from-zero.md step 10, start the master)',
   unitOverrides: 'docs/setup-from-zero.md#troubleshooting-manual-steps (remove the drop-in)',
 } as const;
@@ -155,6 +154,28 @@ async function sandboxCheck(root: string, probe: (paths: string[]) => string | n
   if (unwritable.length) return check('fail', `this user cannot write ${unwritable.join(', ')}`);
   const refused = probe(existing);
   return refused ? check('fail', `the worker confinement cannot write the shared Git paths: ${refused}`) : check('pass', `the worker confinement writes ${existing.length} shared Git paths under ${paths.commonDir}`);
+}
+
+/**
+ * Pure: why the control plane would refuse to create work as `actor`, the principal a filing
+ * credential names (its `/api/status` actor), or null when it is admitted.
+ */
+export function followUpFilingRefusal(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[]; workItems?: string[] } } | null | undefined, repository: string | null | undefined) {
+  if (!actor?.role) return 'the filing credential names no principal';
+  if (actor.role === 'admin') return null;
+  if (actor.role !== 'operator-agent') return `${actor.id} has role ${actor.role}, which cannot create work (Operator permission required)`;
+  if (!actor.capabilities?.includes('intent:create')) return `operator agent ${actor.id} lacks intent:create`;
+  if (!repository || !actor.scope?.repositories?.includes(repository)) return `operator agent ${actor.id}'s scope does not include ${repository ?? 'the repository'}`;
+  if (!actor.scope?.workItems?.includes('*')) return `operator agent ${actor.id} lacks wildcard work scope, which creating work requires`;
+  return null;
+}
+/** Pure: what `actor` holds beyond `intent:create` over `repository` alone, or null when nothing. */
+export function followUpFilingExcess(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[] } }, repository?: string | null) {
+  if (actor.role === 'admin') return `${actor.id} is an admin, which can claim, approve and administer far beyond filing`;
+  const extra = (actor.capabilities ?? []).filter(capability => capability !== 'intent:create');
+  if (extra.length) return `operator agent ${actor.id} also holds ${extra.join(', ')}; the filing credential holds only intent:create`;
+  const otherRepositories = repository ? (actor.scope?.repositories ?? []).filter(other => other !== repository) : [];
+  return otherRepositories.length ? `operator agent ${actor.id} can also create work in ${otherRepositories.join(', ')}; the filing credential is scoped to ${repository} alone` : null;
 }
 
 /**

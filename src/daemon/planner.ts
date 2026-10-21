@@ -5,7 +5,6 @@
 import { z } from 'zod';
 import type { Goal } from '../model/goal.js';
 import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, mergedItem, type GoalPlan } from '../model/goal-plan.js';
-import { goalDeliveries } from '../release-pending.js';
 import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
@@ -27,7 +26,6 @@ import { carriedIsolate, stepCallCarried } from './step-budget.js';
 
 export const plannerRole = 'planner';
 export const planTool = 'graphyard_plan';
-export { goalDeliveries };
 /** The judgement run's Pi role and tool: the approver identity's verdict on one plan. */
 export const planJudgeRole = 'plan-judge';
 export const planJudgementTool = 'graphyard_plan_judgement';

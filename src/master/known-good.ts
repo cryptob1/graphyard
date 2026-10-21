@@ -12,7 +12,6 @@ import { fileURLToPath } from 'node:url';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { installDirectory } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
-import { productionTagPrefix } from '../release-candidate.js';
 
 export const knownGoodDirectory = (installDir: string) => join(installDir, 'coordinator');
 /** The CLI the master unit runs while a pin exists. */
@@ -154,6 +153,8 @@ export function coordinatorDoctorLine(pinned: string | null, production: string 
   return { line: stale || failing ? `FAIL ${line}` : line, ok: !stale && !failing };
 }
 
+/** The tag prefix the retired release-candidate pipeline recorded each promotion under. */
+const productionTagPrefix = 'rc-production/';
 /** The promoted SHAs newest first, read from the repository's `rc-production/` tags; empty when unreadable. */
 export async function promotedShas(root: string, run: ChildRun = defaultChildRun): Promise<string[]> {
   try {

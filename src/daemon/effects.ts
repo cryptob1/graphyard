@@ -56,11 +56,9 @@ import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
 import type { ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
-import { observeDeployment, deploymentEnvironmentName, promotionReads, promotionWorkflow, type PromotionReads } from './deployment.js';
-import { mainWatchFreezeFromEnv, mainWatchReads, type MainWatchReads } from './main-watch.js';
+import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
+import { mainWatchReads, type MainWatchReads } from './main-watch.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
-import { localReleasePorts } from './release-ports.js';
-import { revertRecordKey } from '../release-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import type { ReadingEffects } from './reading-effect.js';
@@ -141,11 +139,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    * so the dashboard and flow report read releases under that same name; sent only on a change.
    */
   publishProductionEnvironment?: () => Promise<unknown>;
-  /**
-   * GY-1302: the promotion drive's reads and its dispatch of the release-candidate workflow; null
-   * when the repository has no such workflow, absent on a loop wired without it.
-   */
-  promotion?: PromotionReads | null;
   /** The main watch's reads (GY-1519, main-watch.ts): the checkout's history and the control plane's acknowledgements; absent, the watch does not run. */
   mainWatch?: MainWatchReads | null;
   /** The control-plane merge executor's reads (GY-1524, cycle-merge-writer.ts): git in the coordinator checkout, the leased deploy-key push, the merge-record post and the recorded merger; absent, the executor does not run. */

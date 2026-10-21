@@ -123,7 +123,7 @@ test('unit:worktree-failure-names-git-error — a failing git worktree add repor
     const failure = await prepareWorkerLaunch(root, 'GY-7', 'launch', (command, args, options) => {
       if (command === 'git') return args[0] === 'rev-parse' ? `${'c'.repeat(40)}\n` : '';
       if (args[1] === 'claim') return JSON.stringify({ epoch: 3, lease: { owner: 'worker-a' } });
-      if (args[1] === 'release') { released.push(args[3]); return '{}'; }
+      if (args[1] === 'unclaim') { released.push(args[3]); return '{}'; }
       // The real worktree command, run with exactly the streams the launcher asked for.
       return defaultChildRun(command, args.slice(0, 4), { cwd: options?.cwd, env: plane.env, stdout: options?.stdio?.[1] === 'inherit' ? 'inherit' : 'capture', stderr: options?.stdio?.[2] === 'inherit' ? 'inherit' : 'capture' });
     }).then(() => null, error => error as Error);

@@ -3,12 +3,11 @@ import assert from 'node:assert/strict';
 import { loadCases, parseCase } from '../src/e2e/case.js';
 import { checkAnswer, checkoutContract, deliverySuspendedCases, deployedE2e, e2eSuite, exercisesDelivery, installServesDeliveries, releaseRetries, releaseWaitBudgetSeconds, releaseWaitUntil, runCases } from '../src/e2e/runner.js';
 import { checkoutRepositoryPolicy } from '../src/model/repository-policy.js';
-// @ts-expect-error The fixture is a plain ES module the uat job runs under tsx.
-import { runOnboardingE2e, suiteResult } from '../scripts/onboarding-delivery-fixture.mjs';
 
 // GY-1938: candidate 20261017T182412Z's e2e suite was killed at its one-hour command timeout. GY-1904
-// gave candidate-batches-five seven GET steps that each wait up to 3600 s for a delivery the shared
-// UAT install never makes: its merger is github with no GitHub App wired, so it delivers nothing.
+// gave a delivery case seven GET steps that each wait up to 3600 s for a delivery the shared UAT
+// install never makes: its merger is github with no GitHub App wired, so it delivers nothing. That
+// case left with the release candidates (GY-1983); `deliveryCase` keeps its shape.
 // Every case, step and attempt of a release run now shares one wait deadline well below that
 // timeout, a pending case asks once, and an install that cannot serve deliveries pends its delivery
 // cases, while a case whose condition is met still passes. The run's clock is fake throughout.
@@ -21,6 +20,12 @@ const fakeClock = () => {
   return clock;
 };
 const hour = 3_600_000;
+/** One created change, seven waits of 3600 s for its delivery, then the delivery view: the shape of GY-1904's delivery case. */
+const deliveryCase = [{ file: 'e2e/cases/delivery-waits.json', definition: parseCase('e2e/cases/delivery-waits.json', JSON.stringify({ id: 'delivery-waits', title: 'A change is delivered', target: 'uat', required: true, steps: [
+  { kind: 'http', name: 'create a change', method: 'POST', path: '/api/work', body: { title: 'E2E case {{case}} run {{run}}' }, status: 200, expect: [], save: { id1: 'id' } },
+  ...[1, 2, 3, 4, 5, 6, 7].map(n => ({ kind: 'http', name: `delivery read ${n}`, method: 'GET', path: '/api/work/{{id1}}', status: 200, expect: [{ path: 'delivery.mergeSha', type: 'string' }], waitSeconds: 3600 })),
+  { kind: 'http', name: 'the delivery view', method: 'GET', path: '/api/delivery', status: 200, expect: [] },
+] })) }];
 
 /** UAT as the shared install answers: items are created, none is ever delivered, and no GitHub App is wired (only the repository label is configured). */
 const undelivered = (wired = false, clock = fakeClock()) => {
@@ -51,42 +56,28 @@ test('unit:release-e2e-probe-names-delivery-ability — the probe reads the inst
   const plainRun = await e2eSuite([{ file: 'e2e/cases/plain.json', definition: plain }], 't', { fetcher: noMerger, report: value => { probed = value; } }).run('http://uat.test', null);
   assert.equal(plainRun.passed, true, plainRun.detail);
   assert.equal(probed?.deliveryProbe, 'unreadable', 'the run report names a probe that could not read the merger');
-  const cases = (await loadCases(root)).filter(entry => entry.definition.target === 'uat');
-  const suspended = deliverySuspendedCases(cases, false);
-  assert.ok(suspended.includes('candidate-batches-five') && suspended.includes('candidate-gates-promotion') && suspended.includes('production-exact-verification'), 'the delivery cases are the ones a no-delivery install cannot serve');
+  const cases = [...(await loadCases(root)).filter(entry => entry.definition.target === 'uat'), ...deliveryCase];
+  assert.deepEqual(deliverySuspendedCases(cases, false), ['delivery-waits'], 'the delivery cases are the ones a no-delivery install cannot serve');
   assert.deepEqual(deliverySuspendedCases(cases, true), [], 'an install that can deliver runs every case for real');
   assert.ok(exercisesDelivery({ steps: [{ kind: 'http', method: 'GET', path: '/api/delivery', status: 200, expect: [] }] }), 'the delivery surface is recognised');
   assert.ok(!exercisesDelivery({ steps: [{ kind: 'http', method: 'GET', path: '/api/work', status: 200, expect: [] }] }), 'an ordinary case is not');
 });
 
-test('unit:release-e2e-pending-case-never-waits — the checkout\'s candidate-batches-five, undeliverable on the install, is asked once per attempt and reported pending, in the e2e suite and the onboarding fixture\'s run, without failing either', async () => {
-  const cases = (await loadCases(root)).filter(entry => entry.definition.id === 'candidate-batches-five');
-  assert.equal(cases.length, 1);
+test('unit:release-e2e-pending-case-never-waits — a delivery case, undeliverable on the install, is asked once per attempt and reported pending in the e2e suite, without failing it', async () => {
+  const cases = deliveryCase;
   const contract = await checkoutContract(root), policy = checkoutRepositoryPolicy(root);
 
   const suite = undelivered(false), began = suite.clock.at;
   const result = await e2eSuite(cases, 't', { fetcher: suite.fetcher, root, contract, policy, now: suite.clock.now, sleep: suite.clock.sleep }).run('http://uat.test', candidate);
   assert.ok(suite.clock.at - began < 60_000, `the suite took ${suite.clock.at - began} fake ms`);
   assert.equal(result.passed, true, result.detail);
-  assert.match(result.detail, /pending, not blocking: case candidate-batches-five/);
+  assert.match(result.detail, /pending, not blocking: case delivery-waits/);
   assert.match(result.detail, /the install serves no deliveries \(merger github without a repository wired\)/);
   assert.equal(suite.reads.filter(read => read.startsWith('GET /api/work/')).length, 2, 'each of the two attempts asked once for the first delivery, then stopped');
-
-  // GY-1906 runs candidate-batches-five on the fixture's own plane; a delivery case the fixture does not own still runs on the shared install, so its copy stands in.
-  const shared = cases.map(entry => ({ ...entry, definition: { ...entry.definition, id: 'shared-delivery-case' } }));
-  const fixture = undelivered(false);
-  const report = await runOnboardingE2e(shared, { url: 'http://uat.test', token: 't', candidate, contract, policy, root, fetcher: fixture.fetcher, now: fixture.clock.now, sleep: fixture.clock.sleep, fixture: async () => { throw new Error('no fixture case is selected'); } });
-  assert.equal(report.cases[0].pending, true);
-  assert.equal(report.cases[0].attempts, 2);
-  assert.doesNotMatch(report.cases[0].failingStep!.reason, /after waiting|wait deadline/);
-  assert.deepEqual(report.suspendedDeliveries, { cases: ['shared-delivery-case'], merger: 'github', repositoryWired: false });
-  const verdict = suiteResult(report, [], policy);
-  assert.equal(verdict.passed, true, verdict.detail);
-  assert.match(verdict.detail, /shared-delivery-case are pending, not blocking/);
 });
 
 test('unit:release-e2e-wait-bound — seven waiting GET steps of 3600 s each, in a required case not pending, share the run\'s one deadline: the suite reports inside its one-hour command timeout', async () => {
-  const cases = (await loadCases(root)).filter(entry => entry.definition.id === 'candidate-batches-five');
+  const cases = deliveryCase;
   const waits = cases[0].definition.steps.filter(step => step.kind === 'http' && step.method === 'GET' && step.waitSeconds === 3600);
   assert.equal(waits.length, 7, 'the case waits on seven sequential GET steps of 3600 s');
   assert.ok(releaseWaitBudgetSeconds * 1000 < hour, 'the shared deadline falls below the command timeout');
@@ -99,7 +90,7 @@ test('unit:release-e2e-wait-bound — seven waiting GET steps of 3600 s each, in
   assert.ok(took < hour, `the suite took ${took / 1000} fake s against a ${hour / 1000} s timeout`);
   assert.ok(took <= releaseWaitBudgetSeconds * 1000 + 120_000, `waits past the shared deadline cost only single asks: ${took / 1000} fake s`);
   assert.equal(result.passed, false, 'an unmet required case still blocks');
-  assert.match(result.detail, /after waiting \d+ s, all that remained of case candidate-batches-five's \d+ s wait budget for this attempt/);
+  assert.match(result.detail, /after waiting \d+ s, all that remained of case delivery-waits's \d+ s wait budget for this attempt/);
   assert.match(result.detail, /delivery\.mergeSha is unset \(delivery is null\), expected string/, 'the failure names the delivery state the install answered, not an undefined-typed value');
   assert.doesNotMatch(result.detail, /after 0 s|shared wait deadline|is undefined/);
 
