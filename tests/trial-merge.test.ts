@@ -200,7 +200,7 @@ async function ownRepositoryTrial(keep: readonly string[]) {
 }
 
 test('unit:trial-credential-free-runner-exits-zero — this repository\'s own two-file fast selection, built and run by the real runner in a credential-free scratch checkout through runTrial\'s environment (GH_CONFIG_DIR, GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_SSH_COMMAND and every GRAPHYARD_*/HERDR_* variable removed, GIT_CONFIG_NOSYSTEM=1, GIT_CONFIG_GLOBAL=/dev/null), records no failed file and a runner exit code of 0 (GY-1549)', async () => {
-  const keep = ['tests/readme.test.ts', 'tests/stable-json.test.ts'];
+  const keep = ['tests/stable-json.test.ts', 'tests/vite-config-loader.test.ts'];
   const trial = await ownRepositoryTrial(keep);
   assert.ok(trial.dropped > 100, `the scratch tree keeps only the two files (${trial.dropped} dropped)`);
   const planted: NodeJS.ProcessEnv = { ...process.env, GH_CONFIG_DIR: '/nowhere/gh', GH_TOKEN: 'gh-secret', GITHUB_TOKEN: 'github-secret', SSH_AUTH_SOCK: '/nowhere/agent.sock', GIT_SSH_COMMAND: 'ssh -i /nowhere/key', GRAPHYARD_TOKEN: 'graphyard-secret', HERDR_PANE_ID: 'p1', GIT_CONFIG_GLOBAL: '/nowhere/.gitconfig' };
