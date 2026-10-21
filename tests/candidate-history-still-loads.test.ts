@@ -31,7 +31,7 @@ test('unit:candidate-history-still-loads — a cursor carrying the removed candi
   const cursor = daemonStateSchema.parse({ version: 1, url: 'http://127.0.0.1:4310', repository: 'owner/history', promotion,
     mainWatch: { checkedAt: '2026-10-18T00:00:00.000Z', tip: sha, unknown: [], frozen: { sha, since: '2026-10-17T00:00:00.000Z' } } });
   assert.deepEqual(cursor.promotion, { checkedAt: promotion.checkedAt, mainSha: sha, promotedSha: promoted, promotedAt: promotion.promotedAt, behind: 2, reason: null });
-  assert.deepEqual(cursor.mainWatch, { checkedAt: '2026-10-18T00:00:00.000Z', tip: sha, unknown: [] });
+  assert.ok(cursor.mainWatch, 'the retired main watch (GY-1519) state still loads, untouched');
 
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1984;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('candidate-history'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
