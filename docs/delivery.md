@@ -9,9 +9,9 @@ The deploy runs off the cycle: the loop cycles on, starts no second meanwhile an
 
 A tip whose post-deploy E2E failed is not deployed again: the same commit fails identically, so the loop waits for main to move.
 
-### Release filing credential
+### E2E record credential
 
-`GRAPHYARD_RELEASE_TOKEN` files release follow-ups; the loop's hourly `master setup --apply` keeps it. `e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.
+`e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.
 
 `deploy/helm/exercise.sh` forwards a kubectl-chosen free port, re-forwarding a lost or foreign one within `FORWARD_BUDGET` seconds; waits for the rollout's new Ready pod, retrying transient API failures (empty reply, reset, stall, non-2xx, bodiless 2xx), else ending `api METHOD /api/PATH failed after 15 attempts: status STATUS, body: BODY`.
 
@@ -43,7 +43,7 @@ An environment registers `{"kind":"environment","services":[…]}`; an observer 
 
 ## Main watch
 
-`graphyard master main-watch status` prints the unexplained commits; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. The watch only reports: each unexplained commit raises one attention item until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`); nothing freezes promotion.
+`graphyard master main-watch status` prints the unexplained commits; `GET /api/main-watch` returns the acknowledgements and direct-merge windows. The watch only reports: each unexplained commit raises one attention item until an admin runs `graphyard master main-watch acknowledge SHA --reason TEXT --admin-token-stdin` or `POST /api/main-watch/acknowledge` (`Idempotency-Key`).
 
 ## Rollback
 
