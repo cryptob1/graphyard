@@ -164,8 +164,11 @@ export interface GoalContext {
 }
 /** Whether `text` names `id` as a whole word: `candidate-gates` is not named by `candidate-gates-promotion`. */
 const names = (text: string, id: string) => new RegExp(`(?<![\\w-])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text);
+/** A negation before `retire` turns it into a keep: `do not retire a` keeps a. */
+const negation = String.raw`(?:(?<![\w-])(?:not|never|no\s+longer)|n't)\s+(?:to\s+)?`;
+const verbs = { retire: String.raw`(?<!${negation})(?<![\w-])retire`, keep: String.raw`(?:(?<![\w-])keep|${negation}retire)` };
 /** The clauses of `text` that open with `verb`, each running to the next `;`, sentence end, `or`, `but`, `keep` or `retire`: `retire a, b and c, or keep them` retires a, b and c. */
-const clauses = (text: string, verb: string) => [...text.matchAll(new RegExp(`(?<![\\w-])${verb}(?![\\w-])(.*?)(?=[;.](?:\\s|$)|(?<![\\w-])(?:or|but|keep|retire)(?![\\w-])|$)`, 'gis'))].map(match => match[1]);
+const clauses = (text: string, verb: keyof typeof verbs) => [...text.matchAll(new RegExp(`${verbs[verb]}(?![\\w-])(.*?)(?=[;.](?:\\s|$)|(?<![\\w-])(?:or|but|keep|retire)(?![\\w-])|$)`, 'gis'))].map(match => match[1]);
 
 /** A new goal, in acceptance drafting. */
 export function recordGoal(input: unknown, key: string, context: GoalContext): Goal {
@@ -243,8 +246,8 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
       `Request ${id} on ${work} is not an approved goals-and-priorities decision (${answer ? `answered: ${answer.text}` : 'unanswered'}); only one the operator answered "Go ahead as asked" amends a goal`, 422);
     demand(protectingStages.includes(goal.stage), `${goal.key} protects no case yet; its acceptance change has not merged`);
     demand(!(goal.amendments ?? []).some(entry => entry.decision === id), `Decision ${id} is already applied to ${goal.key}`);
-    // What it retires is what its `retire` clauses name, never every outcome it mentions; one it also keeps is ambiguous.
-    const named = (verb: string) => goal.protected.outcomes.filter(outcome => clauses(request.needed, verb).some(clause => names(clause, outcome)));
+    // What it retires is what its un-negated `retire` clauses name, never every outcome it mentions; one it also keeps is ambiguous.
+    const named = (verb: keyof typeof verbs) => goal.protected.outcomes.filter(outcome => clauses(request.needed, verb).some(clause => names(clause, outcome)));
     const outcomes = named('retire'), kept = named('keep').filter(outcome => outcomes.includes(outcome));
     demand(names(request.needed, goal.key) && outcomes.length, `Request ${id} on ${work} retires no protected outcome of ${goal.key} (${goal.protected.outcomes.join(', ')}); it asked: ${request.needed}`, 422);
     demand(!kept.length, `Request ${id} on ${work} both retires and keeps ${kept.join(', ')}; ask the operator again with one answer per outcome`, 422);

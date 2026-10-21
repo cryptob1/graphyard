@@ -422,7 +422,7 @@ async function parkedOn(needed: string) {
 
 test('integration:goal-amend-applies-approved-retirement — `graphyard goal amend GOAL-N --apply-decision ID` removes exactly the outcomes and cases the operator\'s approved decision names, records the decision on the goal\'s history, and refuses an unknown or unapproved decision', async () => {
   const goal = await amendedGoal('rc-promotion');
-  const { work, request } = await parkedOn(`A decision to amend ${goal.key}: retire its protected outcome rc-promotion (case rc-promotion); keep rc-promotion-audit`);
+  const { work, request } = await parkedOn(`A decision to amend ${goal.key}: retire its protected outcome rc-promotion (case rc-promotion); do not retire rc-promotion-audit`);
   // Unanswered, it is no decision yet.
   const open = await call(master, 'POST', `goals/${goal.key}/amend`, { decision: request.id });
   assert.equal(open.status, 422); assert.match(open.text, /not an approved goals-and-priorities decision \(unanswered\)/);
@@ -441,7 +441,7 @@ test('integration:goal-amend-applies-approved-retirement — `graphyard goal ame
   assert.equal(both.status, 422); assert.match(both.text, /both retires and keeps rc-promotion-audit/);
 
   const amended: Goal = await cli(master, ['amend', goal.key, '--apply-decision', request.id]);
-  assert.deepEqual(amended.protected, { cases: ['rc-promotion-audit'], outcomes: ['rc-promotion-audit'] }, 'the request retires rc-promotion and keeps rc-promotion-audit');
+  assert.deepEqual(amended.protected, { cases: ['rc-promotion-audit'], outcomes: ['rc-promotion-audit'] }, 'the request retires rc-promotion; its negated retire keeps rc-promotion-audit');
   assert.equal(amended.amendments?.length, 1);
   assert.deepEqual({ ...amended.amendments![0], at: null, approvedAt: null }, { decision: request.id, work: work.key, outcomes: ['rc-promotion'], cases: ['rc-promotion'], approvedBy: operator.id, approvedAt: null, by: master.id, at: null });
   const shown = await ok(master, 'GET', `goals/${goal.key}`);
