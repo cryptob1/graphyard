@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { demand, operatorCapability, type OperatorCapability, type Principal, type Work } from '../../model.js';
-import { appendGoal, applyGoalCommand, goalCommandSchemas, goalHistory, goalKeyPattern, goalSummary, implementersOf, readGoals, recordGoal, type Goal, type GoalCommand, type Landing } from '../../model/goal.js';
+import { appendGoal, applyGoalCommand, goalCommandSchemas, goalHistory, goalKeyPattern, goalSummary, implementersOf, readGoals, recordGoal, type Goal, type GoalCommand, type GoalContext, type Landing } from '../../model/goal.js';
 import { planItemInput, planItemMark, planOrder, mergedItem } from '../../model/goal-plan.js';
 import type { Engine } from '../../engine.js';
 import type { Store } from '../../store.js';
@@ -31,10 +31,18 @@ function allow({ actor, services }: RouteContext, roles: Principal['role'][], ca
  */
 const permitted: Record<Exclude<GoalCommand, 'record' | 'merged' | 'released'>, (context: RouteContext) => void> = {
   draft: intent, approve: judge, refuse: judge, closed: intent, deliver: intent, land: intent, 'case-change-approve': judge, 'case-change-refuse': judge,
-  plan: intent, 'plan-approve': judge, 'plan-refuse': judge, 'plan-invalid': intent, release: intent,
+  plan: intent, 'plan-approve': judge, 'plan-refuse': judge, 'plan-invalid': intent, release: intent, amend: intent,
   'case-change': context => demand(!['reader', 'producer'].includes(context.actor.role), 'A reader or producer cannot request a case change', 403),
 };
 const find = (goals: Goal[], ref: string) => goals.find(goal => goal.key === ref || goal.id === ref);
+/** GY-2602: the human-only request with this id and the item it was raised on, answered or still open. */
+async function humanRequestById(db: pg.PoolClient, id: string): Promise<GoalContext['decision']> {
+  const row = (await db.query(`SELECT i.key, w.document FROM work_items w JOIN work_index i ON i.id = w.id
+    WHERE w.document->'humanRequests' @> $1::jsonb OR w.document->'humanRequest'->>'id' = $2 LIMIT 1`, [JSON.stringify([{ id }]), id])).rows[0];
+  const work = row?.document as Work | undefined;
+  const request = [...(work?.humanRequests ?? []), ...(work?.humanRequest ? [work.humanRequest] : [])].find(entry => entry.id === id);
+  return request ? { work: row.key, request } : null;
+}
 const workByKey = async (db: pg.PoolClient, key: string) => (await db.query('SELECT w.document FROM work_index i JOIN work_items w ON w.id = i.id WHERE i.key = $1', [key])).rows[0]?.document as Work | undefined;
 
 /**
@@ -216,7 +224,7 @@ export const goalRoutes = defineRoutes('goals', [
     },
   },
   {
-    method: 'POST', path: /^\/api\/goals\/([^/]+)\/(draft|approve|refuse|closed|deliver|plan|plan-approve|plan-refuse|plan-invalid|case-change|case-change-approve|case-change-refuse)$/,
+    method: 'POST', path: /^\/api\/goals\/([^/]+)\/(draft|approve|refuse|closed|deliver|plan|plan-approve|plan-refuse|plan-invalid|case-change|case-change-approve|case-change-refuse|amend)$/,
     async handle(context, [ref, verb]) {
       const command = verb as Exclude<GoalCommand, 'record' | 'land' | 'merged' | 'release' | 'released'>;
       permitted[command](context);
@@ -243,7 +251,8 @@ export const goalRoutes = defineRoutes('goals', [
             implementers = implementersOf(work);
           }
         }
-        const next = applyGoalCommand(goal, command, input, { actor, at: now.toISOString(), others: goals, implementers, undelivered });
+        const decision = command === 'amend' ? await humanRequestById(db, goalCommandSchemas.amend.parse(input).decision) : undefined;
+        const next = applyGoalCommand(goal, command, input, { actor, at: now.toISOString(), others: goals, implementers, undelivered, decision });
         await appendGoal(db, actor.id, command, next, input);
         return next;
       });

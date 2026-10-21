@@ -5,6 +5,7 @@ import { applyPlanCommand, isPlanCommand, planCommandSchemas, planNext, type Goa
 import { demand } from './refusal.js';
 import { acceptanceName, acceptedNext } from './goal-acceptance.js';
 export { acceptanceChangeRisk, acceptanceChangeRule, acceptanceName } from './goal-acceptance.js';
+import type { HumanRequest } from './human-request.js';
 import type { Observation, Principal, ScopeFile, Work } from './work.js';
 
 /**
@@ -85,6 +86,8 @@ export const goalCommandSchemas = {
   'case-change': z.object({ work: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), cases: z.array(caseId).min(1).max(50), reason }).strict(),
   'case-change-approve': z.object({ change: z.string().uuid(), reason }).strict(),
   'case-change-refuse': z.object({ change: z.string().uuid(), reason }).strict(),
+  /** GY-2602: apply the operator's answered goals-and-priorities request: retire the protected outcomes it names. */
+  amend: z.object({ decision: z.string().uuid() }).strict(),
 } as const;
 export type GoalCommand = 'record' | 'draft' | keyof typeof goalCommandSchemas;
 
@@ -118,7 +121,10 @@ export interface Goal extends GoalInput {
   planDrafts?: number;
   /** The work items created and released for the approved plan, in dependency order. */
   items?: { ref: string; key: string; id: string }[];
+  /** GY-2602: the operator's decisions applied to the protected set: the request, the item it was raised on, and what it retired. */
+  amendments?: Amendment[];
 }
+export interface Amendment { decision: string; work: string; outcomes: string[]; cases: string[]; approvedBy: string; approvedAt: string; by: string; at: string }
 
 /** The contract bindings a draft adds to e2e/contract.json: one outcome, its criteria and its one case. */
 export const contractBindings = (draft: Pick<AcceptanceDraft, 'outcomes'>): ReleaseContract['outcomes'] =>
@@ -153,7 +159,11 @@ export interface GoalContext {
   undelivered?: readonly string[];
   /** For a release: what is wrong with the created items (missing, unreleased, a dependency not carried); the route reads them. */
   unreleased?: readonly string[];
+  /** For an amendment: the human-only request it names and the item it was raised on, or null when none has that id; the route reads it. */
+  decision?: { work: string; request: HumanRequest } | null;
 }
+/** Whether `text` names `id` as a whole word: `candidate-gates` is not named by `candidate-gates-promotion`. */
+const names = (text: string, id: string) => new RegExp(`(?<![\\w-])${id.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`).test(text);
 
 /** A new goal, in acceptance drafting. */
 export function recordGoal(input: unknown, key: string, context: GoalContext): Goal {
@@ -220,6 +230,21 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
     demand(!unknown.length, `${goal.key} does not protect ${unknown.join(', ')}; it protects ${goal.protected.cases.join(', ')}`, 422);
     demand(next.caseChanges.length < 100, `${goal.key} holds 100 case changes; no more can be requested`, 422);
     next.caseChanges.push({ id: randomUUID(), work: data.work, cases: [...new Set(data.cases)], reason: data.reason, requestedBy: actor.id, requestedAt: at, state: 'requested', judgedBy: null, judgedAt: null, judgement: null });
+  } else if (command === 'amend') {
+    // The operator's answer is the authority: a goals-and-priorities request they answered with a choice as asked, naming this goal and the outcomes it retires.
+    const { decision: id } = goalCommandSchemas.amend.parse(input);
+    const decision = context.decision;
+    demand(decision && decision.request.id === id, `No human-only request ${id}; name the id of the operator's answered goals-and-priorities request`, 404);
+    const { request, work } = decision, answer = request.answer;
+    demand(request.kind === 'goals-and-priorities' && answer?.outcome === 'provided' && answer.choice && !answer.note,
+      `Request ${id} on ${work} is not an approved goals-and-priorities decision (${answer ? `answered: ${answer.text}` : 'unanswered'}); only one the operator answered with a choice as asked amends a goal`, 422);
+    demand(protectingStages.includes(goal.stage), `${goal.key} protects no case yet; its acceptance change has not merged`);
+    demand(!(goal.amendments ?? []).some(entry => entry.decision === id), `Decision ${id} is already applied to ${goal.key}`);
+    const outcomes = goal.protected.outcomes.filter(outcome => names(request.needed, outcome));
+    demand(names(request.needed, goal.key) && outcomes.length, `Request ${id} on ${work} names no protected outcome of ${goal.key} (${goal.protected.outcomes.join(', ')}); it asked: ${request.needed}`, 422);
+    const cases = (goal.acceptance?.outcomes ?? []).filter(outcome => outcomes.includes(outcome.id)).map(outcome => outcome.case.id);
+    next.protected = { cases: goal.protected.cases.filter(entry => !cases.includes(entry)), outcomes: goal.protected.outcomes.filter(entry => !outcomes.includes(entry)) };
+    next.amendments = [...(goal.amendments ?? []), { decision: id, work, outcomes, cases, approvedBy: answer.by, approvedAt: answer.at, by: actor.id, at }];
   } else {
     const data = goalCommandSchemas[command].parse(input);
     const change = next.caseChanges.find(entry => entry.id === data.change);
@@ -261,7 +286,9 @@ const touches = (file: Pick<ScopeFile, 'status' | 'baseSha' | 'sha'>) => file.st
  * the goal. A change the item holds an approved case change for passes, unless that change's
  * approver has since implemented the item. e2e/contract.json — changed, deleted or renamed away —
  * passes only when the item's approved case changes cover every case the goal protects, since the
- * observation carries no contents to tell which binding moved.
+ * observation carries no contents to tell which binding moved — or when the operator's decision
+ * raised on this item amended the goal (GY-2602): that item drops the retired bindings, while the
+ * cases still protected keep refusing their own files.
  */
 export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Work, 'implementers' | 'lease' | 'lastAssignment'>>, observation: Pick<Observation, 'files' | 'scopeFiles'> | null, goals: readonly Goal[]): string[] {
   if (!observation) return [];
@@ -284,7 +311,7 @@ export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Wor
       }
     }
     const renamedAway = file.status === 'renamed' && file.previousPath === contractFile && file.path !== contractFile;
-    if ((file.path === contractFile && touches(file)) || renamedAway) for (const goal of guarding) {
+    if ((file.path === contractFile && touches(file)) || renamedAway) for (const goal of guarding.filter(entry => !(entry.amendments ?? []).some(amendment => amendment.work === work.key))) {
       const ungranted = goal.protected.cases.filter(id => !granted(goal, id));
       if (ungranted.length) refusals.push(`${protectedCasePrefix}${contractFile} ${file.status === 'removed' || renamedAway ? 'deletes' : 'modifies'} the contract binding${goal.protected.outcomes.length === 1 ? '' : 's'} ${goal.protected.outcomes.join(', ')} of ${goal.key}, and no approved case change covers ${ungranted.join(', ')}; ${how(goal)}`);
     }
@@ -294,7 +321,7 @@ export function protectedCaseRefusals(work: Pick<Work, 'key'> & Partial<Pick<Wor
 
 // ---- The ledger: one event per change, each carrying the whole goal ------------------------------
 export const goalEventKinds = ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.refuse', 'goal.closed', 'goal.merged', 'goal.deliver', 'goal.case-change', 'goal.case-change-approve', 'goal.case-change-refuse',
-  'goal.plan', 'goal.plan-approve', 'goal.plan-refuse', 'goal.plan-invalid', 'goal.released'] as const;
+  'goal.plan', 'goal.plan-approve', 'goal.plan-refuse', 'goal.plan-invalid', 'goal.released', 'goal.amend'] as const;
 /** A goal recorded before planning existed (GY-1418) said `planned` for an approved, unmerged acceptance draft: that stage is `accepted` now. */
 export const currentGoal = (goal: Goal): Goal => goal.stage === 'planned' && !goal.merged ? { ...goal, stage: 'accepted' } : goal;
 interface Queryable { query(sql: string, params?: unknown[]): Promise<{ rows: any[] }> }

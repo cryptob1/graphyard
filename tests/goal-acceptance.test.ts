@@ -392,3 +392,70 @@ test('unit:required-cases-protected — after the acceptance change merges, a ca
   const early = await call(master, 'POST', `goals/${goal.key}/deliver`, { items: [work.key], reason: 'Every implementation item delivered' });
   assert.equal(early.status, 409); assert.match(early.text, new RegExp(`${goal.key} is planning; only a goal being delivered is recorded delivered`));
 });
+
+// GY-2602: the operator's answered goals-and-priorities request retires the protected outcomes it names.
+async function amendedGoal(name: string) {
+  const merges = new Map<string, string>([['9'.repeat(40), '8'.repeat(40)]]);
+  engine.gitRunner = (async (args: string[]) => {
+    if (args[0] === 'fetch') return { status: 0, stdout: '', stderr: '' };
+    if (args[0] === 'rev-parse') { const merged = merges.get(args.at(-1)!.replace(/\^2$/, '')); return merged ? { status: 0, stdout: `${merged}\n`, stderr: '' } : { status: 1, stdout: '', stderr: 'unknown revision' }; }
+    if (args[0] === 'rev-list') return { status: 0, stdout: [...merges.keys()].join('\n'), stderr: '' };
+    throw new Error(`unexpected git ${args.join(' ')}`);
+  }) as never;
+  engine.baseBranch = 'main';
+  const recorded: Goal = await ok(master, 'POST', 'goals', goalInput(`Operators can ${name} a release candidate`));
+  const outcomes = [...draftOf(recorded.key, name).outcomes, ...draftOf(recorded.key, `${name}-audit`).outcomes];
+  await ok(author, 'POST', `goals/${recorded.key}/draft`, { outcomes, pr: null, branch: `graphyard/${name}`, head: '8'.repeat(40) });
+  await ok(approver, 'POST', `goals/${recorded.key}/approve`, { reason: 'Both cases check what the customer asked for' });
+  const goal: Goal = (await ok(master, 'POST', `goals/${recorded.key}/land`, { mergeSha: '9'.repeat(40) })).goal;
+  assert.deepEqual(goal.protected, { cases: [name, `${name}-audit`], outcomes: [name, `${name}-audit`] });
+  return goal;
+}
+/** An item parked on a goals-and-priorities request asking NEEDED, and the request. */
+async function parkedOn(needed: string) {
+  const { work, observe } = await claimed(['e2e/', 'src/']);
+  await ok(worker, 'POST', `work/${work.key}/park`, { epoch: work.epoch, kind: 'goals-and-priorities', needed, reason: 'Deleting the cases is a goal change',
+    ask: 'Choose whether to retire the outcome.', recommendation: 'Go ahead as asked', why: 'The release candidate pipeline is being removed.' });
+  const parked = (await store.list()).find(item => item.id === work.id)!;
+  return { work: parked, observe, request: parked.humanRequest! };
+}
+
+test('integration:goal-amend-applies-approved-retirement — `graphyard goal amend GOAL-N --apply-decision ID` removes exactly the outcomes and cases the operator\'s approved decision names, records the decision on the goal\'s history, and refuses an unknown or unapproved decision', async () => {
+  const goal = await amendedGoal('rc-promotion');
+  const { work, request } = await parkedOn(`A decision to amend ${goal.key}: retire its protected outcome rc-promotion (case rc-promotion), or keep it and drop the item`);
+  // Unanswered, it is no decision yet.
+  const open = await call(master, 'POST', `goals/${goal.key}/amend`, { decision: request.id });
+  assert.equal(open.status, 422); assert.match(open.text, /not an approved goals-and-priorities decision \(unanswered\)/);
+  await ok(operator, 'POST', `work/${work.key}/answer`, { request: request.id, choice: 'agree' });
+  // An unknown id, and an id whose answer declined, are refused.
+  assert.equal((await call(master, 'POST', `goals/${goal.key}/amend`, { decision: randomUUID() })).status, 404);
+  const declined = await parkedOn(`Retire ${goal.key}'s outcome rc-promotion-audit`);
+  await ok(operator, 'POST', `work/${declined.work.key}/answer`, { request: declined.request.id, choice: 'decline' });
+  const refused = await call(master, 'POST', `goals/${goal.key}/amend`, { decision: declined.request.id });
+  assert.equal(refused.status, 422); assert.match(refused.text, /answered: Decline/);
+  assert.equal((await call(worker, 'POST', `goals/${goal.key}/amend`, { decision: request.id })).status, 403, 'a worker does not amend a goal');
+
+  const amended: Goal = await cli(master, ['amend', goal.key, '--apply-decision', request.id]);
+  assert.deepEqual(amended.protected, { cases: ['rc-promotion-audit'], outcomes: ['rc-promotion-audit'] }, 'rc-promotion-audit is not named: `rc-promotion` names only itself');
+  assert.equal(amended.amendments?.length, 1);
+  assert.deepEqual({ ...amended.amendments![0], at: null, approvedAt: null }, { decision: request.id, work: work.key, outcomes: ['rc-promotion'], cases: ['rc-promotion'], approvedBy: operator.id, approvedAt: null, by: master.id, at: null });
+  const shown = await ok(master, 'GET', `goals/${goal.key}`);
+  assert.deepEqual(shown.goal.protected, amended.protected);
+  assert.deepEqual(shown.history.at(-1).change, { decision: request.id }); assert.equal(shown.history.at(-1).kind, 'goal.amend');
+  const again = await call(master, 'POST', `goals/${goal.key}/amend`, { decision: request.id });
+  assert.equal(again.status, 409); assert.match(again.text, /already applied/);
+});
+
+test('unit:protected-case-refusals-honor-amendment — once the approved retirement is applied, deleting the retired cases and their contract bindings passes for the item the decision was raised on, while a case still protected refuses as before', async () => {
+  const goal = await amendedGoal('rc-retire');
+  const { work, request, observe } = await parkedOn(`Amend ${goal.key}: retire outcome rc-retire and its case rc-retire`);
+  const deletion = [changed('e2e/cases/rc-retire.json', 'removed'), changed('e2e/contract.json')];
+  assert.match(protectedCaseRefusals(work, observe(deletion as never), [goal]).join('; '), /deletes required case rc-retire .*e2e\/contract.json modifies the contract bindings/);
+  await ok(operator, 'POST', `work/${work.key}/answer`, { request: request.id, choice: 'agree' });
+  const amended: Goal = await ok(master, 'POST', `goals/${goal.key}/amend`, { decision: request.id });
+  assert.deepEqual(protectedCaseRefusals(work, observe(deletion as never), [amended]), []);
+  assert.match(protectedCaseRefusals(work, observe([changed('e2e/cases/rc-retire-audit.json', 'removed')] as never), [amended]).join('; '), /Protected case: e2e\/cases\/rc-retire-audit.json deletes required case rc-retire-audit/);
+  // Another item's contract edit is still judged against the cases the goal protects.
+  const other = await claimed(['e2e/']);
+  assert.match(protectedCaseRefusals(other.work, other.observe([changed('e2e/contract.json')] as never), [amended]).join('; '), /modifies the contract binding rc-retire-audit/);
+});

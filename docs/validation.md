@@ -47,7 +47,7 @@ One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun
 
 ## Goals and acceptance
 
-`goal FILE` records (`statement`/`users`/`constraints`/`deployTarget`). The `acceptance` role drafts outcomes (one required `uat` case each); the merge writer lands that commit on another identity's approver verdict, and `goal land` records it (any other route refused). Protected case or `e2e/contract.json` changes need the item's `goal case-change`, approved by neither requester nor implementer. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production. A failed outcome's hold clears when every attached case passes on a newer served candidate.
+`goal FILE` records (`statement`/`users`/`constraints`/`deployTarget`). The `acceptance` role drafts outcomes (one required `uat` case each); the merge writer lands that commit on another identity's approver verdict, and `goal land` records it (any other route refused). Protected case or `e2e/contract.json` changes need the item's `goal case-change`, approved by neither requester nor implementer. To retire outcomes outright, `goal amend GOAL-N --apply-decision REQUEST_ID` applies the operator's answered goals-and-priorities request: the protected outcomes it names, and their cases, leave the protected set, the decision is recorded on the goal's history, and the item it was raised on may then drop their contract bindings. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production. A failed outcome's hold clears when every attached case passes on a newer served candidate.
 
 ## Evidence reuse and replay
 
