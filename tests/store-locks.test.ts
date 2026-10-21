@@ -255,7 +255,7 @@ test('integration:index-matches-documents — the index equals the documents aft
   // The SQL and the TypeScript form of the view keep the same amounts.
   assert.deepEqual([coordinationTail, coordinationRecords, coordinationSessions], [coordinationHistoryLimit, coordinationRecordLimit, coordinationSessionLimit]);
   const store = await open('lifecycle');
-  const engine = new Engine(store, [15368], 120, 'owner/project');
+  const engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, executor, coordinator, ci];
   const reload = async (item: Work) => (await store.list()).find(entry => entry.id === item.id)!;
   const check = (label: string) => assertIndexMatches(store, label);
@@ -329,7 +329,7 @@ test('integration:index-matches-documents — the index equals the documents aft
   await assertIndexMatches(board, 'board');
   assert.equal(Number((await board.pool.query('SELECT count(*) AS n FROM work_index WHERE settled')).rows[0].n), BOARD_ITEMS - LIVE_ITEMS);
   const token = 'c'.repeat(40);
-  const http = server(new Engine(board, [15368], 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token }]);
+  const http = server(new Engine(board, 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   try {
     const read = async (headers: Record<string, string> = {}) => {

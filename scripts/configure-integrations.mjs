@@ -17,7 +17,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 export const trustedAcceptanceId = 'trusted-acceptance';
 /** The GitHub secret each generated producer's token is stored in, beside the deployed roster. */
-export const producerSecrets = { [trustedAcceptanceId]: 'GRAPHYARD_PRODUCER_TOKEN', 'ci-proofs': 'GRAPHYARD_CI_PRODUCER_TOKEN' };
+export const producerSecrets = { [trustedAcceptanceId]: 'GRAPHYARD_PRODUCER_TOKEN' };
 
 /** The command-line choices: --apply, --deploy, and each --rotate ID / --remove ID. */
 export function parseOptions(argv) {
@@ -141,7 +141,6 @@ async function main() {
   register();
   const { contracts } = await import('./contracts.mjs');
   const { delegationLimitAssignments, readDeployedDelegationLimits } = await import('../src/install/limits.ts');
-  const { ciProducerId, ciProducerSecret, ciProducerGrants, withCiProducer } = await import('../src/install/ci-proofs.ts');
   const { generatedFilesAssignment } = await import('../src/install/generated-files.ts');
   const { repositoryPolicyAssignment } = await import('../src/model/repository-policy.ts');
   const options = parseOptions(process.argv.slice(2));
@@ -155,7 +154,7 @@ async function main() {
     try { app = JSON.parse(await readFile(new URL('.graphyard/github-app.json', root), 'utf8')); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     if (!apply) {
       console.log(JSON.stringify({ repository, url, appRegistered: !!app?.appId, installationVerified: !!app?.installationId,
-        changes: ['Restrict graphyard-reporting environment to main only', 'Send App credentials to Railway secret variables', 'Read the live GRAPHYARD_PRINCIPALS from Railway and merge .graphyard/credentials.json into it by id; a live principal leaves only when named with --remove ID, and the coordinator, admins and live principals are never dropped silently', `Keep the ${trustedAcceptanceId} producer scoped to ${Object.keys(contracts).join(' and ')} and its live token; rotate it only with --rotate ${trustedAcceptanceId}`, `Keep the ${ciProducerId} CI producer scoped to ${ciProducerGrants.join(' and ')} (never manual:* or e2e:*) with runtime github-actions and its live token; rotate it only with --rotate ${ciProducerId}`, 'Print the roster preview by id, role and token change (never a token value)', 'Derive the GRAPHYARD_MAX_*/MIN_* capacity variables from the merged roster, report drift against the deployed values, and set them beside GRAPHYARD_PRINCIPALS', 'Derive GRAPHYARD_GENERATED_FILES from the repository generated-file manifest and set it beside GRAPHYARD_PRINCIPALS', 'Set GRAPHYARD_REPOSITORY_POLICY from graphyard.json\'s risk, review and e2e sections', 'Set Graphyard URL on that environment', 'Stage variables without deploying when no token changes; a changed token requires --deploy, which redeploys and sets its GitHub secret only once the deployment authenticates it'],
+        changes: ['Restrict graphyard-reporting environment to main only', 'Send App credentials to Railway secret variables', 'Read the live GRAPHYARD_PRINCIPALS from Railway and merge .graphyard/credentials.json into it by id; a live principal leaves only when named with --remove ID, and the coordinator, admins and live principals are never dropped silently', `Keep the ${trustedAcceptanceId} producer scoped to ${Object.keys(contracts).join(' and ')} and its live token; rotate it only with --rotate ${trustedAcceptanceId}`, 'Print the roster preview by id, role and token change (never a token value)', 'Derive the GRAPHYARD_MAX_*/MIN_* capacity variables from the merged roster, report drift against the deployed values, and set them beside GRAPHYARD_PRINCIPALS', 'Derive GRAPHYARD_GENERATED_FILES from the repository generated-file manifest and set it beside GRAPHYARD_PRINCIPALS', 'Set GRAPHYARD_REPOSITORY_POLICY from graphyard.json\'s risk, review and e2e sections', 'Set Graphyard URL on that environment', 'Stage variables without deploying when no token changes; a changed token requires --deploy, which redeploys and sets its GitHub secret only once the deployment authenticates it'],
         options, blockedBy: !app?.installationId ? 'Complete graphyard github-setup and install the App first' : null }, null, 2));
       process.exit(0);
     }
@@ -164,14 +163,12 @@ async function main() {
     stage = 'read the live principal roster';
     const liveVariables = JSON.parse(execFileSync('npx', [...railway, 'variable', 'list', '--service', 'graphyard', '--json'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }));
     const live = liveVariables.GRAPHYARD_PRINCIPALS ? JSON.parse(liveVariables.GRAPHYARD_PRINCIPALS) : [];
-    const principals = mergeRoster(live, local, options.remove).map(entry => entry.id === ciProducerId && options.rotate.includes(ciProducerId) ? { ...entry, token: undefined } : entry);
+    const principals = mergeRoster(live, local, options.remove);
     const gh = (args, input) => execFileSync('gh', args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'] });
     const endpoint = `repos/${repository}/environments/graphyard-reporting`;
     // The reporter may publish exactly the protected contract inventories and nothing else.
     const producer = generatedProducer(live, trustedAcceptanceId, { role: 'producer', proofs: Object.keys(contracts) }, options.rotate);
-    // The CI lane's producer publishes what the protected workflow ran on each candidate push. Its
-    // token is kept from the live roster; --rotate ci-proofs rotates it with the secret.
-    const roster = withCiProducer([...principals.filter(p => p.id !== producer.id), producer]);
+    const roster = [...principals.filter(p => p.id !== producer.id), producer];
     stage = 'check the merged roster';
     assertRosterSafe(live, roster, options);
     const recordFile = new URL('.graphyard/pending-secret-sync.json', root);

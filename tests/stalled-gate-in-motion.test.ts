@@ -14,7 +14,7 @@ import { syncConflict } from '../src/daemon/decisions.js';
 import { unboundedAttemptKey } from '../src/daemon/cycle-reclaim.js';
 import { reviewNeed } from '../src/model/dispatch.js';
 import { workFaults } from '../src/model/fault-classes.js';
-import { baseRefreshConflict } from '../src/merge-queue.js';
+import { baseRefreshConflict } from '../src/model/base-refresh.js';
 import { coordinationSnapshot } from '../src/server/work-view.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -243,7 +243,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('base-hold'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

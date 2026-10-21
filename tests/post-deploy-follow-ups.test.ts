@@ -168,7 +168,7 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   const released = (at: string, overrides: Partial<Work> = {}): Work => {
     const item = { ...gy1685, ...createSchema.parse(input), id: 'c0ffee00-0000-4000-8000-000000001689', key: 'GY-1689', stage: 'ready', revision: 3, ready: true, delivery: undefined, submission: null, workspaces: [], lease: null, epoch: 0,
       createdAt: '2026-10-11T03:36:11.661Z', updatedAt: at, stageEnteredAt: '2026-10-11T06:39:00.000Z', gates: [], ...overrides } as unknown as Work;
-    const evaluated = evaluate(item, [gy1685, item], new Date(at), [15368]);
+    const evaluated = evaluate(item, [gy1685, item], new Date(at));
     // `nextAction: null` is the control plane having computed an action and found none, as its evaluation writes it.
     return { ...item, stage: evaluated.stage, gates: evaluated.gates, violations: evaluated.violations, nextAction: null };
   };
@@ -255,7 +255,7 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   const gy1724 = (() => {
     const base = { ...gy1700, ...createSchema.parse(input24), id: 'c0ffee00-0000-4000-8000-000000001724', key: 'GY-1724', stage: 'ready', revision: 3, ready: true, delivery: undefined, submission: null, workspaces: [], lease: null, epoch: 0,
       createdAt: '2026-10-12T07:33:47.000Z', updatedAt: '2026-10-12T07:34:00.000Z', stageEnteredAt: '2026-10-12T07:34:00.000Z', gates: [] } as unknown as Work;
-    const evaluated = evaluate(base, [gy1700, base], new Date('2026-10-12T07:36:00.000Z'), [15368]);
+    const evaluated = evaluate(base, [gy1700, base], new Date('2026-10-12T07:36:00.000Z'));
     return { ...base, stage: evaluated.stage, gates: evaluated.gates, violations: evaluated.violations, nextAction: null } as Work;
   })();
   const live = '2026-10-13T07:33:40.939Z', pair = [gy1700, gy1724];

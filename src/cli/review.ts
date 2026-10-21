@@ -42,11 +42,9 @@ async function reviewSelf({ api, args }: CliContext) {
 
 /**
  * `review post` (GY-1492): the reviewer session posts its verdict through Graphyard, which checks
- * the launch's review binding, the pull request head, GitHub's mergeability recompute and the
- * closing thread lines first. It runs under the session's own GH_CONFIG_DIR credential and never
- * reads the repository connection file: a reviewer holds no Graphyard credential. In control-plane
- * mode (GY-1525) the binding carries a one-time verdict token instead, and the verdict goes to
- * `POST /api/work/:id/review-verdict` at GRAPHYARD_URL as that token; gh never runs.
+ * the launch's review binding and the bound head first. It never reads the repository connection
+ * file: a reviewer holds no Graphyard credential. The binding carries a one-time verdict token
+ * (GY-1525), and the verdict goes to `POST /api/work/:id/review-verdict` at GRAPHYARD_URL as that token.
  * `review self` (GY-1987) is the worker's own read: it uses the worker's connection, never a
  * binding, and never writes.
  */
@@ -60,9 +58,8 @@ export const reviewCommands = defineCommands([{
     '                                BLOCKING finding before complete',
     '  review post --event APPROVE|REQUEST_CHANGES|COMMENT [--body TEXT]',
     '                                Reviewer session only: post its one verdict on the bound head',
-    '                                (body from stdin without --body) after checking the head,',
-    '                                mergeability and the Resolved/Follow-up/Overridden thread lines;',
-    '                                in control-plane mode the verdict goes to the API, never gh',
+    '                                (body from stdin without --body) after checking the head; the',
+    '                                verdict goes to the control plane',
   ],
   async run(context) {
     const { id, args, print } = context;

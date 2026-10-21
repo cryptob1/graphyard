@@ -56,7 +56,6 @@ test('unit:master-status-headroom — master status exports and report interface
   assert.equal(typeof masterStatus.cycleBudget, 'function');
   assert.equal(typeof masterStatus.approveScopeRequest, 'function');
   assert.equal(typeof masterStatus.observationThroughputStatus, 'function');
-  assert.equal(typeof masterStatus.mergeStallAttention, 'function');
   assert.equal(typeof masterStatus.nameOrphanSupervisors, 'function');
   assert.equal(typeof masterStatus.unansweredRequestAttention, 'function');
   assert.equal(typeof masterStatus.unobtainableReviewAttention, 'function');

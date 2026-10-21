@@ -75,7 +75,7 @@ test('unit:soak-intervention-pattern-escalation-build — a simulated day of the
   await database.initialise(); await database.start(); await database.createDatabase('gy_1768_soak');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/gy_1768_soak`); await store.init();
   try {
-    const engine = new Engine(store, [15368], 120, 'owner/escalation-build'); engine.submissionObserver = null;
+    const engine = new Engine(store, 120, 'owner/escalation-build'); engine.submissionObserver = null;
     // The day's items, each carrying its blocked report as the ledger row left it when the release guards landed. The labels map to the keys the control plane assigns.
     const items = new Map<string, Work>(), keyOf = new Map<string, string>();
     for (const entry of backlog) {

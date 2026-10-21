@@ -9,8 +9,6 @@
 // `derivePlannedFiles` plans them at authoring time.
 import { documentationGlobMatches } from './documentation-glob.js';
 import type { FaultClass } from './fault-classes.js';
-import { ciCheckName } from './ci-refusal.js';
-import { requiredCheckFailurePattern } from './required-check-refusal.js';
 import type { WorkOrigin } from './interventions.js';
 import { namedPaths, pathScope, pathScopeContains, testFile } from './scope.js';
 import { soakSuiteGround } from './repeating-paths.js';
@@ -41,27 +39,6 @@ export const noWallClockGatePath = 'tests/no-wall-clock-time-bombs.test.ts';
 export const noWallClockGate = (path: string) => path === noWallClockGatePath;
 const testScope = (entry: string) => testFile(entry) || pathScope(entry).prefix && /(?:^|\/)(?:tests?|__tests__)\/$/.test(pathScope(entry).path);
 
-/** Candidate, observation, policy and gates the failed-check ground reads, as the test gate reads them. */
-export interface GateRecord { name: string; passed: boolean; reasons: readonly string[]; ciAppIds?: number[] }
-type CheckRun = { name: string; result: string; appId: number; id?: number };
-export interface FailedCheckSource {
-  candidate?: { sha: string; baseSha: string } | null;
-  observation?: { candidate?: { sha: string; baseSha: string }; checks?: readonly CheckRun[]; requiredChecks?: readonly { name: string; appId: number | null }[] } | null;
-  gates?: readonly GateRecord[]; policy?: { checks: readonly string[]; review: boolean } | null;
-}
-/** Same set as merge-queue `failedConclusions` (kept here: importing merge-queue cycles through work.ts → this file). */
-const failedRequiredConclusions = new Set(['failure', 'timed_out', 'cancelled', 'action_required', 'startup_failure', 'stale', 'neutral']);
-/** Newest decisive run: merge-queue `latestCheck` / `newestCheck` (id wins; non-cancelled preferred). */
-const newestDecisiveRun = (runs: readonly CheckRun[]) => {
-  const pool = runs.filter(run => run.result !== 'cancelled');
-  return (pool.length ? pool : runs).reduce<CheckRun | undefined>((a, b) => !a ? b : b.id !== undefined && (a.id === undefined || b.id > a.id) ? b : a.id !== undefined && b.id === undefined ? a : b, undefined);
-};
-/** Trusted counting failure for `name`: a protection-bound app, else test-gate CI apps; newest decisive run (merge-queue `requiredCheckRun`). */
-const trustedRequiredFailure = (name: string, item: FailedCheckSource, boundApp: number | null) => {
-  const apps = boundApp !== null ? [boundApp] : item.gates?.find(gate => gate.name === 'test')?.ciAppIds ?? [15368];
-  const run = newestDecisiveRun((item.observation?.checks ?? []).filter(entry => entry.name === name && apps.includes(entry.appId)));
-  return !!run && run.result !== 'cancelled' && failedRequiredConclusions.has(run.result);
-};
 /**
  * GY-1893: modules each fault class's instances are produced and answered in. Filing plans only
  * the proof test (GY-1706); `impliedScopes` / `plannedCompanions` grant the class's machinery so
@@ -141,39 +118,13 @@ export async function peerModuleGround(path: string, text: string | null, planne
   return null;
 }
 
-/** Prose names the check (paths stripped so `.test.ts` never counts as the `test` check). */
-const reasonNamesCheck = (reason: string, name: string) => {
-  let prose = reason;
-  for (const path of namedPaths(reason)) if (path !== name) prose = prose.split(path).join(' ');
-  prose = prose.replace(/:\d+/g, ' ');
-  return new RegExp(`(?:^|[^\\w.-])${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[^\\w.-]|$)`, 'i').test(prose);
-};
-const reasonQuotesFailureSite = (reason: string, path: string) =>
-  new RegExp(`${path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\d+`).test(reason);
 /**
- * GY-1893 / GY-1881: grant the test file a trusted failed required-check run on this candidate
- * names, when the ask names that held check and quotes `PATH:LINE`. Uses the test gate's selection
- * (CI apps, newest decisive run, sha+base); superseded/untrusted failures and non-tests grant nothing.
- */
-export function failedCheckTestGround(path: string, item: FailedCheckSource, reason?: string): string | null {
-  if (!reason || !testFile(path) || !item.candidate || !namedPaths(reason).includes(path)) return null;
-  if (!reasonQuotesFailureSite(reason, path)) return null;
-  const observation = item.observation, candidate = item.candidate;
-  if (!observation?.candidate || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
-  const policy = item.policy?.checks ?? [];
-  // Membership matches merge-queue requiredChecksOf (policy names plus protection-bound extras).
-  const required = [...policy.map(name => ({ name, appId: null })), ...(observation.requiredChecks ?? []).filter(check => check.name !== 'Graphyard / merge' && check.name !== 'graphyard/landable' && !policy.includes(check.name))];
-  // The gate holds a policy check as not passed, a protection-only one as failed (GY-430).
-  const heldName = (held: string) => ciCheckName(held) ?? requiredCheckFailurePattern.exec(held)?.[1] ?? null;
-  const failed = [...new Set(required.filter(({ name, appId }) => (item.gates ?? []).some(gate => !gate.passed && gate.reasons.some(held => heldName(held) === name)) && reasonNamesCheck(reason, name) && trustedRequiredFailure(name, item, appId)).map(check => check.name))];
-  return failed.length ? `${path} is the test file the failed required check ${failed.join(' and ')} on this item's current candidate names, which the item answers within its attempt` : null;
 }
 /**
  * Companion ground from the item's record alone (no base read): timing / wall-clock gates,
- * proof-named test files, a single `web/` file a criterion describes, and GY-1893's failed
- * required-check test file (reason names the check and `PATH:LINE`). Import/proof-held grounds are the loop's.
+ * proof-named test files and a single `web/` file a criterion describes. Import/proof-held grounds are the loop's.
  */
-export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null } & FailedCheckSource, ask: readonly string[], documentation: readonly string[], reason?: string): string | null {
+export function companionGround(path: string, item: { plannedFiles?: readonly string[]; criteria: readonly CompanionCriterion[]; origin?: WorkOrigin | null; description?: string | null }, ask: readonly string[], documentation: readonly string[], _reason?: string): string | null {
   if (pathScope(path).prefix) return null;
   if (timingBaseline(path)) {
     const tested = [...ask, ...(item.plannedFiles ?? [])].find(entry => entry !== path && testScope(entry) && !timingBaseline(entry) && !noWallClockGate(entry));
@@ -191,9 +142,7 @@ export function companionGround(path: string, item: { plannedFiles?: readonly st
   }
   const described = path.startsWith('web/') && !testFile(path) ? item.criteria.find(criterion => webUi.test(criterion.text)) : undefined;
   if (described) return `${path} is the web UI ${described.id} describes`;
-  const soak = soakSuiteGround(path, item.plannedFiles ?? []);
-  if (soak) return soak;
-  return failedCheckTestGround(path, item, reason);
+  return soakSuiteGround(path, item.plannedFiles ?? []);
 }
 
 /** GY-955 AC-1(b): new test file when some criterion's test proofs are held by no base file. */

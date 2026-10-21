@@ -200,7 +200,7 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   // A generous claim lease: this case reads the same recorded item at synthetic observation
   // times, and a lease that lapses between them would change the status under the reading.
-  engine = new Engine(store, [15368], 3600, 'owner/project');
+  engine = new Engine(store, 3600, 'owner/project');
   engine.principals = [operator, worker, executor];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

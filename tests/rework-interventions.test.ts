@@ -110,7 +110,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('rework-grounds'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('rework_grounds_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/rework_grounds_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/grounds'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/grounds'); engine.submissionObserver = null;
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 

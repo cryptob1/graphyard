@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import type { BaseRefresh } from '../src/merge-queue.js';
+import type { BaseRefresh } from '../src/model/base-refresh.js';
 import { carriedApproval, carryRefusal, currentCarry, decideCarry, evidenceBindsCandidate, refreshedCarriedApproval, type CarryInput, type Evidence, type Observation, type TipMerge, type Work } from '../src/model.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
 import { diagnose } from '../src/coordination.js';

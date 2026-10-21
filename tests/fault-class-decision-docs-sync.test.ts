@@ -5,7 +5,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { RefusedResponse } from '../src/model/refusal.js';
 import type { Observation, Work } from '../src/model.js';
-import type { BaseRefresh } from '../src/merge-queue.js';
+import type { BaseRefresh } from '../src/model/base-refresh.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
 
 /**

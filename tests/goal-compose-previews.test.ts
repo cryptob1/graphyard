@@ -86,7 +86,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('goal-compose-preview-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('compose_preview_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/compose_preview_test`); await store.init();
-  http = server(new Engine(store, [15368], 120, 'owner/fixture'), [{ ...operator, token: tokens.operator }, { ...coordinator, token: tokens.coordinator }]);
+  http = server(new Engine(store, 120, 'owner/fixture'), [{ ...operator, token: tokens.operator }, { ...coordinator, token: tokens.coordinator }]);
   await new Promise<void>(done => http.listen(0, '127.0.0.1', done));
   url = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
 });

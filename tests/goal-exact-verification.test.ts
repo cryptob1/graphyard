@@ -65,7 +65,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('goal-exact-verification-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('exact_verification');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/exact_verification`); await store.init();
-  http = server(new Engine(store, [15368], 120, 'owner/fixture'), credentials);
+  http = server(new Engine(store, 120, 'owner/fixture'), credentials);
   await new Promise<void>(done => http.listen(0, '127.0.0.1', done));
   url = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   production = createServer((request, response) => {

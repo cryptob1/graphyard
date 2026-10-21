@@ -60,7 +60,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('standing-held-wait'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('standing_held_wait');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/standing_held_wait`); await store.init();
-  engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 300, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

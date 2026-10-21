@@ -27,7 +27,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_flow_cache');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_flow_cache`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   http = server(engine, [{ ...operator, token: tokens.operator }, { ...producer, token: tokens.producer }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;

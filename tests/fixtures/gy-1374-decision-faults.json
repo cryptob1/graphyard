@@ -54,7 +54,7 @@
     "name": "merge",
     "passed": false,
     "reasons": [
-     "GitHub has not been observed at the current candidate",
+     "The merge writer has not observed the current candidate",
      "Pull request is not mergeable against the current base",
      "Unresolved lease-loss escalation requires operator resolution: Worker graphyard-claude-1 lost lease epoch 1"
     ]

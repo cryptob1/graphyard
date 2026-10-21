@@ -48,7 +48,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('attribution'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('attribution_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/attribution_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
+  engine = new Engine(store, 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
   const configured = process.env.GRAPHYARD_MAX_REVIEWERS; process.env.GRAPHYARD_MAX_REVIEWERS = '8';
   try { http = server(engine, principals.map(p => ({ ...p, token: tokens[p.id] }))); }
   finally { if (configured === undefined) delete process.env.GRAPHYARD_MAX_REVIEWERS; else process.env.GRAPHYARD_MAX_REVIEWERS = configured; }
@@ -397,7 +397,7 @@ test('integration:reanchor-races', async () => {
   await attest(f, B);
   const second = new Store(store.pool.options.connectionString!);
   try {
-    const replica = new Delivery(new Validation(new Engine(second, [15368], 120, 'test/repository'), principals, 'test/repository'));
+    const replica = new Delivery(new Validation(new Engine(second, 120, 'test/repository'), principals, 'test/repository'));
     // Concurrent observations of the same movement from two observers, through two replicas and a racing dispatch poll: exactly one fresh request.
     const now = Date.now();
     const results = await Promise.all([

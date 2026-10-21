@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
-import type { BaseRefresh } from '../src/merge-queue.js';
+import type { BaseRefresh } from '../src/model/base-refresh.js';
 import * as docsSyncModel from '../src/model/docs-sync.js';
 import { docsSyncWatchSchema } from '../src/model/docs-sync.js';
 import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';

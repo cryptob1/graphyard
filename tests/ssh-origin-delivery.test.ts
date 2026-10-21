@@ -123,7 +123,7 @@ before(async () => {
   await pg.initialise(); await pg.start(); await pg.createDatabase('ssh_origin_delivery');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ssh_origin_delivery`);
   await store.init();
-  engine = new Engine(store, [15368], 120, repository);
+  engine = new Engine(store, 120, repository);
   engine.submissionObserver = null;
   engine.directMergeEnvironment = null;
   engine.baseBranch = 'main';

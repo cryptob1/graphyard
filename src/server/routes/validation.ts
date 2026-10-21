@@ -1,4 +1,3 @@
-import { refuseCiProducer } from '../../model/ci-proofs.js';
 import { gitLedger, importRun, readImports, sealAuthority, sealImports } from '../../validation-import.js';
 import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import type { Engine } from '../../engine.js';
@@ -9,8 +8,6 @@ const checkoutGit = (engine: Engine) => engine.gitRunner ??= gitRunnerFor(proces
 
 /** The validation runner protocol: artifacts, definitions, candidates, attempts and commands. */
 export const validationRoutes = defineRoutes('validation', [
-  // The CI producer's only lane is CI-produced evidence; it never uploads, collects, reuses or replays.
-  { method: 'POST', path: /^\/api\/validation(?:\/|$)/, handle: async ({ actor }) => { refuseCiProducer(actor, 'the validation protocol'); return Next; } },
   { method: 'POST', path: '/api/validation/artifacts', handle: async context => context.services.validation.uploadArtifact(context.actor, await parseJson(context, 11_200_000), context.idempotencyKey()) },
   {
     method: 'GET', path: /^\/api\/validation\/artifacts\/([^/]+)\/([^/]+)$/,

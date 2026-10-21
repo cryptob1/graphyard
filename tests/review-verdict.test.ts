@@ -43,7 +43,7 @@ function item(key: string, fields: Record<string, unknown> = {}): Work {
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['graphyard-claude-1'],
     observation: planeObservation(candidate, ['src/feature.ts']), ...fields } as unknown as Work;
 }
-const reviewGate = (work: Work) => evaluate(work, [work], new Date(), [15368]).gates.find(gate => gate.name === 'review')!;
+const reviewGate = (work: Work) => evaluate(work, [work], new Date()).gates.find(gate => gate.name === 'review')!;
 
 // ——— AC-3: the review gate by risk, and the github reasons unchanged. ———
 test('unit:review-gate-by-risk — with a control-plane observation a sensitive delta requires an exact approval on the head, a normal one passes the review gate and marks the item owed a post-merge review; an approval clears the debt', () => {
@@ -51,9 +51,9 @@ test('unit:review-gate-by-risk — with a control-plane observation a sensitive 
   const gate = reviewGate(sensitive);
   assert.equal(gate.passed, false);
   assert.deepEqual(gate.reasons, [sensitiveReviewRefusal(['src/store/pools.ts: persistence layer'])]);
-  assert.equal(evaluate(sensitive, [sensitive], new Date(), [15368]).postMergeReview, undefined, 'a sensitive delta owes no post-merge review');
+  assert.equal(evaluate(sensitive, [sensitive], new Date()).postMergeReview, undefined, 'a sensitive delta owes no post-merge review');
   const normal = item('GY-2');
-  const passed = evaluate(normal, [normal], new Date(), [15368]);
+  const passed = evaluate(normal, [normal], new Date());
   assert.equal(passed.gates.find(gate => gate.name === 'review')!.passed, true, 'a normal delta passes the review gate without a verdict');
   assert.equal(passed.postMergeReview, 'owed', 'and owes a post-merge review');
   // An approval of the exact head, from a control-plane verdict, lands the sensitive one and clears a normal one's debt.
@@ -61,12 +61,12 @@ test('unit:review-gate-by-risk — with a control-plane observation a sensitive 
   assert.equal(reviewGate(sensitive).passed, true);
   normal.postMergeReview = 'owed';
   normal.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'APPROVED', id: 13, submittedAt: now(), source: 'control-plane' } as never);
-  assert.equal(evaluate(normal, [normal], new Date(), [15368]).postMergeReview, null, 'an approval before the merge clears the owed review');
+  assert.equal(evaluate(normal, [normal], new Date()).postMergeReview, null, 'an approval before the merge clears the owed review');
   // A change request holds a sensitive pre-merge review; a normal-risk one is attention for the
   // post-merge pass and does not hold the gate. The mark never changes a delivered or reviewed item.
   const changes = item('GY-3'); changes.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'CHANGES_REQUESTED', id: 14, submittedAt: now() });
   assert.equal(reviewGate(changes).passed, true, 'a normal-risk change request does not hold the merge');
-  assert.equal(evaluate(changes, [changes], new Date(), [15368]).postMergeReview, 'owed');
+  assert.equal(evaluate(changes, [changes], new Date()).postMergeReview, 'owed');
   const sensitiveChanges = item('GY-3b', { observation: planeObservation({ sha: H, baseSha: B, pr: 7, branch: 'b', author: 'graphyard-claude-1' }, ['src/store/pools.ts']) });
   sensitiveChanges.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'CHANGES_REQUESTED', id: 15, submittedAt: now() });
   assert.ok(reviewGate(sensitiveChanges).reasons.includes('Outstanding change requests must be resolved through a new review'));
@@ -81,16 +81,16 @@ test('unit:review-gate-by-risk — with a control-plane observation a sensitive 
 test('unit:review-gate-github-snapshot — a GitHub-observed item keeps the review gate reasons it had: the plain approval refusal, whatever its paths touch, and no post-merge mark', () => {
   const candidate = { sha: H, baseSha: B, pr: 7, branch: 'b', author: 'worker' };
   const github = item('GY-5', { observation: { at: now(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/feature.ts'], scopeFiles: [], prState: 'open', draft: false } });
-  const result = evaluate(github, [github], new Date(), [15368]);
+  const result = evaluate(github, [github], new Date());
   assert.deepEqual(result.gates.find(gate => gate.name === 'review'), { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] });
   assert.equal('postMergeReview' in result, false);
   const reset = item('GY-6', { formalReviewResetRequired: true, observation: { at: now(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/store/x.ts'], scopeFiles: [], prState: 'open', draft: false } });
-  assert.deepEqual(reviewGate(reset).reasons, ['A new independent GitHub approval after the requirement-review baseline is required']);
+  assert.deepEqual(reviewGate(reset).reasons, ['A new independent approval after the requirement-review baseline is required']);
 });
 
 // ——— AC-1: the binding, and review post in both modes. ———
 const TOKEN = 'f'.repeat(64);
-const bindingOf = (fields: Partial<ReviewPostBinding> = {}): ReviewPostBinding => ({ repository: 'owner/project', key: 'GY-7', pr: 7, sha: H, baseSha: B, policyRevision: 1, criteriaOnly: true, threadsListed: [], ...fields });
+const bindingOf = (fields: Partial<ReviewPostBinding> = {}): ReviewPostBinding => ({ repository: 'owner/project', key: 'GY-7', pr: 7, sha: H, baseSha: B, policyRevision: 1, criteriaOnly: true, ...fields });
 
 test('unit:review-post-control-plane-api — the binding gains mode, head, baseTip and verdictToken; in control-plane mode review post sends { event, body, sha: head, token } to the API as the token and never runs gh; the launch keeps only the token\'s sha256 in .graphyard/reviews.json', async () => {
   const parsed = reviewBindingSchema.parse(bindingOf({ mode: 'control-plane', head: H, baseTip: B, verdictToken: TOKEN }));
@@ -205,7 +205,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('review-verdict-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('review_verdict_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/review_verdict_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

@@ -7,7 +7,6 @@ metadata:
     {{- include "graphyard.labels" . | nindent 4 }}
 data:
   GITHUB_BASE_BRANCH: {{ .Values.config.githubBaseBranch | quote }}
-  GITHUB_CI_APP_IDS: {{ .Values.config.githubCiAppIds | quote }}
   GRAPHYARD_REVIEWER_APPS: {{ .Values.config.reviewerApps | quote }}
   {{- with .Values.config.githubRepository }}
   GITHUB_REPOSITORY: {{ . | quote }}

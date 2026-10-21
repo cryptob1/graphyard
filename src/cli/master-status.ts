@@ -45,7 +45,7 @@ export { approveScopeRequest } from './master-scope.js';
 // the report and the tests read them from here.
 export { observationThroughputStatus } from './stall-attention.js';
 // The attention builders live in `status-attention.ts`; the report reads them from here.
-export { approverLaunchAttention, mergeStallAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
+export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';

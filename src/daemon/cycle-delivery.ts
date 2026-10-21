@@ -1,7 +1,7 @@
 // Concern: cycle steps 5–7 — shepherd reviews, escalate merges the gates never authorized, the release-level deployment reading.
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles } from '../model.js';
 import { type Work } from '../model.js';
-import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
+import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../model/merge-authorization.js';
 import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, message, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
@@ -32,7 +32,7 @@ export async function shepherdStep(cycle: Cycle) {
         const escalationKey = `escalation:review:${item.id}:${item.candidate!.sha}:${item.policyRevision}`;
         if (state.actions[escalationKey]?.state !== 'done') performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: escalation, attempts: 1, cycle: state.cycle }, now(), effects.persist));
       } else {
-        const detail = provider === 'github' ? `${item.key}: an independent GitHub approval of the current commit is required; the coordinator cannot supply it`
+        const detail = provider === 'github' ? `${item.key}: an independent reviewer session's approval of the current commit is required; the coordinator cannot supply it`
           : item.reviewRequest ? `${item.key}: Graphyard dispatched ${provider} review to profile ${item.reviewRequest.profile ?? provider}; waiting for a verdict on ${item.candidate!.sha.slice(0, 12)}`
             : `${item.key}: waiting for Graphyard to dispatch a ${provider} review for ${item.candidate!.sha.slice(0, 12)}`;
         if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
@@ -55,9 +55,8 @@ export async function mergeStep(cycle: Cycle) {
   for (const item of open.filter(mergedWithoutAuthorization)) await isolate('escalation', item, item.key, async () => {
     const key = `${candidateKey('escalation', item)}:merged`;
     if (state.actions[key]?.state === 'done') return;
-    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged on GitHub (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
-  // GY-2010: Main guard attention (revert PRs via the GitHub App) is gone with the API client.
 }
 
 /** Step 7: observe what is actually deployed, as one release-level reading; a merged item is already done (GY-1981). */

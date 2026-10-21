@@ -46,7 +46,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('soak-control-plane-observation-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('soak_control_plane_observation');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/soak_control_plane_observation`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
@@ -184,52 +184,3 @@ test('soak:control-plane-observation — the App-less observation job, run acros
   await store.pool.query('UPDATE jobs SET available_at=now()');
 });
 
-test('soak:control-plane-observation — a pull request retained from before the cutover keeps its GitHub review path: an approval posted after submission is read on a later cycle and passes the review gate, a later request for changes withdraws it, and no head-submitted candidate asks GitHub for reviews (GY-1978)', async () => {
-  // A sensitive change (the persistence layer), so its review is owed before the merge, not after it.
-  const retained = await claimed(5, 'src/store/tables/item-5.ts'), local = await claimed(6);
-  await engine.execute(worker, 'submit', local.w.id, { epoch: 1, head: local.head }, randomUUID());
-  const tip = git(checkout, 'rev-parse', 'refs/remotes/origin/main');
-  // GitHub observed #88 before the cutover: the submission and its candidate are a pull request's.
-  const github = () => ({
-    candidate: { sha: retained.head, baseSha: tip, pr: 88, branch: 'graphyard/gy-5-1', author: 'implementer' },
-    checks: [], reviews: [], prState: 'open', draft: false, merged: false, mergeSha: null, mergeable: true, conflicting: false,
-    protected: false, requiredChecks: [], conversations: { required: false, unresolved: [] },
-    files: ['src/store/tables/item-5.ts'], scopeFiles: [], baseTip: tip, baseTree: tip, baseTipContained: true, baseTipAncestor: true, at: new Date().toISOString(),
-  } as any);
-  engine.submissionObserver = async () => github();
-  try { await engine.execute(worker, 'submit', retained.w.id, { epoch: 1, pr: 88 }, randomUUID()); }
-  finally { engine.submissionObserver = null; }
-  await engine.observe(retained.w.id, (await store.workDocument(retained.w.id))!.revision, github());
-  // GitHub's reviews of #88, as the App reads them; the head-submitted candidate's change number is never asked for.
-  const asked: number[] = [];
-  let reviews: { id: number; reviewer: string; sha: string; state: string; submittedAt: string }[] = [];
-  engine.pullReviewReader = async pr => { asked.push(pr); return { reviews: reviews as any, reviewIds: reviews.map(review => review.id), dismissedReviewIds: [] }; };
-  const reviewGate = async (id: string) => (await store.workDocument(id))!.gates.find(gate => gate.name === 'review')!;
-  try {
-    for (let round = 0; round < 3; round++) {
-      await cycle();
-      const gate = await reviewGate(retained.w.id);
-      assert.equal(gate.passed, false, `cycle ${round}: unapproved, the retained pull request waits for review`);
-      assert.ok(gate.reasons.some(reason => reason.startsWith('Independent approval of the current commit is required')), gate.reasons.join('; '));
-    }
-    // The operator approves the exact head on GitHub after submission: the next cycles read it and the gate passes, and stays passed.
-    reviews = [{ id: 501, reviewer: 'octo-operator', sha: retained.head, state: 'APPROVED', submittedAt: new Date().toISOString() }];
-    for (let round = 0; round < 3; round++) {
-      await cycle();
-      const item = (await store.workDocument(retained.w.id))!;
-      assert.equal(item.observation?.source, 'control-plane', 'the head is still observed from the checkout, for the merge writer');
-      assert.deepEqual(item.observation?.reviews?.map(review => [review.reviewer, review.state]), [['octo-operator', 'APPROVED']]);
-      assert.equal((await reviewGate(retained.w.id)).passed, true, `cycle ${round}: the approval posted after submission passes the review gate`);
-    }
-    // A later request for changes replaces the approval on the next cycle.
-    reviews = [{ id: 502, reviewer: 'octo-operator', sha: retained.head, state: 'CHANGES_REQUESTED', submittedAt: new Date().toISOString() }];
-    await cycle();
-    assert.equal((await reviewGate(retained.w.id)).passed, false, 'the withdrawn approval no longer passes');
-    assert.ok(asked.length >= 7 && asked.every(pr => pr === 88), `only the retained pull request is read: ${asked.join(', ')}`);
-    // An unreadable pull request keeps what was recorded and is still observed.
-    engine.pullReviewReader = async () => { throw new Error('GitHub is unavailable'); };
-    await cycle();
-    assert.equal((await jobs()).find(row => row.work_id === retained.w.id)!.error, null, 'a failed review read fails no observation');
-    assert.deepEqual((await store.workDocument(retained.w.id))!.observation?.reviews?.map(review => review.state), ['CHANGES_REQUESTED']);
-  } finally { engine.pullReviewReader = null; }
-});

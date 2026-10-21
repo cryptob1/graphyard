@@ -385,7 +385,7 @@ test('dispatchblock is refused off a dispatchable stage, over a standing blocker
   try {
     await store.init();
     const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' }, worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' }, loop: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
-    const engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [human, worker, loop];
+    const engine = new Engine(store, 120, 'owner/project'); engine.principals = [human, worker, loop];
     const refused = (work: Work, pattern: RegExp) => assert.rejects(engine.execute(loop, 'dispatchblock', work.id, { reason: 'fatal: held' }, randomUUID()), pattern);
     let work = await engine.execute(human, 'create', null, { title: 'held', plannedFiles: ['src/held.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
     await refused(work, /not awaiting a dispatch/);

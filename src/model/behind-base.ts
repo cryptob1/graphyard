@@ -5,7 +5,7 @@ import type { Work } from './work.js';
 const short = (sha: string) => sha.slice(0, 12);
 
 type Held = Pick<Work, 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>;
-/** The control plane's own test merge of the current head onto the observed base tip, when it conflicted (merge-queue.ts baseRefreshConflict); else null. */
+/** The control plane's own test merge of the current head onto the observed base tip, when it conflicted (model/base-refresh.ts baseRefreshConflict); else null. */
 function confirmedConflict(work: Held) {
   const refresh = work.baseRefresh, candidate = work.candidate, observation = work.observation;
   return refresh?.conflict && candidate && observation && refresh.from.sha === candidate.sha && refresh.base === observation.baseTip && refresh.policyRevision === work.policyRevision ? refresh : null;

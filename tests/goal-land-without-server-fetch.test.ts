@@ -54,7 +54,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('goal-land-no-fetch-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('goal_land_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/goal_land_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   const runner = gitRunnerFor(plane);
   engine.gitRunner = ((args, options) => { if (args[0] === 'fetch') fetches.push([...args]); return runner(args, options); }) as GitRunner;
   engine.baseBranch = 'main';

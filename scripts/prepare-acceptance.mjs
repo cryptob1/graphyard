@@ -12,7 +12,7 @@ if (!response.ok) throw new Error(`Cannot read PR (${response.status})`);
 const pr = await response.json();
 if (pr.state !== 'open' || pr.base.ref !== 'main' || pr.head.repo?.full_name !== repository || pr.base.repo?.full_name !== repository) throw new Error('Expected an open same-repository PR into main');
 // A candidate-push run binds to the head and base the control plane recorded for the item (see
-// enumerate-ci-proofs.mjs): the base is the candidate's bound base, which for a queued candidate
+// the CI plan): the base is the candidate's bound base, which for a queued candidate
 // is its predicted base rather than wherever the base branch points now. A head that no longer
 // matches the pull request means the candidate moved; the push that moved it starts its own run.
 const { GRAPHYARD_HEAD: plannedHead, GRAPHYARD_BASE: plannedBase } = process.env;

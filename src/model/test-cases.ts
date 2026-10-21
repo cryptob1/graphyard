@@ -37,7 +37,6 @@ export const caseResult = (evidence: Pick<Evidence, 'result' | 'executed' | 'ski
   evidence.result === 'fail' ? 'fail' : evidence.executed === 0 || evidence.skipped > 0 ? 'skipped' : 'pass';
 
 export function runIdentity(evidence: Evidence): RunIdentity {
-  if (evidence.ciRun) return { kind: 'ci', id: evidence.ciRun.runId, attempt: evidence.ciRun.runAttempt, url: `https://github.com/${evidence.ciRun.repository}/actions/runs/${evidence.ciRun.runId}/job/${evidence.ciRun.jobId}` };
   if (evidence.provenance) return { kind: 'github-actions', id: evidence.provenance.runId, attempt: evidence.provenance.runAttempt, url: evidence.provenance.artifact.url };
   if (evidence.validation) return { kind: 'validation', id: evidence.validation.requestId, attempt: evidence.validation.attemptId, url: null };
   return { kind: 'producer', id: evidence.id, attempt: null, url: evidence.url ?? null };

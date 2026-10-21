@@ -99,7 +99,7 @@ export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): 
   // capacity or selecting another provider is the operator's judgment, not a step anyone runs.
   if (provider === 'agent' && !reviewerProfileFor(work))
     return { needed: false, state: 'provider-exhausted', reason: `every configured reviewer profile is exhausted for ${short(candidate.sha)} (${exhaustedReviewerProfiles(work).join(', ') || 'none configured'}); adding reviewer capacity or selecting another review provider is the operator's decision` };
-  if (provider !== 'github') return { needed: false, state: 'provider-dispatched', reason: `the control plane dispatches ${provider} review through GitHub itself; a fresh reading requests it and observes the verdict` };
+  if (provider !== 'github') return { needed: false, state: 'provider-dispatched', reason: `the control plane dispatches ${provider} review itself; a fresh reading requests it and observes the verdict` };
   return { needed: true, state: 'required', reason: `independent approval of ${short(candidate.sha)} against ${short(candidate.baseSha)} under policy revision ${work.policyRevision} is required` };
 }
 

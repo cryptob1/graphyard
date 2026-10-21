@@ -289,7 +289,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('principal_roster_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/principal_roster_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, REPOSITORY);
+  const engine = new Engine(store, 120, REPOSITORY);
   http = server(engine, [operator, granted, ungranted].map(entry => ({ ...entry, token: tokens.get(entry.id)! })), github as any);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
@@ -515,7 +515,7 @@ test('manual:local-plane-principals-restored — a local plane booted on the old
     const boot = async (roster: typeof installed) => {
       const credentials = principalSchema.parse(roster);
       await new ProofGrants(planeStore, credentials.map(({ token: _token, ...actor }) => actor)).seed();
-      const plane = server(new Engine(planeStore, [15368], 120, REPOSITORY), credentials);
+      const plane = server(new Engine(planeStore, 120, REPOSITORY), credentials);
       await new Promise<void>(resolve => plane.listen(0, '127.0.0.1', resolve));
       const booted = { url: `http://127.0.0.1:${(plane.address() as any).port}`, roster: JSON.stringify(roster), close: () => new Promise<void>(resolve => plane.close(() => resolve())) };
       planes.push(booted);
@@ -539,7 +539,7 @@ test('manual:local-plane-principals-restored — a local plane booted on the old
     const adminActor = { id: admin.id, role: 'admin' as const };
     await new ProofGrants(planeStore, principalSchema.parse([...installed, ...former]).map(({ token: _token, ...actor }) => actor))
       .grant(adminActor, 'production-acceptance-producer', { patterns: ['unit:*', 'integration:*', 'manual:*'], reason: 'Designated independent proof producer' }, randomUUID());
-    const oldEngine = new Engine(planeStore, [15368], 120, REPOSITORY);
+    const oldEngine = new Engine(planeStore, 120, REPOSITORY);
     const open = async (title: string) => {
       const created = await oldEngine.execute(adminActor, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:roster-restore', 'integration:roster-restore'] }] }, randomUUID());
       return oldEngine.execute(adminActor, 'ready', created.id, {}, randomUUID());

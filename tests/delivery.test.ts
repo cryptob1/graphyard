@@ -40,7 +40,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('delivery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/delivery_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
+  engine = new Engine(store, 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
   // Deployment identities (builder, observers, promoter) hold producer credentials
   // and count toward the shared review/proof agent limit the server enforces at
   // boot; this roster needs five, so raise the configurable limit for this file.
@@ -294,7 +294,7 @@ test('D3-9 a sweep interrupted at its bound resumes without silently omitting hi
   // "Interrupted": a different process, with its own pool, continues from the persisted cursor.
   const replicaStore = new Store(store.pool.options.connectionString!);
   try {
-    const replica = new Delivery(new Validation(new Engine(replicaStore, [15368], 120, 'test/repository'), principals, 'test/repository'));
+    const replica = new Delivery(new Validation(new Engine(replicaStore, 120, 'test/repository'), principals, 'test/repository'));
     const second = await replica.sweep(10); assert.deepEqual([second.applied, second.complete], [10, false]);
     s = await state(f.env.id); assert.equal(s.cursor, cursor + 10); assert.equal(s.verification.status, 'unobserved');
     const third = await replica.sweep(10); assert.deepEqual([third.applied, third.complete], [5, true]);

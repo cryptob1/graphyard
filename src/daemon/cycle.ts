@@ -3,7 +3,7 @@ import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
-import { type ExhaustedProof, setAsideFollowUpThreads } from './decisions.js';
+import type { ExhaustedProof } from './decisions.js';
 import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics } from './metrics.js';
 import { profileHealth } from './sessions.js';
@@ -110,9 +110,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   const startedAt = now();
   const read = await timings.step('snapshot', () => effects.snapshot());
   const readAt = now();
-  // Filing runs in the dispatcher, beside this cycle: an approval it has not yet reconciled still
-  // sets its threads aside, so the cycle never sends a head back over what that review filed.
-  const snapshot = setAsideFollowUpThreads(read, await timings.step('follow-up threads', () => effects.followUpThreads?.(read.work, Number.isFinite(Date.parse(read.now)) ? Date.parse(read.now) : readAt).catch(() => undefined)));
+  const snapshot = read;
   const observedAt = Date.parse(snapshot.now), clock = Number.isFinite(observedAt) ? observedAt : startedAt;
   // The same bound `master status` uses, from the read that produced this snapshot: containment
   // settlement may only be proposed while the local clock can be compared with the control plane.

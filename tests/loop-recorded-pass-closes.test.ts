@@ -37,7 +37,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recorded-pass-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('recorded_pass_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/recorded_pass_test`); await store.init();
-  engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 300, repository); engine.submissionObserver = null;
 });
 after(async () => { await store?.close(); await database?.stop(); });
 
