@@ -257,16 +257,12 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   }
 }
 
-/**
- * The assignment worktrees on this host whose attempt has ended: the item is delivered or closed, or
- * the attempt's end is on the record, and no live lease or running session holds that epoch.
- */
+/** The assignment worktrees on this host whose attempt has ended: no live lease and no running implementation session holds that epoch. */
 export function endedAttemptWorktrees(work: Work[], hostId: string, now: number) {
-  return work.flatMap(item => item.workspaces.filter(space => space.host === hostId).filter(space => {
-    if (item.lease && item.lease.epoch === space.epoch && Date.parse(item.lease.expiresAt) > now) return false;
-    if ((item.sessions ?? []).some(handle => handle.kind === 'implementation' && handle.state === 'running' && (handle.epoch ?? Number(/:(\d+)$/.exec(handle.id)?.[1])) === space.epoch)) return false;
-    return item.stage === 'done' || !!item.pipeline?.attempts.some(attempt => attempt.epoch === space.epoch && attempt.endedAt != null);
-  }).map(space => ({ item, space })));
+  return work.flatMap(item => (item.workspaces ?? []).filter(space => space.host === hostId
+    && !(item.lease && item.lease.epoch === space.epoch && Date.parse(item.lease.expiresAt) > now)
+    && !(item.sessions ?? []).some(handle => handle.kind === 'implementation' && handle.state === 'running' && (handle.epoch ?? Number(/:(\d+)$/.exec(handle.id)?.[1])) === space.epoch))
+    .map(space => ({ item, space })));
 }
 
 /** Step 3: end unbounded attempts, reconcile lapsed leases, remove ended attempts' worktrees and sweep leftover panes. */
