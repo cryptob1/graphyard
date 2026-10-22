@@ -65,7 +65,6 @@ test('unit:master-goal-amend — `graphyard master goal-amend GOAL-N REQUEST_ID`
   engine.baseBranch = 'main';
   const recorded: Goal = await ok(coordinator, 'goals', { statement: 'Operators can promote a release candidate', users: ['Operators running Graphyard'], constraints: ['No new third-party service'], deployTarget: 'uat then production' });
   await ok(author, `goals/${recorded.key}/draft`, { outcomes: [outcome('promotion'), outcome('promotion-audit')], pr: null, branch: 'graphyard/promotion', head: '8'.repeat(40) });
-  await ok(approver, `goals/${recorded.key}/approve`, { reason: 'Both cases check what the customer asked for' });
   const goal: Goal = (await ok(coordinator, `goals/${recorded.key}/land`, { mergeSha: '9'.repeat(40) })).goal;
   assert.deepEqual(goal.protected, { cases: ['promotion', 'promotion-audit'], outcomes: ['promotion', 'promotion-audit'] });
 

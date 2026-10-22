@@ -39,13 +39,13 @@ test('unit:acceptance-landing-fetch — a merge commit pushed after the plane la
     const calls: string[][] = [];
     const runner = gitRunnerFor(plane), recording: GitRunner = args => { calls.push([...args]); return runner(args); };
     // Read without a fetch, the plane's stale view refuses the landing as unlanded.
-    assert.match(await acceptanceMergeRefusal(runner, 'main', head, mergeSha) ?? '', /is not a merge of the approved head|does not hold/);
+    assert.match(await acceptanceMergeRefusal(runner, 'main', head, mergeSha) ?? '', /is not a merge of the drafted head|does not hold/);
     // The land route's judgement fetches first, and accepts it.
     assert.equal(await acceptanceLandingRefusal(recording, 'main', head, mergeSha), null);
     assert.deepEqual(calls.find(args => args[0] === 'fetch'), ['fetch', '--no-tags', 'origin', '+refs/heads/main:refs/remotes/origin/main'], 'the base is fetched from origin before anything is judged');
     assert.equal(git(plane, 'rev-parse', 'refs/remotes/origin/main'), mergeSha);
     // A merge that is not of the approved head is still refused after the fetch.
-    assert.match(await acceptanceLandingRefusal(runner, 'main', 'd'.repeat(40), mergeSha) ?? '', /is not a merge of the approved head/);
+    assert.match(await acceptanceLandingRefusal(runner, 'main', 'd'.repeat(40), mergeSha) ?? '', /is not a merge of the drafted head/);
 
     // GY-1922: a fetch that succeeds is authoritative. Rewritten on origin to omit the merge, BASE refuses
     // the landing although the plane's ref held it before this fetch.
@@ -96,7 +96,7 @@ test('unit:acceptance-landing-fetch — a fetch that stalls is bounded and refus
 
 test('unit:acceptance-landing-fetch — the land route judges through the fetching check, and the image installs git', async () => {
   const route = await readFile(join(root, 'src/server/routes/goals.ts'), 'utf8');
-  assert.match(route, /const refusal = await acceptanceLandingRefusal\(engine\.gitRunner, engine\.baseBranch, goal\.approval\.head, body\.mergeSha\)/);
+  assert.match(route, /const refusal = await acceptanceLandingRefusal\(engine\.gitRunner, engine\.baseBranch, goal\.acceptance\.head, body\.mergeSha\)/);
   const dockerfile = await readFile(join(root, 'Dockerfile'), 'utf8');
   const runtime = dockerfile.slice(dockerfile.lastIndexOf('\nFROM '));
   assert.match(runtime, /\nRUN apt-get update && apt-get install -y [^\n]*\bgit\b/, 'the runtime stage, not only the build stage, installs git');

@@ -510,7 +510,7 @@ test('unit:ui-workers-page — Workers is one table of agent sessions (agent, ro
   assert.doesNotMatch(first, /aria-label="Principals"/); assert.match(html, /aria-label="Principals"/);
   // Each role in plain words; the item by key and title; what it is doing; since when; health.
   const row = (id: string) => { const start = first.indexOf(`data-session="${id}"`); assert.ok(start >= 0, id); return first.slice(start, first.indexOf('</tr>', start)); };
-  assert.deepEqual(Object.values(roleWords).slice(0, 4), ['Builds code', 'Reviews code', 'Proves requirements', 'Approves decisions']);
+  assert.deepEqual(Object.values(roleWords).slice(0, 4), ['Builds code', 'Reviews code', 'Proves requirements', 'Runs the loop']);
   const builder = row('s14');
   assert.match(builder, /<td data-label="Role">Builds code<\/td>/);
   assert.match(builder, /<span class="mono">GY-14<\/span> Export monthly reports as CSV<\/button>/);
@@ -526,7 +526,7 @@ test('unit:ui-workers-page — Workers is one table of agent sessions (agent, ro
   // A session the runtime stopped reporting is ended, in plain words, and is not in the open table.
   assert.doesNotMatch(first, /data-session="p16"/);
   assert.match(html, /data-session="p16"[\s\S]*?Ended · stopped responding/);
-  assert.match(html, /data-session="a15"[\s\S]*?<td data-label="Role">Approves decisions<\/td>[\s\S]*?<td data-label="Doing now">Approved the rework request<\/td>/);
+  assert.match(html, /data-session="a15"[\s\S]*?<td data-label="Role">Runs the loop<\/td>[\s\S]*?<td data-label="Doing now">Approved the rework request<\/td>/);
   // No explanatory jargon on the first screen.
   const words = visibleWords(first).join(' ');
   for (const term of ['principal', 'handle', 'liveness', 'sweep', 'epoch', 'lease', 'pane', 'reconcil']) assert.ok(!new RegExp(term, 'i').test(words), `"${term}" on the first screen: ${words}`);

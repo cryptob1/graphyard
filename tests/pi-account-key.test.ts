@@ -113,8 +113,8 @@ function piFleet(registry: ReturnType<typeof memoryRegistry>, host: string, acco
     runtimes: proposedRuntimes.filter(runtime => runtime.name === 'pi'),
     models: [{ name: 'glm-flash', id: 'zai/glm-5.3-flash' }],
     accounts: accounts.map(account => ({ name: account.name, runtime: 'pi', model: 'glm-flash', credential: { host, home: account.home, ...(account.key ? { key: account.key } : {}) } })),
-    roles: [{ name: 'approver', accounts: accounts.map(account => account.name), concurrency: 4 }],
-    reason: 'Approvers on Pi',
+    roles: [{ name: 'producer', accounts: accounts.map(account => account.name), concurrency: 4 }],
+    reason: 'Producers on Pi',
   });
 }
 
@@ -171,8 +171,8 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
   piFleet(registry, config.hostId, [{ name: 'pi-a', home: keyless }]);
   const pi = await fakePi();
   try {
-    await assert.rejects(selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0 }),
-      /No healthy agent account for approver.*pi-a failed its smoke test: No API key found for zai\./s);
+    await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0 }),
+      /No healthy agent account for producer.*pi-a failed its smoke test: No API key found for zai\./s);
     assert.deepEqual((await pi.runs()).map(entry => entry.smoke), [true], 'the smoke test ran, and no session was chosen');
     const account = registry.current().accounts[0];
     assert.equal(account.smoke?.result, 'fail'); assert.equal(account.smoke?.reason, 'No API key found for zai. Use /login to log into a provider.', 'Pi\'s own error, on one line');
@@ -180,19 +180,19 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
     assert.match(fleetView(registry.current(), Date.now()).accounts[0].ineligible!, /failed its smoke test: No API key found for zai/);
 
     // A failed account is not tested again on every launch: it stays out until it is changed.
-    await assert.rejects(selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0 }), /failed its smoke test/);
+    await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0 }), /failed its smoke test/);
     assert.equal((await pi.runs()).length, 1);
 
     // The fix is a registry change — naming the key — and the change is tested before any session.
     registry.mutate('account.set', { account: { name: 'pi-a', runtime: 'pi', model: 'glm-flash', credential: { host: config.hostId, home: keyless, key: zaiKey } }, reason: 'Name the z.ai key' });
     assert.equal(registry.current().accounts[0].smoke, undefined, 'the change clears the old result');
-    const chosen = (await selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0 }))!;
+    const chosen = (await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0 }))!;
     assert.equal(chosen.account.name, 'pi-a');
     await chosen.release('the run ended', 'result');
     assert.deepEqual((await pi.runs()).map(entry => entry.smoke), [true, true]);
     assert.equal(registry.current().accounts[0].smoke?.result, 'pass');
     // A passed account is not tested again until it changes.
-    await (await selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0 }))!.release('the run ended', 'result');
+    await (await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0 }))!.release('the run ended', 'result');
     assert.deepEqual((await pi.runs()).map(entry => entry.smoke), [true, true]);
     // A change to the runtime or model an account runs is a change to it too.
     registry.mutate('model.set', { model: { name: 'glm-flash', id: 'zai/glm-5.3-flash-2' }, reason: 'New model version' });
@@ -202,7 +202,7 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
   // The executor side, alone: an injected smoke test is run once per untested account and reported.
   const tested: string[] = [], alone = memoryRegistry(config.hostId);
   piFleet(alone, config.hostId, [{ name: 'pi-x', home: await piHome('pi-x', null) }, { name: 'pi-y', home: await piHome('pi-y', null) }]);
-  const chosen = await selectFleetSession(config, 'approver', { name: 'approver' }, { registry: alone.client, quota: false, cacheMs: 0, smoke: async account => { tested.push(account.name); return account.name === 'pi-x' ? { ok: false, error: '401 invalid api key' } : { ok: true, error: null }; } });
+  const chosen = await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: alone.client, quota: false, cacheMs: 0, smoke: async account => { tested.push(account.name); return account.name === 'pi-x' ? { ok: false, error: '401 invalid api key' } : { ok: true, error: null }; } });
   assert.deepEqual(tested.sort(), ['pi-x', 'pi-y']);
   assert.equal(chosen?.account.name, 'pi-y', 'the account that failed is passed over for the next');
   assert.match(chosen!.skipped[0].reason, /pi-x failed its smoke test: 401 invalid api key/);
@@ -212,19 +212,19 @@ test('unit:account-smoke-gate — an account is smoke-tested before it is first 
   const shared = memoryRegistry(config.hostId), prompted: string[] = [];
   piFleet(shared, config.hostId, [{ name: 'pi-z', home: await piHome('pi-z', null) }]);
   const slowSmoke = async (account: { name: string }) => { prompted.push(account.name); await new Promise(resolve => setTimeout(resolve, 50)); return { ok: true, error: null }; };
-  const both = await Promise.all([1, 2].map(() => selectFleetSession(config, 'approver', { name: 'approver' }, { registry: shared.client, quota: false, cacheMs: 0, smoke: slowSmoke }).catch(error => error as Error)));
+  const both = await Promise.all([1, 2].map(() => selectFleetSession(config, 'producer', { name: 'producer' }, { registry: shared.client, quota: false, cacheMs: 0, smoke: slowSmoke }).catch(error => error as Error)));
   assert.deepEqual(prompted, ['pi-z'], 'one smoke prompt for two concurrent launches');
   assert.equal(shared.current().accounts[0].smoke?.result, 'pass');
   assert.ok(both.some(entry => !(entry instanceof Error) && entry?.account.name === 'pi-z'));
 });
 
-test('unit:account-smoke-gate — two consecutive approver runs on one account that end without a result hold it from the role for an hour, and the loop falls through to the next account', async () => {
+test('unit:account-smoke-gate — two consecutive producer runs on one account that end without a result hold it from the role for an hour, and the loop falls through to the next account', async () => {
   const { config } = await installation(), registry = memoryRegistry(config.hostId);
   const silent = await piHome('pi-a', secret(), { silent: true }), judging = await piHome('pi-b', secret());
   piFleet(registry, config.hostId, [{ name: 'pi-a', home: silent, key: zaiKey }, { name: 'pi-b', home: judging, key: zaiKey }]);
   // A run on pi-a ends without a result; one on pi-b judges.
   const launch = async () => {
-    const chosen = (await selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0, smoke: async () => ({ ok: true, error: null }) }))!;
+    const chosen = (await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke: async () => ({ ok: true, error: null }) }))!;
     const ok = chosen.account.name === 'pi-b';
     await chosen.release('the run ended', ok ? 'result' : 'no-result');
     return { account: chosen.account.name, run: { result: { ok } } };
@@ -232,42 +232,42 @@ test('unit:account-smoke-gate — two consecutive approver runs on one account t
   {
     const first = await launch();
     assert.equal(first.account, 'pi-a'); assert.equal(first.run.result?.ok, false);
-    assert.deepEqual(registry.current().accounts.find(entry => entry.name === 'pi-a')!.unjudged?.approver?.runs, 1, 'one run without a result is counted, not held');
+    assert.deepEqual(registry.current().accounts.find(entry => entry.name === 'pi-a')!.unjudged?.producer?.runs, 1, 'one run without a result is counted, not held');
     const second = await launch();
     assert.equal(second.account, 'pi-a', 'one run without a result does not move the role');
-    const held = registry.current().accounts.find(entry => entry.name === 'pi-a')!.unjudged!.approver!;
+    const held = registry.current().accounts.find(entry => entry.name === 'pi-a')!.unjudged!.producer!;
     assert.ok(held.until && Math.abs(Date.parse(held.until) - Date.now() - unjudgedHoldMs) < 60_000, 'the second in a row holds the account for an hour');
     const third = await launch();
     assert.equal(third.account, 'pi-b', 'the loop falls through to the next account instead of relaunching on pi-a');
     assert.equal(third.run.result?.ok, true);
     const view = fleetView(registry.current(), Date.now(), config.hostId);
-    assert.match(view.accounts.find(entry => entry.name === 'pi-a')!.held[0].reason, /pi-a is held from approver until .*2 consecutive approver runs on it ended without a result/);
+    assert.match(view.accounts.find(entry => entry.name === 'pi-a')!.held[0].reason, /pi-a is held from producer until .*2 consecutive producer runs on it ended without a result/);
     assert.equal(view.accounts.find(entry => entry.name === 'pi-a')!.eligible, true, 'the hold is for the role, not the account');
   }
 
   // The rule itself: a result clears the count, a hold lapses after its hour, and other roles are untouched.
   const at = Date.parse('2026-09-25T20:45:00Z'), iso = (offset: number) => new Date(at + offset).toISOString();
   const model = registry.current();
-  const session = { account: 'pi-b', role: 'approver' as const };
+  const session = { account: 'pi-b', role: 'producer' as const };
   recordRunOutcome(model, session, 'no-result', 'the run ended without a result', iso(0));
   recordRunOutcome(model, session, 'result', 'judged', iso(1));
   recordRunOutcome(model, session, 'no-result', 'the run ended without a result', iso(2));
-  assert.equal(chooseSession(model, { role: 'approver', host: config.hostId }, at + 3).account?.name, 'pi-b', 'a result between two unjudged runs resets the count');
+  assert.equal(chooseSession(model, { role: 'producer', host: config.hostId }, at + 3).account?.name, 'pi-b', 'a result between two unjudged runs resets the count');
   recordRunOutcome(model, session, 'no-result', 'the run ended without a result', iso(3));
   model.accounts.find(entry => entry.name === 'pi-a')!.unjudged = {};
-  assert.equal(chooseSession(model, { role: 'approver', host: config.hostId }, at + 4).account?.name, 'pi-a');
+  assert.equal(chooseSession(model, { role: 'producer', host: config.hostId }, at + 4).account?.name, 'pi-a');
   model.accounts.find(entry => entry.name === 'pi-a')!.enabled = false;
-  assert.match((chooseSession(model, { role: 'approver', host: config.hostId }, at + 4) as { reason: string }).reason, /pi-b is held from approver/);
-  assert.equal(chooseSession(model, { role: 'approver', host: config.hostId }, at + unjudgedHoldMs + 4).account?.name, 'pi-b', 'the hold lapses after its hour');
+  assert.match((chooseSession(model, { role: 'producer', host: config.hostId }, at + 4) as { reason: string }).reason, /pi-b is held from producer/);
+  assert.equal(chooseSession(model, { role: 'producer', host: config.hostId }, at + unjudgedHoldMs + 4).account?.name, 'pi-b', 'the hold lapses after its hour');
   // Runs overlap when a role's concurrency is above one: runs started before the hold that end
   // unjudged during it leave the hold standing for its whole hour instead of resetting the count.
-  const hold = structuredClone(model.accounts.find(entry => entry.name === 'pi-b')!.unjudged!.approver);
+  const hold = structuredClone(model.accounts.find(entry => entry.name === 'pi-b')!.unjudged!.producer);
   assert.equal(recordRunOutcome(model, session, 'no-result', 'the run ended without a result', iso(10)), false, 'a run ending during the hold changes nothing');
   recordRunOutcome(model, session, 'no-result', 'the run ended without a result', iso(11));
-  assert.deepEqual(model.accounts.find(entry => entry.name === 'pi-b')!.unjudged!.approver, hold, 'the hold stands after overlapping runs end');
-  assert.match((chooseSession(model, { role: 'approver', host: config.hostId }, at + 12) as { reason: string }).reason, /pi-b is held from approver/, 'the loop does not relaunch on the held account');
-  model.roles.push({ name: 'producer', accounts: ['pi-b'], concurrency: 1 });
-  assert.equal(chooseSession(model, { role: 'producer', host: config.hostId }, at + 4).account?.name, 'pi-b', 'a hold from the approver role does not keep the account from producing');
+  assert.deepEqual(model.accounts.find(entry => entry.name === 'pi-b')!.unjudged!.producer, hold, 'the hold stands after overlapping runs end');
+  assert.match((chooseSession(model, { role: 'producer', host: config.hostId }, at + 12) as { reason: string }).reason, /pi-b is held from producer/, 'the loop does not relaunch on the held account');
+  model.roles.push({ name: 'worker', accounts: ['pi-b'], concurrency: 1 });
+  assert.equal(chooseSession(model, { role: 'worker', host: config.hostId }, at + 4).account?.name, 'pi-b', 'a hold from the producer role does not keep the account from building');
   // A run the loop cancelled is not the account's failure, and a session ended first still takes its outcome once.
   const late: FleetSession = { ...registry.current().sessions.at(-1)!, account: 'pi-b', endedAt: iso(0), endReason: 'gone from Herdr', outcome: undefined };
   const copy = structuredClone(model); copy.sessions.push(late);
@@ -282,12 +282,12 @@ test('unit:account-smoke-gate — a failed smoke test is retested once its delay
   piFleet(registry, config.hostId, [{ name: 'pi-r', home: await piHome('pi-r', null) }]);
   let outage = true;
   const tested: number[] = [], smoke = async () => { tested.push(1); return outage ? { ok: false, error: '503 provider unavailable' } : { ok: true, error: null }; };
-  await assert.rejects(selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /pi-r failed its smoke test: 503 provider unavailable; it is tested again after 60 minutes/);
+  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /pi-r failed its smoke test: 503 provider unavailable; it is tested again after 60 minutes/);
   outage = false;
-  await assert.rejects(selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /failed its smoke test/, 'within the delay the failure stands untested');
+  await assert.rejects(selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke }), /failed its smoke test/, 'within the delay the failure stands untested');
   assert.equal(tested.length, 1);
   const later = Date.now() + smokeRetestMs + 1_000;
-  const chosen = await selectFleetSession(config, 'approver', { name: 'approver' }, { registry: registry.client, quota: false, cacheMs: 0, smoke, now: () => later });
+  const chosen = await selectFleetSession(config, 'producer', { name: 'producer' }, { registry: registry.client, quota: false, cacheMs: 0, smoke, now: () => later });
   assert.equal(tested.length, 2, 'the executor tested it again');
   assert.equal(chosen?.account.name, 'pi-r');
   assert.equal(registry.current().accounts[0].smoke?.result, 'pass');

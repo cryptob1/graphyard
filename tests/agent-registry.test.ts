@@ -455,7 +455,6 @@ test('unit:registry-visibility — master status and the dashboard show each acc
   assert.match(sessionEnded(session({}), leased('someone-else', new Date(later + hour).toISOString()), later)!, /leased to someone-else/);
   assert.match(sessionEnded(session({ role: 'reviewer' }), { key: 'GY-5', stage: 'review', lease: null, autoDispatch: { review: null, producers: [], history: [] } } as any, later)!, /no standing review request/);
   assert.equal(sessionEnded(session({ role: 'reviewer' }), { key: 'GY-5', stage: 'review', lease: null, autoDispatch: { review: { state: 'requested' }, producers: [], history: [] } } as any, later), null);
-  assert.match(sessionEnded(session({ role: 'approver', work: null }), undefined, now + 31 * 60_000)!, /decision window passed/);
   assert.equal(sessionEnded(session({ role: 'master', work: null }), undefined, now + 12 * hour), null, 'the master session holds its slot until the loop ends it');
   assert.match(sessionEnded(session({ role: 'master', work: null }), undefined, now + 49 * hour)!, /older than any session runs/);
   const settled = structuredClone(registry); settled.sessions.push(session({ id: 'newer', selectedAt: new Date(now + 1000).toISOString() }));

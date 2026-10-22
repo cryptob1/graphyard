@@ -128,7 +128,7 @@ test('unit:fleet-panel-marks-stale-probe — each card shows when its quota was 
  * another column, one launch line, and spent accounts collapsed by the day they are back. Each
  * fleet holds single-account plans (every account its own login home), as production does.
  */
-type Role = 'worker' | 'reviewer' | 'producer' | 'approver' | 'escalation-handler' | 'master';
+type Role = 'worker' | 'reviewer' | 'producer' | 'master';
 function declutterFleet(names: string[], roles: { name: Role; accounts: string[]; concurrency: number }[], spent: string[] = [], live: [Role, string, string][] = []): FleetView {
   const registry = applyRegistryMutation(emptyRegistry(), 'apply', {
     runtimes: [{ name: 'claude', launch: { kind: 'claude', args: [], environment: {}, homeVariable: 'CLAUDE_CONFIG_DIR', modelFlag: '--model', login: null, loginFile: null } }],
@@ -190,13 +190,13 @@ test('unit:fleet-why-no-duplication — an idle account\'s and a spent account\'
 
 test('unit:fleet-launch-summary-compact — every role that can launch is one chip on one line naming its next account in its title, and only a role that cannot launch gets a line, with why and when', () => {
   const names = ['launch-a', 'launch-b'];
-  const roles = (['worker', 'reviewer', 'producer', 'approver', 'escalation-handler', 'master'] as const).map(name => ({ name, accounts: names, concurrency: name === 'master' ? 1 : 2 }));
+  const roles = (['worker', 'reviewer', 'producer', 'master'] as const).map(name => ({ name, accounts: names, concurrency: name === 'master' ? 1 : 2 }));
   // The master at its concurrency limit: one blocked role.
   const blocked = render(declutterFleet(names, roles, [], [['master', 'launch-a', 'GY-1325']]));
   assert.equal(blocked.split('data-can-launch="no"').length - 1, 1, 'exactly one reason line');
   assert.equal(blocked.split('Cannot launch').length - 1, 1);
   assert.match(blocked, /<li data-role-launch="master" data-can-launch="no">.*master: none can launch — at its concurrency limit \(1 of 1 live\); next: launch-a when one of its sessions ends<\/li>/);
-  assert.equal(blocked.split('class="role-chip"').length - 1, 5, 'the other five are chips');
+  assert.equal(blocked.split('class="role-chip"').length - 1, 3, 'the other three are chips');
   assert.ok(blocked.includes('<span class="role-chip" data-role-launch="worker" data-can-launch="yes" title="next: launch-a now"><span aria-hidden="true">Workers</span><span class="sr-only">Workers: can launch now — next: launch-a now</span></span>'), 'a chip names its next account in its title');
   assert.ok(blocked.includes('</span></span>: can launch</p>'));
   // No blocked role: one line of chips, and no "Cannot launch" anywhere.
@@ -204,7 +204,7 @@ test('unit:fleet-launch-summary-compact — every role that can launch is one ch
   assert.ok(!clear.includes('Cannot launch'), 'no Cannot launch text');
   assert.equal(clear.split('data-can-launch="no"').length - 1, 0);
   assert.equal(clear.split('class="role-launch-ready"').length - 1, 1, 'one line');
-  assert.ok(clear.includes('Escalation handlers: can launch now — next: launch-a now</span></span> · ') && clear.includes('</span></span>: all can launch</p>'), 'every role a chip on the one line');
+  assert.ok(clear.includes('Producers: can launch now — next: launch-a now</span></span> · ') && clear.includes('</span></span>: all can launch</p>'), 'every role a chip on the one line');
 });
 
 test('unit:fleet-spent-collapsed — accounts read working, then idle, then spent or ineligible, and six spent accounts back on the same day render as one collapsed summary row naming all six', () => {

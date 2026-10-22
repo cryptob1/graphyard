@@ -112,8 +112,8 @@ test('integration:workers-tab-lists-every-session — a top-level Workers tab li
     const row = rowOf(html, handle.id);
     assert.ok(row.includes(`data-work="${item.key}"`), `${handle.id} names ${item.key}`);
     assert.match(row, new RegExp(`<span class="mono">${item.key}</span> ${item.title}</button>`), `${handle.id} links to its item`);
-    const role = expectedRole[handle.kind] ?? (handle.role === 'approver' ? 'approver' : 'master');
-    // The role in plain words (GY-161): builds code, reviews code, proves requirements, approves decisions.
+    const role = expectedRole[handle.kind] ?? 'master';
+    // The role in plain words (GY-161): builds code, reviews code, proves requirements, runs the loop.
     assert.ok(row.includes(`data-role="${role}"`) && row.includes(`<td data-label="Role">${roleWords[role as keyof typeof roleWords]}</td>`), `${handle.id} is a ${role}`);
     assert.ok(row.includes(handle.subject), `${handle.id} shows its subject`);
     assert.ok(row.includes(handle.host) && row.includes(handle.principal), `${handle.id} shows host and principal`);
