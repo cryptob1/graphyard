@@ -50,7 +50,7 @@ async function codingAgents() {
   return root;
 }
 
-test('unit:registry-discovers-agent-environments — propose discovers every ~/.coding_agents environment (Claude, Codex, Cursor, OpenCode, Pi), proposes runtimes, accounts by reference, models and a worker/reviewer/approver/producer mapping, --apply writes it as a registry revision, and no credential content reaches the proposal', async () => {
+test('unit:registry-discovers-agent-environments — propose discovers every ~/.coding_agents environment (Claude, Codex, Cursor, OpenCode, Pi), proposes runtimes, accounts by reference, models and a worker/reviewer/producer mapping, --apply writes it as a registry revision, and no credential content reaches the proposal', async () => {
   const directory = await codingAgents(), home = join(scratch, 'home');
   await mkdir(home, { recursive: true });
   // Only the fixture is looked at: no runtime default home, no provider, no executable on this machine.
@@ -109,12 +109,12 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     for (const account of proposal.accounts) assert.deepEqual(Object.keys(account.credential).sort(), ['home', 'host'], `${account.name} holds a reference, nothing more`);
     assert.deepEqual(proposal.models.map((model: any) => model.name), ['claude-default', 'codex-default', 'cursor-default', 'opencode-default', 'pi-default']);
 
-    // The role mapping: worker, reviewer, approver and producer are all mapped; Pi serves the worker (GY-1746) and the narrow roles.
+    // The role mapping: worker, reviewer and producer are all mapped; Pi serves the worker (GY-1746) and the narrow roles.
     const roles = Object.fromEntries(proposal.roles.map((role: any) => [role.name, role.accounts]));
-    for (const role of ['worker', 'reviewer', 'approver', 'producer']) assert.ok(roles[role]?.length, `role ${role} is mapped`);
+    for (const role of ['worker', 'reviewer', 'producer']) assert.ok(roles[role]?.length, `role ${role} is mapped`);
     const full = ['claude-a', 'claude-b', 'claude-c', 'codex', 'cursor-a', 'opencode-a', 'opencode-b'];
     assert.deepEqual(roles.worker, [...full, 'pi-a', 'pi-b']); assert.deepEqual(roles.reviewer, full);
-    assert.deepEqual(roles.approver, [...full, 'pi-a', 'pi-b']); assert.deepEqual(roles.producer, [...full, 'pi-a', 'pi-b']);
+    assert.deepEqual(roles.producer, [...full, 'pi-a', 'pi-b']);
     // The master role is never proposed (GY-898): the operator names its accounts themselves.
     assert.deepEqual(proposal.roles.map((role: any) => role.name), fleetRoles.filter(name => name !== 'master'));
 

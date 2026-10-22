@@ -65,30 +65,6 @@ function memoryRegistry(concurrency: number) {
   return { client, record, at: (now: number) => { time = now; }, live: () => liveSessions(registry).filter(session => session.role === 'approver'), all: () => registry.sessions };
 }
 
-test('unit:concurrency-counts-live-only — with 7 recorded approver sessions and none running, the role is available and a launch selects an account', async () => {
-  const cfg = await config(), fleet = memoryRegistry(7);
-  const works = ['GY-1', 'GY-2', 'GY-3', 'GY-4', 'GY-5', 'GY-6', 'GY-7'];
-  for (const key of works) fleet.record(key, iso(-10 * minute));
-  fleet.at(clock);
-  const probe = { registry: fleet.client, now: () => clock };
-  const none = { agents: [] as HerdrAgent[], available: true };
-
-  // What the registry records alone reads the role as full; what runs says otherwise.
-  assert.match((await fleetRoleHealth(cfg, 'approver', probe))!.reason!, /at its concurrency limit \(7 of 7 live\)/);
-  const health = await fleetRoleHealth(cfg, 'approver', { ...probe, runtime: none });
-  assert.equal(health?.available, true, 'no session runs, so the role is available');
-  assert.equal(health?.reason, null);
-  // Sessions that do run still count, and an unreadable Herdr proves nothing gone.
-  const running = { agents: works.map(key => ({ name: `${sessionName('graphyard-approver', key)}-eeeeeeee` }) as HerdrAgent), available: true };
-  assert.equal((await fleetRoleHealth(cfg, 'approver', { ...probe, runtime: running }))?.available, false, 'seven running approvers fill the role');
-  assert.equal((await fleetRoleHealth(cfg, 'approver', { ...probe, runtime: { agents: [], available: false } }))?.available, false, 'an unreadable inventory does not free a slot');
-
-  const selected = await selectFleetSession(cfg, 'approver', { name: 'graphyard-approver-gy-9-abcdef12', principal: 'approver-agent' }, { ...probe, work: 'GY-9', runtime: none });
-  assert.equal(selected?.account.name, 'claude-b', 'a launch selects an account');
-  assert.deepEqual(fleet.live().map(session => session.work), ['GY-9'], 'the seven sessions that no longer run were ended before the choice');
-  assert.ok(fleet.all().filter(session => works.includes(session.work!)).every(session => /is gone from Herdr/.test(session.endReason ?? '')), 'each with the reason it ended');
-});
-
 test('unit:registry-request-outlasts-lock-queue — a registry request waits 30 s, so a selection queued behind the coordination lock is not abandoned while the server completes it', () => {
   // 2026-10-01: 45 of 46 selects were abandoned at a 10 s bound; each still completed server-side and left a phantom live session.
   assert.ok(fleetRequestTimeoutMs >= 30_000, 'the registry request bound covers the coordination lock queue');

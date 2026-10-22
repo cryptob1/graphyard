@@ -167,8 +167,8 @@ test('unit:connect-account-default-roles — a strong account joins worker and r
   await ok('agent-registry/connect', operator, { host: HOST, provider: cheap.id, sealed: await sealForHost(publicKey, KEY), reason: 'Connect a second z.ai key on a host without a readable master configuration' });
   const secondReports = await runWorker({ masterFile: join(scratch, 'absent', 'master.json') });
   assert.equal(secondReports[0].state, 'healthy', `the second cheap account connected: ${secondReports[0].detail}`);
-  assert.equal(secondReports[0].detail, `${secondReports[0].detail.split(' ')[0]} joined approver, producer`, 'without the research append the worker claims only the registry roles');
-  assert.deepEqual((await connectViews()).filter(entry => entry.provider === cheap.id).at(-1)?.placement, ['approver', 'producer'], 'research placement is absent until the host confirms it');
+  assert.equal(secondReports[0].detail, `${secondReports[0].detail.split(' ')[0]} joined producer`, 'without the research append the worker claims only the registry roles');
+  assert.deepEqual((await connectViews()).filter(entry => entry.provider === cheap.id).at(-1)?.placement, ['producer'], 'research placement is absent until the host confirms it');
   // The strong account: appended to worker and reviewer in the same way.
   const strong = connectProviders.find(provider => provider.id === 'anthropic-api')!;
   await ok('agent-registry/connect', operator, { host: HOST, provider: strong.id, sealed: await sealForHost(publicKey, KEY), reason: 'Connect the Anthropic API key' });
@@ -222,7 +222,7 @@ test('unit:api-key-sealed-to-host — a pasted key is sealed to the host, stored
   assert.ok(!markup.includes(KEY), 'the card carries no key');
 });
 
-test('connect Pi — a z.ai key pasted for Pi lands in Pi\'s own auth document in a pi-<letter> home and registers a Pi account for approval and proofs', async () => {
+test('connect Pi — a z.ai key pasted for Pi lands in Pi\'s own auth document in a pi-<letter> home and registers a Pi account for work and proofs', async () => {
   const { hosts } = await ok('agent-registry/connect/host-key', operator);
   const publicKey = hosts.find((entry: { host: string }) => entry.host === HOST)?.publicKey!;
   const provider = connectProviders.find(entry => entry.id === 'pi-zai')!;
@@ -247,7 +247,7 @@ test('connect Pi — a z.ai key pasted for Pi lands in Pi\'s own auth document i
   assert.equal(account?.runtime, 'pi');
   assert.deepEqual(account?.credential, { host: HOST, home });
   assert.ok(document.runtimes.some((runtime: { name: string; launch: { homeVariable: string } }) => runtime.name === 'pi' && runtime.launch.homeVariable === 'PI_CODING_AGENT_DIR'));
-  for (const role of ['worker', 'approver', 'producer']) assert.ok(document.roles.find((entry: { name: string }) => entry.name === role)?.accounts.includes(name), role);
+  for (const role of ['worker', 'producer']) assert.ok(document.roles.find((entry: { name: string }) => entry.name === role)?.accounts.includes(name), role);
   assert.ok(!JSON.stringify(await ok('agent-registry/connect', operator)).includes(KEY), 'no API read returns the key');
 });
 

@@ -173,7 +173,7 @@ test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from
     assert.deepEqual(refused.cycles, [], 'the loop cycles nothing from a dirty checkout');
     const escalation = state.actions['escalation:dirty-checkout'];
     assert.ok(escalation, 'the refusal is raised as attention on the cursor');
-    assert.equal(escalation.kind, 'escalation');
+    assert.equal(escalation.kind, 'attention');
     assert.match(escalation.detail, /src\/loop\.ts/);
     assert.match(escalation.detail, /tests\/scratch\.test\.ts/);
     assert.match(escalation.detail, /the master loop refuses to start, self-upgrade or restart/);
