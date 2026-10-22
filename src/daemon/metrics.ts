@@ -1,22 +1,15 @@
 // Concern: measurement — stage percentiles, actionable subjects and item latency.
 import { type Work, currentEvidence } from '../model.js';
 import { pendingBaseRefresh } from '../model/base-refresh.js';
-import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
-import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';
-import { type ApprovalWatch, type DaemonActionKind, type DaemonState, type CycleMetrics } from './state.js';
+import { type MasterConfig, assertDispatchable } from '../master.js';
+import { type DaemonActionKind, type DaemonState, type CycleMetrics } from './state.js';
 import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
-import { decisionKey } from './reconcile.js';
 import { docsSyncHolding } from '../model/docs-sync.js';
 import { isHotfix, wipHoldWording } from '../model/dispatch.js';
-import { approvedUnapplied, boundDetail, mergeableCandidate, routineDecision, withheldDecision } from './decisions.js';
+import { mergeableCandidate, neededRework } from './rework.js';
+import { boundDetail } from './text.js';
 
-export const approvedResumePendingDetail = (itemKey: string, action: string, decisionId: string, approvedBy: string | null | undefined) =>
-  `${itemKey}'s ${action} decision ${decisionId} was approved by ${approvedBy ?? 'its approver'} but the control plane could not apply it yet; the watch stays live and resume is tried again next cycle`;
-export const staleRevisionDecideRefusal = (error: unknown) =>
-  /Policy revision changed(?: \(now \d+\))?; reload and request again/.test(error instanceof Error ? error.message : String(error));
-export const staleRevisionDecideNote = 'the item moved past the revision the loop read';
-export const staleRevisionDecideDetail = (detail: string) => detail.includes(staleRevisionDecideNote);
 
 
 export function percentiles(values: number[]) {
@@ -76,22 +69,9 @@ export function missingProofs(work: Work, now: Date) {
  * cycle's `actionable` count; whether the whole pipeline has gone still is the progress
  * watchdog's judgement (progressAttention in ./liveness.ts), not a per-subject wait.
  */
-/**
- * GY-1298. The wording of a decision its approver judged but nobody applied: the wait is the apply the
- * loop owes, not an approver's judgement.
- */
-export const approvedUnappliedWording = 'is approved but unapplied: approved at';
-/**
- * When the watch's decision was approved with no outcome recorded, as the loop last found it once the named session ended (GY-1300),
- * or null. The apply step keeps that finding on the watch; a re-request's new decision carries the entry under the old id, never its own.
- */
-export function approvedUnappliedSince(watch: Pick<ApprovalWatch, 'decision' | 'ended'>): string | null {
-  const entry = watch.ended.findLast(line => line.includes(`decision ${watch.decision} on `) && line.includes(approvedUnapplied));
-  return entry ? entry.slice(entry.indexOf(approvedUnapplied) + approvedUnapplied.length).trim().split(' ')[0] || null : null;
-}
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
-  context: { assessments?: Record<string, ContainmentAssessment>; approvals?: DaemonState['approvals']; baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'];
+  context: { baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'];
     /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not a dispatch wait. */ fleetHeld?: boolean;
     /** GY-2097: the dispatch step held a claimable item under the in-flight cap — `maxInFlight` items are being built or waiting to merge — so its wait is the cap's capacity, not a dispatch wait. */ wipHeld?: boolean;
     /** GY-1890: whether an item's own launch is in flight; its slot is allocated, so its wait is that launch, never the fleet's capacity. */ launching?: (item: Work) => boolean } = {}): ActionableSubject[] {
@@ -106,24 +86,10 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
   // progress watchdog (./liveness.ts) judges whether the whole pipeline has gone still.
   const stalled = new Map(stalledItems(work, new Date(now), 0).map(entry => [entry.key, entry]));
   for (const item of work) {
-    // A routine decision is the one subject a delivered item can still raise: containment recovery.
-    // It stays a subject until it is applied. A decision sitting with an approver is the pipeline
-    // waiting on its own agent, and counting that as nothing to act on is how a dead approver used
-    // to make an item disappear from the one measure built to notice it.
-    const decision = routineDecision(item, config, now, context.assessments?.[item.id], context.baseFailed?.get(item.id));
-    const watch = decision ? context.approvals?.[decisionKey(item, decision)] : undefined;
-    // A decision waiting for an approver account to reset is the one capacity line, not a stall per item (GY-182).
-    // An approved decision whose application was lost is named for what it is (GY-1300), never as waiting for its approver.
-    const unapplied = watch ? approvedUnappliedSince(watch) : null;
-    // A conflict rework a docs-sync session holds inside its bound is the step's recorded wait, not a stall (GY-1436).
-    const docsHeld = decision?.action === 'rework' && !watch && decision.binding === `${item.candidate?.sha}:conflict` && !!context.docsSyncs && !!docsSyncHolding(context.docsSyncs, item, now);
-    if (decision && !docsHeld && !watch?.settledAt && !(watch && standingCapacity(item, 'approver').length)) add('decision', item, !watch ? `${item.key} needs a ${decision.action} decision requested and approved`
-      : unapplied ? `${item.key}'s ${decision.action} decision ${watch.decision} is ${approvedUnapplied} ${unapplied}; the loop asks the control plane to apply it`
-      : watch.approvedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} ${approvedUnappliedWording} ${watch.approvedAt}${watch.approvedBy ? ` by ${watch.approvedBy}` : ''}; the loop applies it (graphyard master decisions ${item.key})`
-      : watch.exhaustedAt ? `${item.key}'s ${decision.action} decision ${watch.decision} is unjudged after ${watch.launches} approver session(s)`
-        : `${item.key}'s ${decision.action} decision ${watch.decision} is requested and waiting for approver session ${watch.agentName ?? '(not launched)'} to judge it`);
-    const withheld = decision ? null : withheldDecision(item, config, now, context.assessments?.[item.id]);
-    if (withheld) add('decision', item, withheld.reason.slice(0, 500));
+    // A rework the loop owes is a subject until it is applied, unless a docs-sync session holds the conflict inside its bound (GY-1436).
+    const rework = neededRework(item);
+    const docsHeld = !!rework && rework.binding === `${item.candidate?.sha}:conflict` && !!context.docsSyncs && !!docsSyncHolding(context.docsSyncs, item, now);
+    if (rework && !docsHeld) add('decision', item, `${item.key} returns to a worker: ${rework.reason}`);
     if (item.stage === 'done') continue;
     const stall = stalled.get(item.key);
     if (stall) add('escalation', item, `${item.key} holds its ${stall.gate ?? 'unevaluated'} gate with no action, no dependency and no recorded human need: ${stall.refusal ?? stall.detail}`);
@@ -134,12 +100,6 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // the wait is the cap's capacity; a "Hotfix: …" item starts whatever the count and keeps the
     // loop's own dispatch subject while it waits for a profile.
     try { assertDispatchable(item, work, new Date(now).toISOString()); const launching = !!context.launching?.(item), fleetHeld = context.fleetHeld && !launching, wipHeld = !launching && context.wipHeld && !isHotfix(item); add(wipHeld || fleetHeld ? 'capacity' : 'dispatch', item, wipHeld ? `${item.key} ${wipHoldWording.held}` : fleetHeld ? `${item.key} is claimable but no worker profile is free; it starts when one frees` : `${item.key} is claimable and waiting for a worker`); } catch { /* not claimable: not actionable */ }
-    // A lapsed quarantine is the loop's to settle only where this host verified its supervisor gone
-    // (GY-426). One it cannot verify — another host's, or a supervisor still holding its scope — is
-    // escalated with its refusals and counted under the containment class, a wait no cycle could
-    // end (GY-393).
-    if (item.containmentQuarantine && containmentPhase(item, now)?.state === 'lapsed' && (!context.assessments || context.assessments[item.id]?.settleable))
-      add('settle', item, `${item.key} holds a lapsed containment quarantine from epoch ${item.containmentQuarantine.epoch}`);
     if (pendingBaseRefresh(item)) add('refresh', item, `${item.key} conflicts with the moved base and is waiting for the control plane to try bringing its candidate onto it`);
     // No head is owed a proof the loop asks for: CI runs the unit tests, UAT the end-to-end ones,
     // and the control plane requests no producer (GY-1266, GY-1235). A mergeable candidate is not

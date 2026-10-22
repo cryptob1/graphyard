@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { escalationTriggers, type Work } from './work.js';
+import type { Work } from './work.js';
 
 /**
  * Typed agent requests.
@@ -9,11 +9,10 @@ import { escalationTriggers, type Work } from './work.js';
  * decider, so nothing waits on a master session noticing it, and the item is free for the next
  * assignment rather than held by a session sitting at a prompt.
  *
- * Every type names exactly one decider, from the four the project allows (see AGENTS.md and
+ * Every type names exactly one decider, from the three the project allows (see AGENTS.md and
  * docs/glossary.md#who-decides):
  *
  * - **rule** — a deterministic rule the control plane applies; no judgment is involved.
- * - **approver** — an independent approver agent, through the two-party decision machinery.
  * - **follow-up** — a tracked follow-up work item; the cause is outside this item.
  * - **human** — one of the three human-only decisions: goals and priorities, spending money or
  *   opening third-party accounts, and issuing credentials to people.
@@ -22,10 +21,10 @@ import { escalationTriggers, type Work } from './work.js';
  * with that reason (master-daemon.ts); this is what it should have recorded.
  */
 
-// GY-1992: `scope-request` is retired; a stored one still loads, and a new one is refused.
-export const agentRequestTypes = ['decision', 'blocker', 'note', 'escalation'] as const;
+// GY-1992, GY-2874: `scope-request`, `decision` and `escalation` are retired; a stored one still loads, and a new one is refused.
+export const agentRequestTypes = ['blocker', 'note'] as const;
 export type AgentRequestType = typeof agentRequestTypes[number];
-export const deciderKinds = ['rule', 'approver', 'follow-up', 'human'] as const;
+export const deciderKinds = ['rule', 'follow-up', 'human'] as const;
 export type DeciderKind = typeof deciderKinds[number];
 /** The three decisions no agent may make. A request may name one; nothing else routes to a human. */
 export const humanDecisions = ['goals-and-priorities', 'spending-money-or-accounts', 'issuing-credentials'] as const;
@@ -38,10 +37,6 @@ export interface AgentRequest {
   /** The attempt that raised it; a request from a lease that ended is never acted on. */
   epoch: number | null;
   requestedBy: string; at: string; reason: string;
-  /** decision: the two-party decision action an approver agent must approve. */
-  action?: string;
-  /** escalation: which standing concern the request raises. */
-  trigger?: string;
   /** Named only when the request is one of the three human-only decisions. */
   humanDecision?: HumanDecision;
   decider: Decider;
@@ -55,8 +50,6 @@ export const agentRequestSchema = z.object({
   type: z.enum(agentRequestTypes),
   reason: z.string().trim().min(1).max(2000),
   epoch: z.number().int().positive().optional(),
-  action: z.string().trim().min(1).max(100).optional(),
-  trigger: z.enum(escalationTriggers).optional(),
   humanDecision: z.enum(humanDecisions).optional(),
   /** Whether recording this ends the attempt. A note is a record, not a hand-off, so it defaults off. */
   release: z.boolean().optional(),
@@ -65,22 +58,15 @@ export const agentRequestSchema = z.object({
 }).strict();
 export type AgentRequestInput = z.infer<typeof agentRequestSchema>;
 
-const command = (key: string, type: AgentRequestType, action?: string) =>
-  type === 'decision' ? `graphyard master decide ${key} ${action ?? 'ACTION'} REASON, then graphyard master approver ${key} DECISION`
-      : type === 'escalation' ? `graphyard master decide ${key} resolve-escalation REASON, then graphyard master approver ${key} DECISION`
-        : type === 'blocker' ? `graphyard master create — a follow-up item naming ${key} and the external cause`
-          : null;
 
 /**
  * Who decides a request. Deterministic: the type decides, except that a request naming one of the
  * three human-only decisions routes to the operator whatever its type. Nothing else reaches a human.
  */
-export function deciderFor(key: string, request: Pick<AgentRequest, 'type' | 'action' | 'humanDecision'>): Decider {
+export function deciderFor(key: string, request: Pick<AgentRequest, 'type' | 'humanDecision'>): Decider {
   if (request.humanDecision) return { kind: 'human', who: `the human operator (${request.humanDecision.replace(/-/g, ' ')})`, command: null };
   switch (request.type) {
-    case 'decision': return { kind: 'approver', who: 'an independent approver agent', command: command(key, 'decision', request.action) };
-    case 'escalation': return { kind: 'approver', who: 'an independent approver agent', command: command(key, 'escalation') };
-    case 'blocker': return { kind: 'follow-up', who: 'a tracked follow-up work item', command: command(key, 'blocker') };
+    case 'blocker': return { kind: 'follow-up', who: 'a tracked follow-up work item', command: `graphyard master create — a follow-up item naming ${key} and the external cause` };
     case 'note': return { kind: 'rule', who: 'nobody; a note is recorded, not decided', command: null };
   }
 }
@@ -93,9 +79,7 @@ export const agentRequestLimit = 50, agentRequestCeiling = 200;
  *
  * Trimming the oldest entries would be a way to remove somebody else's ask: a `note` needs no
  * lease, so any credential that reaches the item could push the open requests off the end by
- * writing fifty of them. A `decision`'s only durable effect *is* its record — `blocker` and
- * `escalation` each project onto state that survives — so losing it loses
- * both the ask and the `escalate` action the control plane raises from it. Room is therefore made
+ * writing fifty of them. Room is therefore made
  * from resolved entries first, oldest first, and then from notes, which name no decider and move
  * nothing anybody is waiting on; the request just recorded is never the one dropped to make room
  * for itself. This is the rule `sessions.ts::bounded` applies to handles, with the same ceiling
@@ -118,7 +102,7 @@ export function boundedAgentRequests(requests: AgentRequest[], recorded: AgentRe
 
 /**
  * The types that move state a gate reads. Recording one is the same fact as the command it
- * replaces — `blocked` sets the blocker, an escalation fences the merge — so it needs exactly the authority that command needs: the live lease on the
+ * replaces — `blocked` sets the blocker — so it needs exactly the authority that command needs: the live lease on the
  * item, under the attempt that is asking. Without that rule any worker or producer credential
  * could block or fence any item in the graph, which is the opposite of what a typed request is
  * for. A `note` records nothing a gate reads, so it needs no lease.
@@ -129,8 +113,7 @@ export const leaseHeldRequestTypes: readonly AgentRequestType[] = agentRequestTy
  * Why this actor may not close that request, or null when it may.
  *
  * The decider the record names is the only party that closes it. Without this rule a session
- * could record a request whose decider is an independent approver or the human operator and then
- * resolve it itself, and master status would stop showing the very thing it exists to surface.
+ * could record a request whose decider is the human operator and then resolve it itself, and master status would stop showing the very thing it exists to surface.
  * The asker never closes its own ask — a decision is somebody else's by construction — except for
  * a note, which decides nothing and is its author's own record.
  */
@@ -141,8 +124,7 @@ export function requestResolutionRefusal(request: Pick<AgentRequest, 'type' | 'r
   }
   if (request.requestedBy === actor.id) return `${actor.id} recorded this ${request.type}; it is decided by ${request.decider.who}, never by the session that asked`;
   // A follow-up is tracked by whoever opens the item that carries it, which the loop does; every
-  // other decider reaches the item through the two-party decision machinery or the operator, and
-  // both apply under an operator identity.
+  // other decider is the operator.
   const allowed = request.decider.kind === 'follow-up' ? ['coordinator', 'admin'] : ['admin'];
   if (!allowed.includes(actor.role)) return `This ${request.type} is decided by ${request.decider.who}; a ${actor.role} credential cannot close it`;
   return null;

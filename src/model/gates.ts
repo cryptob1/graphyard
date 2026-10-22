@@ -1,6 +1,5 @@
 import type { Gate, Stage, Work } from './work.js';
 import type { MergeLedgerState } from './merge-ledger.js';
-import { escalationRefusals } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
@@ -121,9 +120,9 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   const ledger = current ? mergeLedgerRefusals(work.mergeLedger, obs!.candidate) : null;
   const checkReasons = ledger ? ledger.test : current ? [] : [unobservedCandidateRefusal];
   gates.push({ name: 'test', reasons: checkReasons, passed: checkReasons.length === 0 });
-  // A standing escalation or lead hold is a refusal to deliver, and its own reason is reported.
+  // A lead hold is a refusal to deliver, and its own reason is reported.
   // Unresolved review threads are the reviewer's inputs, not merge blockers.
-  const delivery = [...escalationRefusals(work), ...(leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [])];
+  const delivery = leadHoldRefusal(work) ? [leadHoldRefusal(work)!] : [];
   add('merge', [...(!current ? [unobservedCandidateRefusal] : []), ...(ledger ? ledger.merge : []), ...delivery]);
   const first = gates.find(g => !g.passed);
   const violations = [...work.violations];

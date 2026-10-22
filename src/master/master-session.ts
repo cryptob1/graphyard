@@ -40,7 +40,7 @@ export function masterWakeText(cliPath: string, causes: readonly string[], heart
 }
 
 /** The input the handover is composed from, all of it control-plane or cursor truth. */
-export interface HandoverInput { work: Work[]; now: number; approvals?: readonly { work: string; action: string; decision: string; agentName: string | null; settledAt: string | null }[]; subjects?: readonly { key: string }[]; cliPath: string }
+export interface HandoverInput { work: Work[]; now: number; subjects?: readonly { key: string }[]; cliPath: string }
 /**
  * The durable handover: the section after the master prompt that lets a replacement continue the
  * in-flight judgement work by name, with no dependence on the outgoing session's memory. Every
@@ -49,12 +49,10 @@ export interface HandoverInput { work: Work[]; now: number; approvals?: readonly
 export function masterHandover(input: HandoverInput) {
   const line = (text: string) => (text.length > 500 ? `${text.slice(0, 499)}…` : text);
   const open = input.work.filter(item => item.stage !== 'done');
-  const unjudged = (input.approvals ?? []).filter(watch => !watch.settledAt);
   const parks = open.flatMap(item => item.humanRequest && !item.humanRequest.answer ? [`${item.key} (${item.humanRequest.kind}: ${item.humanRequest.needed})`] : []);
   return [
     `Durable handover from the launcher that started this session: it relaunches the master when the session exits, spends its account or passes its session budget, so continue from this record and from node ${input.cliPath} master status; there is no earlier memory to inherit.`,
     line(`- Material subjects standing (master status judges each): ${input.subjects?.length ? input.subjects.map(subject => subject.key).slice(0, 20).join(', ') : 'none'}`),
-    line(`- Decisions requested and still unjudged: ${unjudged.length ? unjudged.map(watch => `${watch.work} ${watch.action} decision ${watch.decision.slice(0, 12)} with approver session ${watch.agentName ?? '(not launched)'}`).join('; ') : 'none'}`),
     line(`- Needs-you parks (human-only decisions): ${parks.length ? parks.join('; ') : 'none'}`),
     `Continue the operating loop from node ${input.cliPath} master status until both stopping conditions hold; the launcher wakes this session as these change.`,
   ].join('\n');

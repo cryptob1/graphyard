@@ -88,19 +88,15 @@ export function callIdentity(arg: unknown): unknown {
   if (typeof value.id === 'string' && typeof value.key === 'string' && 'epoch' in value) { const item = value as unknown as Work; return [item.id, item.candidate?.sha ?? null, item.candidate?.baseSha ?? null, item.policyRevision, item.epoch]; }
   if ('pane_id' in value || 'agent_status' in value) return { name: value.name ?? null, pane: value.pane_id ?? null };
   if (typeof value.record === 'string' && typeof value.agentName === 'string') return { record: value.record, agentName: value.agentName, request: value.requestId ?? null };
-  // An escalation handler's launch, named by what it handles and when it launched; its idle mark and wait change between cycles.
-  if (typeof value.trigger === 'string' && typeof value.launchedAt === 'string' && 'work' in value) return { work: value.work, trigger: value.trigger, launchedAt: value.launchedAt };
-  // A fenced attempt's supervisor: the attempt and the process, never the lease expiry the cycle read.
-  if (value.scope && typeof value.scope === 'object' && 'owner' in value && 'epoch' in value) return { id: value.id ?? value.key ?? null, epoch: value.epoch, owner: value.owner, pid: (value.scope as { pid?: unknown }).pid ?? null };
   // A blocker probe's record: the probe and its outcome, never the next-probe instant the cycle stamps.
   if (typeof value.probe === 'string' && typeof value.result === 'string' && 'nextAt' in value) { const { nextAt: _nextAt, ...probe } = value; return probe; }
   return value;
 }
 /** The arguments that name a call's identity: free text — a reason, a prompt, a message, an outcome — is left out, so a re-worded retry still joins its call; a call that takes none, or only this cycle's reading of the world (an inventory, a snapshot), is one call however the reading moved. */
 const identityArguments: Partial<Record<keyof DaemonEffects, number[]>> = {
-  promptSession: [0], withdraw: [0, 1], withdrawReview: [0, 1], endRegistrySession: [0], endSession: [0], decide: [0, 1, 3],
-  holdAccount: [0], endEscalation: [0], markEscalation: [0], relaunchEscalation: [0], stopSupervisor: [0, 1], recordSession: [], reportCapacity: [0], settleContainment: [0], containment: [0],
-  reclaim: [], reclaimResources: [], panes: [], herdr: [], roleHealth: [], escalationSessions: [], launchedSessions: [], approverLaunches: [], planeHealth: [], hostMemory: [], reconcileSessions: [],
+  promptSession: [0], endRegistrySession: [0], endSession: [0], rework: [0],
+  holdAccount: [0], recordSession: [], reportCapacity: [0],
+  reclaim: [], reclaimResources: [], panes: [], herdr: [], roleHealth: [], launchedSessions: [], planeHealth: [], hostMemory: [], reconcileSessions: [],
 };
 /**
  * The intent of a prompt's text: the instruction it gives, with what the clock moves between one cycle's wording
@@ -116,11 +112,8 @@ const keyedBeside = (call: string, args: unknown[]): unknown[] => {
   // A handle record is keyed by the item's id, never its revision or head: the item advancing between the running and the finished record must not part them.
   if (call === 'recordSession') return [(args[0] as Work | undefined)?.id ?? null, second?.id ?? null, second?.state ?? null];
   if (call === 'reportCapacity') return [second?.event ?? null, second?.role ?? null, second?.epoch ?? null, second?.requestId ?? null, second?.cause ?? null];
-  if (call === 'settleContainment') return [second?.epoch ?? null];
-  // A hold is keyed by the exhaustion it records (never when it was seen), a mark by the state it writes, an end by the resolution it gives: a different one never joins, nor consumes the answer of, another.
+  // A hold is keyed by the exhaustion it records (never when it was seen), an end by the resolution it gives: a different one never joins, nor consumes the answer of, another.
   if (call === 'holdAccount') return [second ? [second.reason, second.role, second.profile, second.work, second.resetsAt, second.identity, second.home, second.kind, second.reported].map(value => value ?? null) : null];
-  if (call === 'markEscalation') return [!!(args[0] as { idleSince?: unknown } | undefined)?.idleSince];
-  if (call === 'endEscalation') return [second ?? null, args[2] ? 'waiting' : null];
   return [];
 };
 export const callKey = (call: string, args: unknown[]) => canonicalJson([call, ...(identityArguments[call as keyof DaemonEffects] ?? args.map((_, index) => index)).map(index => callIdentity(args[index])), ...keyedBeside(call, args)]);

@@ -1,9 +1,7 @@
 import { dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { attestationWait } from './unproduced-attestation.js';
-import { standingEscalations } from './escalation.js';
 import { proofStep } from './action-proof-step.js';
 import { isDelivered } from './closure.js';
-import { openAgentRequests } from './agent-requests.js';
 import { refusalAction, reviewStandstill } from './refusal-mapping.js';
 import { mergeWriterRefusal } from './ci-refusal.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, type Work } from './work.js';
@@ -25,8 +23,8 @@ export type { LlmRole, NextAction, NextActionInputs, NextActionKind } from './ac
 export { refusalAction, refusalRuleFor, refusalRuleIndex, refusalRules, reviewStandstill } from './refusal-mapping.js';
 export { gateRefusalCatalogue, refusalShape, type RefusalShape } from './refusal-catalogue.js';
 // What stands beside an action lives in `concerns.ts`, re-exported here likewise.
-export { carriedAction, dispatchHold, escalationResolution, humanNeeded, humanNeededActions, openAction } from './concerns.js';
-export type { CarriedConcern, HumanNeeded, HumanNeededRow, OpenAction } from './concerns.js';
+export { carriedAction, dispatchHold, humanNeeded, humanNeededActions, openAction } from './concerns.js';
+export type { HumanNeeded, HumanNeededRow, OpenAction } from './concerns.js';
 
 /**
  * The typed next action.
@@ -98,17 +96,14 @@ export function nextAction(work: Work, all: Work[], now: Date): OpenAction | nul
  * The order is the order a delivery actually unblocks in: a typed request an agent left behind
  * first, because a session gave up its lease waiting for that answer; then a delivered item, which
  * owes nothing; then an assignment nobody holds any more; then the first refusing gate; and finally the merge a fully proven candidate
- * is authorized for. A standing escalation is not in that order at all: it refuses delivery, the
- * merge gate carries its refusal like any other, and `carriedAction` (concerns.ts) decides what it
- * does to the step named here — which, for everything before delivery, is nothing.
+ * is authorized for. `carriedAction` (concerns.ts) names who owes an action no executor may run.
  */
 export function actionAccount(work: Work, all: Work[], now: Date): ActionAccount {
   const heldSince = work.stageEnteredAt ?? work.updatedAt ?? now.toISOString();
   const held = Date.parse(heldSince);
   // The liveness rules (liveness.ts) apply to what was computed before any concern is carried.
   const computed = livenessCarry(work, computeAccount(work, all, now), all, now);
-  // A standing escalation turns an item with nothing else to do into an `escalate` (concerns.ts).
-  const action = carriedAction(work, computed.action, all, now);
+  const action = carriedAction(computed.action);
   return { work: work.id, key: work.key, ...computed, action, ...(action && !computed.action ? { wait: null, defect: null } : {}),
     heldSince, heldMs: Number.isFinite(held) ? Math.max(0, now.getTime() - held) : 0 };
 }
@@ -128,12 +123,6 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
   if (!work.ready) return waits({ kind: 'human', on: 'operator', detail: `${key} has not been released from the backlog; releasing it is a goals-and-priorities decision, which is the operator's` },
     'ready', 'Not released from backlog');
 
-  // A typed request an agent recorded instead of blocking on a prose question. A two-party decision
-  // is somebody else's judgment, so it leaves the executor loop by the only door that exists for that — escalate.
-  const decision = openAgentRequests(work, now).find(ask => ask.type === 'decision');
-  if (decision) return make('escalate', `${decision.requestedBy} recorded a decision request on ${key} for ${decision.action ?? 'an action'}: ${decision.reason} — decided by ${decision.decider.who}`,
-    { kind: 'escalate', trigger: 'decision', detail: decision.decider.command ?? decision.reason }, `request:${decision.id}`);
-
   if (work.stage === 'done' && work.closure) return waits({ kind: 'settled', on: null, detail: `${key} was closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''} by ${work.closure.by}: ${work.closure.reason}` });
   // Done = merged (GY-1981): a delivery owes nothing more, whatever its smoke policy or deployment record.
   if (work.stage === 'done') return waits({ kind: 'settled', on: null, detail: `${key} is delivered; its gates are history and no gate refuses it` });
@@ -146,21 +135,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
   if (children.length) return waits({ kind: 'dependency', on: children[0], detail: `${key} was split into ${work.children!.join(', ')} and is delivered when they are; ${children.join(', ')} not yet` }, 'ready', `Split into child items: ${children[0]} is not delivered`);
 
   const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
-  // A containment quarantine outlives the attempt that raised it, and no executor step lowers one:
-  // reconciliation clears a lapsed lease — the other half of `reclaim`, and the half that works —
-  // but a fence comes down only on the worker's settlement capability, a verified containment
-  // assessment or an operator's stopped-worker recovery, each resting on somebody judging that the
-  // worker really stopped. Naming `reclaim` handed an executor a row whose handler re-read the
-  // item, called it free while it was still fenced, and came back every settle window for as long
-  // as the fence stood. This is `provider-exhausted` again: no executor step answers it.
-  if (work.containmentQuarantine && !liveLease) {
-    const quarantine = work.containmentQuarantine;
-    return make('escalate', `${key} is fenced by unverified containment from epoch ${quarantine.epoch} and nothing may be assigned to it; no executor step lowers a quarantine`,
-      { kind: 'escalate', trigger: 'containment', detail: `verify that ${quarantine.owner}'s worker stopped and settle the epoch ${quarantine.epoch} quarantine (graphyard master settle-containment ${key} REASON), or recover it as a stopped worker` },
-      `quarantine:${quarantine.epoch}:${quarantine.settlementHash}`);
-  }
   // An assignment whose lease has lapsed without a submission is held by a session that cannot
-  // act, and nothing fences the item. Reclaiming it is mechanical: the reconciliation the control
+  // act. Reclaiming it is mechanical: the reconciliation the control
   // plane already runs clears the lapse, and the executor only asks for it.
   if (!liveLease && work.lease && !work.submission) {
     const lease = work.lease;

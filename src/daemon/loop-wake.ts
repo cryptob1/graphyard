@@ -1,7 +1,7 @@
 // Concern: waking the sleeping master loop the moment the dispatcher tick sees work the loop acts on (GY-1490).
 import type { Work } from '../model.js';
 import { assertDispatchable, finishedAgentStates, type HerdrAgent, type MasterConfig } from '../master.js';
-import { neededDecision } from './decisions.js';
+import { neededRework } from './rework.js';
 
 /*
  * GY-1490. A loop whose last cycle found nothing actionable sleeps `run.intervalSeconds` (300 s on
@@ -42,9 +42,9 @@ export function loopWakeSubjects(work: readonly Work[], config: WakeConfig, now:
     if (!working && !leased) subjects.push({ key: `slot:${profile.name}`, reason: `worker profile ${profile.name} is free while ${claimable[0].key} waits` });
   }
   for (const item of work) {
-    let decision: ReturnType<typeof neededDecision> = null;
-    try { decision = neededDecision(item, config); } catch { continue; }
-    if (decision) subjects.push({ key: `decision:${item.key}:${decision.action}:${decision.binding}`, reason: `${item.key} needs a ${decision.action} decision` });
+    let rework: ReturnType<typeof neededRework> = null;
+    try { rework = neededRework(item); } catch { continue; }
+    if (rework) subjects.push({ key: `rework:${item.key}:${rework.binding}`, reason: `${item.key} needs its rework applied` });
   }
   return subjects;
 }

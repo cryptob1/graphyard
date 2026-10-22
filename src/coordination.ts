@@ -6,7 +6,7 @@ import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null; deferred_reason?: string | null; unobserved?: number }
 export interface Diagnostic { kind: string; message: string; next: string }
 export function resourceConflicts(work: Work, all: Work[], now: number) {
-  return all.filter(w => w.id !== work.id && (w.containmentQuarantine || w.lease && Date.parse(w.lease.expiresAt) > now))
+  return all.filter(w => w.id !== work.id && w.lease && Date.parse(w.lease.expiresAt) > now)
     .flatMap(w => (work.exclusiveResources ?? []).filter(r => w.exclusiveResources?.includes(r)).map(resource => ({ resource, key: w.key })));
 }
 
@@ -25,8 +25,8 @@ export function fileConflicts(work: Work, all: Work[]) {
 }
 
 export interface OverlapAhead { key: string; stage: Stage; state: 'claimed' | 'submitted'; paths: string[]; theirs: string[] }
-/** Claimed for dispatch purposes: a live lease, or a containment quarantine still holding the assignment. */
-const claimedNow = (work: Work, now: number) => !!work.containmentQuarantine || !!work.lease && Date.parse(work.lease.expiresAt) > now;
+/** Claimed for dispatch purposes: a live lease. */
+const claimedNow = (work: Work, now: number) => !!work.lease && Date.parse(work.lease.expiresAt) > now;
 /**
  * In flight: claimed, or submitted with its candidate standing — not sent back for rework. A
  * submitted item whose rework was requested and that nobody has claimed is a peer waiting for a
@@ -144,9 +144,7 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
     if (parent?.stage !== 'done') add('dependency', `Waiting for ${parent?.key ?? dep}`, 'Complete the prerequisite before claiming this item.');
   }
   const owns = work.lease && Date.parse(work.lease.expiresAt) > now;
-  if (work.containmentQuarantine) {
-    add('containment-quarantine', `Worker containment from epoch ${work.containmentQuarantine.epoch} has not been verified stopped`, 'The supervising parent must verify shutdown and settle with its capability; if that capability is unavailable, an operator must independently confirm the worker stopped and use the stopped-worker recovery command.');
-  } else if (work.ready && !owns && (!work.submission || work.reworkRequested)) {
+  if (work.ready && !owns && (!work.submission || work.reworkRequested)) {
     add(work.lastAssignment ? 'unowned-after-assignment' : 'unclaimed', work.lastAssignment ? 'Previous assignment no longer has authority' : 'No worker has claimed this item', 'Check dependencies and resources, then claim a fresh epoch and workspace.');
   }
   if (owns && !work.workspaces.some(w => w.epoch === work.lease!.epoch)) add('workspace-missing', 'Owner has not registered this attempt’s workspace', 'Run worktree or register before starting implementation.');

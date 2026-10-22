@@ -20,13 +20,11 @@ Goal passes intake, acceptance, approval, planning, approval and delivery. `grap
 
 **Risk lane** (`low`/`medium`/`high`) is set by paths.
 
-- **High** (4h): store, auth, server, principals, public API, operator agent, proof grants, install, deploy. Producer proofs, `manual:` attestations, two-party rework.
+- **High** (4h): store, auth, server, principals, public API, operator agent, proof grants, install, deploy. Producer proofs, `manual:` attestations.
 - **Medium** (60min): remainder.
 - **Low** (30min): test-only, docs-only, single-module. Required CI, one approval.
 
 **Risk class** (`sensitive`/`normal`; unknown: sensitive): delta paths vs `graphyard.json` `risk.sensitive` (generic default), in `graphyard status`. **Review timing**: sensitive before merge, normal after unless `review.normalChanges: pre-merge` ([delivery](delivery.md)).
-
-Low/medium reworks need no approver, nor reworks grounded on the exact head: trusted proof failed on it, its `manual:` attestation was refused, or the control plane's test merge conflicted.
 
 ## Who holds which authority
 
@@ -36,7 +34,7 @@ Text equivalent: in bootstrap the human operator supervises one worker; later ma
 
 ![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: operator: human-only decisions; Herdr hosts master, slice lead, worker; reviewer, producer hold credentials; guarded path merges. [legend](glossary.md#diagram-legend).
+Text equivalent: operator: goals, money, credentials for people; Herdr hosts master (applies every other decision), slice lead, worker; reviewer, producer hold credentials; guarded path merges. [legend](glossary.md#diagram-legend).
 
 ## Correctness rules
 

@@ -284,7 +284,7 @@ export function renewalGraceMs(error: unknown): number | null {
 
 /**
  * How long a supervisor keeps retrying a control-plane call it cannot do without — the item
- * lookup, the containment quarantine and launch, the first renewal, the settlement — through a
+ * lookup and the first renewal — through a
  * transient failure (GY-1506). A deploy restarts the server for about a minute, answering 502s,
  * dropped connections and "Startup validation has not completed; retry shortly"; three tries
  * 100 ms apart gave up inside it, the worker never launched and its lease lapsed as a loss.
@@ -336,27 +336,9 @@ export function restartTolerantApi(api: ControlPlaneApi, until: () => number, op
  * setting up (GY-1033). \`supervise\` itself never prints it: it lives here, beside the supervisor the
  * line announces, only so tests can import it without loading the CLI command table.
  */
-export const setupLine = (subject: string, epoch: number) => `graphyard: establishing containment for ${subject} epoch ${epoch}`;
-/**
- * Why a supervisor could not lower its own containment fence (GY-1155): its shutdown did not
- * verify the scope empty within its bound — the bound and what held it are named — or the settle
- * it posted was refused. It is put on the item's record before the supervisor exits, so the fence
- * it leaves standing is never silent, and the loop that observes the ended attempt settles it.
- */
-export interface ContainmentShutdownFailure { reason: string; boundMs?: number; held?: string; refusal?: string }
-/**
- * The record a supervisor's failure to lower its fence is put on the item as: a note, which needs
- * no lease — the one this attempt held may already have ended — and names the quarantined epoch.
- */
-export const containmentFailureNote = (epoch: number, failure: ContainmentShutdownFailure) =>
-  ({ type: 'note' as const, reason: `Containment fence of epoch ${epoch} was left standing by its supervisor: ${failure.reason}`.slice(0, 2000) });
-/** The durable containment fence a foreground supervisor raises, acknowledges, lowers, and reports a failure to lower. */
-export interface SupervisedQuarantine {
-  establish: () => Promise<unknown>; revalidate?: () => Promise<unknown>; acknowledge?: () => Promise<unknown>; settle: () => Promise<unknown>;
-  report?: (failure: ContainmentShutdownFailure) => Promise<unknown>;
-}
+export const setupLine = (subject: string, epoch: number) => `graphyard: starting supervision of ${subject} epoch ${epoch}`;
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; shutdownPollMs?: number; shutdownTimeoutMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; attemptBoundMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession; quarantine?: SupervisedQuarantine } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; attemptBoundMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession } = {}) {
   let deadline = 0, granted = 0, attempts = 0;
   /** One renewal attempt, sequenced: a beat the supervisor already gave up on never moves the deadline. */
   const heartbeatAttempt = () => {
@@ -450,7 +432,6 @@ export async function supervise(command: string, args: string[], epoch: number, 
   const detached = options.detached ?? platform !== 'win32';
   if (!detached && platform !== 'linux' && !options.containment) throw new Error(`Foreground worker supervision requires durable containment and is not supported on ${platform}`);
   const containment = options.containment ?? (!detached && platform === 'linux' ? systemdContainment(command, args) : undefined);
-  if (containment && !options.quarantine) throw new Error('Foreground worker supervision requires a durable Graphyard containment quarantine');
   const sessionVisible = options.session?.visible ?? herdrSessionProbe();
   const surrender = options.session?.surrender ?? assignmentSurrender(epoch);
   const unconsented = options.session?.unconsented ?? consentHoldProbe();
@@ -459,7 +440,6 @@ export async function supervise(command: string, args: string[], epoch: number, 
     let stopping = false, pending = false, prelaunchInterrupted = false, finished = false;
     let sessionSeen = false, scopeSeen = false;
     const supervisedPids = new Map<number, string>();
-    let containmentFailure: unknown;
     let expiry: ReturnType<typeof setTimeout>;
     let timer: ReturnType<typeof setInterval>;
     // The release of an attempt whose agent ended on its own, which the supervisor finishes before it exits.
@@ -474,7 +454,7 @@ export async function supervise(command: string, args: string[], epoch: number, 
       if (!child?.pid) return;
       if (containment) {
         try { containment.signal(signal); return; }
-        catch (error) { containmentFailure ??= error; }
+        catch { /* fall back to the process group */ }
       }
       if (detached && platform !== 'win32') { try { process.kill(-child.pid, signal); } catch {} return; }
       if (platform === 'win32') { try { child.kill(signal); } catch {} return; }
@@ -493,35 +473,6 @@ export async function supervise(command: string, args: string[], epoch: number, 
       // Keep this timer referenced even if the group leader exits first.
       setTimeout(async () => {
         signalGroup('SIGKILL');
-        if (containment) {
-          let empty = false, lastVerificationFailure: unknown;
-          const shutdownDeadline = performance.now() + (options.shutdownTimeoutMs ?? 2000);
-          do {
-            try { if (containment.empty()) { empty = true; break; } }
-            catch (error) { lastVerificationFailure = error; }
-            const remaining = shutdownDeadline - performance.now();
-            if (remaining <= 0) break;
-            await delay(Math.min(options.shutdownPollMs ?? 50, remaining));
-          } while (performance.now() < shutdownDeadline);
-          containmentFailure ??= lastVerificationFailure;
-          // A fence this supervisor cannot lower is reported on the item's record before it exits.
-          const unsettled = async (failure: ContainmentShutdownFailure) => {
-            try { await options.quarantine?.report?.(failure); } catch { /* the loop still observes the ended attempt and settles it */ }
-            finish(new Error(failure.reason));
-          };
-          if (!empty) {
-            const boundMs = Math.round(options.shutdownTimeoutMs ?? 2000);
-            const held = containmentFailure !== undefined ? (containmentFailure instanceof Error ? containmentFailure.message : String(containmentFailure)) : `${containment.unit ? `containment scope ${containment.unit}` : 'the containment scope'} still held processes`;
-            await unsettled({ reason: `Worker containment shutdown could not be verified: ${held} (its scope was not verified empty within ${boundMs}ms)`, boundMs, held });
-            return;
-          }
-          try { await options.quarantine!.settle(); }
-          catch (error) {
-            const refusal = error instanceof Error ? error.message : String(error);
-            await unsettled({ reason: `Worker containment shutdown was verified but its Graphyard quarantine could not be settled: ${refusal}`, refusal });
-            return;
-          }
-        }
         finish(null, code);
       }, options.graceMs ?? 5000);
     }
@@ -571,34 +522,7 @@ export async function supervise(command: string, args: string[], epoch: number, 
     process.on('SIGTERM', interrupted); process.on('SIGINT', interrupted); process.on('SIGHUP', interrupted);
     void (async () => {
       try {
-        if (containment) await options.quarantine!.establish();
-        if (containment && options.quarantine!.revalidate) {
-          try { await options.quarantine!.revalidate(); }
-          catch (error) {
-            if ((error as { settleAllowed?: boolean }).settleAllowed) {
-              try { await options.quarantine!.settle(); }
-              catch (settlementError) { throw new Error(`Fresh Graphyard state refused worker launch and its unlaunched quarantine could not be settled: ${settlementError instanceof Error ? settlementError.message : String(settlementError)}`); }
-            }
-            throw error;
-          }
-        }
-        if (prelaunchInterrupted) {
-          if (containment) {
-            try { await options.quarantine!.settle(); }
-            catch (error) { finish(new Error(`Worker launch was interrupted after its Graphyard quarantine was established, but the quarantine could not be settled: ${error instanceof Error ? error.message : String(error)}`)); return; }
-          }
-          finish(null, 1);
-          return;
-        }
-        // Acknowledgement is durable launch authority. Rework cannot clear its
-        // quarantine while this live lease (and response) may still reach us.
-        if (containment && options.quarantine!.acknowledge) {
-          await options.quarantine!.acknowledge();
-        }
-        if (prelaunchInterrupted) {
-          if (containment) await options.quarantine!.settle();
-          finish(null, 1); return;
-        }
+        if (prelaunchInterrupted) { finish(null, 1); return; }
         child = spawn(containment?.command ?? command, containment?.args ?? args, { stdio: 'inherit', detached, env });
         // Never learn the fallback root from a later /proc snapshot: after this
         // child exits its numeric PID can identify an unrelated replacement.
@@ -635,26 +559,11 @@ export async function supervise(command: string, args: string[], epoch: number, 
   });
 }
 
-export interface SupervisorProbeTarget { key: string; epoch: number; workspacePath: string }
-export interface SupervisorProbeDeps {
-  platform?: NodeJS.Platform;
-  uid?: number;
-  listProcesses?: () => string[];
-  readCommand?: (pid: number) => string;
-  processOwner?: (pid: number) => number;
-  readCwd?: (pid: number) => string;
-  readParent?: (pid: number) => number;
-  readCgroup?: (controlGroup: string) => string;
-  resolvePath?: (path: string) => string;
-  run?: (command: string, args: string[]) => string;
-}
-
 /**
  * The assignment a supervisor names in its own command line: `watch KEY EPOCH -- command`.
  *
- * This is only ever used to attribute a live process to a *different* assignment, so it
- * demands the exact invocation shape rather than a loose match: an ordinary command that
- * happens to carry a `watch` argument must never excuse a process from the fence.
+ * It demands the exact invocation shape rather than a loose match: an ordinary command that
+ * happens to carry a `watch` argument is never taken for a supervisor.
  */
 export function watchAssignment(argv: string[]): { key: string; epoch: string } | null {
   const index = argv.indexOf('watch');
@@ -662,141 +571,7 @@ export function watchAssignment(argv: string[]): { key: string; epoch: string } 
   const [key, epoch, separator] = argv.slice(index + 1, index + 4);
   return /^[A-Za-z][A-Za-z0-9]*-\d+$/.test(key ?? '') && /^\d+$/.test(epoch ?? '') && separator === '--' ? { key, epoch } : null;
 }
-
-const vanished = (error: unknown) => ['ENOENT', 'ESRCH'].includes((error as { code?: string }).code ?? '');
 const detail = (error: unknown) => (error instanceof Error ? error.message : String(error)).replace(/[\x00-\x1f\x7f]+/g, ' ').slice(0, 200);
-export const scopePattern = /^graphyard-watch-[A-Za-z0-9:@._-]+\.scope$/;
-const liveScope = ['active', 'activating', 'deactivating', 'reloading'];
-
-/**
- * Observe, on the registered host, whether a contained worker is still running.
- *
- * This reports what it could see and what it could not: a signal it failed to collect is
- * never the same as an absence. Command lines identify a supervisor regardless of its
- * owner; working directories and containment scopes are readable only for the probing
- * user's own processes and user manager, which is the boundary local dispatch uses.
- */
-export function probeSupervisorAbsence(target: SupervisorProbeTarget, deps: SupervisorProbeDeps = {}) {
-  const platform = deps.platform ?? process.platform;
-  const uid = deps.uid ?? (typeof process.getuid === 'function' ? process.getuid()! : 0);
-  const processes: { pid: number; evidence: 'command' | 'workspace' }[] = [];
-  const scopes: { unit: string; activeState: string; processes: number[]; attributed: number[] }[] = [];
-  const unverifiable: string[] = [];
-  let inaccessible = 0;
-  const record = () => ({ method: 'linux-proc-systemd' as const, platform: String(platform), uid, workspacePath: target.workspacePath, processes, scopes, inaccessible, unverifiable });
-  if (platform !== 'linux') {
-    unverifiable.push(`Supervisor absence requires Linux process and systemd scope inspection; this host reports ${platform}`);
-    return record();
-  }
-  const listProcesses = deps.listProcesses ?? (() => readdirSync('/proc'));
-  const readCommand = deps.readCommand ?? ((pid: number) => readFileSync(`/proc/${pid}/cmdline`, 'utf8'));
-  const processOwner = deps.processOwner ?? ((pid: number) => statSync(`/proc/${pid}`).uid);
-  const readCwd = deps.readCwd ?? ((pid: number) => readlinkSync(`/proc/${pid}/cwd`));
-  // Parentage, like the command line, is world-readable, so ancestry can be followed
-  // across owners; a supervisor's containment scope holds only its own descendants.
-  const readParent = deps.readParent ?? ((pid: number) => {
-    const status = linuxProcessRecord(readFileSync(`/proc/${pid}/stat`, 'utf8'));
-    if (!status) throw new Error(`Process ${pid} reported an unreadable status line`);
-    return status.ppid;
-  });
-  const readCgroup = deps.readCgroup ?? ((controlGroup: string) => readFileSync(join('/sys/fs/cgroup', controlGroup, 'cgroup.procs'), 'utf8'));
-  const run = deps.run ?? ((command: string, args: string[]) => String(execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 15_000 })));
-  const resolvePath = deps.resolvePath ?? ((path: string) => { try { return realpathSync(path); } catch { return path; } });
-  const workspace = resolvePath(target.workspacePath);
-  // The kernel separates command-line arguments with NUL, and an argument may itself
-  // contain spaces: only that boundary reconstructs the argv a supervisor was given.
-  const commandArgv = (pid: number) => readCommand(pid).split('\0').filter(Boolean);
-  // A working directory is readable for this user's ordinary processes and withheld for
-  // privileged ones, so an unreadable answer is 'not inspectable', never 'not the worker'.
-  const workspaceMember = (pid: number): 'inside' | 'outside' | 'gone' | 'unreadable' => {
-    try { const cwd = readCwd(pid); return cwd === workspace || cwd.startsWith(`${workspace}/`) ? 'inside' : 'outside'; }
-    catch (error) { return vanished(error) ? 'gone' : 'unreadable'; }
-  };
-  // Matching the fenced assignment blocks settlement, so it stays deliberately loose.
-  const supervisesTarget = (argv: string[]) => argv.includes('watch') && argv.includes(target.key) && argv.includes(String(target.epoch));
-  /**
-   * Which assignment a live process belongs to, read from the supervisor it descends from.
-   *
-   * A contained worker is a descendant of the supervisor that created its scope, and both
-   * parentage and command lines are readable for every process. Only reaching a supervisor
-   * of a different work key or epoch attributes a process elsewhere: a broken chain, an
-   * orphan reparented away from its dead supervisor, or a process this user cannot follow
-   * is 'unresolved', which fences rather than excuses.
-   */
-  const assignmentOf = (pid: number): 'target' | 'other' | 'unresolved' => {
-    const seen = new Set<number>();
-    for (let current = pid; current > 1 && !seen.has(current); ) {
-      seen.add(current);
-      let argv: string[];
-      try { argv = commandArgv(current); }
-      catch { return 'unresolved'; }
-      if (supervisesTarget(argv)) return 'target';
-      const assignment = watchAssignment(argv);
-      if (assignment) return assignment.key === target.key && assignment.epoch === String(target.epoch) ? 'target' : 'other';
-      let parent: number;
-      try { parent = readParent(current); }
-      catch { return 'unresolved'; }
-      if (!Number.isSafeInteger(parent) || parent <= 0) return 'unresolved';
-      current = parent;
-    }
-    return 'unresolved';
-  };
-  let pids: number[] = [];
-  try { pids = listProcesses().filter(name => /^\d+$/.test(name)).map(Number); }
-  catch (error) { unverifiable.push(`Host process table could not be read: ${detail(error)}`); }
-  for (const pid of pids) {
-    let argv: string[];
-    try { argv = commandArgv(pid); }
-    catch (error) { if (!vanished(error)) unverifiable.push(`Command line of process ${pid} could not be read: ${detail(error)}`); continue; }
-    // The supervisor is identified by its own command line, which every user can read.
-    if (supervisesTarget(argv)) { processes.push({ pid, evidence: 'command' }); continue; }
-    let owner: number;
-    try { owner = processOwner(pid); }
-    catch (error) { if (!vanished(error)) unverifiable.push(`Owner of process ${pid} could not be read: ${detail(error)}`); continue; }
-    // Another user's descendants are outside this sweep; local dispatch runs the worker as
-    // the coordinator's user, and the containment scope below covers the contained tree.
-    if (owner !== uid) continue;
-    const membership = workspaceMember(pid);
-    if (membership === 'inside') processes.push({ pid, evidence: 'workspace' });
-    if (membership === 'unreadable') inaccessible++;
-  }
-  try { run('systemctl', ['--user', 'show-environment']); }
-  catch (error) {
-    unverifiable.push(`systemd user manager is unavailable, so containment scopes cannot be queried: ${detail(error)}`);
-    return record();
-  }
-  let units: string[] = [];
-  try {
-    units = [...new Set(run('systemctl', ['--user', 'list-units', '--all', '--plain', '--no-legend', '--type=scope', 'graphyard-watch-*.scope'])
-      .split(/\r?\n/).map(line => line.trim().replace(/^[^A-Za-z0-9]+/, '').split(/\s+/)[0]).filter(unit => scopePattern.test(unit)))];
-  } catch (error) { unverifiable.push(`Containment scope query failed: ${detail(error)}`); return record(); }
-  for (const unit of units) {
-    try {
-      const properties = run('systemctl', ['--user', 'show', '--property=LoadState', '--property=ActiveState', '--property=ControlGroup', unit]).split(/\r?\n/);
-      const property = (name: string) => properties.find(line => line.startsWith(`${name}=`))?.slice(name.length + 1).trim() ?? '';
-      const activeState = property('ActiveState'), controlGroup = property('ControlGroup');
-      if (!activeState) { unverifiable.push(`systemd reported no state for containment scope ${unit}`); continue; }
-      if (property('LoadState') === 'not-found' || !liveScope.includes(activeState)) { scopes.push({ unit, activeState, processes: [], attributed: [] }); continue; }
-      if (!controlGroup) { unverifiable.push(`Containment scope ${unit} is ${activeState} without a readable control group`); continue; }
-      let members: number[];
-      try { members = readCgroup(controlGroup).split(/\s+/).filter(value => /^\d+$/.test(value)).map(Number); }
-      catch (error) { if (!vanished(error)) throw error; members = []; }
-      // A scope name carries the supervisor's PID, not the work key, so it cannot say whose
-      // assignment a live scope is. Every member it still holds therefore fences this one
-      // unless that member is positively attributed to a different live assignment: a
-      // working directory outside the workspace is not proof of belonging elsewhere.
-      const held: number[] = [], attributed: number[] = [];
-      for (const pid of members) {
-        const membership = workspaceMember(pid);
-        if (membership === 'gone') continue;
-        if (membership !== 'inside' && assignmentOf(pid) === 'other') attributed.push(pid);
-        else held.push(pid);
-      }
-      scopes.push({ unit, activeState, processes: held, attributed });
-    } catch (error) { unverifiable.push(`Containment scope ${unit} could not be inspected: ${detail(error)}`); }
-  }
-  return record();
-}
 
 // --- The master loop's own supervisor ----------------------------------------
 //

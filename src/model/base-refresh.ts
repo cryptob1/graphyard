@@ -112,3 +112,16 @@ export function currentBaseRefreshCarry(work: Pick<Work, 'candidate' | 'baseRefr
   if (!refresh || !carry || !candidate || refresh.head !== candidate.sha) return null;
   return carry.to.sha === candidate.sha && carry.to.baseSha === candidate.baseSha && carry.policyRevision === work.policyRevision ? carry : null;
 }
+
+/** GY-1434: how long a system-driven item's base conflict waits for the loop's own refresh before the loop reworks it. */
+export const conflictReworkBoundMs = 10 * 60_000;
+/** The round's grounds binding (`${sha}:conflict`), the conflict's first recording on this head, its due time and how far past it the round is. */
+export interface ConflictReworkDue { binding: string; since: string; dueAt: string; overdueMs: number }
+/** The loop-owned conflict rework a system-driven item is owed and when it falls due, or null when none is owed. */
+export function conflictReworkDue(work: Pick<Work, 'stage' | 'systemDriven' | 'reworkRequested' | 'candidate' | 'observation' | 'baseRefresh' | 'policyRevision'>, now: number): ConflictReworkDue | null {
+  if (work.stage === 'done' || work.systemDriven !== true || work.reworkRequested || !baseRefreshConflict(work)) return null;
+  const since = work.baseRefresh!.conflictSince ?? work.baseRefresh!.at, at = Date.parse(since);
+  if (!Number.isFinite(at)) return null;
+  const due = at + conflictReworkBoundMs;
+  return { binding: `${work.candidate!.sha}:conflict`, since, dueAt: new Date(due).toISOString(), overdueMs: Math.max(0, now - due) };
+}

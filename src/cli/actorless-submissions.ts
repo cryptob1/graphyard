@@ -1,7 +1,6 @@
 import { agentOwner, type AttentionItem } from '../master.js';
 import { reviewNeed, type ReviewState } from '../model/dispatch.js';
 import { pendingBaseRefresh } from '../model/base-refresh.js';
-import { standingEscalations } from '../model/escalation.js';
 import { baseHoldSightedAt } from '../model/behind-base.js';
 import type { Work } from '../model/work.js';
 
@@ -62,7 +61,6 @@ const missingActor: Record<ReviewState, { actor: string; next: (key: string) => 
  */
 function namedWait(work: Work, state: ReviewState, now: Date): string | null {
   if (work.blocker) return 'blocked';
-  if (standingEscalations(work).length) return 'escalated';
   if (work.lease && Date.parse(work.lease.expiresAt) > now.getTime()) return 'leased';
   if (pendingBaseRefresh(work)) return 'base refresh';
   const open = (work.actionQueue?.actions ?? []).find(row => row.state !== 'done');
@@ -112,11 +110,7 @@ export function actorlessSubmissions(work: Work[], now: Date, reworkDecisions: R
   });
 }
 
-/**
- * The actorless submissions `master status` names, from its snapshot and the loop's decision
- * watches: a rework decision the loop requested and has not seen settled is a rework request.
- */
-export function actorlessAttention(snapshot: { work: Work[]; now: string }, approvals: readonly { work: string; action: string; settledAt: string | null }[] = []): AttentionItem[] {
-  const reworking = new Set(approvals.filter(watch => watch.action === 'rework' && !watch.settledAt).map(watch => watch.work));
-  return actorlessSubmissions(snapshot.work, new Date(snapshot.now), reworking);
+/** The actorless submissions `master status` names, from its snapshot. */
+export function actorlessAttention(snapshot: { work: Work[]; now: string }): AttentionItem[] {
+  return actorlessSubmissions(snapshot.work, new Date(snapshot.now));
 }

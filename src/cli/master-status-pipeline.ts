@@ -2,11 +2,9 @@
 import { dataDirectory } from '../install/worktree-root.js';
 import { probeCandidateConflictsWithBudget } from '../conflicts.js';
 import { agentOwner, buildMasterStatus, type MasterConfig } from '../master.js';
-import { nameOrphanSupervisors } from './status-attention.js';
 import { leadTimeReport, speedSections } from '../flow-analytics.js';
 import { timedStep } from '../master/timings.js';
 import { withPipelineTimelines } from '../pipeline-speed.js';
-import { reviewRoundCapOf, withReviewRounds } from '../review-cap.js';
 import type { ReportSections } from '../master/sections.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -29,7 +27,6 @@ export async function buildPipelineStatus(
   coordinator: any,
   runtime: any,
   credentials: any,
-  containment: any,
   reviews: any,
   producers: any,
   failures: any[],
@@ -44,10 +41,7 @@ export async function buildPipelineStatus(
   // on their own and attach them first; a failed read marks the section and leaves speed unmeasured.
   await timedStep('timelines', () => withPipelineTimelines(snapshot.work, masterApi)).catch(error => sections.mark('speed', 'GET /api/pipeline-timelines', error));
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
-  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState, { mode: master.supervision, operatorLogin: master.operatorLogin }),
-    snapshot.work, master.workers, runtime, Date.parse(snapshot.now), daemonState && 'orphans' in daemonState ? daemonState : null));
-  // Each item's review round against the configured cap (GY-1118). No check-run annotation is read back (GY-2010).
-  const status = { ...sessions, work: withReviewRounds(sessions.work, snapshot.work, reviewRoundCapOf(master)) };
+  const status = await timedStep('build status', async () => buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState, { mode: master.supervision, operatorLogin: master.operatorLogin }));
   for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
   // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
   // breach attention (GY-1232) and the stage holding each item's time (GY-1382); a failed read marks its section.
@@ -57,5 +51,5 @@ export async function buildPipelineStatus(
   // report carries no line, rather than a figure guessed from what did read.
   const lead = await timedStep('lead time', () => leadTimeReport(snapshot.work, masterApi))
     .catch(error => { sections.mark('lead time', 'GET /api/events?kind=ready', error); return null; });
-  return { probe, sessions, status, delivery, lead };
+  return { probe, status, delivery, lead };
 }

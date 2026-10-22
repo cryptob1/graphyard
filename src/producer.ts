@@ -12,7 +12,6 @@ import type { DispatchRequest } from './model/dispatch.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { anchorSessionCheckout, sessionWritable, verifySessionSandbox, type SessionSandboxProbe, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
-import { escalationSessionMs, readApproverLaunches, readEscalationSessions } from './master/autonomy.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
@@ -771,12 +770,9 @@ export const loopScratchCheckout = (base: string) => sessionCheckout(base, 'appr
  */
 export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
   const now = options.now ?? Date.now();
-  const [producers, reviews, approvers, escalations] = await Promise.all([readProducerLedger(root), readReviewLedger(root), readApproverLaunches(root), readEscalationSessions(root)]);
-  // A live headless approver's directory is owned by its run, not by a ledger record (GY-391).
-  // GY-866: an interactive approver's or escalation handler's directory is owned by its launch
-  // record for as long as that record is kept; the loop's scratch checkout is kept always.
-  const recorded = [...approvers, ...escalations].filter(record => record.checkout && now - Date.parse(record.launchedAt) < escalationSessionMs).map(record => record.checkout!);
-  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...recorded, ...heldCheckouts, loopScratchCheckout(worktreeRoot(root, config)).directory];
+  const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
+  // A live headless run's directory is owned by its run, not by a ledger record (GY-391); the loop's scratch checkout is kept always.
+  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...heldCheckouts, loopScratchCheckout(worktreeRoot(root, config)).directory];
   return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 

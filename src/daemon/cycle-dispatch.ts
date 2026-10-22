@@ -7,28 +7,26 @@ import { isHotfix, maxInFlight, wipHoldWording } from '../model/dispatch.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
-import { assertDispatchable, dispatchReserved, type ContainmentAssessment, type EscalationSession, type RoleCapacity, roleCapacity } from '../master.js';
+import { assertDispatchable, dispatchReserved, type RoleCapacity, roleCapacity } from '../master.js';
 import { workspaceDispatchFailure } from '../master/dispatch.js';
 import { holdCycleBase } from '../master/worktrees.js';
-import { standingEscalations } from '../model/escalation.js';
 import { coordinateAttempts, coordinateRetryMs, registeredLaunch } from '../model/session-state.js';
 import { coordinateOwed } from '../model/launch-sentinel.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { type DaemonAction, message } from './state.js';
-import { decisionKey, dispatchKey } from './reconcile.js';
+import { dispatchKey } from './reconcile.js';
 import { clearProfileFailure, occupiesRoleBound, profileHealth, readyToRetry, recordProfileFailure, type ProfileHealth } from './sessions.js';
-import { detailChanged, fitDecisionReason, routineDecision } from './decisions.js';
+import { detailChanged } from './text.js';
 import { capacityKey, record, stoppedStates } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { credentialBlockedMarker } from '../worker-credential.js';
-import { attemptEndsNeedingRetry, attemptRetryHold, capBinding, capBindingPrefix, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, type AttemptRetryHold } from './reblocked-attempts.js';
+import { attemptEndsNeedingRetry, attemptRetryHold, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, type AttemptRetryHold } from './reblocked-attempts.js';
 import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
 import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
 import { decompositionHold, decompositionSettings } from '../decomposition.js';
 import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
 import { deploySkewFailure, planeWideFailure } from '../model/blocker-class.js';
-import { closeStanding, closingItems } from './stale-closes.js';
 import { guardCarried, settleCarriedWrites } from './carried-writes.js';
 import { carriedCall, launchWrite, owedWrite, recordCarried, stepCallCarried, supersedeOwed, unboundedEffects, withinStepBudget } from './step-budget.js';
 
@@ -113,9 +111,9 @@ export function saturatedFleet(health: readonly ProfileHealth[], held: (entry: P
 }
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
-export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) =>
-  withinStepBudget(cycle, 'dispatch', ['decide', 'approver', 'agents', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'decisions', 'recordDecomposition', 'recordResearch'], bounded => dispatchStepWithin(bounded, cycle, health, assessments)); // GY-1774: every call the step makes — the role and plane health reads, the escalation listing, each capacity report, the memory reading, the split and research records, the decision history, the cap decision and its approver launch — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
-async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
+export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>) =>
+  withinStepBudget(cycle, 'dispatch', ['agents', 'roleHealth', 'reportCapacity', 'planeHealth', 'hostMemory', 'recordDecomposition', 'recordResearch'], bounded => dispatchStepWithin(bounded, cycle, health)); // GY-1774: every call the step makes — the role and plane health reads, each capacity report, the memory reading, the split and research records — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
+async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: ReturnType<typeof profileHealth>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
   //    identity; the daemon never holds a lease. An unhealthy profile is skipped, not waited on.
@@ -129,30 +127,19 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   //    `dispatchStarvationMs` or longer in its stage is offered before every item that has not,
   //    whatever its scope or heat. `master status` reports this same order (dispatchSchedule).
   const hot = hotspots(open, clock), hotFiles = new Set(hot.map(entry => entry.file));
-  // GY-1439: no worker round is spent on an item a close stands requested on (closingItems).
-  const closing = closingItems(cycle);
   const offered = dispatchSort(open.filter(item => {
-    if (closing.has(item.key)) return false;
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }), hotFiles, clock);
 
   // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f'),
   // as is one blocked on a GitHub credential failure (GY-999, 1e). The retry ladder is computed from the item's own exhaustion record, so it survives this
-  // cursor and reads the same from any host: each retry waits 5, then 15 minutes; an item whose
-  // attempts end without submitting three times in a row is held with every cause named instead
-  // of being redispatched again, and only the decision an independent approver judges resumes it.
-  // The loop requests that decision with its operator-agent identity and launches the approver;
-  // it never judges its own request, and a refusal ends the requesting.
+  // cursor and reads the same from any host: each retry waits 5, then 15, then 45 minutes.
   const held885 = new Set<string>();
   for (const item of offered) {
-    if (!attemptEndsNeedingRetry(item).length) continue;
-    await isolate('dispatch', item, item.key, async () => {
-      const hold = attemptRetryHold(item, clock, await capResumeApprovedAt(cycle, item));
-      if (!hold) return;
-      held885.add(item.id);
-      if (hold.kind === 'backoff') await recordRetryBackoff(cycle, item, hold);
-      else await holdAtCap(cycle, item, hold);
-    });
+    const hold = attemptRetryHold(item, clock);
+    if (!hold) continue;
+    held885.add(item.id);
+    await isolate('dispatch', item, item.key, () => recordRetryBackoff(cycle, item, hold));
   }
 
   // 4-decompose. Splitting broad items before dispatch (GY-1126): an item about to be offered for
@@ -210,22 +197,11 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   const capacities: RoleCapacity[] = [roleCapacity('worker', config.workers.filter(worker => worker.mode === 'launch'), credentials)];
   if (effects.reportCapacity) {
     const others = (effects.roleHealth ? await carriedCall(cycle, 'dispatch', 'capacity', 'roleHealth', () => effects.roleHealth!(), () => null).catch(() => null) : null) ?? {};
-    for (const role of ['reviewer', 'producer', 'approver', 'escalation-handler'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
-    // A waiting record whose escalation no longer stands waits on nothing: step 1 drops it.
-    const waitingEscalations = new Set((effects.escalationSessions ? await carriedCall(cycle, 'dispatch', 'capacity', 'escalationSessions', () => effects.escalationSessions!(), () => [] as EscalationSession[]).catch(() => [] as EscalationSession[]) : [])
-      .filter(session => session.waiting && open.some(item => item.key === session.work && standingEscalations(item).some(entry => entry.trigger === session.trigger))).map(session => session.work));
-    // An item waits on the approver role while it needs a decision no approver session is judging.
-    const unjudged = new Set(open.filter(item => {
-      const decision = effects.approver ? routineDecision(item, config, clock, assessments[item.id], cycle.baseFailed.get(item.id)) : null, watch = decision ? state.approvals[decisionKey(item, decision)] : undefined;
-      return !!decision && !watch?.settledAt && !watch?.exhaustedAt && !agents.some(agent => agent.name === watch?.agentName && !stoppedStates.includes(agent.agent_status ?? ''));
-    }).map(item => item.key));
+    for (const role of ['reviewer', 'producer'] as const) if (others[role]) capacities.push(roleCapacity(role, others[role]!.profiles, others[role]!.health));
     const needs: Record<CapacityRole, Work[]> = {
       worker: claimable,
       reviewer: open.filter(item => item.autoDispatch?.review?.state === 'requested'),
       producer: open.filter(item => item.autoDispatch?.producers.some(request => request.state === 'requested')),
-      approver: open.filter(item => unjudged.has(item.key)),
-      // An item waits on the escalation-handler role while a handler for it ended on spent quota with no account left.
-      'escalation-handler': open.filter(item => waitingEscalations.has(item.key)),
       // No item waits on the master role: its capacity is the loop's own wait, not an item's (GY-898).
       master: [],
       // Doctor and diagnostician spend quota but no item waits on them (GY-1705).
@@ -255,8 +231,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     }
   }
   const workersSpent = !!effects.reportCapacity && capacities[0].exhausted;
-  // With every approver account spent no approver is launched before the first reset (GY-182).
-  const approversSpent = !!effects.reportCapacity && !!capacities.find(capacity => capacity.role === 'approver')?.exhausted;
 
   // 4b-human. An item parked on a decision only a human may make holds no lease and is not
   //     claimable, so there is nothing to dispatch and nothing to escalate to an agent: the loop
@@ -365,11 +339,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
       }
       return 'stop';
     }
-    // GY-1439: a close requested by hand since the last cycle is in no kept history or watch until the
-    // decisions step (4c) reads it, after this step; the item's own history, read afresh only for an
-    // item a profile is about to take, holds it here, so its claim does not move the revision under the close.
-    const close = await closeStanding(effects, item, snapshot.work, closing);
-    if (close) { performed.push(...await closingWait(item, close)); return; }
     taken.add(choice.profile.name);
     const holds = [choice.profile.name];
     // Captured at decision time: the launch runs on the launcher after this cycle may have ended,
@@ -382,12 +351,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     const releaseBase = holdCycleBase(snapshot.now);
     if (cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued).finally(releaseBase))) inFlightCount += 1; else releaseBase();
   }) === 'stop') break; });
-
-  /** The one wait an item a close stands unapplied on records instead of a dispatch (GY-1439). */
-  async function closingWait(item: Work, close: string): Promise<DaemonAction[]> {
-    const waitKey = `wait:closing:${item.id}`, detail = `${item.key}: close decision ${close} stands unapplied, so the loop takes no dispatch decision on it while it is being closed`;
-    return detailChanged(state.actions[waitKey], detail) ? [await record(state, waitKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)] : [];
-  }
 
   /** What a dispatch that starts on a hot file adds to its record, so master status can show the contention (GY-882). */
   function hotspotNote(beside: Pick<Hotspot, 'file'> & { beside: string[] } | null) {
@@ -404,9 +367,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   async function launch(item: Work, key: string, chosen: NonNullable<ReturnType<typeof health.find>>, free: Awaited<ReturnType<typeof effects.agents>>, pick: () => ReturnType<typeof health.find>, holds: string[], performed: DaemonAction[], beside: { file: string; beside: string[] } | null, queued = false) {
     let choice = chosen;
     const previous = state.actions[key];
-    // GY-1439: a close requested while this launch waited in the queue holds it before it claims and moves the revision.
-    const close = queued ? await closeStanding(effects, item, snapshot.work, new Map()) : null;
-    if (close) { taken.delete(chosen.profile.name); performed.push(...await closingWait(item, close)); return; }
     for (;;) {
       const current = choice;
       taken.add(current.profile.name);
@@ -506,7 +466,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   });
-  return { capacities, approversSpent };
+  return { capacities };
 }
 
 /** The key of the loop's host-memory record: one deferral and one resumption per crossing. */
@@ -525,98 +485,12 @@ export async function hostMemoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'n
   return judged.state.low;
 }
 
-/**
- * GY-885. When an applied decision last approved a fresh round past the item's attempt cap, as
- * epoch time, or 0. Only the loop's own cap bindings count — any other applied decision answers
- * something else — and the read failing holds nothing: the ladder then simply counts every end.
- */
-async function capResumeApprovedAt(cycle: Cycle, item: Work): Promise<number> {
-  if (!cycle.effects.decisions) return 0;
-  const history = await cycle.effects.decisions(item).then(result => result.decisions, error => { if (stepCallCarried(error)) throw error; return []; }); // GY-1774: a carried read is the item's carried handling
-  let resume = 0;
-  for (const entry of history) {
-    if (entry.state !== 'applied' || (entry.action !== 'rework' && entry.action !== 'unblock')) continue;
-    if (typeof entry.input?.binding !== 'string' || !entry.input.binding.startsWith(capBindingPrefix)) continue;
-    const at = Date.parse(entry.approvedAt ?? '');
-    if (Number.isFinite(at) && at > resume) resume = at;
-  }
-  return resume;
-}
-
 /** Name one backoff window the item's retry ladder is waiting out (GY-885): a record, so `master status` shows why nothing dispatches. */
 async function recordRetryBackoff(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
   const { state, now, performed, effects } = cycle;
-  const last = hold.ends.at(-1), since = last ? Date.parse(last.at) : hold.resumeAt! - retryBackoffMs[retryBackoffMs.length - 1];
-  const detail = last
-    ? `${item.key}: attempt ${last.epoch} ended ${last.reason.startsWith(credentialBlockedMarker) ? 'on a GitHub credential failure' : "past its role's time box"} at ${last.at}; retry ${hold.count + 1} of ${maxFailedAttempts} waits ${Math.round((hold.resumeAt! - since) / 60_000)} minutes, until ${new Date(hold.resumeAt!).toISOString()}`
-    : `${item.key}: the cap decision an independent approver approved was applied, and the fresh round it starts waits ${retryBackoffMs[retryBackoffMs.length - 1] / 60_000} minutes, until ${new Date(hold.resumeAt!).toISOString()}`;
+  const last = hold.ends.at(-1)!, since = Date.parse(last.at);
+  const detail = `${item.key}: attempt ${last.epoch} ended ${last.reason.startsWith(credentialBlockedMarker) ? 'on a GitHub credential failure' : "past its role's time box"} at ${last.at}; retry ${hold.count + 1}${hold.count < maxFailedAttempts ? ` of ${maxFailedAttempts}` : ''} waits ${Math.round((hold.resumeAt - since) / 60_000)} minutes, until ${new Date(hold.resumeAt).toISOString()}`;
   const key = `retry:backoff:${item.id}:${since}`;
-  if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: last?.epoch ?? null, state: 'waiting', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: last.epoch, state: 'waiting', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
 }
 
-/**
- * GY-885 at the cap: the item is not redispatched again. The loop requests the rework decision —
- * whether the item gets one more round is the independent approver's judgment, never the loop's
- * own — with its operator-agent identity and launches the approver session for it, and records
- * the hold naming every cause. The requester attests only what it verified: it ended the attempt
- * on the record itself, so the previous worker is stopped while no lease is live and no
- * containment fence stands; a fence nobody settled is named, never attested away. A refusal is
- * the approver's considered judgement: the loop stops requesting and names the recovery. The
- * one rework request the control plane holds per item is honoured: a round another finding
- * already asked for is this cap's answer too, and the hold waits for it.
- */
-async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
-  const { state, now, clock, performed, effects } = cycle;
-  const key = `retry:held:${item.id}`, binding = capBinding(item, hold.boundAt!);
-  const held = `held: ${hold.count} attempts in a row ended without submitting, each past its role's time box or on a GitHub credential failure — ${hold.causes.join('; ')}`;
-  const note = async (outcome: 'done' | 'failed', detail: string) => {
-    if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-  };
-  const history = effects.decisions ? await effects.decisions(item).then(result => result.decisions, error => { if (stepCallCarried(error)) throw error; return undefined; }) : undefined; // GY-1774
-  const standing = history?.filter(entry => entry.action === 'rework' && ['requested', 'approved'].includes(entry.state));
-  const mine = standing?.find(entry => entry.input?.binding === binding);
-  const refused = history?.find(entry => entry.action === 'rework' && entry.state === 'refused' && entry.input?.binding === binding);
-  const liveLease = item.lease && Date.parse(item.lease.expiresAt) > clock;
-  const blocked = mine ? `${item.key} is ${held}. Its cap decision ${mine.id} stands ${mine.state} and waits on the independent approver judging it.`
-    : refused ? `${item.key} is ${held}. The independent approver refused the round the loop asked for: ${refused.refusal?.reason ?? 'no reason recorded'}. The loop does not request it again; read it with graphyard master decisions ${item.key}, then request what the item needs with a reason that cites ${refused.id}, or file the follow-up that decides its fate.`
-    : standing?.length ? `${item.key} is ${held}. A rework decision ${standing[0].id} already stands ${standing[0].state} on the item, and the control plane holds one rework request at a time, so the cap waits for it before asking for its own.`
-    : liveLease || item.containmentQuarantine ? `${item.key} is ${held}, but the loop will not attest the previous worker stopped while ${liveLease ? 'a lease is still live' : 'its containment fence stands'}: settle the fence on its registered host (graphyard master settle-containment ${item.key}) and the cap decision is requested.`
-    : !effects.decide || !effects.approver ? `${item.key} is ${held}. This loop runs without the decision effects, so it cannot request the round: graphyard master decide ${item.key} rework '{"previousWorkerStopped":true,"binding":"${binding}"}' REASON, then graphyard master approver ${item.key} DECISION.`
-    : null;
-  if (blocked) { await note('done', blocked); return; }
-  const { decide, approver } = effects;
-  await note('done', `${item.key} is ${held}. The loop requests the rework decision that alone resumes it, and puts it to the independent approver: whether the item gets one more round is the approver's judgment, not the loop's.`);
-  const startedKey = `retry:cap-request:${item.id}`;
-  if (state.actions[startedKey]?.state === 'failed' && !readyToRetry(state.actions[startedKey], state.cycle)) return;
-  const attempts = (state.actions[startedKey]?.attempts ?? 0) + 1;
-  await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: 'started', detail: `Requesting the rework decision that alone resumes ${item.key} past its attempt cap`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
-  try {
-    const reason = fitDecisionReason(`${item.key}: `, `${held}. Only a fresh attempt can move it, and whether it gets one is the approver's judgment, not the loop's. `, 'The previous worker is stopped: the loop ended the attempt on the record itself.');
-    const requested = await decide!(item, 'rework', reason, { binding });
-    // A low- or medium-lane rework is applied as it is requested (GY-883): no approver to launch.
-    const settledState = (requested as { state?: string }).state;
-    if (settledState === 'applied' || settledState === 'failed') {
-      performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: settledState === 'applied' ? 'done' : 'failed', detail: `Requested decision ${requested.id} (rework) for ${item.key}; its risk lane needs no approver, and the control plane ${settledState === 'applied' ? 'applied it' : 'could not apply it'} at once: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    // The request alone changes nothing; the independent approver session is what applies it.
-    // The launch runs on the launcher beside the cycle (GY-616) and is reported next cycle.
-    const launchKey = `attempt-cap:approver:${item.id}`;
-    // GY-1774: on the launcher beside the cycle the launch holds no cycle and waits as long as it takes; settled in place, it is bound like the step's other calls.
-    const launchWith = cycle.detached ? unboundedEffects(effects).approver! : approver!;
-    const handed = cycle.launch('decision', item, launchKey, [], async sink => {
-      let launched: Awaited<ReturnType<typeof launchWith>>;
-      try { launched = await launchWith(item, requested.id); }
-      catch (error) {
-        if (!stepCallCarried(error)) throw error;
-        sink.push(await record(state, launchKey, { kind: 'decision', work: item.key, principal: null, state: 'waiting', detail: `Launching the approver of ${item.key}'s cap decision ${requested.id} was carried to the next cycle: ${message(error)}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-        return;
-      }
-      sink.push(await record(state, launchKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s cap decision ${requested.id}: launched independent approver session ${launched.agentName}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-    });
-    performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Requested decision ${requested.id} (rework) for ${item.key} and ${handed ? 'handed the approver session to the launcher' : 'launched the independent approver session'}: ${reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-  } catch (error) {
-    if (stepCallCarried(error)) return recordCarried(cycle, startedKey, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Requesting ${item.key}'s cap decision`);
-    performed.push(await record(state, startedKey, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not put ${item.key}'s cap decision to an approver: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-  }
-}

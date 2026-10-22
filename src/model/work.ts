@@ -27,8 +27,6 @@ export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landa
 export const stages = ['backlog', 'ready', 'build', 'review', 'test', 'acceptance', 'merge', 'done'] as const;
 export type Stage = typeof stages[number];
 export const sliceIds = ['product', 'infrastructure', 'docs-experience'] as const; export type SliceId = typeof sliceIds[number];
-export const escalationTriggers = ['lease-loss', 'evidence-policy-conflict', 'security-concern', 'requirement-weakening'] as const;
-export type EscalationTrigger = typeof escalationTriggers[number];
 /** The shipped setting: every new item is system-driven unless its intent says `"systemDriven": false`. */
 export const systemDrivenDefault = true;
 export { declaredPostDeploy, liveObservationPhrase, postDeployCriterionRefusal, postDeployOnlyRefusal, postDeployProof, postDeployProofPrefix, postDeployProofs } from './post-merge-proofs.js';
@@ -98,11 +96,9 @@ export function observationWindowHold(work: { observationWindow?: ObservationWin
   return window && Date.parse(window.notBefore) > now.getTime() ? window : null;
 }
 export { loopObservationProofs, loopObservation } from './loop-observation.js';
-// The `decision:*` capabilities request a two-party decision (see model/approval.ts); an agent
-// holding one still needs a second, independent agent holding `decision:approve` to apply it.
+// The master's operator-agent identity applies intent with no capability (engine.ts `operatorCommands`); these name the rest.
 // `e2e:record` (GY-1614) admits only the scenario registry and its run route: a candidate's UAT case runs.
-export const operatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider', 'policy:bootstrap',
-  'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant', 'decision:approve', 'e2e:record'] as const;
+export const operatorCapabilities = ['policy:requirements', 'policy:review-provider', 'policy:bootstrap', 'e2e:record'] as const;
 export type OperatorCapability = typeof operatorCapabilities[number];
 export const operatorCredentialHash = Symbol('operatorCredentialHash');
 export interface Principal {
@@ -120,7 +116,6 @@ export interface Principal {
 }
 export interface AssignmentIdentity { owner: string; epoch: number; displayName?: string; runtime?: string; claimedAt?: string }
 export interface Lease { owner: string; epoch: number; expiresAt: string }
-export interface ContainmentScope { unit: string; pid: number }
 export interface Workspace { host: string; path: string; branch: string; epoch: number; owner: string }
 // createdAt is the provider's pull-request creation time; older observations predate it.
 export interface Candidate { sha: string; baseSha: string; pr: number; branch: string; author: string; createdAt?: string }
@@ -163,8 +158,6 @@ export interface Observation {
   revertedDelivery?: RevertedDelivery; // a merged change whose content the base branch does not hold; see model/landing-check.ts
 }
 export interface Gate { name: string; passed: boolean; reasons: string[] }
-/** `decision`: the approved two-party decision whose application raised it, when the item's ledger records it approved (GY-1347). */
-export interface Escalation { trigger: EscalationTrigger; reason: string; at: string; actor: string; decision?: string }
 export interface Work extends Create {
   /**
    * The current validation selection per proof. `reanchor` is set when the selected request's
@@ -189,9 +182,6 @@ export interface Work extends Create {
   id: string; key: string; stage: Stage; revision: number; policyRevision: number;
   createdAt: string; updatedAt: string; stageEnteredAt: string; ready: boolean;
   epoch: number; lease: Lease | null; lastAssignment?: AssignmentIdentity; workspaces: Workspace[]; candidate: Candidate | null;
-  // `scope` is the exact systemd scope unit the supervisor launched the session in and that
-  // supervisor's pid, so settlement can attribute a live scope to this assignment or another.
-  containmentQuarantine?: { owner: string; epoch: number; at: string; settlementHash: string; launchAcknowledgedAt?: string; launchExpiresAt?: string; leaseExpiresAt?: string; scope?: ContainmentScope } | null;
   submission: { epoch: number; pr: number } | null;
   /**
    * The open decision only a human may make, recorded by the attempt that reached it. Recording it
@@ -211,8 +201,6 @@ export interface Work extends Create {
    * alone; see model/base-refresh.ts for the rule and model/carry.ts for what the refresh carries.
    */
   baseRefresh?: BaseRefresh | null; baseRefreshRequest?: BaseRefreshRequest | null; mergeRefusal?: MergeRefusal | null; // baseRefreshRequest: the standing request to merge a repaired base in (GY-528); mergeRefusal: the guarded merge's refusal (GY-831)
-  /** GY-1927: the automatic-merging hold over the item's candidate, as the coordination view serves it (merger-mode.ts `mergeHolds`); absent when nothing holds it. */
-  mergeHold?: string | null;
   reworkRequested: boolean;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
@@ -248,11 +236,6 @@ export interface Work extends Create {
   /** Required proof names that had no authorized producer when intent was last recorded. */
   proofGaps?: string[];
   evidence: Evidence[]; observation: Observation | null; blocker: string | null;
-  // `escalations` is the source of truth: every distinct unresolved trigger
-  // stands until it is individually resolved. `escalation` mirrors the oldest
-  // one so legacy documents and readers keep working.
-  escalation?: Escalation | null;
-  escalations?: Escalation[];
   // Durable state for a blocking lead ruling. History records the ruling; this
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;

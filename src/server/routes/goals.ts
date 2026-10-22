@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type pg from 'pg';
-import { demand, operatorCapability, type OperatorCapability, type Principal, type Work } from '../../model.js';
+import { demand, type Principal, type Work } from '../../model.js';
 import { appendGoal, applyGoalCommand, goalCommandSchemas, goalHistory, goalKeyPattern, goalSummary, implementersOf, readGoals, recordGoal, type Goal, type GoalCommand, type GoalContext, type Landing } from '../../model/goal.js';
 import { planItemInput, planItemMark, planOrder, mergedItem } from '../../model/goal-plan.js';
 import type { Engine } from '../../engine.js';
@@ -16,14 +16,13 @@ import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
  * other than the plan's author judges the plan, the loop releases its items, and
  * case changes after that are judged by an approver who is neither their requester nor an
  * implementer of their item. This module authorizes its callers itself, so it is matched ahead of
- * the operator-agent route guard: an operator agent records intent with `intent:create` and judges
- * with `decision:approve`, each within its repository scope.
+ * the operator-agent route guard: the master's operator agent records intent and judges within its repository scope.
  */
-const intent = (context: RouteContext) => allow(context, ['admin', 'coordinator'], 'intent:create');
-const judge = (context: RouteContext) => allow(context, ['admin'], 'decision:approve');
-function allow({ actor, services }: RouteContext, roles: Principal['role'][], capability: OperatorCapability) {
-  if (actor.role === 'operator-agent') return operatorCapability(actor, capability, undefined, services.repository);
-  demand(roles.includes(actor.role), `${actor.id} is a ${actor.role}; this goal command needs ${roles.join(' or ')} or an operator agent holding ${capability}`, 403);
+const intent = (context: RouteContext) => allow(context, ['admin', 'coordinator']);
+const judge = (context: RouteContext) => allow(context, ['admin']);
+function allow({ actor, services }: RouteContext, roles: Principal['role'][]) {
+  if (actor.role === 'operator-agent') return demand(!!actor.scope?.repositories.includes(services.repository), 'Repository is outside this operator-agent scope', 403);
+  demand(roles.includes(actor.role), `${actor.id} is a ${actor.role}; this goal command needs ${roles.join(' or ')} or the master's operator agent`, 403);
 }
 /**
  * Who may run each command on an existing goal. A case change is asked by whoever works on the item.

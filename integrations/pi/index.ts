@@ -11,8 +11,7 @@ import { autonomyContract } from '../../src/autonomy';
  * never run blindly. Nothing here asks a person anything: there is no UI call anywhere in this
  * file, and a refused call returns its reason to the agent so it retries safely.
  *
- * `GRAPHYARD_PI_ROLE` (approver | producer | research | decomposition | triage) selects the role's tool; unset, the approver's
- * and the producer's are registered.
+ * `GRAPHYARD_PI_ROLE` (producer | research | decomposition | triage | …) selects the role's tool; unset, the producer's is registered.
  * The tools submit nothing to the control plane themselves: the runner hands the validated payload
  * to the loop, which applies it through the same routes a terminal session uses, and the gates
  * decide. The extension is self-contained apart from the one contract text it shares with every
@@ -37,14 +36,6 @@ const count = (description: string): JsonSchema => ({ type: 'integer', minimum: 
 // GY-1402: the proof form `master create` accepts (src/model/proof.ts proofSchema), checked at the call so the agent corrects it in its run.
 const proof: JsonSchema = { type: 'string', minLength: 1, maxLength: 200, pattern: '^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$', description: 'A proof id: unit:, integration:, e2e: or manual: then letters, digits and ._/- only, such as unit:fault-class-loop' };
 
-export const decideParameters: JsonSchema = {
-  type: 'object', additionalProperties: false, required: ['decision', 'approve', 'reason'],
-  properties: {
-    decision: text(100, 'The id of the decision you judged, exactly as Graphyard lists it'),
-    approve: { type: 'boolean', description: 'true to approve the decision, false to refuse it' },
-    reason: text(2000, 'Why, weighed against the item\'s criteria and the operator\'s goals'),
-  },
-};
 export const evidenceParameters: JsonSchema = {
   type: 'object', additionalProperties: false, required: ['proof', 'sha', 'baseSha', 'policyRevision', 'result', 'executed', 'skipped', 'exercise'],
   properties: {
@@ -200,7 +191,6 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
         return { content: [{ type: 'text', text: `${name} recorded ${key}. Graphyard applies it and its gates decide; do not repeat it.` }], details: params, terminate };
       } };
   };
-  const decide = tool('graphyard_decide', 'Graphyard decide', 'Record your verdict on the Graphyard decision you were asked to judge: approve true or false, with your reason. Call it exactly once; it is your answer.', decideParameters, params => `decision ${params.decision}`, true);
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
   // The research session's brief (GY-259) is registered for its own role only.
   if (role === 'acceptance') return [tool('graphyard_acceptance', 'Graphyard acceptance', 'Record the acceptance draft for the goal you were asked to draft: each customer outcome in plain language with its criteria and the one required uat E2E case that proves it. Call it exactly once; it is your result.', acceptanceParameters, params => `acceptance ${params.goal}`, true)];
@@ -211,7 +201,7 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.
   if (role === 'triage') return [tool('graphyard_triage_decision', 'Graphyard triage decision', 'Record your judgement of the machine-filed backlog item you were asked to triage: release it with a priority, close it with a reason (naming the delivered item that already fixed it, if any), or merge it into another open item. Call it exactly once; it is your result.', triageParameters, () => 'the judgement', true)];
-  return role === 'approver' ? [decide] : role === 'producer' ? [evidence] : [decide, evidence];
+  return [evidence];
 }
 
 // ---- The destructive-command guard -------------------------------------------------------------

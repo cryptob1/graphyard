@@ -95,8 +95,6 @@ export function mergeQueue(work: readonly Work[], ledger: Readonly<Record<string
     // The served review gate is the control plane's verdict under the deployment's policy, never this process's
     // own reading of graphyard.json, which an unapplied edit or an older checkout makes diverge (GY-1843).
     if (!gate(item, 'review')) return false;
-    // GY-1927: a candidate the automatic-merging hold stands over waits for the merge decision that releases it.
-    if (item.mergeHold) return false;
     const state = ledger[item.key];
     if (trialRefusalHeld(candidate, state)) return false;
     if (state && state.head === candidate.sha.toLowerCase() && state.state === 'reconciled') return false;

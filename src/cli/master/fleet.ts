@@ -10,7 +10,6 @@ import { harnessDrift, writeHarnessPermissions } from '../../harness.js';
 import { browserFlows, listConfirmAccessFixtures, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
 import { registryCommand } from '../master-registry.js';
-import { assertHandReview } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
 import type { AttentionItem, MasterConfig } from '../../master.js';
 
@@ -83,11 +82,8 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'registry') return print(await registryCommand(master, args, { read: path => masterApi(path), write: (path, data) => masterMutation(path, data) }));
   if (id === 'reviewer') return reviewerCommand(root, master, args, print);
   // The fleet on this host against the CLI checkout's commit: the release a restart would load.
-  // A system-driven item's reviewer is the loop's to launch, save the recovery it sends the master to (GY-175),
-  // judged on the same snapshot the launch reads its review request from.
   if (id === 'review') {
-    const snapshot = await masterApi('work-snapshot'), work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-    if (work) assertHandReview(work, (await readReviewLedger(root)).reviews, (await readDispatchCursor(root, master)).failures, Date.parse(snapshot.now));
+    const snapshot = await masterApi('work-snapshot');
     return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
   }
   if (id === 'browser') {

@@ -96,7 +96,7 @@ export async function promoteToAutonomy(root: string, adminToken: string | undef
   const entry = { action: 'promote', at: (deps.now?.() ?? new Date()).toISOString(), from: 'supervised', to: 'autonomous',
     by: { actor: actor.id, githubLogin: operatorLogin, user: userInfo().username, host: hostname() },
     reviewer: { app: `${config.reviewer!.slug}[bot]`, appId: config.reviewer!.appId, profiles: config.reviewers.map(profile => profile.name) },
-    identities: { operatorAgent: plan.operatorAgent.id, approver: plan.approver.id }, reason: promotionReason };
+    identities: { operatorAgent: plan.operatorAgent.id }, reason: promotionReason };
   const file = promotionAuditFile(root);
   await mkdir(actionsDirectory(root), { recursive: true, mode: 0o700 });
   await appendFile(file, `${JSON.stringify(entry)}\n`, { mode: 0o600 }); await chmod(file, 0o600);
@@ -104,5 +104,5 @@ export async function promoteToAutonomy(root: string, adminToken: string | undef
   // The autonomy apply already writes autonomous; recorded again so the flip never depends on it.
   const { supervision } = await recordSupervision(root, 'autonomous');
   return { promoted: true, supervision, changes: applied.changes, audit: { file, entry }, harness: applied.harness,
-    next: `Autonomous: the loop launches ${entry.reviewer.app}'s reviewer for the next build-passing candidate, and the master requests two-party decisions as ${entry.identities.operatorAgent}. There is no demotion command.` };
+    next: `Autonomous: the loop launches ${entry.reviewer.app}'s reviewer for the next build-passing candidate, and the master applies every decision as ${entry.identities.operatorAgent}. There is no demotion command.` };
 }

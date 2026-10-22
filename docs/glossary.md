@@ -38,7 +38,7 @@ Launches sessions, reports liveness. **Canonical usage:** *Herdr*; others by pro
 Role | Held by | May | Never
 ---|---|---|---
 | `admin` | Human operator | Any decision | Share with AI
-| `operator-agent` | Master, approver | Add intent; request, approve | Self-approve; merge
+| `operator-agent` | Master | Apply decisions | Merge
 | `coordinator` | Master loop | Dispatch, reconcile merges | Implement, prove
 | `slice-lead` | Slice lead | Rule, escalate | Implement, merge
 | `worker` | Worker | Claim, heartbeat, register, submit | Satisfy acceptance
@@ -47,7 +47,7 @@ Role | Held by | May | Never
 
 ## Who decides
 
-Master applies non-weakening intent directly; two-party decisions (`graphyard master decide GY-N ACTION REASON`, approved by `graphyard master approve GY-N DECISION REASON`) cover requirement rewrites, escalations, ungrounded [high-lane](how-graphyard-works.md#risk-lanes) rework, recovery, `manual:` attestation, proof grants, and merges with automatic merging off; human-only decisions [park](master-agent-reference.md#items-and-human-waits).
+Master applies `release`, `unblock`, `requirements`, `rework`, `close`, `grant` and `attest` at once under its operator-agent identity. Human keeps goals and priorities, money and accounts, credentials for people; those [park](master-agent-reference.md#items-and-human-waits).
 
 ## Diagram legend
 

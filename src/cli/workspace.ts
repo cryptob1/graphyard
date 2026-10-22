@@ -5,10 +5,9 @@ import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
-import { containmentFailureNote, controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../supervisor.js';
+import { controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../supervisor.js';
 import { attributeConflicts, hasConflictMarkers, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
 import { resolveTimingBaseline, timedTestFile, timingBaselinePath } from '../model/timing-companion.js';
-import { acknowledgeContainment, containmentCredentials, establishContainment, revalidateContainment, settleContainment } from '../quarantine.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
 import { resolveWork, type CliContext } from './context.js';
 import { installUnderLease } from './install-under-lease.js';
@@ -172,18 +171,8 @@ export const workspaceCommands = defineCommands([
       process.env.GRAPHYARD_URL = base; process.env.GRAPHYARD_TOKEN = watchToken;
       process.env.GRAPHYARD_CLI = await context.activeCliPath(); process.env.GRAPHYARD_HOST_ID = hostId;
       const foreground = !!(process.env.HERDR_ENV === '1' && process.env.GRAPHYARD_HERDR_AGENT_KIND);
-      // This random capability remains only in the supervisor process. It is never
-      // placed in the child environment, request history, or quarantine document.
-      const containment = foreground ? containmentCredentials() : null;
-      const exclusiveResources = [...(work.exclusiveResources ?? [])];
-      const settlementRequestId = foreground ? randomUUID() : '';
-      const launchRequestId = foreground ? randomUUID() : '';
-      // The scope is created here rather than inside the supervisor so its exact unit name and
-      // this supervisor's pid are recorded on the quarantine: settlement later holds everything
-      // that unit still contains and can tell it from a neighbouring assignment's scope.
+      // The worker runs in its own systemd scope, so its whole process tree is signalled at once.
       const scoped = foreground && process.platform === 'linux' ? systemdContainment(args[separator + 1], args.slice(separator + 2)) : null;
-      const unit = scoped?.args.find(arg => arg.startsWith('--unit='))?.slice('--unit='.length);
-      const scope = unit ? { unit, pid: process.pid } : undefined;
       // `complete` ends the lease, so the renewal after a submission is refused by design: say
       // so before the supervisor stops the session, so the stop reads as the end of the attempt
       // rather than as a lost assignment.
@@ -194,32 +183,9 @@ export const workspaceCommands = defineCommands([
           throw error;
         }
       };
-      // Settlement comes at shutdown, long after setup: its window opens at its first call.
-      let settleUntil = 0;
-      const settleApi = restartTolerantApi(api, () => settleUntil ||= performance.now() + controlPlaneRestartWindowMs);
       process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
           detached: !foreground,
           ...(scoped ? { containment: scoped } : {}),
-          quarantine: foreground ? {
-            // The quarantine records the exact scope unit and supervisor pid the session is
-            // launched in, and launch is refused unless the confirmed record names them.
-            establish: () => establishContainment(
-              requestId => setupApi(`work/${work.id}/quarantine`, { epoch, settlementHash: containment!.settlementHash, ...(scope ? { scope } : {}) }, requestId),
-              { epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: containment!.requestId, ...(scope ? { scope } : {}) },
-            ),
-            revalidate: async () => revalidateContainment(await setupApi('work-snapshot?view=coordination'), {
-              workId: work.id, principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash,
-              exclusiveResources, workspace,
-            }),
-            acknowledge: () => acknowledgeContainment(
-              requestId => setupApi(`work/${work.id}/launch`, { epoch, settlementHash: containment!.settlementHash }, requestId),
-              { principal: workerStatus.actor.id, epoch, settlementHash: containment!.settlementHash, exclusiveResources, requestId: launchRequestId },
-            ),
-            settle: () => settleContainment(
-              (requestId, body) => settleApi(`work/${work.id}/settle`, body, requestId),
-              { epoch, settlementToken: containment!.settlementToken, settlementHash: containment!.settlementHash, exclusiveResources, requestId: settlementRequestId },
-            ), report: failure => api(`work/${work.id}/request`, containmentFailureNote(epoch, failure), randomUUID()), // a fence it cannot lower goes on the record
-          } : undefined,
         });
     },
   },

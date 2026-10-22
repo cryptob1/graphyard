@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { operatorCredentialRefusal, operatorOnlyDecision, refusedReconciliations } from './operator-decision.js'; // not approval.ts's re-export: approval → park-withdrawal → here would read it uninitialized (GY-1815)
 import { hostDoableAsk, hostDoableRefusal, parkRefusal as classifiedParkRefusal, type HostDoableAsk } from './park-refusal.js';
 import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';
@@ -197,8 +196,7 @@ export function openHumanRequests(work: readonly { id: string; key: string; titl
   }).sort((a, b) => b.waitedMs - a.waitedMs);
 }
 
-// The human surface (GY-102). `park` is not the only thing the server takes from the operator's own credential: an
-// approval no agent identity can complete is another. Every such action is a rule here — what the server refuses an agent
+// The human surface (GY-102). Every action the server takes from the operator's own credential is a rule here — what the server refuses an agent
 // identity, and how to find its open instances. The page, the CLI list and `GET /api/human-requests` render this table and
 // nothing else, so a rule added here is listed for the human without a second change, and none is silently absent.
 
@@ -207,19 +205,11 @@ export interface HumanOnlyActor { id?: string; role?: string | null; sessionKind
 /** Undeclared is reported as undeclared: an unlabelled session is never treated as human (delegation.ts `sessionKind`). */
 const declaredKind = (actor: HumanOnlyActor) => actor.sessionKind ?? 'undeclared';
 
-/** A decision as the surface reads it: the server folds extra terminal states onto the model's own. */
-export type HumanOnlyDecision = Omit<import('./approval.js').Decision, 'state'> & { state: string };
-/** One item as the rules read it: its document, and its two-party decisions when a rule needs them. */
-export interface HumanOnlySubject {
-  work: Work;
-  /** Folded from the ledger by the caller; `reads` says which rules require it. */
-  decisions?: readonly HumanOnlyDecision[];
-}
+/** One item as the rules read it. */
+export interface HumanOnlySubject { work: Work }
 export interface HumanOnlyRule {
   /** Stable name, carried on every row the rule raises. */
   kind: string;
-  /** A cheap pre-filter: whether this item's decisions must be folded from the ledger before `open` can answer for it. */
-  reads?(work: Work): boolean;
   /** Why this session may not answer one of these, or null when it may: the refusal the server raises. */
   refuse(actor: HumanOnlyActor): string | null;
   /** Every open instance of this rule on one item. */
@@ -238,52 +228,11 @@ export const parkRule: HumanOnlyRule = {
   open: (subject, now) => openHumanRequests([subject.work], now),
 };
 
-/** The fourth decision the operator keeps, beside the three of `humanDecisionLabel`. */
-export const operatorApprovalLabel = 'authorizing what no agent identity may authorize';
-/**
- * An approval the server takes from the operator's admin credential alone
- * (model/approval.ts `operatorOnlyDecision`): a requested merge decision overriding a
- * reconciliation the record refused. Every agent identity is refused it — the master's own pair
- * approving it would deliver nothing — so it waits here, with a parked request's fields.
- */
-export const operatorApprovalRule: HumanOnlyRule = {
-  kind: 'operator-approval',
-  // Only an item with a refused reconciliation carries one: the ledger read is bounded to items that could answer it.
-  reads: work => refusedReconciliations(work).length > 0,
-  refuse: operatorCredentialRefusal,
-  open(subject, now) {
-    const work = subject.work;
-    return (subject.decisions ?? []).filter(decision => decision.state === 'requested').flatMap(decision => {
-      const operatorOnly = operatorOnlyDecision(decision, work);
-      if (!operatorOnly) return [];
-      // The requester asked for this decision, so approving it is what it recommends (GY-1410).
-      const request: HumanOnlyRequest = { id: decision.id, kind: operatorApprovalRule.kind, needed: operatorOnly.needed, reason: decision.reason,
-        requestedBy: decision.requestedBy, epoch: work.epoch, at: decision.requestedAt,
-        recommendation: 'Approve', why: `${decision.requestedBy} asked for this decision, and only a human admin may approve it.` };
-      return [{
-        rule: operatorApprovalRule.kind, work: work.key, id: work.id, title: work.title, request,
-        waitedMs: Math.max(0, now - Date.parse(decision.requestedAt)), decision: operatorApprovalLabel,
-        refusal: operatorCredentialRefusal({ id: 'an agent identity', role: 'operator-agent' })!,
-        // Declining is the operator's considered refusal on the same route (server/decision-refusal.ts), terminal with their reason, as on a park request.
-        choices: [{ label: `Approve and deliver ${work.key}`, input: 'none', declines: false, body: { decision: decision.id, reason: 'Approved by the operator' }, note: 'reason', recommended: true },
-          { label: 'Decline', input: 'none', declines: true, body: { action: 'refuse', decision: decision.id, reason: 'Declined by the operator' }, note: 'reason' }],
-        answer: {
-          cli: `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve ${work.key} ${decision.id} REASON`,
-          decline: `GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master refuse ${work.key} ${decision.id} REASON`,
-          dashboard: 'Work → Needs you → Approve or Decline',
-          api: `POST /api/work/${work.key}/approve {"decision":"${decision.id}","reason":"…"}`,
-          post: { command: 'approve', body: { decision: decision.id }, field: 'reason', submit: `Approve and deliver ${work.key}`, decline: { body: { action: 'refuse', decision: decision.id }, submit: 'Decline' } },
-        },
-      }];
-    });
-  },
-};
-
 /**
  * Every rule, in the order the surface lists them. Enforcement reads this table and so does the
  * page: adding a rule here is the one change a new human-only action needs.
  */
-export const humanOnlyRules: HumanOnlyRule[] = [parkRule, operatorApprovalRule];
+export const humanOnlyRules: HumanOnlyRule[] = [parkRule];
 export const humanOnlyRule = (kind: string, rules: readonly HumanOnlyRule[] = humanOnlyRules) => rules.find(rule => rule.kind === kind) ?? null;
 /**
  * Why this session may not answer a row of that rule, or null when it may. A rule this reader
@@ -294,8 +243,6 @@ export function humanOnlyRefusal(kind: string, actor: HumanOnlyActor, rules: rea
   const rule = humanOnlyRule(kind, rules);
   return rule ? rule.refuse(actor) : `No ${kind} rule is known here; reload before answering it`;
 }
-/** Whether any rule needs this item's decisions read before the table can answer for it. */
-export const humanOnlyReadsDecisions = (work: Work, rules: readonly HumanOnlyRule[] = humanOnlyRules) => rules.some(rule => rule.reads?.(work) === true);
 /** Every open human-only action, longest wait first: the whole human-facing surface. */
 export function openHumanOnly(subjects: readonly HumanOnlySubject[], now: number, rules: readonly HumanOnlyRule[] = humanOnlyRules): HumanRequestRow[] {
   return subjects.filter(subject => subject.work.stage !== 'done')

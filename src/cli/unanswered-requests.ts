@@ -6,12 +6,12 @@ import { unansweredRequests, unobtainableReview, unobtainableReviewLine, type Re
 export function unansweredRequestOwner(key: string, request: Pick<UnansweredRequest, 'kind'>) {
   return request.kind === 'review'
     ? agentOwner('master', `graphyard master review ${key} [PROFILE] forces the next attempt for the open request`)
-    : agentOwner('master', `graphyard master decide ${key} rework REASON, approved by the approver agent, so the group's proofs are requested afresh on the next head`, 'approver');
+    : agentOwner('master', `graphyard master rework ${key} REASON, so the group's proofs are requested afresh on the next head`);
 }
 
 /** Who owes the decision a producer request waits on (GY-533), and with which command. */
 export function requestRemedyOwner(key: string, remedy: { decision: 'rework' | 'attest'; proofs: string[] }) {
-  return agentOwner('master', `graphyard master decide ${key} ${remedy.decision} ${remedy.decision === 'attest' ? `{"proof":"${remedy.proofs[0]}"} ` : ''}REASON, then graphyard master approver ${key} DECISION — the loop raises it itself; this is the command when its decision stalls`, 'approver');
+  return agentOwner('master', remedy.decision === 'attest' ? `graphyard master attest ${key} ${remedy.proofs[0]} REASON` : `graphyard master rework ${key} REASON — the loop applies it itself; this is the command when it stalls`);
 }
 
 /**
@@ -37,14 +37,14 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
     // Once the reader knows how long ago the session settled — so the grace has been measured —
     // the decision its evidence calls for is the named answer, not an unanswered request.
     if (next?.kind === 'decision' && request.settledMs !== null) return { subject: row.key, requestId: request.requestId,
-      text: `${subject} for ${row.key} awaits the ${next.decision} decision its evidence calls for, ${elapsed(request.sinceMs)} after it was requested: ${settled}; ${next.proofs.join(', ')} ${next.proofs.length === 1 ? 'was' : 'were'} recorded as not exercising ${next.proofs.length === 1 ? 'its criterion' : 'their criteria'} on this head, so no producer is launched for it again and the loop raises the ${next.decision} decision instead`,
+      text: `${subject} for ${row.key} awaits the ${next.decision} decision its evidence calls for, ${elapsed(request.sinceMs)} after it was requested: ${settled}; ${next.proofs.join(', ')} ${next.proofs.length === 1 ? 'was' : 'were'} recorded as not exercising ${next.proofs.length === 1 ? 'its criterion' : 'their criteria'} on this head, so no producer is launched for it again and it waits on the ${next.decision} instead`,
       ...requestRemedyOwner(row.key, next) };
     // A producer that recorded its proofs as not exercising their criterion answered the request
     // with a finding (GY-817): the head awaits rework, which the loop requests as it does for a
     // failing proof, and no producer is launched for it again.
     if (request.unexercised?.length) return { subject: row.key, requestId: request.requestId, kind: 'nonexercising-proof' as const,
-      text: `${row.key} is awaiting rework for a non-exercising proof: ${request.unexercised.join('; ')}. The ${request.group ?? 'producer'} proofs are a defect of the candidate's tests, as a failing proof is; the loop requests the rework decision and the next head is proven afresh`,
-      ...agentOwner('master', `the loop requests the rework decision for ${row.key}, approved by the approver agent; graphyard master decide ${row.key} rework REASON only when the loop cannot`, 'approver') };
+      text: `${row.key} is awaiting rework for a non-exercising proof: ${request.unexercised.join('; ')}. The ${request.group ?? 'producer'} proofs are a defect of the candidate's tests, as a failing proof is; the loop returns it to a worker and the next head is proven afresh`,
+      ...agentOwner('master', `the loop applies the rework for ${row.key}; graphyard master rework ${row.key} REASON only when the loop cannot`) };
     const scheduled = next?.kind === 'relaunch'
       ? `nothing is running for it, and attempt ${next.attempt} of ${next.limit} has been due on the loop's next dispatch tick since the session settled${request.settledMs === null ? '' : ` ${elapsed(request.settledMs)} ago`}`
       : 'nothing is running for it and no further attempt is scheduled';

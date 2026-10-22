@@ -5,7 +5,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
-import type { DecisionSituation } from '../model/approval.js';
 import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, type BlockerProbeResult } from './blocker-probes.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
@@ -35,19 +34,13 @@ import { readProducerLedger, saveProducerLedger, launchProducer } from '../produ
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
-import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
-import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
-import { annotatePaneShell } from '../quarantine.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, holdRepeatedLimitAccount, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
-import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
-import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
-import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
-import { decisionEventKinds } from './decision-reads.js';
+import type { ExhaustedProof } from './rework.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
@@ -71,8 +64,6 @@ export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 export interface LaunchedSession { role: 'reviewer' | 'producer'; record: string; profile: string; agentName: string; pane: string | null; work: string; requestId: string | null; /** A producer's proof group: with the item, the session its account was selected for (GY-1582). */ group?: string }
 /** A session only says its account is spent once it has stopped; while it works, its output is its own prose. */
 export const stoppedStates = ['idle', 'done', 'blocked'];
-/** The wait an escalation launch refused for spent capacity already computed: the earliest reset among every account it skipped. */
-export const launcherRetry = (error: unknown) => { const retryAt = (error as { retryAt?: unknown } | null)?.retryAt; return typeof retryAt === 'string' ? retryAt : null; };
 export const failoverKey = (role: CapacityRole, work: Work, attempt: string | number) => `failover:${role}:${work.id}:${attempt}`;
 export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 /** GY-852: paste by pane_id, else name (profiles reuse names across sessions). */
@@ -111,12 +102,10 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   selfProvision?: () => Promise<unknown>;
   /**
    * The producer requests the dispatcher has stopped attempting (GY-496), from its cursor: the loop
-   * escalates each and, a cycle later, requests the rework. Absent, nothing is escalated.
+   * announces each and, a cycle later, applies the rework. Absent, nothing is announced.
    */
   exhaustedProofs?: () => Promise<ExhaustedProof[]>;
-  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each asks for its round's rework decision. `answered` names the approvals the ledger settled otherwise (follow-ups filed, a fresh read, a fallback), so the gate's report of a still-owed plan is provisional, never past the ledger's answer (GY-1814). */ mechanicalFixes?: () => Promise<MechanicalFixState & { answered?: { key: string; reviewId: number }[] }>; /** GY-1764: reports the planned fix (or none) the review gate's hold reads. */ recordMechanicalPlan?: (work: Work, plan: { reviewId: number; head: string } | null, answered?: { reviewId: number; head: string }) => Promise<unknown>;
-  /** GY-1118: withdraws a capped change request as the reviewer App that posted it (GitHub's review dismissal); absent, it is escalated instead. */
-  withdrawReview?: (work: Work, reviewId: number, message: string) => Promise<void>;
+  /** The review ledger's planned mechanical fixes (GY-971), one bot round each: each is its round's rework. `answered` names the approvals the ledger settled otherwise (follow-ups filed, a fresh read, a fallback), so the gate's report of a still-owed plan is provisional, never past the ledger's answer (GY-1814). */ mechanicalFixes?: () => Promise<MechanicalFixState & { answered?: { key: string; reviewId: number }[] }>; /** GY-1764: reports the planned fix (or none) the review gate's hold reads. */ recordMechanicalPlan?: (work: Work, plan: { reviewId: number; head: string } | null, answered?: { reviewId: number; head: string }) => Promise<unknown>;
   /**
    * GY-437: between cycles, aligns this checkout with the verified deployed release — fetches the base branch, checks out its tip when the
    * checkout is a clean detached checkout, and, when the diff touches code the loop loads, re-executes the loop through its own supervisor. A loop wired without it keeps cycling exactly as before, on the release it loaded.
@@ -146,23 +135,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   hostMemory?: () => Promise<HostMemoryReading | null>;
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /** GY-1740: hold an unleased post-deploy follow-up on the instant its blocker names, clearing it (`window`). */ deferWindow?: (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => Promise<Work>;
-  /**
-   * Requests one routine decision with the master's own operator-agent identity and returns it.
-   * A loop configured without these three keeps cycling: each routine decision is then recorded as
-   * an escalation naming the command a master session runs, exactly as before. It also requests a
-   * stale backlog release again (GY-1315).
-   */
-  decide?: (work: Work, action: RoutineDecisionAction | 'release', reason: string, input?: Record<string, unknown>) => Promise<{ id: string }>;
-  /**
-   * Launches the independent approver session for one requested decision, under the name
-   * `approverSessionName` gives it, and reports the session so later cycles can supervise it.
-   * Never the requester.
-   */
-  approver?: (work: Work, decision: string) => Promise<{ agentName: string; pane: string | null; account?: string | null; runtime?: string | null; session?: string | null; run?: RunRecord | null; settled?: Promise<RunRecord>; /** GY-1598: why a same-named session that never ran its request was closed first. */ replaced?: string }>;
-  /** The account and runtime a listed approver session was launched on, so an adopted session's exhaustion holds the account it spent. */
-  approverLaunch?: (agentName: string) => Promise<{ account: string | null; runtime: string | null; session?: string | null; pane?: string | null } | null>;
-  /** Every approver launch recorded on this host, with the item and decision each judges (GY-403). */
-  approverLaunches?: () => Promise<{ agentName: string; account: string | null; runtime: string | null; session: string | null; launchedAt: string; work: string | null; decision: string | null }[]>;
+  /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`); absent, the loop applies no rework. */
+  rework?: (work: Work, reason: string) => Promise<unknown>;
   /**
    * Ends an agent registry session whose runtime ran out of quota, so the role's slot is free for
    * the replacement launched in the same cycle (GY-182). The registry would otherwise count it live
@@ -175,36 +149,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    * Returns what it ended. A loop wired without it leaves the registry to its own time windows.
    */
   reconcileSessions?: (runtime: { agents: HerdrAgent[]; available: boolean }, finished: ReadonlyMap<string, string>) => Promise<{ session: string; role: string; work: string | null; account: string; reason: string }[]>;
-  /** One item's decision history: the approved merge decision automatic merging asks for, and what became of every decision this loop requested. */
-  decisions?: (work: Work) => Promise<{ decisions: { id: string; action: string; state: string; input: any; requestedBy?: string; requestedAt?: string; pin?: { escalations?: { trigger: string; at: string }[] } | null; reason?: string; precedent?: string[]; situation?: DecisionSituation | null; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; outcome?: string | null; refusal?: { approver: string; reason: string; at?: string } | null }[] }>;
-  /**
-   * GY-1142. The items whose decision ledger moved after ledger seq `after`, in one read per cycle,
-   * and the seq it now stands at; `after` null reads only where it stands. `complete` false means
-   * more moved than one page holds. The loop keeps a history read on an earlier cycle only for an
-   * item this names unmoved; absent, every history is read again each cycle.
-   */
-  decisionChanges?: (after: string | null) => Promise<{ seq: string; work: string[]; complete: boolean }>;
-  /** The deadline the decisions step's control-plane reads share, in ms (GY-1241); `decisionReadDeadlineMs` when unset. */
-  decisionReadDeadlineMs?: number;
-  /**
-   * Takes back one of the loop's own requests, as its requester. Only for a request the item has
-   * moved past — a merge decision bound to an earlier candidate, a round the item no longer needs —
-   * which would otherwise stand forever, refuse the request for the current one, or be adopted
-   * for a later round on a reason that describes an older head.
-   */
-  withdraw?: (work: Work, decision: string, reason: string) => Promise<unknown>;
-  /**
-   * Asks the control plane to apply a decision an approver already approved whose application
-   * recorded no outcome (GY-1300). It approves nothing: the server replays what the recorded
-   * approval authorized, under the decision's own engine key, and answers the decision as it settled.
-   */
-  resume?: (work: Work, decision: string) => Promise<{ id: string; state?: string; outcome?: string | null; approvedBy?: string | null; approvedAt?: string | null; approvalReason?: string | null }>;
-  /** Verifies on this host which quarantined supervisors are demonstrably gone. */
-  containment?: (work: Work[], observed: ContainmentObservation) => Record<string, ContainmentAssessment> | Promise<Record<string, ContainmentAssessment>>;
-  /** Bounds this host's clock against the control plane with a light timed read just before containment is assessed (GY-811). */
-  controlPlaneClock?: () => Promise<ControlPlaneClock>;
-  /** Settles one quarantine this host verified dead, so the item can be claimed again. */
-  settleContainment?: (work: Work, assessment: ContainmentAssessment) => Promise<unknown>;
   /** Tells the process supervisor the loop is alive, so a hung cycle becomes a restart. */
   notify?: (state: 'ready' | 'alive') => void | Promise<void>;
   /**
@@ -213,7 +157,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    * records what the loop observed on the item. A loop wired without the two never fails a
    * session over and never escalates capacity: it cycles exactly as it did before.
    */
-  sessionOutput?: (agent: HerdrAgent, lines?: number) => string | null | Promise<string | null>; /** GY-1598: how long the loop watches an idle approver's screen before ending it. */ idleScreenPauseMs?: number;
+  sessionOutput?: (agent: HerdrAgent, lines?: number) => string | null | Promise<string | null>;
   /**
    * A blocked session's runtime prompt (GY-197). `answerSession` sends the keys that choose the prompt's
    * non-destructive answer into the session's pane; `promptSession` then gives it the one instruction to carry on
@@ -248,18 +192,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   endSession?: (session: LaunchedSession, resolution: string) => Promise<void>;
   /** Launches the session's request again on another account or runtime; throws `accountsExhausted` when none is left. */
   relaunch?: (session: LaunchedSession, work: Work, snapshot: { work: Work[]; now: string }) => Promise<{ profile: string }>;
-  /**
-   * The escalation handlers this host launched (GY-182), how one that ran out of quota is ended,
-   * and how its escalation is launched again on another account; the last throws `accountsExhausted`
-   * when none is left.
-   */
-  escalationSessions?: () => Promise<EscalationSession[]>;
-  endEscalation?: (session: EscalationSession, resolution: string, waiting: EscalationSession['waiting']) => Promise<void>;
-  /** Write an escalation handler's record back as given (the loop notes when it first saw the handler stopped). */
-  markEscalation?: (session: EscalationSession) => Promise<void>;
-  relaunchEscalation?: (session: EscalationSession) => Promise<{ agentName: string; account: string | null }>;
-  /** Account health of the reviewer, producer and approver profiles, as the worker profiles' arrives in `credentials`. */
-  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer' | 'approver' | 'escalation-handler', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
+  /** Account health of the reviewer and producer profiles, as the worker profiles' arrives in `credentials`. */
+  roleHealth?: () => Promise<Partial<Record<'reviewer' | 'producer', { profiles: { name: string }[]; health: Record<string, { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }> }>>>;
   /** Herdr's agent inventory, read asynchronously: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /**
@@ -270,8 +204,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   panes?: () => Promise<{ panes: HerdrPane[]; available: boolean }>;
   /**
    * The same session inventory with whether it could be read at all. A Herdr that cannot be
-   * reached reports no sessions, and stopping a supervisor on that would kill live work, so the
-   * orphan step acts only on an inventory that says it is available.
+   * reached reports no sessions, so nothing is concluded from an inventory that says it is unavailable.
    */
   herdr?: () => { agents: HerdrAgent[]; available: boolean } | Promise<{ agents: HerdrAgent[]; available: boolean }>;
   /**
@@ -280,8 +213,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    * reports its own `childWaitMs`. A loop wired without it reports every step as its own work.
    */
   childWaits?: () => number;
-  /** Stops an orphaned watch supervisor through the containment scope it recorded at launch. */
-  stopSupervisor?: (orphan: OrphanSupervisor, signal: NodeJS.Signals) => void | Promise<void>;
   /**
    * Records a launched session's durable handle on the item: the runtime, host, Herdr coordinates
    * and transcript a human attaches to it with. A loop configured without it keeps
@@ -300,8 +231,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
-  acceptance?: AcceptanceEffects; // the acceptance role (GY-1417); absent while either master identity is missing
-  planner?: PlannerEffects; // the planner (GY-1418); absent while either master identity is missing — each acts only through the two identities a two-party decision needs
+  acceptance?: AcceptanceEffects; // the acceptance role (GY-1417); absent while the master identity is missing
+  planner?: PlannerEffects; // the planner (GY-1418); absent while the master identity is missing
   masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
 }
 
@@ -309,8 +240,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
 export const findingRecheckMs = 120_000;
 /** How long after its claim a launched session is given to appear in Herdr before its absence means anything. */
 export const launchAppearanceMs = 120_000;
-/** How long an escalation handler stays stopped with no limit notice before it is taken as finished. */
-export const handlerSettleMs = 180_000;
 /**
  * A session blocked on its runtime's own prompt (GY-197). A known prompt is answered on the cycle that sees it — within one loop
  * interval, well inside two minutes — and answered at most `blockedPromptAnswers` times, `blockedPromptSettleMs` apart, before it

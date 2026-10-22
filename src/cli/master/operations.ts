@@ -1,13 +1,11 @@
-// Concern: `graphyard master` operations subcommands — status, settle-containment, checkout-restore and the confined master's loop requests, dispatch, merge, recover, reading.
+// Concern: `graphyard master` operations subcommands — status, checkout-restore and the confined master's loop requests, dispatch, merge, recover, reading.
 import { parseArgs } from 'node:util';
 import { resourceConflicts } from '../../coordination.js';
-import { handSettlementRefusal } from '../../model/containment.js';
-import { dispatchWork, listHerdrAgents, readWorkerCredential, snapshotWithClock, verifyContainmentDeath, withReviewerDefaults, withRoleDefaults } from '../../master.js';
+import { dispatchWork, listHerdrAgents, readWorkerCredential, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { observeDeployment, readDaemonState } from '../../master-daemon.js';
 import { localPostDeployChecks, type PostDeployChecksInput } from '../../master-verification.js';
 import { cycleBudget, masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
-import { assertHandDispatch } from '../hand-actions.js';
 import { unhandled, type MasterSession } from './session.js';
 import { masterHarnessDrift } from './fleet.js';
 import { readSecretFromStdin } from '../context.js';
@@ -48,7 +46,7 @@ export async function postDeployChecksCommand(stdin: AsyncIterable<string | Buff
   write(`${JSON.stringify(await localPostDeployChecks(input))}\n`);
 }
 
-/** Reading status and acting on one item: settle a quarantine, dispatch, merge, record a reading. */
+/** Reading status and acting on one item: dispatch, merge, record a reading. */
 export async function operationsCommand(session: MasterSession, effects: RecoverEffects = recoverEffects): Promise<unknown> {
   const { id, args, print, root, master, masterApi, masterMutation, coordinator, cli } = session;
   if (id === 'status') {
@@ -72,43 +70,20 @@ export async function operationsCommand(session: MasterSession, effects: Recover
   if (id === 'checkout-restore') return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master')));
   // The confined master session sees no host systemd (GY-1658), so its restart is a request the loop serves through its own unit.
   if (id === 'restart' && confinedMaster()) return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master'), { act: 'restart' }));
-  if (id === 'settle-containment') {
-    if (!args[0] || !args.slice(1).join(' ').trim()) throw new Error('Use master settle-containment GY-N REASON');
-    const { snapshot, clockOffset } = await snapshotWithClock(() => masterApi('work-snapshot'));
-    const work = snapshot.work.find((item: any) => item.id === args[0] || item.key === args[0]);
-    if (!work) throw new Error(`Unknown work item ${args[0]}`);
-    if (!work.containmentQuarantine) throw new Error(`${work.key} has no containment quarantine to settle`);
-    // GY-1633: inside its settle bound a lapsed fence is the loop's reclaim step's to settle; a hand settlement is a second executor.
-    const loopOwned = handSettlementRefusal(work, Date.parse(snapshot.now));
-    if (loopOwned) throw new Error(loopOwned);
-    const assessment = await verifyContainmentDeath(work, { hostId: master.hostId, observedAt: snapshot.now, clockOffset });
-    if (!assessment.settleable) {
-      // Every process still holding the fence is printed with its command line and working
-      // directory: the master verifies whose it is before stopping anything.
-      const held = assessment.verification?.held ?? [];
-      const processes = held.length ? `\nProcesses holding the fence (verify before stopping anything):\n${held.map(entry => `- pid ${entry.pid}${entry.unit ? ` in ${entry.unit}` : ''}: cmdline "${entry.command}" cwd ${entry.cwd ?? '<unreadable>'}`).join('\n')}` : '';
-      const recorded = assessment.scope ? `\nRecorded launch scope: ${assessment.scope.unit} (supervisor pid ${assessment.scope.pid}); systemd reports it ${assessment.verification?.recordedScope?.activeState ?? 'unqueried'}` : '\nThis quarantine recorded no launch scope; every live graphyard-watch scope is judged by its members';
-      console.error(`Automatic containment settlement refused for ${work.key}:\n- ${assessment.refusals.join('\n- ')}${recorded}${processes}\n${assessment.attestation}`);
-      process.exitCode = 1; return;
-    }
-    const settled = await masterMutation(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine.settlementHash, reason: args.slice(1).join(' '), verification: assessment.verification });
-    return print({ key: settled.key, epoch: assessment.epoch, scope: assessment.scope, containmentQuarantine: settled.containmentQuarantine, stage: settled.stage, verification: assessment.verification });
-  }
   if (id === 'dispatch') {
     const { positionals } = parseArgs({ args, options: {}, allowPositionals: true });
     if (!positionals[0]) throw new Error('Use master dispatch GY-N PROFILE');
-    const requestedAt = Date.now(), snapshot = await masterApi('work-snapshot');
+    const snapshot = await masterApi('work-snapshot');
     const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
     const profile = master.workers.find(item => item.name === positionals[1]);
     if (!work) throw new Error(`Unknown work item ${positionals[0]}`);
-    const { claimBy } = await assertHandDispatch(work, snapshot.now, master.run.dispatchIntervalSeconds, path => masterApi(path), requestedAt);
     if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
     const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
     if (profile.credentialFile) {
       const workerStatus = await masterApi('status', await readWorkerCredential(root, profile.credentialFile));
       if (workerStatus.actor?.role !== 'worker' || workerStatus.actor.id !== profile.principal) throw new Error('Worker credential no longer matches the configured principal; update the profile before dispatch');
     }
-    return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now, { claimBy }));
+    return print(await dispatchWork(root, work, profile, await listHerdrAgents(), undefined, snapshot.work, undefined, undefined, undefined, snapshot.now));
   }
   // GitHub merges (docs/delivery.md): there is no Graphyard merge to run, by hand or by the loop.
   if (id === 'merge') return print({ merged: false, result: mergeAnswer });

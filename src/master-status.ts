@@ -31,7 +31,7 @@ import { attributionFor, describeReading, loadedRevision, owedUpgrade, readDisk,
  * (a dispatch failure, or a failed action row) gets one attention item naming the ledger, its bound,
  * the live count and the remedy, and every other attention for that item that blamed capacity or
  * repeated the raw refusal is replaced by it. The row's own attention is replaced only when it is
- * about a launch; one ranked above it (quarantine, a human-only park, a merge violation) stays,
+ * about a launch; one ranked above it (a human-only park, a merge violation) stays,
  * with its owner, and the ledger item is listed beside it. Only a refusal that stands now counts:
  * a dispatch failure, or an action back in the queue whose latest event is a failure — an action
  * that failed once on a full ledger and has since been claimed again or completed says nothing
@@ -65,7 +65,7 @@ export function ledgerRefusalAttention<T extends { work: any[]; attentionItems: 
       return { subject: row.key, text, ...agentOwner('master', `${sessionLedgerRemedy(spec)}; master status reports the ledger's headroom under ledgers`) } as AttentionItem;
     });
     items.push(...own);
-    // A row reporting something ranked above a launch — quarantine, a human-only park, an
+    // A row reporting something ranked above a launch — a human-only park, an
     // unauthorized or reverted merge, an offline worker — keeps it; the ledger item is listed beside it.
     if (!aboutLaunch(row)) return row;
     replaced.set(row.key, row.attention);
@@ -179,11 +179,11 @@ export function attributeAttention(items: AttentionItem[], readings: ResourceRea
  * the setup and the dispatcher, which the report reads before everything else.
  */
 export async function derivedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
-  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean; approvals?: Parameters<typeof actorlessAttention>[1];
+  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean;
     /** GY-2015: the merge writer's own summary, so the owed lines it holds read as its motion; absent, the readers behave as before. */
     mergeWriter?: MergeWriterSummary | null }) {
   const reviews = summarizeReviews(observed.reviews), now = Date.parse(snapshot.now);
-  const rows = observed.rows ?? buildMasterStatus(snapshot, master.workers, observed.runtime.available ? observed.runtime.agents : [], {}, {}, reviews, master.baseBranch, coordinator ?? undefined,
+  const rows = observed.rows ?? buildMasterStatus(snapshot, master.workers, observed.runtime.available ? observed.runtime.agents : [], {}, reviews, master.baseBranch, coordinator ?? undefined,
     // The retry schedule of every settled session (GY-533): without it a failed session whose next
     // attempt is already scheduled reads as a request nothing will answer.
     { producers: summarizeProducers(observed.producers), failures: [], retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] }).work;
@@ -192,7 +192,7 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const unanswered = unansweredRequestAttention(rows);
   const stalledItems = stalledItemAttention(snapshot);
   // A submitted item with no review, producer or rework request and no named wait (GY-191).
-  const actorless = actorlessAttention(snapshot, observed.approvals as Parameters<typeof actorlessAttention>[1]);
+  const actorless = actorlessAttention(snapshot);
   // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
   const conflicted = reviewConflictAttention(snapshot.work, observed.reviews).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
   // What waits on a judgment rather than on capacity, named once and counted apart (GY-104); the

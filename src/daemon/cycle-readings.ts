@@ -7,7 +7,7 @@ import type { PostDeployFiler } from '../master-verification.js';
 import type { PostDeployReader, PostDeployReading } from '../master/post-deploy-readings.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { detailChanged } from './decisions.js';
+import { detailChanged } from './text.js';
 import { record } from './effects.js';
 import { stillVerifying, withinDeploymentBudget } from './deployment.js';
 import type { Cycle } from './cycle.js';

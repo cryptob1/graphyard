@@ -5,12 +5,10 @@ import { z } from 'zod';
 
 /** Roles launched into session slots. */
 export const capacityRoles = ['worker', 'reviewer', 'producer'] as const;
-/** Roles that judge or request decisions (no slot; same quota). */
-export const decisionRoles = ['approver', 'escalation-handler'] as const;
 /** Headless registry roles that spend the same accounts (GY-1705); no item waits on them. */
 export const headlessQuotaRoles = ['doctor', 'diagnostician'] as const;
 /** Every role that can exhaust provider quota (GY-898, GY-1705). */
-export const quotaRoles = [...capacityRoles, ...decisionRoles, 'master', ...headlessQuotaRoles] as const;
+export const quotaRoles = [...capacityRoles, 'master', ...headlessQuotaRoles] as const;
 export type CapacityRole = typeof quotaRoles[number];
 
 /** What a session's own output says about its provider quota. */
@@ -215,8 +213,7 @@ export const exhaustionReportSchema = z.object({
   /** The worker attempt the exhausted session held; no other role's session holds one. */
   epoch: z.number().int().positive().optional(),
   /**
-   * What the session answered: a reviewer's or producer's dispatch request, an approver's decision,
-   * an escalation handler's trigger.
+   * What the session answered: a reviewer's or producer's dispatch request.
    */
   requestId: z.string().min(1).max(64).optional(),
   profile: z.string().min(1).max(80),

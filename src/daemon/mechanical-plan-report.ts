@@ -2,8 +2,7 @@
 import type { Work } from '../model.js';
 import { bindingApproval } from '../model/carry.js';
 import { mechanicalHoldUntil, mechanicalPlanFreshMs, mechanicalRoundStartMs } from '../mechanical-findings.js';
-import { deliveredMeanwhile } from './decision-reads.js';
-import { detailChanged } from './decision-text.js';
+import { detailChanged } from './text.js';
 import { type DaemonState, message } from './state.js';
 
 type Plan = { key: string; head: string; pr?: number; epoch?: number; reviewId: number };
@@ -96,7 +95,7 @@ export async function reportMechanicalPlans(work: readonly Work[], plans: readon
     // GY-1795: the item was delivered after this cycle's snapshot, so the write can never land and the target is
     // settled — no projection to synchronize, no hold, no instance; the next snapshot reads it done (GY-1336's rule).
     // A failure an earlier cycle recorded for the same report is settled with it (Codex, PR #1203).
-    if (deliveredMeanwhile(message(failure))) { await sink.settle(item); continue; }
+    if (/Delivered work is immutable/.test(message(failure))) { await sink.settle(item); continue; }
     // Only a plan the ledger still carries blocks the item's decision: one the ledger ceased to plan owes no round, so the decision step
     // agrees with the ledger (nothing owed) while the stale projection lapses by `mechanicalPlanFreshMs` at the gate.
     if (wanted) unreported.add(item.id);

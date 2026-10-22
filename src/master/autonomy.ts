@@ -1,32 +1,20 @@
-// Concern: agent identities and autonomy — approver and escalation launches, and the autonomy commands.
-import { createHash, randomUUID, randomBytes } from 'node:crypto';
+// Concern: the master's own identity and its commands — onboarding it, and applying intent with it at once.
+import { randomUUID, randomBytes } from 'node:crypto';
 import { wholeDocument } from '../model/work-summary.js';
-import { readFile, mkdir } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
-import { z } from 'zod';
-import { type ChildRun, defaultChildRun } from '../child-runner.js';
-import { distinctSessionName, sessionNameLimit, sessionName, nameForLaunch } from '../session-name.js';
+import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
 import { localDirectory } from '../onboarding.js';
 import { writeHarnessPermissions } from '../harness.js';
-import { type Work, escalationTriggers } from '../model.js';
-import { type FleetLaunchAccount, type FleetProbe, readFleet, selectFleetSession } from '../fleet.js';
-import { capacityRetryAt } from '../model/capacity.js';
-import { type EscalationContext, contextFingerprint, escalationAction, handleEscalation, followPrecedent } from '../model/escalation-context.js';
-import { type AgentEnvironment, agentKindSchema, type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema, type WorkerProfile } from './profiles.js';
-import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadMasterConfig, loadStoredMasterConfig, privateFile, readCredentialFile } from './config.js';
-import { type AccountSkip, accountLaunch, agentLaunchPlan, describeObservedExhaustion, type EnvironmentProbe, heldAwareProbe, inspectProfileAccounts, type LaunchRole, NoHealthyAccountError, observedExhaustions, ownLoginHold, type ProfileAccountHealth, recordEnvironmentLog, selectAccount, setupAgentEnvironments } from './environments.js';
-import { closeFailedLaunch, launchStartMs, readSessionScreen, type RequestDelivery, startAgentSession, withLaunchClose, withLaunchedRuntime } from './launch.js';
-import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
-import { boundLaunch, freeStalledSlot, judgeApproverStall, stallScreenLines, withoutPane } from './approver-stall.js';
-import { allocateManagedCheckout, failureText, settleCheckout } from './worktrees.js';
+import type { Work } from '../model.js';
+import { type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema } from './profiles.js';
+import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, externalCredential, loadStoredMasterConfig, privateFile, readCredentialFile } from './config.js';
+import { setupAgentEnvironments } from './environments.js';
+import { withLaunchedRuntime } from './launch.js';
+import type { HerdrAgent } from './herdr.js';
 import { herdrAttach } from './dispatch.js';
 import type { SessionHandleInput } from '../model/sessions.js';
-import { dataDirectory, type FilesystemProbe, type SessionCheckout } from '../install/worktree-root.js';
 import { registeredLaunch } from '../model/session-state.js';
 import { liveReviewRequest } from '../model/dispatch.js';
-import { narrowRoleRuntime, piRuntimeSchema } from '../runner/payloads.js';
-import { applyDecision, approverRunContext, approverRunOptions, narrowRunner, piApproverPrompt, registryRunner, runOutcome, startNarrowRun } from '../runner/roles.js';
-import type { Runner, RunRecord } from '../runner/types.js';
 import { autonomyPlan, autonomyReason, humanOnlyDecisions, masterHarness } from './harness.js';
 import { attemptKey, unblockWithRetry } from './unblock.js';
 import { restartMasterLoop } from './loop-restart.js';
@@ -42,19 +30,19 @@ async function identityHolds(config: MasterConfig, file: string, id: string, fet
   try { return (await adminCall(config, await readCredentialFile(file), fetcher, 'status')).actor?.id === id; } catch { return false; }
 }
 /**
- * Onboarding for autonomy: provision (or repair) the master's operator-agent identity and the
- * approver identity, store their credentials beside the coordinator's, record them in the
- * master configuration, and install the master's harness rules. The admin credential is read
- * once from stdin and never stored. Without `apply` it reports the plan and changes nothing.
+ * Onboarding for autonomy: provision (or repair) the master's operator-agent identity, store its
+ * credential beside the coordinator's, record it in the master configuration, and install the
+ * master's harness rules. The admin credential is read once from stdin and never stored. Without
+ * `apply` it reports the plan and changes nothing.
  */
 export async function setupAutonomy(root: string, input: { adminToken?: string; apply: boolean; harness?: string }, fetcher: AutonomyFetch = fetch) {
   const config = await loadStoredMasterConfig(root);
   const plan = autonomyPlan(config);
-  const identities = [plan.operatorAgent, plan.approver];
+  const identities = [plan.operatorAgent];
   const describe = identities.map(({ id, capabilities, credentialFile, role }) => ({ id, capabilities, credentialFile, role }));
   if (!input.apply) return { applied: false, identities: describe, humanOnly: humanOnlyDecisions, harness: await writeHarnessPermissions(root, masterHarness(root, config, input.harness ?? 'claude'), false),
     next: 'Rerun with --apply and the admin credential on stdin: graphyard master autonomy --admin-token-stdin --apply' };
-  if (!input.adminToken || input.adminToken.length < 32) throw new Error('Autonomy setup needs the admin credential once, on stdin; it is used to provision the agent identities and is never stored');
+  if (!input.adminToken || input.adminToken.length < 32) throw new Error('Autonomy setup needs the admin credential once, on stdin; it is used to provision the master identity and is never stored');
   const status = await adminCall(config, input.adminToken, fetcher, 'status');
   if (status.actor?.role !== 'admin') throw new Error('Autonomy setup needs the admin credential; it provisions operator-agent identities, which only an admin may create');
   const existing: any[] = await adminCall(config, input.adminToken, fetcher, 'operator-agents');
@@ -77,84 +65,39 @@ export async function setupAutonomy(root: string, input: { adminToken?: string; 
     await assertOutsideWorktrees(root, identity.credentialFile, `${identity.id} credential file`);
     changes.push(`${identity.id}: ${current ? 'credential rotated' : 'provisioned'}`);
   }
-  const next = { ...config, supervision: 'autonomous' as const, operatorAgent: { id: plan.operatorAgent.id, credentialFile: plan.operatorAgent.credentialFile }, approver: { id: plan.approver.id, credentialFile: plan.approver.credentialFile } };
+  const next = { ...config, supervision: 'autonomous' as const, operatorAgent: { id: plan.operatorAgent.id, credentialFile: plan.operatorAgent.credentialFile } };
   await atomicPrivateWrite(resolve(await localDirectory(root), 'master.json'), masterConfigSchema.parse(next));
   const harness = await writeHarnessPermissions(root, masterHarness(root, next, input.harness ?? 'claude'), true);
   return { applied: true, identities: describe, changes, humanOnly: humanOnlyDecisions, harness,
-    next: 'The master now creates, releases, unblocks and adds requirements with its operator-agent identity, and requests every other decision with graphyard master decide; graphyard master approver GY-N DECISION launches the independent approver session' };
+    next: 'The master now applies every decision with its operator-agent identity: graphyard master create, release, unblock, requirements, rework, attest and close' };
 }
-export async function agentToken(root: string, config: MasterConfig, which: 'operatorAgent' | 'approver') {
-  const identity = config[which];
-  if (!identity) throw new Error(`No ${which === 'operatorAgent' ? 'master operator-agent' : 'approver'} identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply`);
-  await externalCredential(root, identity.credentialFile, which === 'operatorAgent' ? 'Operator-agent' : 'Approver');
+export async function agentToken(root: string, config: MasterConfig, _which: 'operatorAgent' = 'operatorAgent') {
+  const identity = config.operatorAgent;
+  if (!identity) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply');
+  await externalCredential(root, identity.credentialFile, 'Operator-agent');
   return readCredentialFile(identity.credentialFile);
 }
 /**
- * Fill the binding a decision needs from the item's current state, so the master names the
- * decision and its reason and Graphyard supplies the exact revision or candidate it binds to.
+ * Fill the binding an intent needs from the item's current state, so the master names the change
+ * and its reason and Graphyard supplies the exact revision or candidate it binds to.
  */
-export function decisionInput(action: string, work: Work, input: Record<string, unknown>) {
-  // A triage closure (GY-402) binds its judgement, not the revision; a diagnostician's closure (GY-439) binds the revision.
-  if (['release', 'unblock', 'resolve'].includes(action) || (action === 'close' && input.triageAt === undefined)) return { expectedRevision: work.revision, ...input };
+export function intentInput(action: 'requirements' | 'attest', work: Work, input: Record<string, unknown>) {
   if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
-  if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
-  if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
-  return action === 'withdraw-park' && work.humanRequest ? { request: work.humanRequest.id, ...input } : input;
+  if (!work.candidate) throw new Error(`${work.key} has no candidate to attest`);
+  return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof), ...input };
 }
 /**
  * GY-523. The exercise record an attestation carries: the proof run against the candidate base —
- * the tree with the change, and so the criterion's behaviour, removed — failed. The approver
- * confirms it by running the proof there before approving; without it the control plane records
- * the attested pass as not exercising its criterion (GY-135), and no remedy but a second,
- * hand-built attestation would move the item.
- *
- * GY-535. The record is a claim for the approver to confirm, not a measurement: an approval
- * carries only its reason, so it states no more than that confirmation establishes. The behaviour
- * removed is the candidate's diff against its base, named by both commits, and `executed: 1` is
- * the floor the approver's one confirming run guarantees; what the approver actually ran and saw
- * is recorded in its approval reason (see attestConfirmation). A requester that measured more
- * names its own `exercise`.
+ * the tree with the change, and so the criterion's behaviour, removed — failed. Without it the
+ * control plane records the attested pass as not exercising its criterion (GY-135). The behaviour
+ * removed is the candidate's diff against its base, named by both commits, and `executed: 1` is the
+ * floor the master's one confirming run guarantees; a master that measured more names its own `exercise`.
  */
 export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, proof: unknown) {
   const criterion = work.criteria.find(entry => typeof proof === 'string' && entry.proofs.includes(proof));
   if (!criterion || !work.candidate) return {};
-  return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against the candidate base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the approver confirms by running it and records in its approval reason`, result: 'fail' as const, executed: 1 } };
+  return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against the candidate base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the master confirmed by running it`, result: 'fail' as const, executed: 1 } };
 }
-/**
- * GY-523. What an approver confirms before approving an attestation: the exercise record it carries
- * says the proof fails against the candidate base, so the approver runs it there, and against the
- * candidate, and approves only on both outcomes. An approved attestation is then recorded as
- * exercising its criterion rather than as an unexercised pass. The approval reason records what the
- * approver observed, since the approval carries no fields of its own (GY-535).
- */
-export const attestConfirmation = (baseSha?: string) =>
-  `An attest decision carries an exercise record (criterion, behaviour removed, executed, result fail) that is yours to confirm: before approving it, run its proof against the candidate base${baseSha ? ` ${baseSha}` : ''} — the tree without the change — and see it fail, and against the candidate and see it pass; refuse it otherwise. The record states only that the proof fails there with at least one case executed, so say in your approval reason what you ran on each tree, how many cases executed, and the failure you saw. `;
-/** The Pi approver's prompt, with the attestation confirmation before its call to decide; the caller guards it on the decision being an attest (carriesAttestation, GY-535). */
-export const piApproverWithAttestation = (config: MasterConfig, work: Work, decision: string, clone?: string) =>
-  piApproverPrompt(config, work.key, decision, config.approver!.id, clone).replace('Then call the graphyard_decide tool', `${attestConfirmation(work.candidate?.baseSha)}Then call the graphyard_decide tool`);
-/**
- * GY-535. Whether an approver's prompt carries the attestation confirmation: only an attest
- * decision's, the only one whose record names a proof its approver must run, so any other approver
- * told to confirm an exercise record would assert an audit nobody measured. The action is read from
- * the decision ledger with the master's credential; an item without a candidate carries no attest
- * (decisionInput builds attest only for one) and answers without the read. A ledger that cannot be
- * read keeps the confirmation in place — an attest that lost its instruction is a gate quietly
- * dropped, which an unreadable lookup must not cause — and the launch is never failed for it.
- */
-async function carriesAttestation(config: MasterConfig, work: Work, decision: string, fetcher: AutonomyFetch): Promise<boolean> {
-  if (!work.candidate) return false;
-  try {
-    const response = await fetcher(`${config.url}/api/work/${encodeURIComponent(work.id)}/decisions`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(2_000) });
-    if (!response.ok) throw new Error(`the decision ledger answered ${response.status}`);
-    return ((await response.json()) as { decisions?: { id: string; action: string }[] }).decisions?.some(entry => entry.id === decision && entry.action === 'attest') ?? false;
-  } catch { return true; }
-}
-/** The applied two-party merge decision for exactly the current candidate, if one stands. */
-export function approvedMerge<T extends { action: string; state: string; input: any; approvedBy: string | null }>(work: Work, decisions: T[]): T | null {
-  return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!work.candidate
-    && decision.input.sha === work.candidate.sha && decision.input.baseSha === work.candidate.baseSha && decision.input.policyRevision === work.policyRevision) ?? null;
-}
-
 /**
  * A roster rotation, previewed against the principals the server authenticates now. It may add
  * principals and rotate tokens; it may never drop a live principal or change its role. The
@@ -182,349 +125,6 @@ export async function readProposedRoster(root: string) {
 export { restartMasterLoop } from './loop-restart.js';
 
 /**
- * Launch the independent approver session for one decision: its own Herdr tab, its own
- * credential by path, the approver marker, and a prompt to judge — never to implement.
- */
-/**
- * One session name per decision, not per item. An item takes several decisions in its life — rework
- * after a verdict, rework after a base conflict, a merge approval — and an approver stops when it
- * has judged, leaving its tab listed. Named per item, that finished tab refused the launch of the
- * next decision's approver until somebody closed it by hand.
- *
- * Per decision and inside the runtime's limit, both (GY-101): the fixed prefix and an eight-
- * character decision fragment left four characters for the key, so every key from GY-10 up built a
- * 33-character name no runtime would take and no approver could be launched at all. The key is
- * kept whole now and the decision id takes what the limit leaves.
- */
-/**
- * Two decisions whose fragments match are one session: the second launch is refused as already
- * visible, or adopted as the first decision's approver. So the full role word is kept only while it
- * leaves at least `approverDistinguisher` characters of the decision id (one collision in ~16
- * million per pair, against one in 65,536 at the four the generic floor accepts); past that the
- * role word gives way to `gy-approver`, which affords the full eight for any key up to GY-12345678.
- */
-export const approverDistinguisher = 6;
-export const approverSessionName = (work: Pick<Work, 'key'>, decision: string) =>
-  distinctSessionName(sessionNameLimit - sessionName('graphyard-approver', work.key).length - 1 >= approverDistinguisher ? ['graphyard-approver'] : ['gy-approver'], work.key, decision);
-/**
- * The names an approver's and an escalation handler's exhaustion is held under when the session
- * ran on no named account: the runtime's own login, which every launch of the role shares.
- */
-export const approverProfile = 'approver', escalationProfile = 'escalation-handler';
-/** The runtime an approver runs on when nothing names an account or a runtime for it. */
-export const approverRuntime = (config: Pick<MasterConfig, 'reviewers' | 'workers'>) => config.reviewers[0]?.kind ?? config.workers[0]?.kind;
-/**
- * Where an approver may run when the agent registry does not decide the role (GY-182): the accounts
- * the reviewer profiles name — the runtime an approver already borrowed — or, with none named, the
- * worker profiles'. An approver is a capacity role like any other, so an account a session of any
- * role saw spent is skipped until its reset, and the next account takes the decision.
- */
-export function approverProfiles(config: Pick<MasterConfig, 'reviewers' | 'workers'>) {
-  const named = <P extends { name: string; accounts?: string[] }>(profiles: P[]) => profiles.filter(profile => profile.accounts?.length).map(profile => ({ name: profile.name, accounts: profile.accounts! }));
-  const reviewers = named(config.reviewers);
-  return reviewers.length ? reviewers : named(config.workers.filter(profile => profile.mode === 'launch'));
-}
-export type ApproverSelection = { fleet: NonNullable<Awaited<ReturnType<typeof selectFleetSession>>>; account: FleetLaunchAccount; profile: string; skipped: AccountSkip[] }
-  | { fleet: null; account: AgentEnvironment | null; profile: string; skipped: AccountSkip[] };
-/**
- * The account an approver launches on: the registry's approver role when it defines one, else the
- * first healthy, unheld account of `approverProfiles`, else the runtime's own login unless a session
- * saw it spent. Throws `NoHealthyAccountError` — `capacityExhausted` when every skip was spent quota.
- */
-export async function selectApproverAccount(config: MasterConfig, work: string | null, principal: string, probe: FleetProbe = {}, kind = approverRuntime(config)): Promise<ApproverSelection> {
-  const fleet = await selectFleetSession(config, 'approver', { name: approverProfile, principal }, await heldAwareProbe(config, { ...probe, work: work ?? undefined }));
-  if (fleet) return { fleet, account: fleet.account, profile: approverProfile, skipped: fleet.skipped };
-  const profiles = approverProfiles(config), skipped: AccountSkip[] = [];
-  if (!profiles.length) { await selectAccount(config, 'approver', { name: approverProfile, kind }, { ...probe, work: work ?? undefined }); return { fleet: null, account: null, profile: approverProfile, skipped }; }
-  for (const profile of profiles) {
-    try {
-      const selected = await selectAccount(config, 'approver', profile, { ...probe, work: work ?? undefined });
-      return { fleet: null, account: selected.account as AgentEnvironment | null, profile: profile.name, skipped: [...skipped, ...selected.skipped] };
-    } catch (error) { if (!(error instanceof NoHealthyAccountError)) throw error; skipped.push(...error.skipped); }
-  }
-  const spent = new NoHealthyAccountError(`No healthy agent account for the approver: ${skipped.map(entry => entry.reason).join('; ')}`, skipped);
-  if (spent.capacityExhausted) throw spent;
-  // A named account logged out or unconfigured is a fault, not a wait: the approver runs on the runtime's own login unless that is spent too.
-  await selectAccount(config, 'approver', { name: approverProfile, kind }, { ...probe, work: work ?? undefined });
-  return { fleet: null, account: null, profile: approverProfile, skipped };
-}
-/**
- * The runtime's own login for a role launched on an explicit runtime: no account is chosen, but a
- * login a session of any role saw spent is refused until its reset, as `selectAccount` refuses it.
- */
-export async function heldRuntimeLogin(config: MasterConfig, role: LaunchRole, profile: string, work: string | null, probe: FleetProbe = {}, kind?: string): Promise<ApproverSelection> {
-  const at = probe.now?.() ?? Date.now(), own = ownLoginHold(await observedExhaustions(config, at), { name: profile, kind });
-  if (own) {
-    const skip: AccountSkip = { at: new Date(at).toISOString(), role, profile, environment: own.key, reason: describeObservedExhaustion(`${profile}'s own account`, own.held), work, cause: 'exhausted' };
-    await recordEnvironmentLog(config, [], [skip]).catch(() => {});
-    throw new NoHealthyAccountError(`No healthy agent account for ${role} profile ${profile}: ${skip.reason}`, [skip]);
-  }
-  return { fleet: null, account: null, profile, skipped: [] };
-}
-/**
- * Undo a launch that failed after its tab or registry session existed: the tab is closed and the
- * registry session ended. One the registry could not be told of is named on the returned error
- * (`registrySession`), so the caller keeps the only id that can free the role's slot later.
- */
-async function abandonLaunch(error: unknown, pane: string | undefined, tabId: string | undefined, selected: { release: (reason: string) => Promise<boolean>; account: FleetLaunchAccount } | null, reason: string, run?: ChildRun) {
-  // Closed through the loop's own close path before the session is given back, and the failure records it, confirmed or not (GY-413).
-  let failure = error instanceof Error ? error : new Error(failureText(error));
-  if (pane || tabId) {
-    try { failure = withLaunchClose(failure, await closeFailedLaunch(pane, tabId, run)); }
-    catch (closeError) { failure = withLaunchClose(failure, `Herdr could not confirm ${pane ? `pane ${pane}` : `tab ${tabId}`} closed: ${failureText(closeError).slice(0, 200)}`); }
-  }
-  if (selected && !await selected.release(reason)) Object.assign(failure, { registrySession: selected.account.fleet.session });
-  return failure;
-}
-/**
- * The session record a decision's approver registers (GY-172): keyed on the decision, so a
- * relaunch for the same decision reopens it rather than adding a second, and bound to nothing the
- * item moves past — the session report closes it once its pane is gone, and the loop records it
- * ended when it closes the pane of a decision that settled.
- */
-export const approverSessionId = (decision: string) => `approver:${decision}`;
-/**
- * The approver's own copy of the repository (GY-564): a clone with its own refs, index, working tree and object store, detached at the candidate head (or the current head when none is bound), with no remote.
- * Nothing is shared with the operator's repository (GY-926): no `--shared` alternates — git-clone(1) calls them dangerous: gc/prune there can delete objects the approver's clone needs, and the file would name the operator's store — and no hardlinks.
- * The bound SHA is fetched while the remote exists; one the repository cannot supply refuses the launch rather than silently detach at HEAD, where the approver would judge an unrelated tree.
- */
-export async function approverClone(root: string, target: string, sha?: string, run: ChildRun = defaultChildRun) {
-  await run('git', ['clone', '--quiet', '--no-hardlinks', '--no-checkout', root, target], { cwd: root });
-  if (sha) try { await run('git', ['-C', target, 'fetch', '--quiet', 'origin', sha], { cwd: target }); } catch { /* not in the operator's repository */ }
-  await run('git', ['-C', target, 'remote', 'remove', 'origin'], { cwd: target });
-  await run('git', ['-C', target, 'checkout', '--quiet', '--detach', sha ?? 'HEAD'], { cwd: target });
-}
-/**
- * A headless approver's run (GY-169), in a directory of its own under the managed worktree root
- * (GY-391) — never the operator's repository, which the destructive-command guard would otherwise
- * treat as the run's worktree and let it remove files in. The directory goes when the run ends,
- * and a reclaim pass takes back one a dead master left behind.
- */
-async function startHeadlessApprover(root: string, config: MasterConfig, work: Work, decision: string, attest: boolean, name: string, token: string, runner: Runner, headless: { fetcher?: typeof fetch; filesystem?: FilesystemProbe }) {
-  const checkout = await allocateManagedCheckout(root, config, 'approval', work.key, work.candidate?.sha ?? '0'.repeat(40), randomUUID(), headless.filesystem);
-  let started: ReturnType<typeof startNarrowRun>; const timeoutMs = piRuntimeSchema.parse(config.run.pi ?? {}).approverTimeoutMinutes * 60_000;
-  try {
-    await approverClone(root, checkout.worktree, work.candidate?.sha);
-    started = startNarrowRun({ runner, name, role: 'approver', work: work.key, subject: decision, checkout: checkout.directory, root, context: approverRunContext(config.url, work.id, decision, timeoutMs, checkout.directory),
-      prompt: attest ? piApproverWithAttestation(config, work, decision, checkout.worktree) : piApproverPrompt(config, work.key, decision, config.approver!.id, checkout.worktree),
-      options: approverRunOptions(checkout.directory, decision, { GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: config.approver!.credentialFile, GRAPHYARD_HOST_ID: config.hostId }, timeoutMs),
-      apply: async result => result.ok ? [await applyDecision(config.url, token, work, result.payload, headless.fetcher)] : [] });
-  } catch (error) { await settleCheckout(root, checkout.directory); throw error; }
-  return { ...started, settled: started.settled.finally(() => settleCheckout(root, checkout.directory)) };
-}
-export type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
-/**
- * An `idle` one also needs a still screen across `pauseMs` that shows no trace of its decision (`judgeApproverStall`): Herdr reports a
- * long or silent command as idle. Its age comes only from the launch record bound to its pane (`boundLaunch`).
- */
-async function closeUnstartedApprover(root: string, config: MasterConfig, agent: HerdrAgent, decision: string, probe: FleetProbe, run?: ChildRun, pauseMs?: number) {
-  const own = boundLaunch(await readApproverLaunches(root), agent), verdict = await judgeApproverStall(agent, own?.launchedAt, launchStartMs(config), Date.now(), () => readSessionScreen(agent.pane_id!, run, stallScreenLines), decision, pauseMs);
-  if (!verdict.close) throw new Error(`Approver session ${agent.name} is already visible in Herdr; let it finish or close it first (${verdict.why})`);
-  const stalled = `approver session ${agent.name} (pane ${agent.pane_id}): ${verdict.why}`, replaced = `closed ${stalled}`;
-  // GY-1604: its registry session is ended before its pane is closed, freeing the slot; one that cannot be ended refuses with the pane open, for a retry to end.
-  if (own?.session) await freeStalledSlot(own.session, stalled, async (session, reason) => { const fleet = await readFleet(config, 'approver', probe); if (fleet.managed) await fleet.client.end(session, reason); });
-  await closeHerdrPane(agent.pane_id!, run);
-  return { replaced, pane: agent.pane_id! };
-}
-/**
- * `herdr` is this host's Herdr inventory and whether it could be read at all (GY-205): the role's
- * registry sessions are judged live or gone against it, and an inventory that could not be read
- * judges none gone — an empty list read as available would end every approver session on the host.
- */
-export async function launchApprover(root: string, work: Work, decision: string, explicitKind: NonNullable<WorkerProfile['kind']> | undefined, herdr: { agents: HerdrAgent[]; available: boolean }, run?: ChildRun, probe: FleetProbe = {}, register?: SessionRegistrar,
-  headless: { runner?: Runner; fetcher?: typeof fetch; filesystem?: FilesystemProbe; screenPauseMs?: number } = {}) {
-  const config = await loadMasterConfig(root);
-  const { agents } = herdr;
-  const token = await agentToken(root, config, 'approver');
-  // GY-535: the attestation confirmation is an attest decision's instruction alone.
-  const attest = await carriesAttestation(config, work, decision, headless.fetcher ?? fetch);
-  const retry = `graphyard master approver ${work.key} ${decision} [AGENT_KIND]`;
-  const name = nameForLaunch(retry, () => approverSessionName(work, decision));
-  const visible = agents.find(agent => agent.name === name), closed = visible ? await closeUnstartedApprover(root, config, visible, decision, probe, run, headless.screenPauseMs) : null, replaced = closed?.replaced ?? null;
-  // GY-1604: the replacement is chosen against the inventory without the closed pane, whose registry session is already ended.
-  if (closed) { herdr = withoutPane(herdr, closed.pane, name); if (probe.runtime) probe = { ...probe, runtime: withoutPane(probe.runtime, closed.pane, name) }; }
-  // GY-169: a `pi` approver runtime (no AGENT_KIND override) is a headless run under the same name; its validated graphyard_decide
-  // verdict is applied as the approver identity on the `master approve`/`master refuse` route, under the server's separation rules.
-  // GY-170: a registry approver role decides the runtime too (a `pi` account runs headless with its home, model and the role's
-  // policy); `run.runtimes`/`run.pi` configure only an approver the registry does not define.
-  const registry = explicitKind ? null : await selectFleetSession(config, 'approver', { name: approverProfile, principal: config.approver!.id }, await heldAwareProbe(config, { runtime: herdr, ...probe, work: work.key }));
-  if (registry && registry.account.kind === 'pi') {
-    let started: Awaited<ReturnType<typeof startHeadlessApprover>>;
-    try { started = await startHeadlessApprover(root, config, work, decision, attest, name, token, headless.runner ?? registryRunner(registry.account), headless); }
-    catch (error) { await registry.release(`approver run for ${work.key} failed to start: ${failureText(error).slice(0, 300)}`); throw error; }
-    // The run is the session: the registry's slot is given back the moment it ends; its outcome counts toward runs without a result (GY-446).
-    const settled = started.settled.then(async run => { await registry.release(`the headless approver run for ${work.key} ended`, runOutcome(run)); return run; },
-      async error => { await registry.release(`the headless approver run for ${work.key} ended`, 'no-result'); throw error; });
-    settled.catch(() => { /* the run's own record carries its failure */ });
-    return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: registry.account.fleet.session,
-      account: { environment: registry.account.name, kind: registry.account.kind, quota: registry.health?.quota ?? null, skipped: registry.skipped },
-      run: started.record, settled: settled as Promise<RunRecord> | undefined, ...(replaced ? { replaced } : {}) };
-  }
-  if (!registry && !explicitKind && narrowRoleRuntime(config.run, 'approver') === 'pi') {
-    const started = await startHeadlessApprover(root, config, work, decision, attest, name, token, headless.runner ?? narrowRunner(config.run.pi), headless);
-    return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: null as string | null, runtime: 'pi' as const, delivery: 'request' as RequestDelivery, focusChanged: false, session: null, account: null,
-      run: started.record, settled: started.settled as Promise<RunRecord> | undefined, ...(replaced ? { replaced } : {}) };
-  }
-  // The registry's approver role picks runtime and account; an explicit AGENT_KIND overrides it, never past a hold (a login a session
-  // saw spent waits for its reset); with no approver role the first reviewer profile's runtime runs it. No runtime is assumed.
-  // The role's count is judged against the sessions Herdr lists (GY-190): an approver that judged and exited holds no slot.
-  const chosen = explicitKind ? await heldRuntimeLogin(config, 'approver', approverProfile, work.key, probe, explicitKind)
-    : registry ? { fleet: registry, account: registry.account, profile: approverProfile, skipped: registry.skipped } satisfies ApproverSelection
-    : await selectApproverAccount(config, work.key, config.approver!.id, { runtime: herdr, ...probe });
-  const selected = chosen?.fleet ?? null;
-  // Nothing here names a runtime: the role's account decides, then the operator's argument, then a runtime configured for another session.
-  const kind = chosen?.account?.kind ?? explicitKind ?? approverRuntime(config);
-  // A launch refused for its runtime gives the chosen session back at once (GY-184).
-  const plan = () => {
-    if (!kind) throw new Error('No runtime is configured for the approver: name accounts for the approver role with graphyard master registry role set approver ACCOUNT[,ACCOUNT…] --reason REASON, or pass AGENT_KIND');
-    // Without an inventory nothing shows whether this decision's session already runs.
-    if (!herdr.available) throw new Error(`Herdr's session inventory could not be read, so no approver session for ${work.key} is launched into it; the launch is made again once Herdr answers`);
-    return accountLaunch({ kind, approvals: 'auto', agentArgs: [], environment: {} }, chosen?.account ?? null);
-  };
-  let launch: ReturnType<typeof accountLaunch>;
-  try { launch = plan(); }
-  catch (error) { await selected?.release(`approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
-  const cli = `node ${config.cliPath}`;
-  let delivery: RequestDelivery | undefined;
-  const prompt = `You are the independent Graphyard approver for ${config.repository}, acting as ${config.approver!.id}. Judge decision ${decision} on ${work.key}: run ${cli} master decisions ${work.key}, read the item with ${cli} status ${work.key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. ${attest ? attestConfirmation(work.candidate?.baseSha) : ''}If it is justified, run ${cli} master approve ${work.key} ${decision} "YOUR REASON". If not, record the refusal: run ${cli} master refuse ${work.key} ${decision} "YOUR REASON" — a decline is recorded, never expressed by exiting. Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop when the decision is judged.`;
-  let pane: string | undefined, tabId: string | undefined, checkout: SessionCheckout | undefined; // GY-866: its own anchored checkout (reviewer.js, read dynamically: it reads this barrel at load)
-  try {
-    checkout = await (await import('../reviewer.js')).coordinationCheckout(root, config, work.key, work.candidate?.sha, headless.filesystem); const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory, '--label', `Approver · ${work.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_REPOSITORY_ROOT=${root}`, '--env', `GRAPHYARD_TOKEN_FILE=${config.approver!.credentialFile}`, '--env', 'GRAPHYARD_APPROVER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
-    pane = created.pane; tabId = created.tab;
-    // Registered with its pane before its runtime starts (GY-172 AC-2): the session report observes it and closes it once it is gone.
-    ({ delivery } = await registeredLaunch(register, { id: approverSessionId(decision), kind: 'coordination', role: 'approver', principal: config.approver!.id, runtime: kind, host: config.hostId,
-      agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      subject: `${work.key}: judge decision ${decision}`, state: 'running' }, () => startAgentSession(name, kind, created.pane, launch.args, prompt, run, { directory: checkout!.directory, cwd: checkout!.directory, retry, contract: launch.contract, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
-  } catch (error) {
-    if (checkout) await settleCheckout(root, checkout.directory); throw await abandonLaunch(error, pane, tabId, selected, `approver launch for ${work.key} failed: ${failureText(error).slice(0, 300)}`, run);
-  }
-  const spentOn = selected?.account.name ?? chosen?.account?.name ?? null;
-  // The registry session is kept with the launch: the loop ends it once the decision is judged, or the moment the session is spent.
-  const session = selected?.account.fleet.session ?? null;
-  // The record names the spent account, registry slot, item and decision (GY-403), so the loop adopts and closes the session.
-  // Kept off the checkout (GY-1339): an unwritable location leaves it unrecorded and the started runtime judging; other failures close it.
-  let record: ApproverLaunchRecord;
-  try { record = await saveApproverLaunch(root, { agentName: name, account: spentOn, runtime: kind, session, launchedAt: new Date().toISOString(), work: work.key, decision, pane: pane ?? null, checkout: checkout.directory }); }
-  catch (error) { const failure = await abandonLaunch(error, pane, tabId, selected, `approver launch record for ${work.key} could not be written: ${failureText(error).slice(0, 300)}`, run); await settleCheckout(root, checkout.directory); throw failure; }
-  return { agentName: name, work: work.key, decision, identity: config.approver!.id, pane: pane! as string | null, delivery, focusChanged: false, runtime: kind as string, session,
-    ...(record.unrecorded ? { unrecorded: record.unrecorded } : {}), ...(replaced ? { replaced } : {}),
-    account: selected ? { environment: selected.account.name, kind, reason: selected.selection.reason, skipped: selected.skipped }
-      : chosen?.account ? { environment: chosen.account.name, kind, reason: `the first healthy account of profile ${chosen.profile}`, skipped: chosen.skipped } : null,
-    run: null as RunRecord | null, settled: undefined as Promise<RunRecord> | undefined };
-}
-
-/**
- * The account each approver session was launched on (GY-182). The loop adopts a session a master
- * started with `master approver` rather than launching its own, and an adopted session that stops
- * on a limit notice must hold the account it actually spent, not the runtime's own login.
- */
-export const approverLaunchSchema = z.object({ agentName: z.string().max(200), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(),
-  /** The agent registry session the launch holds, when the registry chose its account. */
-  session: z.string().max(200).nullable().default(null), launchedAt: z.string(),
-  /** The item and decision it judges (GY-403): the loop registers the session in its approval watch from these. */
-  work: z.string().max(40).nullable().default(null), decision: z.string().max(100).nullable().default(null),
-  /** The Herdr pane it was launched in (GY-1598): only a record naming the pane a listed session sits in dates that session. */ pane: z.string().max(200).nullable().optional(),
-  /** Its own managed directory, kept from reclaim while this record is (GY-866). */ checkout: z.string().max(4096).optional() }).strict();
-export type ApproverLaunch = z.infer<typeof approverLaunchSchema>;
-/** Where approver launches are recorded (GY-1339): the managed data root keyed by checkout, since the doctor's checkout is read-only (EROFS). */
-export const approverLaunchesFile = (root: string, environment: Record<string, string | undefined> = process.env) =>
-  resolve(dataDirectory(environment), 'approver-launches', `${createHash('sha256').update(resolve(root)).digest('hex').slice(0, 12)}.json`);
-/** The record's place before GY-1339, still read, and written only when the data root refuses writes. */
-const checkoutApproverLaunchesFile = (root: string) => resolve(root, '.graphyard', 'approvers', 'launches.json');
-const readLaunchFile = async (file: string): Promise<ApproverLaunch[]> => { try { return z.array(approverLaunchSchema).parse(JSON.parse(await readFile(file, 'utf8'))); } catch { return []; } };
-/** Every approver launch recorded on this host within the last day: the data root's records, after any the checkout still holds. */
-export async function readApproverLaunches(root: string, environment: Record<string, string | undefined> = process.env, now = Date.now()): Promise<ApproverLaunch[]> {
-  const [checkout, data] = await Promise.all([readLaunchFile(checkoutApproverLaunchesFile(root)), readLaunchFile(approverLaunchesFile(root, environment))]);
-  // The checkout's file is rewritten only when the data root refuses writes, so its old records are aged out here.
-  return [...checkout.filter(entry => now - Date.parse(entry.launchedAt) < escalationSessionMs && !data.some(newer => newer.agentName === entry.agentName)), ...data];
-}
-export async function readApproverLaunch(root: string, agentName: string): Promise<ApproverLaunch | null> {
-  return (await readApproverLaunches(root)).findLast(entry => entry.agentName === agentName) ?? null;
-}
-/** Where a launch record was written, or why it could not be: `unrecorded` names every location that refused it. */
-export interface ApproverLaunchRecord { file: string | null; unrecorded?: string }
-/** Record the launch of `launch.agentName`, replacing an earlier one and dropping records past a day: to the data root, else the
- * checkout; when both refuse writes (EROFS, EACCES, EPERM) it is returned unrecorded, never closing a started runtime. Other failures throw. */
-export async function saveApproverLaunch(root: string, launch: z.input<typeof approverLaunchSchema>, now = Date.now(),
-  options: { environment?: Record<string, string | undefined>; write?: (file: string, value: unknown) => Promise<void> } = {}): Promise<ApproverLaunchRecord> {
-  const environment = options.environment ?? process.env;
-  const write = options.write ?? (async (file: string, value: unknown) => { await mkdir(dirname(file), { recursive: true, mode: 0o700 }); await atomicPrivateWrite(file, value); });
-  const kept = (await readApproverLaunches(root, environment, now)).filter(entry => entry.agentName !== launch.agentName && now - Date.parse(entry.launchedAt) < escalationSessionMs);
-  const records = [...kept, approverLaunchSchema.parse(launch)].slice(-retainedEscalationSessions);
-  const refused: string[] = [];
-  for (const file of [approverLaunchesFile(root, environment), checkoutApproverLaunchesFile(root)]) {
-    try {
-      await write(file, records);
-      return { file };
-    } catch (error) {
-      const code = (error as { code?: string } | null)?.code ?? '';
-      if (!['EROFS', 'EACCES', 'EPERM'].includes(code)) throw error;
-      refused.push(`${file} (${code}: ${failureText(error).split('\n')[0]!.slice(0, 200)})`);
-    }
-  }
-  return { file: null, unrecorded: `the approver launch record could not be written to ${refused.join(' or ')}` };
-}
-/** The approver role's accounts as `roleCapacity` reads them: whether any is left, and each one's reset. */
-export async function approverRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}) {
-  const named = approverProfiles(config), profiles = named.length ? named : [{ name: approverProfile, kind: approverRuntime(config) }];
-  return { profiles, health: await inspectProfileAccounts(config, 'approver', profiles, Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null as string | null }])), probe) };
-}
-
-/**
- * The escalation-handler role's accounts as `roleCapacity` reads them, as `approverRoleHealth` does
- * for the approver. A handler launches on the runtime its escalation names, so `runtimes` — those of
- * the handlers waiting to launch again — are each checked: a runtime's own login another role saw
- * spent bars the handler too. The role has capacity while any of them can launch.
- */
-export async function escalationRoleHealth(config: MasterConfig, probe: EnvironmentProbe = {}, runtimes: string[] = []) {
-  const profiles = [{ name: escalationProfile }], results: { available: boolean; reason: string | null; accounts?: ProfileAccountHealth[] }[] = [];
-  for (const kind of runtimes.length ? [...new Set(runtimes)] : [undefined]) {
-    results.push((await inspectProfileAccounts(config, 'escalation-handler', [{ name: escalationProfile, kind }], { [escalationProfile]: { available: true, reason: null as string | null } }, probe))[escalationProfile]);
-  }
-  const usable = results.find(result => result.available);
-  return { profiles, health: { [escalationProfile]: usable ?? { available: false, reason: results.map(result => result.reason).filter(Boolean).join('; ') || null, accounts: results.flatMap(result => result.accounts ?? []) } } };
-}
-
-/**
- * The escalation handlers this host launched and has not seen end (GY-182). A handler is launched
- * by a master, not by the loop, so this is what lets the loop find one that stopped on its
- * provider's limit notice, hold the account and launch the same escalation again elsewhere.
- * `waiting` is a handler ended for spent quota with no account left: it is launched again once
- * `retryAt` passes. One that finished — stopped with no notice, or gone from Herdr — is ended by
- * the loop too, so the registry session it holds does not keep the role's slot.
- */
-export const escalationSessionSchema = z.object({
-  agentName: z.string().max(200), pane: z.string().max(200).nullable(), work: z.string().max(40), trigger: z.string().max(64),
-  kind: z.string().max(40), account: z.string().max(200).nullable(), runtime: z.string().max(40).nullable(), launchedAt: z.string(),
-  /** The agent registry session the handler holds, when the registry chose its account: ended with the handler. */
-  session: z.string().max(200).nullable().default(null),
-  waiting: z.object({ since: z.string(), retryAt: z.string(), reason: z.string().max(500) }).strict().nullable().default(null),
-  /** When the loop first saw the handler stopped with no limit notice: past a grace, it has finished. */
-  idleSince: z.string().optional(), /** Its own managed directory, kept from reclaim while this record is (GY-866). */ checkout: z.string().max(4096).optional(),
-}).strict();
-export type EscalationSession = z.infer<typeof escalationSessionSchema>;
-export const retainedEscalationSessions = 50, escalationSessionMs = 86_400_000;
-const escalationSessionsPath = async (root: string) => resolve(await localDirectory(root), 'escalations', 'sessions.json');
-export async function readEscalationSessions(root: string): Promise<EscalationSession[]> {
-  try { return z.array(escalationSessionSchema).parse(JSON.parse(await readFile(await escalationSessionsPath(root), 'utf8'))); } catch { return []; }
-}
-/**
- * Replace the handler of `work`/`trigger` (or drop it with `session` null). A running handler's
- * record is dropped a day after launch, or when more than the retained count are running; a waiting
- * one is kept until a day past its `retryAt`, however many there are, so a weekly reset still finds
- * the escalation to launch again.
- */
-export async function saveEscalationSession(root: string, work: string, trigger: string, session: EscalationSession | null, now = Date.now()) {
-  const current = (entry: EscalationSession) => now - Date.parse(entry.waiting ? entry.waiting.retryAt : entry.launchedAt) < escalationSessionMs;
-  const kept = (await readEscalationSessions(root)).filter(entry => !(entry.work === work && entry.trigger === trigger) && current(entry));
-  const file = await escalationSessionsPath(root); await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  // The count bounds running and finished records only: a waiting one is how the loop launches its escalation again, kept until the time filter drops it.
-  const all = [...kept, ...(session ? [session] : [])], launched = all.filter(entry => !entry.waiting);
-  const evicted = new Set(launched.slice(0, Math.max(0, launched.length - retainedEscalationSessions)));
-  await atomicPrivateWrite(file, all.filter(entry => !evicted.has(entry)));
-}
-
-/**
  * `master review` registers the reviewer session before its runtime starts (GY-172 AC-2), keyed on
  * the review request it answers, as the loop's own reviewer launches are; the pane and name the
  * launcher returns are written over the registration once it has started. `launch` is the reviewer
@@ -546,118 +146,20 @@ export async function registeredReview<T>(config: MasterConfig, args: string[], 
     withLaunchedRuntime(handle, launch), launched => launched as { pane?: string | null; agentName?: string | null }, pane => herdrAttach(pane, config.herdrWorkspace));
 }
 
-/**
- * A context the handler received is what the control plane assembled: the fingerprint covers
- * every byte but itself, so a document altered or abridged on the way is refused before it is judged.
- */
-export function verifiedContext(context: EscalationContext) {
-  const { fingerprint, ...document } = context;
-  if (contextFingerprint(document) !== fingerprint) throw new Error(`The escalation context for ${context.key} does not match its fingerprint ${fingerprint}; fetch it again from the control plane`);
-  return context;
-}
-/**
- * Spawn a judging session for one escalation (GY-90). It is a fresh master: its whole input is
- * the assembled context, written to one private file, and the escalation inside it. It holds no
- * loop state, reads nothing else, and records its decision with `master decide … --precedent
- * --context`, so the ledger carries the reason, the precedent it relied on and what it saw; with
- * no precedent to cite it decides without `--precedent`, and the ledger records that (GY-138).
- */
-export async function launchEscalationHandler(root: string, config: MasterConfig, context: EscalationContext, kind: NonNullable<WorkerProfile['kind']>, agents: HerdrAgent[], run?: ChildRun, register?: SessionRegistrar) {
-  await agentToken(root, config, 'operatorAgent');
-  const escalationRetry = `graphyard master escalation ${context.key} ${context.escalation.trigger} ${kind}`;
-  const name = nameForLaunch(escalationRetry, () => distinctSessionName(['graphyard-escalation', 'graphyard-esc', 'gy-esc'], context.key, context.escalation.trigger));
-  if (agents.some(agent => agent.name === name)) throw new Error(`Escalation handler ${name} is already visible in Herdr; let it finish or close it first`);
-  // A capacity role like any other (GY-182): the registry's escalation-handler role chooses the
-  // account when it defines one, and a login a session saw spent is not launched on before it resets.
-  let selected: Awaited<ReturnType<typeof selectFleetSession>>;
-  try {
-    selected = await selectFleetSession(config, 'escalation-handler', { name, principal: config.operatorAgent!.id }, await heldAwareProbe(config, { work: context.key }));
-    if (!selected) await selectAccount(config, 'escalation-handler', { name: escalationProfile, kind }, { work: context.key });
-  } catch (error) {
-    if (!(error instanceof NoHealthyAccountError) || !error.capacityExhausted) throw error;
-    // Every account is already spent before this handler starts — another role may have held a
-    // shared one. The escalation is kept as a waiting record, so the loop reports the capacity
-    // wait and launches it again once the first held account resets, with no one retrying it.
-    const at = Date.now(), held = await observedExhaustions(config, at);
-    // With no reset known for a spent account, the handler is tried again this soon: the same
-    // capacity recheck every other spent role waits on (GY-316). Read through a dynamic import:
-    // auto-dispatch imports this barrel, so a static edge here would run its module body while
-    // the reviewer module it reads top-level is still initializing.
-    const { capacityRecheckMs } = await import('../auto-dispatch.js');
-    const retryAt = capacityRetryAt(error.skipped.map(skip => ({ resetsAt: held[skip.environment]?.until ?? null }))) ?? new Date(at + capacityRecheckMs).toISOString();
-    await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: null, work: context.key, trigger: context.escalation.trigger, kind, account: null, runtime: null, launchedAt: new Date(at).toISOString(), session: null,
-      waiting: { since: new Date(at).toISOString(), retryAt, reason: error.message.slice(0, 500) } });
-    // The wait rides on the error, so a loop that ended a spent handler keeps it rather than its own guess.
-    throw Object.assign(new NoHealthyAccountError(`${error.message}; the escalation waits and the loop launches it again at ${retryAt}`, error.skipped), { retryAt });
-  }
-  const runtime = selected?.account.kind ?? kind;
-  const directory = resolve(await localDirectory(root), 'escalations'); await mkdir(directory, { recursive: true, mode: 0o700 });
-  const file = resolve(directory, `${context.key}-${context.escalation.trigger}-${context.fingerprint.slice(0, 12)}.json`);
-  await atomicPrivateWrite(file, context);
-  // A launch refused for its runtime gives the chosen session back at once (GY-184).
-  let launch: ReturnType<typeof accountLaunch>;
-  try { launch = accountLaunch({ kind: runtime, approvals: 'auto', agentArgs: [], environment: {} }, selected?.account ?? null); }
-  catch (error) { await selected?.release(`escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`); throw error; }
-  const cli = `node ${config.cliPath}`;
-  // A requirement-weakening reason is a claim about one item's criteria (GY-873): the spawned
-  // handler is told to judge this item's own revision, never to copy another item's reason.
-  const ownRevision = context.escalation.trigger === 'requirement-weakening'
-    ? ` This is a requirement-weakening escalation, so judge it against this item's own revision: state each criterion whose text or proofs changed, before and after, from the item's requirements history (item.requirementRevisions), and name the decision that applied it — never copy another item's reason into yours; the precedent you cite is the rule followed, nothing more.`
-    : '';
-  const prompt = `You are a Graphyard escalation handler spawned for the ${context.escalation.trigger} escalation on ${context.key} in ${config.repository}, acting as ${config.operatorAgent!.id}. Your entire input is the file ${file}: the context the control plane assembled for this decision — the repository's own operating rules and policy, the current goals and priorities, the item (requirements, the standing refusal, the candidate, its typed history) and precedent (earlier ${escalationAction} decisions with their reasons and outcomes). Read that file and nothing else: do not run status, events or any other read, do not open the repository, and hold no state beyond it. Decide whether the ${context.escalation.trigger} escalation should be resolved, following the precedent that applies and saying which.${ownRevision} If it should, run ${cli} master decide ${context.key} ${escalationAction} '{"trigger":"${context.escalation.trigger}"}' --precedent DECISION_ID[,DECISION_ID] --context ${context.fingerprint} "YOUR REASON" exactly once, citing only ids listed in precedent.detail; when precedent.detail lists no decision that applies, leave out --precedent and the control plane records that no precedent was available — never invent an id. An independent approver judges it. If it should not, request nothing and state the reason in this tab. Never edit, push, merge, review, approve or submit evidence. Stop when the decision is recorded or declined.`;
-  let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, checkout: SessionCheckout | undefined;
-  try {
-    checkout = await (await import('../reviewer.js')).coordinationCheckout(root, config, context.key, context.item?.candidate?.sha); const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory, '--label', `Escalation · ${context.key}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_REPOSITORY_ROOT=${root}`, '--env', 'GRAPHYARD_ESCALATION_HANDLER=1', '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
-    pane = created.pane; tabId = created.tab;
-    // The instruction is the session's own first request (GY-93), never pasted into it: a handler
-    // that refused a pasted prompt would record no decision and leave the escalation standing.
-    // Registered first, like every launched session (GY-172 AC-2).
-    ({ delivery } = await registeredLaunch(register, { id: `escalation:${context.escalation.trigger}:${context.fingerprint.slice(0, 12)}`, kind: 'coordination', role: 'escalation', principal: config.operatorAgent!.id, runtime, host: config.hostId,
-      agentName: name, pane: created.pane, attach: herdrAttach(created.pane, config.herdrWorkspace), ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}),
-      subject: `${context.key}: handle the ${context.escalation.trigger} escalation`, state: 'running' }, () => startAgentSession(name, runtime, created.pane, launch.args, prompt, run, { directory: checkout!.directory, cwd: checkout!.directory, retry: escalationRetry, environment: launch.environment, timeoutMs: launchStartMs(config) }), () => undefined));
-  } catch (error) {
-    if (checkout) await settleCheckout(root, checkout.directory); const failure = await abandonLaunch(error, pane, tabId, selected, `escalation handler launch for ${context.key} failed: ${failureText(error).slice(0, 300)}`, run);
-    // A registry session that could not be ended is kept on a record due now: the loop ends it
-    // before it launches the escalation again, so the role's slot is never left orphaned.
-    const orphan = (failure as { registrySession?: string }).registrySession;
-    if (orphan) {
-      const at = new Date().toISOString();
-      await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: null, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: at, session: orphan,
-        waiting: { since: at, retryAt: at, reason: `the launch failed (${failureText(error)}) and its registry session could not be ended`.slice(0, 500) } }).catch(() => {});
-    }
-    throw failure;
-  }
-  // The record is part of the launch: it is how the loop finds a handler that stopped on a limit
-  // notice and ends its registry session, so a launch whose record cannot be written is closed and fails.
-  try { await saveEscalationSession(root, context.key, context.escalation.trigger, { agentName: name, pane: pane!, work: context.key, trigger: context.escalation.trigger, kind, account: selected?.account.name ?? null, runtime, launchedAt: new Date().toISOString(), session: selected?.account.fleet.session ?? null, waiting: null, checkout: checkout.directory }); }
-  catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `escalation handler record for ${context.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
-  return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
-}
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'defer', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'defer', 'requirements', 'rework', 'attest', 'principals', 'restart', 'environments'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   daemonLock: () => Promise<{ pid: number; host: string; heartbeatAt: string } | null>;
-  /** A coordinator-authenticated mutation, with which a session this command launches is registered before it starts (GY-172). */
-  mutate?: (path: string, body: unknown) => Promise<unknown>;
-  /** The runner a launched session's runtime calls go through; the asynchronous runner when omitted. */
-  runtime?: ChildRun;
   fetcher?: typeof fetch;
-  /**
-   * Refuses a `decide` the caller does not own (GY-175), judged on the exact work document and
-   * snapshot clock the decision is then built from, so a later read cannot move the item under it.
-   */
-  assertDecision?: (work: Work, action: string, input: unknown, now: number, flags: { precedent?: string }) => void | Promise<void>;
-  /** Filesystem facts for the approver's managed checkout (tests stub a durable volume when GRAPHYARD_DATA_HOME is on tmpfs). */
-  filesystem?: FilesystemProbe;
 }
 const words = (args: string[]) => args.join(' ').trim();
 async function jsonArgument(value: string) { return JSON.parse(value.startsWith('@') ? await readFile(value.slice(1), 'utf8') : value); }
 /**
- * The autonomy subcommands of `graphyard master`: onboarding the agent identities, the master's
- * own intent commands, two-party decisions, the approver session, roster rotation and the loop
- * restart. Each authenticates as the identity the command belongs to, never as another.
+ * The autonomy subcommands of `graphyard master`: onboarding the master identity, the intent it
+ * applies at once, roster rotation and the loop restart. Each authenticates as the identity the
+ * command belongs to, never as another.
  */
 export async function runAutonomyCommand(root: string, config: MasterConfig, id: string, args: string[], deps: AutonomyDependencies) {
   if (!(autonomySubcommands as readonly string[]).includes(id)) throw new Error(`Unknown autonomy command ${id}`);
@@ -666,14 +168,13 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     const result = await response.json(); if (!response.ok) throw new Error(JSON.stringify(result)); return result;
   };
   const operator = () => agentToken(root, config, 'operatorAgent');
-  const registrar = (work: string): SessionRegistrar | undefined => deps.mutate ? handle => deps.mutate!(`work/${encodeURIComponent(work)}/session`, handle) : undefined;
   const snapshotItem = async (key: string | undefined) => {
     if (!key) throw new Error(`Use master ${id} GY-N …`);
     const snapshot = await deps.coordinator('work-snapshot'), found = snapshot.work.find((work: Work) => work.id === key || work.key === key);
-    // A settled delivery is a summary in the snapshot (GY-422); a decision reads its whole document.
-    if (!found) throw new Error(`Unknown work item ${key}`); return { work: await wholeDocument(found, deps.coordinator), now: Date.parse(snapshot.now) };
+    // A settled delivery is a summary in the snapshot (GY-422); intent reads its whole document.
+    if (!found) throw new Error(`Unknown work item ${key}`); return wholeDocument(found, deps.coordinator);
   };
-  const item = async (key: string | undefined) => (await snapshotItem(key)).work;
+  const item = snapshotItem;
   const reason = (rest: string[]) => { const text = words(rest); if (!text) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`); return text; };
   if (id === 'environments') {
     // The agent accounts sessions run on: discover or create them, report login and quota, and
@@ -704,58 +205,17 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
   }
   if (id === 'requirements') {
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master requirements GY-N FILE REASON');
-    const input = decisionInput('requirements', work, await jsonArgument(`@${args[1]}`));
+    const input = intentInput('requirements', work, await jsonArgument(`@${args[1]}`));
     return call(await operator(), `work/${work.id}/requirements`, { ...input, reason: reason(args.slice(2)) });
   }
-  if (id === 'decide') {
-    const { work, now } = await snapshotItem(args[0]); const action = args[1];
-    if (!action) throw new Error('Use master decide GY-N ACTION [JSON|@FILE] [--precedent ID[,ID]] [--context FINGERPRINT] REASON');
-    // A handler cites the decisions it followed and the fingerprint of the context it judged from.
-    const flags: Record<string, string> = {}; const rest: string[] = [];
-    for (let index = 2; index < args.length; index++) {
-      if (args[index] === '--precedent' || args[index] === '--context') { flags[args[index].slice(2)] = args[++index] ?? ''; continue; }
-      rest.push(args[index]);
-    }
-    const explicit = rest[0] && /^[{@]/.test(rest[0]);
-    const input = explicit ? await jsonArgument(rest[0]) : {};
-    await deps.assertDecision?.(work, action, input, now, { precedent: flags.precedent });
-    return call(await operator(), `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason: reason(rest.slice(explicit ? 1 : 0)),
-      ...(flags.precedent ? { precedent: flags.precedent.split(',').map(value => value.trim()).filter(Boolean) } : {}), ...(flags.context ? { context: flags.context } : {}) });
+  if (id === 'rework') {
+    const work = await item(args[0]);
+    return call(await operator(), `work/${work.id}/rework`, { reason: reason(args.slice(1)), previousWorkerStopped: true });
   }
-  if (id === 'context' || id === 'escalation') {
-    // The assembled context, read from the control plane by key and nothing else — no snapshot,
-    // no status; `escalation` then spawns a fresh handler on it: the built-in precedent rule in
-    // this process, or a judging session of KIND.
-    if (!args[0]) throw new Error(`Use master ${id} GY-N [TRIGGER] [--budget N]${id === 'escalation' ? ' [precedent|AGENT_KIND]' : ''}`);
-    const rest: string[] = []; let budget: string | undefined;
-    for (let index = 1; index < args.length; index++) { if (args[index] === '--budget') budget = args[++index]; else rest.push(args[index]); }
-    const trigger = rest.find(value => (escalationTriggers as readonly string[]).includes(value));
-    const params = new URLSearchParams(); if (trigger) params.set('trigger', trigger); if (budget) params.set('budget', budget);
-    const context = verifiedContext(await deps.coordinator(`work/${encodeURIComponent(args[0])}/context${params.size ? `?${params}` : ''}`));
-    if (id === 'context') return context;
-    const handler = rest.find(value => value !== trigger) ?? 'precedent';
-    if (handler === 'precedent') return handleEscalation(context, followPrecedent, async request => call(await operator(), `work/${encodeURIComponent(context.key)}/decide`, request));
-    return launchEscalationHandler(root, config, context, agentKindSchema.parse(handler), await deps.agents(), deps.runtime, registrar(context.key));
-  }
-  if (id === 'decisions') return deps.coordinator(`work/${encodeURIComponent((await item(args[0])).id)}/decisions`);
-  if (id === 'approve') {
-    // The server refuses self-approval; this refuses the master's session before it asks.
-    if (process.env.GRAPHYARD_MASTER === '1') throw new Error('The master never approves its own decisions; graphyard master approver GY-N DECISION launches the independent approver session');
-    const file = process.env.GRAPHYARD_TOKEN_FILE;
-    if (!file) throw new Error('master approve runs in an approver session, which carries its own credential file in GRAPHYARD_TOKEN_FILE');
-    const token = await readCredentialFile(file);
-    for (const own of [config.credentialFile, config.operatorAgent?.credentialFile]) if (own && token === await readCredentialFile(own).catch(() => null)) throw new Error('That is one of the master\'s own credentials; approvals come from the approver identity');
-    const work = await item(args[0]); if (!args[1]) throw new Error('Use master approve GY-N DECISION REASON');
-    return call(token, `work/${work.id}/approve`, { decision: args[1], reason: reason(args.slice(2)) });
-  }
-  if (id === 'approver') {
-    const work = await item(args[0]); if (!args[1]) throw new Error('Use master approver GY-N DECISION [AGENT_KIND]');
-    // `deps.agents` throws when Herdr cannot be read, so a listing it returns was read.
-    const launched = await launchApprover(root, work, args[1], args[2] ? agentKindSchema.parse(args[2]) : undefined, { agents: await deps.agents(), available: true }, deps.runtime, {}, registrar(work.id),
-      deps.filesystem ? { filesystem: deps.filesystem } : {});
-    // A headless approver runs in this process, so the command waits for its verdict and reports the run.
-    const { settled, ...report } = launched;
-    return settled ? { ...report, run: await settled } : report;
+  if (id === 'attest') {
+    // A manual: proof no producer may run, attested by the master on the exact current head.
+    const work = await item(args[0]); if (!args[1]) throw new Error('Use master attest GY-N PROOF REASON');
+    return call(await operator(), `work/${work.id}/evidence`, intentInput('attest', work, { proof: args[1] }));
   }
   if (id === 'principals') {
     const live = (await deps.coordinator('principals')).principals;

@@ -7,7 +7,7 @@ import type { ChildRun } from '../child-runner.js';
 import { heldCliSnapshots, shortCommit } from './held-cli.js';
 import type { DaemonState } from './state.js';
 import { touchStanding } from './state-cursor.js';
-import { detailChanged } from './decisions.js';
+import { detailChanged } from './text.js';
 import { checkoutState } from './checkout-state.js';
 import type { SelfUpgradeOutcome } from './upgrade.js';
 

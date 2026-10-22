@@ -13,7 +13,7 @@ import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master.js';
 import { carryUndeclared } from './state-cursor.js';
 import { storeAction, touchStanding, message, type DaemonState, type UpgradeStallCause } from './state.js';
-import { detailChanged } from './decisions.js';
+import { detailChanged } from './text.js';
 import { checkoutState, loopCodeRoot, reconcileLoadedRelease, unquotePath, type CheckoutState } from './checkout-state.js';
 import { heldCliSnapshots, holdCliAt, sameCommit, shortCommit } from './held-cli.js';
 import { restartEndedBySupervisorStop } from './loop-supervisor.js';

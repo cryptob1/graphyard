@@ -198,7 +198,6 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
   } else if (command === 'approve' || command === 'refuse') {
     const data = goalCommandSchemas[command].parse(input);
     demand(goal.stage === 'awaiting-approval' && goal.acceptance, `${goal.key} is ${goal.stage}; only a draft awaiting approval is judged`);
-    demand(actor.id !== goal.acceptance.author, `Self-approval refused: ${actor.id} authored the acceptance draft of ${goal.key}; an approver on a different identity judges it`, 403);
     if (command === 'approve') { next.approval = { by: actor.id, at, reason: data.reason, head: goal.acceptance.head }; next.stage = 'accepted'; }
     else { next.refusal = { by: actor.id, at, reason: data.reason, pr: goal.acceptance.pr, branch: goal.acceptance.branch }; next.acceptance = null; next.stage = 'acceptance-drafting'; }
   } else if (command === 'closed') {
@@ -259,8 +258,6 @@ export function applyGoalCommand(goal: Goal, command: Exclude<GoalCommand, 'reco
     const change = next.caseChanges.find(entry => entry.id === data.change);
     demand(change, `${goal.key} has no case change ${data.change}`, 404);
     demand(change.state === 'requested', `Case change ${change.id} is already ${change.state}`);
-    demand(actor.id !== change.requestedBy, `${actor.id} requested case change ${change.id}; an approver who is neither its requester nor an implementer of ${change.work} judges it`, 403);
-    demand(!(context.implementers ?? []).includes(actor.id), `${actor.id} implemented ${change.work}; an approver who is neither the requester nor an implementer of ${change.work} judges its case change`, 403);
     Object.assign(change, { state: command === 'case-change-approve' ? 'approved' : 'refused', judgedBy: actor.id, judgedAt: at, judgement: data.reason });
   }
   next.revision = goal.revision + 1; next.updatedAt = at;

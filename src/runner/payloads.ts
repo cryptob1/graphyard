@@ -9,13 +9,6 @@ import { z } from 'zod';
  */
 const sha = z.string().regex(/^[0-9a-f]{40}$/i);
 
-/** `graphyard_decide`: the approver's verdict on one requested decision. */
-export const decidePayloadSchema = z.object({
-  decision: z.string().trim().min(1).max(100),
-  approve: z.boolean(),
-  reason: z.string().trim().min(1).max(2000),
-}).strict();
-export type DecidePayload = z.infer<typeof decidePayloadSchema>;
 
 /** `graphyard_submit_evidence`: one proof's result on the exact head, with its exercise run (GY-135). */
 export const evidencePayloadSchema = z.object({
@@ -72,7 +65,7 @@ export type DecompositionSettings = z.infer<typeof decompositionSettingsSchema>;
 /** The estimated-lines bound in force. */
 export const estimatedLinesBound = (settings: DecompositionSettings) => settings.maxEstimatedLines;
 
-export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', decompose: 'graphyard_decompose' } as const;
+export const graphyardTools = { evidence: 'graphyard_submit_evidence', decompose: 'graphyard_decompose' } as const;
 
 /**
  * `run.diagnostician` in .graphyard/master.json (GY-439): the headless model settings the

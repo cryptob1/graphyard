@@ -194,8 +194,8 @@ export function judgeBotCommit(commit: BotCommit, review: { state: string; commi
  * 1. reconcileReviews (src/reviewer.ts) reads each approval of the current head once and records
  *    its plan on the approval's review-ledger record (`mechanicalFix`): `planned` when anything on it
  *    is mechanical, `none` otherwise. A planned approval's follow-ups wait while its head is current.
- * 2. The loop's routine decisions (src/daemon/decisions.ts, `mechanicalRework`) return that head to
- *    a worker as a mechanical-fix round: the rework decision the independent approver judges.
+ * 2. The loop's routine rework (src/daemon/rework.ts, `mechanicalRework`) returns that head to
+ *    a worker as a mechanical-fix round.
  * 3. The worker launcher (src/master/dispatch.ts) gives that round's worker-class session the bot
  *    instruction (`mechanicalWorkerSection`), and the head it submits is reviewed afresh.
  * 4. launchReview verifies that head as the bot commit (`freshReadFor`) and records the fresh read

@@ -2,12 +2,10 @@ import { agentOwner, type AttentionItem } from '../master.js';
 import type { Work } from '../model.js';
 import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
 import { elapsed } from '../model/sessions.js';
-import { maxDecisionRequests } from '../daemon/decisions.js';
 import { pushRefusal, trialRefusal } from '../model/gates.js';
 import { openAction } from '../model/concerns.js';
 import type { MergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { baseFailureHoldMs, baseFailurePrefix } from '../merge-writer/executor.js';
-import { staleRelease, staleReleaseWaitBoundMs, unappliedReleases, type DecisionHistoryRow } from '../model/stale-release.js';
 
 /**
  * What `master status` says about work that is waiting on a judgement rather than on capacity
@@ -39,7 +37,7 @@ export function humanNeededAttention(snapshot: { work: Work[]; now: string }, wr
     if (held === 'stalled') return [];
     const item: AttentionItem = { subject: row.key,
       text: `${row.reason} — no executor may run it; ${row.decision} has been owed for ${elapsed(row.waitedMs)}`,
-      ...agentOwner('master', row.resolve, 'approver') };
+      ...agentOwner('master', row.resolve) };
     // GY-2053: a live flight is movement on its own, so its hold is dated from this reading, never from a movement aged past the bound.
     if (held === 'moving') item.inMotionUntil = new Date((writer!.inFlight ? now : mergeWriterMovement(writer)!.at) + mergeWriterMotionBound(writer)).toISOString();
     // GY-2174: a head the writer's own base-failure hold parks is out of the queue by the writer's
@@ -199,25 +197,3 @@ export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { k
     counted: items.length + requests.filter(item => !rowAttention(item.subject)).length };
 }
 
-/**
- * GY-1294. A release decision the server settled `stale` — the item revision moved between the
- * request and its approver's read — releases nothing, and an item in backlog shows no other sign
- * that it waits: five diagnosed root-cause fixes sat there for 2–23 hours, each behind a stale
- * release nobody asked for again. While the item is still in backlog and that stale release is
- * its latest — no later release requested, approved or applied — the release is owed, and it is
- * named so, as owed decision attention with how long it has waited, never left silent. Null for
- * any other item.
- */
-export function staleReleaseAttention(work: { key: string; stage: string; ready?: boolean }, decisions: readonly DecisionHistoryRow[], now: number): AttentionItem | null {
-  const release = staleRelease(work, decisions);
-  if (!release) return null;
-  const waited = release.requestedAt ? Math.max(0, now - Date.parse(release.requestedAt)) : 0;
-  const next = `graphyard master release ${work.key}, or graphyard master decide ${work.key} release REASON then graphyard master approver ${work.key} DECISION`;
-  // GY-1315: the loop requests it again itself (staleReleaseStep, and the diagnosis step for its own fixes) while requests are left,
-  // so inside the wait bound the line is a step in motion: GY-1313 and GY-1314 counted 3 minutes after going stale, 3 minutes before the re-request.
-  const requested = release.requestedAt ? Date.parse(release.requestedAt) : Number.NaN;
-  const inMotionUntil = Number.isFinite(requested) && unappliedReleases(decisions) < maxDecisionRequests ? new Date(requested + staleReleaseWaitBoundMs).toISOString() : undefined;
-  return { subject: work.key, text: `${work.key} sits in backlog behind release decision ${release.id}, which went stale: ${release.outcome ?? 'the item revision moved before its approver read it'} — no executor may run it; the release of ${work.key} has been owed for ${elapsed(waited)}`,
-    ...agentOwner('master', next, 'approver'), ...(inMotionUntil ? { inMotionUntil } : {}) };
-}
-export { staleReleaseWaitBoundMs };

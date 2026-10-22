@@ -280,7 +280,7 @@ export const boardRouteMissing = (error: unknown) => (error as { status?: unknow
  * (404). Any other failure — a 500, an auth refusal, a timeout, a body that is not a board — is
  * reported as the section's `error` rather than papered over, so a failing route is seen.
  */
-export async function masterBoard(api: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, status: any, unanswered: { work: string; id: string }[] = []) {
+export async function masterBoard(api: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, status: any) {
   let board: Board;
   try {
     const served = await api('board');
@@ -290,9 +290,6 @@ export async function masterBoard(api: (path: string) => Promise<any>, snapshot:
     if (!boardRouteMissing(error)) return { error: `GET /api/board failed: ${error instanceof Error ? error.message : String(error)}` };
     board = boardFromStatus(snapshot.work, Date.parse(snapshot.now), status);
   }
-  const items = groups.flatMap(group => board.groups[group]).map(entry => {
-    const decision = unanswered.find(row => row.work === entry.key);
-    return decision ? { ...entry, actor: 'master' as const, command: `graphyard master approver ${entry.key} ${decision.id}` } : entry;
-  });
+  const items = groups.flatMap(group => board.groups[group]);
   return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs, blockers: board.blockers ?? blockerCounts(items), owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
 }

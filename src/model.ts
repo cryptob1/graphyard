@@ -7,7 +7,7 @@ export * from './model/policy.js';
 export * from './model/work.js';
 export * from './model/retired-queue.js';
 export * from './model/evidence.js';
-export * from './model/escalation.js';
+export * from './model/lease-end.js';
 export * from './model/delegation.js';
 export * from './model/delivery.js';
 export * from './model/bootstrap.js';

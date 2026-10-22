@@ -5,7 +5,7 @@ import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { forwardTolerant } from '../master/profiles.js';
-import { boundDetail } from './decisions.js';
+import { boundDetail } from './text.js';
 import { daemonActionSchema, daemonStateSchema, type DaemonAction, type DaemonState, type DeploymentObservation } from './state.js';
 
 export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of a run of /tmp passes removing 0 under the standing inode bound
@@ -83,9 +83,8 @@ export function pruneDaemonState(state: DaemonState) {
   // stopped seeing (a removed item, a renamed repository) so the cursor cannot grow without end.
   const clocks = Object.keys(state.clocks);
   if (clocks.length > retainedClocks) for (const id of clocks.slice(0, clocks.length - retainedClocks)) delete state.clocks[id];
-  // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
-  const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
-  if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
+  // Retired fields a cursor written before GY-2874 still carries are dropped on its next write.
+  delete state.orphans; delete state.approvals; delete state.absences; delete state.decisionsDeferred;
   // A cleared base failure is retired by its step once its candidates were rerun and refreshed; this bound drops the oldest, cleared first.
   const failures = Object.entries(state.baseFailures).sort((a, b) => Number(!a[1].cleared) - Number(!b[1].cleared) || Date.parse(a[1].raisedAt) - Date.parse(b[1].raisedAt));
   if (failures.length > retainedBaseFailures) for (const [key] of failures.slice(0, failures.length - retainedBaseFailures)) delete state.baseFailures[key];
@@ -136,12 +135,6 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
   for (const clock of Object.values(state.clocks)) clock.key = cut(clock.key, 40);
   for (const sample of state.latency) sample.work = cut(sample.work, 40);
-  for (const orphan of Object.values(state.orphans)) Object.assign(orphan, { owner: cut(orphan.owner, 200), unit: cut(orphan.unit, 200) });
-  for (const watch of Object.values(state.approvals)) {
-    Object.assign(watch, { work: cut(watch.work, 40), action: cut(watch.action, 40), decision: cut(watch.decision, 100), agentName: cut(watch.agentName, 200), pane: cut(watch.pane, 200) });
-    watch.ended = watch.ended.slice(-10).map(entry => cut(entry, 300));
-  }
-  for (const absence of Object.values(state.absences)) absence.owner = cut(absence.owner, 200);
   if (state.master) {
     state.master.agentName = cut(state.master.agentName, 200);
     state.master.pane = cut(state.master.pane, 200);

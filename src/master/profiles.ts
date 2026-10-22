@@ -375,10 +375,10 @@ export const defaultRerunFailedChecks = 1;
 export const maxRerunFailedChecks = 3;
 /**
  * Who reviews and merges (GY-1501). `autonomous`, the default every existing install keeps: the
- * reviewer App reviews and the master's operator-agent and approver identities decide. `supervised`,
+ * reviewer App reviews and the master's operator-agent identity decides. `supervised`,
  * where `up --local` starts: the operator reviews each pull request on GitHub (a non-author approval of
- * the exact head) and GitHub auto-merge merges it; the loop launches no reviewer, approver or
- * escalation session and the master claims no autonomy. `master promote` promotes it (GY-1502).
+ * the exact head) and GitHub auto-merge merges it; the loop launches no reviewer or
+ * session and the master claims no autonomy. `master promote` promotes it (GY-1502).
  */
 export const supervisionModes = ['autonomous', 'supervised'] as const;
 export type Supervision = typeof supervisionModes[number];
@@ -403,8 +403,8 @@ export const masterConfigSchema = forwardTolerant(z.object({
   herdrInstance: z.object({ configHome: z.string().trim().min(1).max(500).refine(isAbsolute, 'must be absolute'), session: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/) }).strict().optional(),
   masterAgentName: sessionNameField,
   autoMerge: z.boolean().default(true),
-  // Review rounds before only a blocking finding stands against it (GY-1118; default 3).
-  reviewRoundCap: z.number().int().min(1).max(20).optional(),
+  // Retired (GY-2874): no review round is capped; an existing master.json still loads.
+  reviewRoundCap: z.unknown().optional(),
   mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
   workers: z.array(workerProfileSchema).max(100).default([]),
   reviewer: reviewerIdentitySchema.optional(),
@@ -431,9 +431,10 @@ export const masterConfigSchema = forwardTolerant(z.object({
   }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, batchSize: _batchSize, parallelTips: _parallelTips, ciConcurrency: _ciConcurrency, ...kept }) => kept).optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
-  // The master's operator-agent identity and the approver identity for its two-party decisions. Paths only, never tokens.
+  // The master's operator-agent identity, which applies every decision it makes. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
-  approver: agentIdentitySchema.optional(),
+  // Retired (GY-2874): the approver identity; an existing master.json still loads.
+  approver: z.unknown().optional(),
   // GY-1855: install that receives uncleared loop-step stall filings; absent files into this install (slow-loop precedent).
   upstream: z.object({
     url: z.string().min(1).max(500),
@@ -466,17 +467,16 @@ export function withProducerDefaults<T extends Pick<MasterConfig, 'producers'>>(
   return { ...config, producers: config.producers.map(profile => profile.concurrency === undefined ? { ...profile, concurrency: automaticProducerConcurrency } : profile) };
 }
 /**
- * The config as a supervised install runs it (GY-1501): no reviewer App, operator-agent or approver
- * identity, whatever master.json still records, so the loop launches no approver or escalation
- * session and the master requests no two-party decision; its reviewer answers in control-plane mode
+ * The config as a supervised install runs it (GY-1501): no reviewer App or operator-agent identity,
+ * whatever master.json still records, so the loop applies no rework itself; its reviewer answers in control-plane mode
  * (GY-1978), which needs a profile, not an App. Autonomous configs pass unchanged.
  */
-export function withSupervision<T extends { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown; approver?: unknown }>(config: T): T {
+export function withSupervision<T extends { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown }>(config: T): T {
   if (config.supervision !== 'supervised') return config;
-  const { reviewer: _reviewer, operatorAgent: _operatorAgent, approver: _approver, ...kept } = config;
+  const { reviewer: _reviewer, operatorAgent: _operatorAgent, ...kept } = config;
   return kept as T;
 }
-export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown; approver?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
+export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
 /** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
 export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
   return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;

@@ -1,28 +1,23 @@
-// Concern: cycle steps 1–1d and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts, recover dead workers and exited sessions; the resume waits they hand to live in cycle-resume.ts.
+// Concern: cycle steps 1–1b and 1g — close finished sessions, fail over exhausted ones, answer blocked prompts and close exited sessions; the resume waits they hand to live in cycle-resume.ts.
 import type { Work } from '../model.js';
 import { detectRetryingExhaustion, silentPaneExhaustion, type CapacityRole, type ExhaustionSignal } from '../model/capacity.js';
 import { detectRuntimeExhaustion } from '../master/environments.js';
 import { launchStartMs } from '../master/launch.js';
-import { screenMotion, stallScreenLines } from '../master/approver-stall.js';
-import { classifyRuntimePrompt, containmentQuarantines, continueAfterDecline, type EscalationSession, escalationProfile, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity, type WorkerProfile } from '../master.js';
-import { containmentPhase } from '../model/containment.js';
-import { standingEscalations } from '../model/escalation.js';
-import { capacityRecheckMs } from '../auto-dispatch.js';
-import { message, orphanObservationSchema } from './state.js';
+import { screenMotion, stallScreenLines } from '../master/screen-motion.js';
+import { classifyRuntimePrompt, continueAfterDecline, type HerdrAgent, isProfileSession, ownLoginAccounts, profileAccount, type RuntimePrompt, type SessionIdentity, type WorkerProfile } from '../master.js';
+import { message } from './state.js';
 import { closeKey } from './reconcile.js';
-import { clearProfileFailure, orphanedSupervisors, readyToRetry } from './sessions.js';
+import { clearProfileFailure, readyToRetry } from './sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
-import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, handlerSettleMs, launchAppearanceMs, launcherRetry, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
+import { blockedPromptAnswers, blockedPromptFailMs, blockedPromptSettleMs, failoverKey, launchAppearanceMs, promptDigest, type LaunchedSession, preserveInterruptedAttempt, record, stoppedStates } from './effects.js';
 import { checkPaneStillBelongs, endWorkerAttempt, resumeStep, workerHandle } from './cycle-resume.js';
 import type { Cycle } from './cycle.js';
-import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
-import { carriedCall, carriedRow, oweCarried, owedWrite, supersedeOwed, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+import { carriedCall, carriedRow, owedWrite, supersedeOwed, recordCarried, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /** GY-1774: the continuation each session slot still owes after its decline keys were sent, kept while a carried prompt is retried (lost with the loop, when the session's own idle handling takes over). */
 const owedContinuations = new WeakMap<object, Map<string, { key: string; text: string; outcome: string }>>();
 export { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs, resumeWaitKey, idleLeaseKey, resumePromptText, idlePromptText } from './cycle-resume.js';
 
-/** Steps 1–1d: close finished sessions, fail over exhausted ones, and settle what dead workers and orphaned supervisors left. */
 /**
  * A listed session's limit notice: a stopped one by its runtime's own notices, one its host still
  * reports working only when its runtime is retrying on the notice (GY-973).
@@ -55,7 +50,7 @@ export function outputReadDue(state: object, agents: readonly HerdrAgent[], agen
   return true;
 }
 
-export const closeStep = (cycle: Cycle) => withinStepBudget(cycle, 'sessions', ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'escalationSessions', 'recordSession', 'stopSupervisor', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork', 'endEscalation', 'markEscalation', 'relaunchEscalation', 'containment'], closeStepWithin); // GY-1774: every call the step makes — each session call, screen read, inventory, record, hold, capacity report, supervisor stop and fence probe — is bounded
+export const closeStep = (cycle: Cycle) => withinStepBudget(cycle, 'sessions', ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'recordSession', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork'], closeStepWithin); // GY-1774: every call the step makes — each session call, screen read, inventory, record, hold and capacity report — is bounded
 async function closeStepWithin(cycle: Cycle) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open, owns, heldBy } = cycle;
   // Whether a live lease of `principal` is worked in the worktree `cwd` names (…/worktrees/GY-N-EPOCH).
@@ -170,18 +165,10 @@ async function closeStepWithin(cycle: Cycle) {
         const partialWork = await effects.preserveWork?.(item, epoch) ?? { state: 'not-applicable' as const, detail: 'this loop has no access to the attempt worktree' };
         const { account, runtime } = await held('worker', profile.name, item, signal, { work: item.key, epoch });
         await effects.reportCapacity!(item, { event: 'exhausted', role: 'worker', epoch, profile: profile.name, account, runtime: runtime ?? profile.kind ?? null, reason: signal.reason, resetsAt: signal.resetsAt, partialWork });
-        // The lease is over on the record; the supervisor is stopped through the containment scope
-        // it recorded, and the fence it leaves is settled in this action once the host verifies it
-        // gone (GY-1155), so the item is claimable again.
-        const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
-        let stop = 'its supervisor stops on the ended lease';
-        try {
-          if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
-        } catch (error) { if (stepCallCarried(error)) throw error; stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; }
-        if (scope && await settleEndedAttemptFence(cycle, item, { epoch, owner: profile.principal, preserved: signal.reason })) stop += ', its containment fence was settled';
+        // The lease is over on the record, so the item is claimable again and its supervisor stops on the ended lease.
         clearProfileFailure(state, profile);
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch, state: 'done',
-          detail: `${item.key} epoch ${epoch} exhausted ${account ?? `${profile.name}'s own account`} mid-session (${signal.reason}; ${resets}). Partial work ${partialWork.state}${partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}` : ''}; the attempt ended as released, ${stop}, and ${item.key} is re-queued for another account`,
+          detail: `${item.key} epoch ${epoch} exhausted ${account ?? `${profile.name}'s own account`} mid-session (${signal.reason}; ${resets}). Partial work ${partialWork.state}${partialWork.commit ? ` at ${partialWork.commit.slice(0, 12)}` : ''}; the attempt ended as released, its supervisor stops on the ended lease, and ${item.key} is re-queued for another account`,
           attempts, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'failover', work: item.key, principal: profile.principal, epoch }, error, `Failing over ${profile.agentName} on ${item.key} epoch ${epoch}`); // GY-1774
@@ -204,7 +191,7 @@ async function closeStepWithin(cycle: Cycle) {
         const startedAt = handle?.startedAt ? Date.parse(handle.startedAt) : Number.NaN;
         const pastStart = Number.isFinite(startedAt) && clock - startedAt >= launchStartMs(config);
         if ((agent.agent_status ?? '') === 'done' && pastStart && !doneMotions.has(session.record)) {
-          doneMotions.set(session.record, screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs));
+          doneMotions.set(session.record, screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work));
         }
       }
     }
@@ -227,7 +214,7 @@ async function closeStepWithin(cycle: Cycle) {
       let ended = false;
       if (!noticeSignal && pastStart && status === 'done') {
         ended = effects.sessionOutput
-          ? (await (doneMotions.get(session.record) ?? screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work, effects.idleScreenPauseMs))) === 'still'
+          ? (await (doneMotions.get(session.record) ?? screenMotion(() => effects.sessionOutput!(agent, stallScreenLines), session.work))) === 'still'
           : true;
       }
       const signal = noticeSignal ?? silentPaneExhaustion({
@@ -263,132 +250,6 @@ async function closeStepWithin(cycle: Cycle) {
       } catch (error) {
         if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'failover', work: item.key }, error, `Failing over ${session.role} session ${session.agentName} for ${item.key}`);
         performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `${session.role} session ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
-      }
-    });
-    /**
-     * A handler that finished — stopped with no limit notice for `handlerSettleMs`, or no longer
-     * listed by Herdr — is ended like a spent one, less the relaunch: its registry session ends, so
-     * the role's slot is free for the next escalation, its pane closes and its record is dropped.
-     * Herdr reports a session idle while a command runs, so one stopped sighting is not an end.
-     */
-    let listing: { agents: HerdrAgent[]; available: boolean } | null = null;
-    const handlerFinished = async (session: EscalationSession, isStopped: boolean) => {
-      listing ??= effects.herdr ? await carriedCall(cycle, 'sessions', 'failover', 'herdr', () => effects.herdr!(), () => ({ agents: [] as HerdrAgent[], available: false })).catch(() => ({ agents: [] as HerdrAgent[], available: false })) : { agents, available: true };
-      if (!listing.available) return;
-      const listed = listing.agents.some(candidate => candidate.name === session.agentName);
-      const gone = !listed && clock - Date.parse(session.launchedAt) > launchAppearanceMs;
-      const mark = (idleSince: string | undefined) => owedWrite(cycle, `escalation-mark:${session.work}:${session.trigger}:${session.launchedAt}`, { kind: 'failover', work: session.work }, `Marking escalation handler ${session.agentName} for ${session.work} ${idleSince ? 'idle' : 'active'}`, 'markEscalation', fx => fx.markEscalation!({ ...session, idleSince })); // GY-1774: a best-effort mark, owed when carried
-      if (!gone && !isStopped) { if (session.idleSince && effects.markEscalation) await mark(undefined); return; }
-      if (!gone) {
-        if (!session.idleSince) { if (effects.markEscalation) await mark(new Date(clock).toISOString()); return; }
-        if (clock - Date.parse(session.idleSince) < handlerSettleMs) return;
-      }
-      const key = `close:escalation:${session.work}:${session.trigger}:${session.launchedAt}`, previous = state.actions[key];
-      if (!effects.endEscalation || previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
-      const why = gone ? 'Herdr no longer lists it' : `it has been stopped with no limit notice since ${session.idleSince}`;
-      try {
-        await effects.endEscalation(session, `escalation handler for ${session.work} (${session.trigger}) finished: ${why}`, null);
-        performed.push(await record(state, key, { kind: 'close', work: session.work, principal: null, state: 'done', detail: `Ended escalation handler ${session.agentName} for ${session.work} (${session.trigger}): ${why}; its pane${session.session ? ', registry session' : ''} and record are closed, so the role takes the next escalation`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      } catch (error) {
-        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'close', work: session.work }, error, `Ending finished escalation handler ${session.agentName} for ${session.work}`); // GY-1774
-        performed.push(await record(state, key, { kind: 'close', work: session.work, principal: null, state: 'failed', detail: `Could not end finished escalation handler ${session.agentName} for ${session.work}: ${message(error)}`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      }
-    };
-    // An escalation handler is a capacity role too (GY-182): one stopped on its provider's notice
-    // is ended, its account held, and the same escalation launched again on another account; with
-    // none left it waits for the first reset and is launched again then, by the loop alone.
-    for (const session of effects.escalationSessions ? await carriedCall(cycle, 'sessions', 'failover', 'escalationSessions', () => effects.escalationSessions!(), () => [] as EscalationSession[]).catch(() => [] as EscalationSession[]) : []) await isolate('failover', open.find(candidate => candidate.key === session.work) ?? null, session.agentName, async () => {
-      const item = open.find(candidate => candidate.key === session.work);
-      // A wait with nothing left to launch — its item closed, or its escalation resolved another way
-      // while the item stays open — is dropped: its record, and any registry session a failed launch
-      // left on it, are ended, so it is neither relaunched, reported as a wait, nor holding a slot.
-      const dropWait = async (waiting: NonNullable<EscalationSession['waiting']>, why: string) => {
-        const dropKey = `close:escalation:${session.work}:${session.trigger}:${waiting.since}`, dropped = state.actions[dropKey];
-        if (!effects.endEscalation || dropped?.state === 'done' || !readyToRetry(dropped, state.cycle)) return;
-        try {
-          await effects.endEscalation(session, `${why}, so no handler is launched for it`, null);
-          performed.push(await record(state, dropKey, { kind: 'close', work: session.work, principal: null, state: 'done', detail: `Dropped the waiting escalation handler record for ${session.work} (${session.trigger}): ${why}, so nothing is left to launch${session.session ? '; its registry session is ended' : ''}`, attempts: (dropped?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-        } catch (error) {
-          if (stepCallCarried(error)) return recordCarried(cycle, dropKey, { kind: 'close', work: session.work }, error, `Dropping the waiting escalation handler record for ${session.work} (${session.trigger})`); // GY-1774
-          performed.push(await record(state, dropKey, { kind: 'close', work: session.work, principal: null, state: 'failed', detail: `Could not drop the waiting escalation handler record for ${session.work} (${session.trigger}) (${why}): ${message(error)}`, attempts: (dropped?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-        }
-      };
-      // A handler whose item has closed has nothing left to judge: it is ended once it finishes.
-      if (!item) { if (session.waiting) await dropWait(session.waiting, `${session.work} is no longer open`); else await handlerFinished(session, !!stopped(session.agentName)); return; }
-      const key = failoverKey('escalation-handler', item, `${session.trigger}:${session.waiting ? `${session.waiting.since}:relaunch` : session.launchedAt}`), previous = state.actions[key];
-      if (session.waiting && !standingEscalations(item).some(entry => entry.trigger === session.trigger)) { await dropWait(session.waiting, `the ${session.trigger} escalation on ${item.key} no longer stands`); return; }
-      if (session.waiting) {
-        const waiting = session.waiting;
-        if (Date.parse(waiting.retryAt) > clock || !effects.relaunchEscalation || !readyToRetry(previous, state.cycle)) return;
-        const attempts = (previous?.attempts ?? 0) + 1;
-        await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `escalation handler for ${item.key} (${session.trigger}) waited since ${waiting.since} (${waiting.reason}); launching it again`, attempts, cycle: state.cycle }, now(), effects.persist);
-        // The relaunch is a session launch: the launcher runs it beside the cycle (GY-616), and the
-        // failover is settled when it lands — done with the handler it became, or waiting again on
-        // the reset the launcher chose when no account is left for the role.
-        cycle.launch('failover', item, key, [], async sink => {
-          let detail: string, settle: 'done' | 'waiting' = 'done';
-          try {
-            const launched = await effects.relaunchEscalation!(session);
-            detail = `escalation handler for ${item.key} (${session.trigger}) waited since ${waiting.since} (${waiting.reason}); relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
-          } catch (error) {
-            // GY-1774: settled in place, the relaunch is bound like the step's other calls; carried, the record waits and the next cycle joins it.
-            if (stepCallCarried(error)) { oweCarried(key, error); sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'waiting', detail: `Relaunching the escalation handler for ${item.key} (${session.trigger}) was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist)); return; }
-            if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) {
-              sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler for ${item.key} (${session.trigger}) could not be launched again: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
-              return;
-            }
-            const retryAt = launcherRetry(error) ?? new Date(clock + capacityRecheckMs).toISOString();
-            await effects.endEscalation?.(session, waiting.reason, { ...waiting, retryAt }).catch(() => {});
-            settle = 'waiting';
-            detail = `escalation handler for ${item.key} (${session.trigger}) waits for capacity: no other account is left for the role (${message(error)}), so it is launched again from its waiting record at ${retryAt}`;
-          }
-          sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: settle, detail, attempts, cycle: state.cycle }, now(), effects.persist));
-        });
-        return;
-      }
-      const agent = listed(session.agentName);
-      if (previous?.state === 'done' || !readyToRetry(previous, state.cycle)) return;
-      const signal = agent ? await notice(agent, session.runtime ?? session.kind) : null;
-      if (!signal) { await handlerFinished(session, !!agent && !!stopped(session.agentName)); return; }
-      const attempts = (previous?.attempts ?? 0) + 1, resets = signal.resetsAt ? `resets ${signal.resetsAt}` : 'reset time unknown';
-      try {
-        // A handler on no named account spent its runtime's own login, which an approver launches on too.
-        let hold: { until?: string } | undefined;
-        for (const account of session.account ? [session.account] : ownLoginAccounts({ name: escalationProfile, kind: session.runtime ?? session.kind })) {
-          const recorded = await effects.holdAccount?.(account, { at: new Date(clock).toISOString(), resetsAt: signal.resetsAt, reason: signal.reason, role: 'escalation-handler', profile: escalationProfile, work: item.key }) as { until?: string } | undefined;
-          hold ??= recorded;
-        }
-        await effects.reportCapacity!(item, { event: 'exhausted', role: 'escalation-handler', requestId: session.trigger.slice(0, 64), profile: escalationProfile, account: session.account, runtime: session.runtime, reason: signal.reason, resetsAt: signal.resetsAt,
-          partialWork: { state: 'not-applicable', detail: 'an escalation handler edits nothing: it requests a decision and leaves no work to keep' } });
-        const ended = `provider quota exhausted on ${session.account ?? 'its runtime\'s own account'} mid-session (${signal.reason}; ${resets})`;
-        await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'started', detail: `escalation handler ${session.agentName} for ${item.key} (${session.trigger}) ${ended}; launching it again`, attempts, cycle: state.cycle }, now(), effects.persist);
-        // The relaunch is a session launch: the launcher runs it beside the cycle (GY-616), and the
-        // failover is recorded done, with what became of the handler, when it lands.
-        cycle.launch('failover', item, key, [], async sink => {
-          let next: string;
-          try {
-            if (!effects.relaunchEscalation) throw new Error('this loop cannot launch an escalation handler');
-            // The handler is ended but its record stays, due now: a relaunch that fails for any reason
-            // is retried by later cycles from it, and a successful one replaces it.
-            await effects.endEscalation?.(session, ended, { since: new Date(clock).toISOString(), retryAt: new Date(clock).toISOString(), reason: `${ended}; to be launched again`.slice(0, 500) });
-            const launched = await effects.relaunchEscalation(session);
-            next = `relaunched as ${launched.agentName} on ${launched.account ?? 'its runtime\'s own account'}`;
-          } catch (error) {
-            if (stepCallCarried(error)) { oweCarried(key, error); sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'waiting', detail: `Failing over escalation handler ${session.agentName} for ${item.key} was carried to the next cycle: ${message(error)}`.slice(0, 2000), attempts, cycle: state.cycle }, now(), effects.persist)); return; } // GY-1774
-            if (!(error as { capacityExhausted?: boolean })?.capacityExhausted) {
-              sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
-              return;
-            }
-            // The launcher already chose the wait: the earliest reset among every account it skipped.
-            const retryAt = launcherRetry(error) ?? signal.resetsAt ?? hold?.until ?? new Date(clock + capacityRecheckMs).toISOString();
-            await effects.endEscalation?.({ ...session, pane: null, session: null }, ended, { since: new Date(clock).toISOString(), retryAt, reason: message(error).slice(0, 500) });
-            next = `no other account is left for the role (${message(error)}), so it is launched again at ${retryAt}`;
-          }
-          sink.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'done', detail: `escalation handler ${session.agentName} for ${item.key} (${session.trigger}) ${ended}; ${next}`, attempts, cycle: state.cycle }, now(), effects.persist));
-        });
-      } catch (error) {
-        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'failover', work: item.key }, error, `Failing over escalation handler ${session.agentName} for ${item.key}`); // GY-1774
-        performed.push(await record(state, key, { kind: 'failover', work: item.key, principal: null, state: 'failed', detail: `escalation handler ${session.agentName} for ${item.key} exhausted its account (${signal.reason}) but could not be failed over: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist));
       }
     });
   }
@@ -567,77 +428,7 @@ async function closeStepWithin(cycle: Cycle) {
     });
   });
 
-  // 1c. A lease that keeps advancing while Herdr no longer reports the session renewing it is an
-  //     orphaned watch supervisor: the agent is gone, the item stays owned by a worker that cannot
-  //     act, nothing lapses, and no replacement can be dispatched. Two observations establish it —
-  //     one lease expiry later than the one first seen with the session already gone — and the
-  //     supervisor is then stopped through the containment scope it recorded at launch, rather
-  //     than left for a master to find with `pgrep` and kill by hand.
   const runtime = effects.herdr ? await carriedCall(cycle, 'sessions', 'escalation', 'herdr', () => effects.herdr!(), () => null) : null; // GY-1774: a carried inventory is recorded, and read again next cycle
-  if (runtime?.available && effects.stopSupervisor) {
-    const orphans = orphanedSupervisors(open, config.workers, runtime.agents, clock);
-    for (const id of Object.keys(state.orphans)) if (!orphans.some(orphan => orphan.id === id)) delete state.orphans[id];
-    for (const orphan of orphans) await isolate('escalation', open.find(candidate => candidate.id === orphan.id) ?? null, orphan.key, async () => {
-      const previous = state.orphans[orphan.id];
-      const tracked = previous && previous.epoch === orphan.epoch && previous.owner === orphan.owner && previous.pid === orphan.scope.pid ? previous : null;
-      if (!tracked) {
-        state.orphans[orphan.id] = orphanObservationSchema.parse({ epoch: orphan.epoch, owner: orphan.owner, pid: orphan.scope.pid, unit: orphan.scope.unit, firstSeenAt: new Date(clock).toISOString(), leaseExpiresAt: orphan.leaseExpiresAt });
-        await effects.persist(state); return;
-      }
-      // A supervisor already stopped is judged against the expiry it was stopped at: a lease that
-      // advances past it proves the stop did not take, and the next signal is not negotiable.
-      const baseline = Date.parse(tracked.stoppedLeaseExpiresAt ?? tracked.leaseExpiresAt);
-      state.orphans[orphan.id] = { ...tracked, leaseExpiresAt: orphan.leaseExpiresAt };
-      if (!(Date.parse(orphan.leaseExpiresAt) > baseline)) { await effects.persist(state); return; }
-      // Established from here on, in the observation itself, so a stop that fails keeps it so (GY-1617).
-      state.orphans[orphan.id].establishedAt ??= new Date(clock).toISOString();
-      const stops = tracked.stops + 1, signal: NodeJS.Signals = stops === 1 ? 'SIGTERM' : 'SIGKILL';
-      const key = `incident:orphan-supervisor:${orphan.id}:${orphan.epoch}:${orphan.scope.pid}`;
-      const incident = `${orphan.key} epoch ${orphan.epoch} renewed its lease to ${orphan.leaseExpiresAt} while Herdr no longer reports session ${orphan.agentName}: its watch supervisor (pid ${orphan.scope.pid}, containment scope ${orphan.scope.unit}) has outlived the agent`;
-      await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'started', detail: `${incident}; stopping it with ${signal} through that scope`, attempts: stops, cycle: state.cycle }, now(), effects.persist);
-      // The agent is gone, so its worktree is quiescent: what it left uncommitted is kept and put
-      // on the record — which ends the attempt — before the supervisor holding it is stopped.
-      const held = open.find(item => item.id === orphan.id), ended = `ended without submitting: its agent session ${orphan.agentName} is gone from Herdr while its supervisor (pid ${orphan.scope.pid}) still renewed the lease`;
-      const preserved = held && await preserveInterruptedAttempt(state, effects, held, orphan.epoch, config.workers.find(profile => profile.principal === orphan.owner), ended, now, performed);
-      try {
-        await effects.stopSupervisor!(orphan, signal);
-        state.orphans[orphan.id] = { ...state.orphans[orphan.id], stops, stoppedLeaseExpiresAt: orphan.leaseExpiresAt };
-        // GY-1155: the attempt ended on the record and its supervisor was stopped through its scope,
-        // so its fence is settled in this action once the host verifies the supervisor gone.
-        const settled = !!held && preserved?.state === 'done' && await settleEndedAttemptFence(cycle, held, { epoch: orphan.epoch, owner: orphan.owner, preserved: ended });
-        performed.push(await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'done', detail: `${incident}; stopped with ${signal} through that scope, so the lease ${settled ? 'ended and its containment fence was settled' : 'lapses instead of renewing'}`, attempts: stops, cycle: state.cycle }, now(), effects.persist));
-      } catch (error) {
-        if (stepCallCarried(error)) return recordCarried(cycle, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch }, error, `Stopping the orphaned supervisor of ${orphan.key} epoch ${orphan.epoch}`); // GY-1774
-        performed.push(await record(state, key, { kind: 'escalation', work: orphan.key, principal: orphan.owner, epoch: orphan.epoch, state: 'failed', detail: `${incident}; it could not be stopped through that scope: ${message(error)}`, attempts: stops, cycle: state.cycle }, now(), effects.persist));
-      }
-    });
-  }
-
-  // 1d. A worker whose supervisor has already exited. When the agent dies under a supervisor that
-  //     is still healthy, the supervisor stops, settles its own quarantine and exits — but it
-  //     releases nothing, so the lease stays live until it lapses, and the item would then be
-  //     dispatched again with the attempt's uncommitted work still sitting in the old worktree.
-  //     Herdr no longer reporting the session while no fence stands for a lease that is still
-  //     live is that state exactly (a live launch holds its fence until the agent has appeared,
-  //     and a stopped agent still in Herdr is 1a's case). The partial work is kept and recorded,
-  //     which ends the attempt, so the re-dispatch that follows is told where it is (GY-105).
-  //     Two observations establish it, as for an orphaned supervisor: a session Herdr failed to
-  //     list once is not a dead worker, and ending a live attempt on one reading would stop it.
-  if (runtime?.available) {
-    const gone = new Set<string>();
-    for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('preserve', heldBy(profile), profile.name, async () => {
-      const item = open.find(candidate => !!candidate.lease && candidate.lease.owner === profile.principal && Date.parse(candidate.lease.expiresAt) > clock);
-      if (!item || failedOver.has(item.id) || item.containmentQuarantine || runtime.agents.some(agent => agent.name === profile.agentName)) return;
-      const epoch = item.lease!.epoch;
-      if (item.submission?.epoch === epoch || item.lastAssignment?.epoch !== epoch || !(clock - Date.parse(item.lastAssignment.claimedAt ?? item.stageEnteredAt) > launchAppearanceMs)) return;
-      gone.add(item.id);
-      const seen = state.absences[item.id];
-      if (!seen || seen.epoch !== epoch || seen.owner !== profile.principal) { state.absences[item.id] = { epoch, owner: profile.principal, firstSeenAt: new Date(clock).toISOString(), cycle: state.cycle }; await effects.persist(state); return; }
-      if (seen.cycle === state.cycle) return;
-      await preserveInterruptedAttempt(state, effects, item, epoch, profile, `ended without submitting: its agent session ${profile.agentName} is gone from Herdr (first seen gone at ${seen.firstSeenAt}) and its supervisor has exited without releasing the lease`, now, performed);
-    });
-    for (const id of Object.keys(state.absences)) if (!gone.has(id)) delete state.absences[id];
-  }
 
   await resumeStep(cycle, failedOver, runtime?.available !== false);
   await closeExitedWorkerSessions(cycle, runtime ?? null);
@@ -685,17 +476,7 @@ export async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents:
     const leased = !!item.lease && item.lease.owner === handle.principal && Date.parse(item.lease.expiresAt) > clock;
     const seenKey = `exited:implementation:${item.id}:${handle.id}:${handle.startedAt}`;
     let reason: string | null = null;
-    // GY-1633: a submitted attempt's supervisor that left its fence standing past the grace window
-    // holds nothing the record still authorizes; its session is over. A lapsed lease proves no
-    // process gone, so the supervisor is stopped through its recorded scope and verified gone on the
-    // host before its pane is closed (stopLingeringSupervisor), and the close settles the fence below.
-    // A loop that cannot stop or inspect it — no fenced workspace registered on this host to probe —
-    // leaves the pane to the steps that read Herdr.
-    const fence = item.containmentQuarantine, owner = fence && config.workers.find(profile => profile.principal === fence.owner);
-    const lingering = !leased && !!fence?.scope && !!owner && !!effects.stopSupervisor && !!effects.containment && handle.id === `${fence.owner}:${fence.epoch}`
-      && item.submission?.epoch === fence.epoch && containmentPhase(item, clock)?.state === 'lapsed' && inspectable(item, config.hostId);
     if (item.stage !== 'build' && !leased) reason = `${item.key} has left build, the stage this implementation session was launched for, and is now in ${item.stage}`;
-    else if (lingering) reason = `${item.key} epoch ${fence!.epoch} submitted pull request #${item.submission!.pr} and holds no lease, yet its containment fence still stands past the grace window`;
     else if (runtime?.available && handle.pane && !attemptStanding(item, handle.id) && !(clock - Date.parse(handle.startedAt) < launchAppearanceMs)) {
       const listed = runtime.agents.find(agent => agent.pane_id === handle.pane);
       if (!leased && listed && ['idle', 'done', 'blocked'].includes(listed.agent_status ?? '')) {
@@ -725,19 +506,13 @@ export async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents:
         // The pane goes first, so the record never says finished beside a pane still standing. A
         // close that fails leaves the handle running: the step is retried whole on a later cycle.
         let closed = '';
-        if (lingering) closed = `; ${await stopLingeringSupervisor(cycle, item, owner!)}`;
         if (handle.pane) {
           try { await effects.closeSession(handle.pane); closed += `; pane ${handle.pane} closed`; }
           catch (error) { if (!paneAlreadyGone(error)) throw error; closed += `; pane ${handle.pane} was already gone`; }
         }
         const outcome = `closed by the loop: ${found}${closed}`.slice(0, 500);
         await effects.recordSession!(item, { id: handle.id, kind: 'implementation', runtime: handle.runtime, host: handle.host, subject: handle.subject, state: 'finished', outcome });
-        // GY-1155: closing a submitted attempt's session ends that attempt on the record, so a fence
-        // its supervisor could not settle is settled with it once the host verifies it gone.
-        const quarantine = item.containmentQuarantine;
-        const settled = !!quarantine && handle.id === `${quarantine.owner}:${quarantine.epoch}` && item.submission?.epoch === quarantine.epoch
-          && await settleEndedAttemptFence(cycle, item, { epoch: quarantine.epoch, owner: quarantine.owner, closed: outcome });
-        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}${settled ? '; its containment fence was settled' : ''}`));
+        performed.push(await entry('done', `Closed implementation session ${handle.id} of ${item.key}${handle.pane ? ` (pane ${handle.pane})` : ''}: ${found}${closed}`));
         // Its sighting goes with it, in this cycle's sweep.
         sighted.delete(seenKey);
       } catch (error) {
@@ -751,28 +526,3 @@ export async function closeExitedWorkerSessions(cycle: Cycle, runtime: { agents:
   for (const key of lapsed) delete state.actions[key];
   if (lapsed.length) await effects.persist(state);
 }
-
-/**
- * GY-1633. Stops a submitted attempt's lingering supervisor through the scope it recorded — the
- * guarded stop endWorkerAttempt takes, which signals the pid only while it still runs this
- * assignment — and returns how, once the host verifies it gone. Until then it throws, so the close
- * is recorded failed and retried on a later cycle with the pane still standing: a pane that may
- * hold a running supervisor is never closed under it.
- */
-async function stopLingeringSupervisor(cycle: Cycle, item: Work, profile: WorkerProfile) {
-  const fence = item.containmentQuarantine!, scope = fence.scope!;
-  // supervisorStillRunning answers null without probing a fence it cannot inspect, so only an
-  // inspectable fence lets that null stand as the host's word that the supervisor is gone.
-  if (!inspectable(item, cycle.config.hostId)) throw new Error(`its fenced workspace for epoch ${fence.epoch} is not registered on ${cycle.config.hostId}, so its supervisor cannot be verified gone and its pane is left standing`);
-  let stop: string;
-  try {
-    await cycle.effects.stopSupervisor!({ id: item.id, key: item.key, epoch: fence.epoch, owner: fence.owner, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: fence.leaseExpiresAt ?? new Date(cycle.clock).toISOString() }, 'SIGTERM');
-    stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`;
-  } catch (error) { if (stepCallCarried(error)) throw error; stop = `its supervisor could not be signalled (${message(error)})`; }
-  const running = await supervisorStillRunning(cycle, item, { epoch: fence.epoch, owner: fence.owner });
-  if (running) throw new Error(`${stop}, but it is not yet verified gone, so its pane is left standing: ${running}`);
-  return `${stop} and verified gone`;
-}
-
-/** Whether this host can probe `item`'s fence: its fenced epoch's workspace is registered here (GY-1633). */
-const inspectable = (item: Work, hostId: string) => containmentQuarantines([item], hostId).length > 0;

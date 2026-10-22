@@ -2,9 +2,8 @@ import { createCipheriv, createHash, publicEncrypt, randomBytes, randomUUID, con
 import type pg from 'pg';
 import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
 import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
-import { describeHumanRequest, humanDecisionLabel, humanOnlyReadsDecisions, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, recommendationIssues, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
+import { describeHumanRequest, humanDecisionLabel, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, recommendationIssues, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
 import { humanAnswerSchema, resolveHumanAnswer } from '../model/human-answer.js';
-import { decisionsByWork } from './decision-ledger.js';
 import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { eventWorkSql } from '../store/snapshot-delta.js';
@@ -35,7 +34,7 @@ async function receipt(db: Db, actor: Principal, key: string, fingerprint: strin
 async function commit(services: Services, db: Db, now: Date, work: Work, all: Work[], actor: Principal, kind: string, details: unknown, key: string, fingerprint: string) {
   services.engine.evaluate(work, all, now);
   // The engine's auto-dispatch ledger entries for this evaluation; the method is internal to the
-  // engine's own transactions, and this is one of them (see decisions.ts).
+  // engine's own transactions, and this is one of them.
   await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
   await save(db, work, actor.id, kind, now, details);
   await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
@@ -43,15 +42,8 @@ async function commit(services: Services, db: Db, now: Date, work: Work, all: Wo
 }
 /** An attempt that stops without finishing ends on the record as released, never as a silent lapse. */
 async function endLease(services: Services, db: Db, work: Work, all: Work[], epoch: number, now: Date, by: string) {
-  const held = { lease: work.lease, containmentQuarantine: work.containmentQuarantine };
   endAttempt(work, epoch, 'released', now);
   work.lease = null;
-  // GY-1687: this transaction ends the attempt without entering the engine's command path, so the requirements
-  // decision held for the attempt is applied here, as the engine's own attempt-ending commands apply it, before
-  // `commit` evaluates the freed item and derives any dispatch from it (Codex review of 086e327d7695). The method
-  // is internal to the engine's own transactions, and this is one of them (see `commit`).
-  const engine = services.engine as unknown as { applyHeldDecisions(db: Db, work: Work, all: Work[], before: typeof held, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: Db) => Promise<void>)[]> };
-  for (const write of await engine.applyHeldDecisions(db, work, all, held, now, { command: by, submitted: false })) await write(db);
 }
 
 /** Whether the item's latest `blocked` report was written by `owner` during attempt `epoch`. */
@@ -146,9 +138,7 @@ export function sealToHost(publicKey: string, secret: string) {
  */
 export async function humanOnlySubjects(services: Services, work: readonly Work[]): Promise<HumanOnlySubject[]> {
   const open = work.filter(item => item.stage !== 'done');
-  const reads = open.filter(item => humanOnlyReadsDecisions(item));
-  const decisions = await decisionsByWork(services.engine.store.pool, reads.map(item => item.id));
-  return open.map(item => ({ work: item, decisions: decisions[item.id] ?? [] }));
+  return open.map(item => ({ work: item }));
 }
 
 /**

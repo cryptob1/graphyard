@@ -50,11 +50,10 @@ export const commitRef = /^[0-9a-f]{7,40}$/i;
 export const itemRef = /^GY-\d+$/;
 
 /** Why this item may not be closed now, or null. Pure over the item and the clock. */
-export function closeRefusal(work: Work, now: number): string | null {
+export function closeRefusal(work: Work): string | null {
   if (work.closure) return `${work.key} is already closed as ${work.closure.kind}`;
   if (work.stage === 'done') return `${work.key} is delivered; delivered work is immutable`;
   if (work.observation?.merged) return `${work.key}'s pull request is merged; reconciliation records its delivery`;
-  if (work.lease && Date.parse(work.lease.expiresAt) > now) return `${work.key} has a live worker lease (${work.lease.owner}, epoch ${work.lease.epoch}); release it or let it lapse before closing`;
   return null;
 }
 

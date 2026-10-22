@@ -27,7 +27,7 @@ export function agentRequestAttention(snapshot: { work: Work[]; now: string }): 
     return { subject: work.key, text,
       ...(request.decider.kind === 'human'
         ? humanOwner(request.humanDecision === 'spending-money-or-accounts' ? 'spending money or opening third-party accounts' : request.humanDecision === 'issuing-credentials' ? 'issuing credentials to people' : 'goals and priorities', request.reason)
-        : agentOwner('master', request.decider.command ?? `graphyard master status names ${work.key}'s next action`, request.decider.kind === 'approver' ? 'approver' : undefined)) };
+        : agentOwner('master', request.decider.command ?? `graphyard master status names ${work.key}'s next action`)) };
   }));
 }
 

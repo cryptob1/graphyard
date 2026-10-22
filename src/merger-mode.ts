@@ -3,7 +3,6 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from './model.js';
 import type { Store } from './store.js';
-import { decisionsByWork } from './server/decision-ledger.js';
 
 /**
  * The merge writer: the control plane is the only one. Old `policy.merger.set` events stay on the
@@ -18,13 +17,9 @@ export const mergeWriterStatus = { merger: 'control-plane' as MergerMode, line: 
 const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
 /**
- * GY-1927: automatic merging. Default true: every install that never set it hands a candidate
- * whose every gate passes to its merge writer, as before. Set false (`master init --no-auto-merge`),
- * the plane holds every such candidate — GitHub is asked for no queue entry, auto-merge or
- * head-bound merge and the control-plane writer starts none — until an applied merge decision,
- * approved by an identity other than its requester, binds its exact sha, baseSha and policy
- * revision. Checks keep publishing as they would. Like the merger it is an attributed policy event
- * on the append-only ledger (`policy.auto-merge.set`), written by an admin or coordinator only.
+ * GY-1927: the automatic-merging setting, an attributed policy event on the append-only ledger
+ * (`policy.auto-merge.set`), written by an admin or coordinator only. It holds no candidate
+ * (GY-2874): a candidate whose every gate passes is merged whatever it says.
  */
 export const autoMergeEventKind = 'policy.auto-merge.set';
 export interface AutoMergeSetting { autoMerge: boolean; since: string | null; setBy: string | null; reason: string | null; event: string | null }
@@ -40,34 +35,9 @@ export async function recordedAutoMerge(db: Queryable): Promise<AutoMergeSetting
 export async function autoMergeStatus(db: Queryable) {
   const setting = await recordedAutoMerge(db);
   const line = setting.autoMerge ? 'routine merges permitted after gates pass'
-    : `each merge needs an approved merge decision: graphyard master decide GY-N merge REASON, approved by an identity other than its requester (automatic merging off since ${setting.since}, set by ${setting.setBy}: ${setting.reason})`;
+    : `automatic merging was set off since ${setting.since} by ${setting.setBy} (${setting.reason}); it holds nothing, and merges still land once every gate passes`;
   return { ...setting, line };
 }
-
-/** The decision fields the release reads. */
-type MergeDecisionLike = { action: string; state: string; input: any; requestedBy: string; approvedBy: string | null; id?: string };
-/** The applied, independently approved merge decision bound to the item's exact candidate and policy revision, if one stands. */
-export function releasingMergeDecision<T extends MergeDecisionLike>(work: Pick<Work, 'candidate' | 'policyRevision'>, decisions: readonly T[]): T | null {
-  const candidate = work.candidate;
-  return decisions.find(decision => decision.action === 'merge' && decision.state === 'applied' && !!candidate && !!decision.approvedBy && decision.approvedBy !== decision.requestedBy
-    && decision.input?.sha === candidate.sha && decision.input?.baseSha === candidate.baseSha && decision.input?.policyRevision === work.policyRevision) ?? null;
-}
-/** The hold one item's candidate is under, as a sentence, or null when nothing holds it. */
-export const mergeHoldReason = (work: Pick<Work, 'key' | 'candidate' | 'policyRevision'>, setting: Pick<AutoMergeSetting, 'autoMerge'>, decisions: readonly MergeDecisionLike[]): string | null =>
-  setting.autoMerge || !work.candidate || releasingMergeDecision(work, decisions) ? null
-    : `${work.key}: automatic merging is off, so ${work.candidate.sha.slice(0, 12)} is held until an applied merge decision, approved by an identity other than its requester, binds that head, base ${work.candidate.baseSha.slice(0, 12)} and policy revision ${work.policyRevision} (graphyard master decide ${work.key} merge REASON)`;
-/** Each named item's hold, keyed by id: one read of the setting, and of the decisions only while automatic merging is off. */
-export async function mergeHolds(db: Queryable, work: readonly Work[]): Promise<Map<string, string | null>> {
-  const setting = await recordedAutoMerge(db), holds = new Map<string, string | null>();
-  if (setting.autoMerge) { for (const item of work) holds.set(item.id, null); return holds; }
-  const held = work.filter(item => item.stage !== 'done' && !!item.candidate);
-  const decisions = await decisionsByWork(db, held.map(item => item.id));
-  for (const item of work) holds.set(item.id, null);
-  for (const item of held) holds.set(item.id, mergeHoldReason(item, setting, decisions[item.id] ?? []));
-  return holds;
-}
-/** One item's hold (see `mergeHolds`). */
-export const mergeHold = async (db: Queryable, work: Work) => (await mergeHolds(db, [work])).get(work.id) ?? null;
 
 /** The automatic-merging setting: read by the roles that watch the install, changed by an admin or the coordinator alone. */
 export class AutoMergeSettings {

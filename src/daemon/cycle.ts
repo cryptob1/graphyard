@@ -3,8 +3,7 @@ import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
-import type { ExhaustedProof } from './decisions.js';
-import { emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
+import { reworkStep, type ExhaustedProof } from './rework.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics } from './metrics.js';
 import { profileHealth } from './sessions.js';
 import { boundedPersist } from './liveness.js';
@@ -14,9 +13,7 @@ import { masterSessionStep } from './cycle-master.js';
 import { blockerStep } from './cycle-blockers.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
-import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
-import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { triageBacklogStep } from './cycle-triage.js';
 import { checkInvariants } from '../model/invariants.js';
@@ -28,8 +25,8 @@ import { syncProjectMemory } from '../project-memory.js';
 export const defaultLaunchConcurrency = 3;
 
 /**
- * The session launcher beside the cycle (GY-616). A launch — a worker dispatch, an approver, a
- * failover relaunch — creates a Herdr pane and registers a session, which under memory pressure
+ * The session launcher beside the cycle (GY-616). A launch — a worker dispatch, a failover
+ * relaunch — creates a Herdr pane and registers a session, which under memory pressure
  * costs eight seconds a call; run inline, a burst of them held every merge, decision and close
  * behind it. The cycle hands the launcher a request and moves on: the launcher runs up to
  * `concurrency` of them at once, queues the rest, and keeps what each one recorded for the next
@@ -188,10 +185,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
       }
     }
   });
-  // The decision histories a loop keeps between its cycles (GY-1142) are its own, like its write chain.
-  let heldDecisions = heldHistories.get(unbounded);
-  if (!heldDecisions) heldHistories.set(unbounded, heldDecisions = emptyHeldDecisions());
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, heldDecisions, closedPanes };
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, closedPanes };
   /**
    * One step of the cycle. A step that throws or times out is one log line naming the step and the
    * error; the cycle goes on with its other steps and the step runs again next cycle. Nothing is
@@ -220,22 +214,20 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   await step('blockers', () => blockerStep(cycle));
   spent('decisions');
 
-  const assessments = await step('reclaim', () => reclaimStep(cycle)) ?? {};
+  await step('reclaim', () => reclaimStep(cycle));
   spent('close');
 
   // 3a. A required check that fails on the base head too is set aside before anything decides on
-  //     the item (GY-528): the decisions and the approver capacity dispatch counts read it.
+  //     the item (GY-528).
   cycle.baseFailed = await step('base failures', () => baseFailureStep(cycle)) ?? new Map();
   spent('decisions');
 
-  const capacity = await step('dispatch', () => dispatchStep(cycle, health, assessments)) ?? { capacities: [], approversSpent: false };
+  await step('dispatch', () => dispatchStep(cycle, health));
   await settleLaunches();
   spent('dispatch');
 
-  // 4b. Past the review-round cap (GY-1118) a change request is filed as follow-ups and withdrawn, or escalated; it is never reworked.
-  await step('review cap', () => reviewCapStep(cycle));
-  await step('decisions', () => decisionStep(cycle, assessments, capacity));
-  await settleLaunches();
+  // 4c. A head nothing can carry forward goes back to a worker at once, with the master's own identity.
+  await step('rework', () => reworkStep(cycle));
   spent('decisions');
 
   await step('reviews and proofs', () => shepherdStep(cycle));
@@ -249,9 +241,9 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   await step('deployment verification', () => deploymentStep(cycle));
   // 7b. The system invariants (GY-404): properties of the running pipeline no per-item gate can see, one `master status` line each.
-  await step('invariants', async () => checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals, docsSyncs: state.docsSyncs, agents, build: state.deployment?.sha ?? null }));
+  await step('invariants', async () => checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, docsSyncs: state.docsSyncs, agents, build: state.deployment?.sha ?? null }));
   // 7c. The machine-filed backlog (GY-402): the one-time follow-up migration, then a triage run
-  //     for each machine-filed item no triage has judged; its closures go to the approver in 4c.
+  //     for each machine-filed item no triage has judged; its closures apply at once.
   await step('triage', () => triageBacklogStep(cycle));
   // 7e. Setup (GY-1416): derived deployment variables the deployment lacks are set by the loop, never asked of a human.
   if (effects.selfProvision) await step('setup', () => cycle.isolate('config', null, 'setup self-provision', () => effects.selfProvision!()));
@@ -275,7 +267,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
   // not a recomputation beside it, so what reclasses a subject is what the step decided. GY-2097:
   // the in-flight cap's own hold (`wipHeld`) is the same reading — the wait is the cap's capacity.
-  const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, wipHeld: cycle.wipHeld, launching: item => launcher.busy(dispatchKey(item)) });
+  const actionable = actionableSubjects(config, snapshot.work, clock, { baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, wipHeld: cycle.wipHeld, launching: item => launcher.busy(dispatchKey(item)) });
   const { stages, lead } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
@@ -310,7 +302,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
  * so the order is kept per underlying effects, across cycles, not per cycle.
  */
 const writeChains = new WeakMap<object, { writing: Promise<unknown> }>();
-const heldHistories = new WeakMap<object, HeldDecisions>();
 function serialPersist(effects: DaemonEffects, owner: object): DaemonEffects {
   let chain = writeChains.get(owner);
   if (!chain) writeChains.set(owner, chain = { writing: Promise.resolve() });
@@ -336,7 +327,7 @@ export interface Cycle {
   timings: Timings;
   /** Per item id, the required checks that fail on the base head too (GY-528): no rework is requested for them. */
   baseFailed: Map<string, Set<string>>;
-  /** The producer requests the dispatcher stopped attempting (GY-496), read once per cycle for the proof and decision steps. */
+  /** The producer requests the dispatcher stopped attempting (GY-496), read once per cycle for the proof and rework steps. */
   exhaustedProofs: () => Promise<ExhaustedProof[]>;
   /** The launcher beside the cycle (GY-616): what is in flight, and what it holds. */
   launcher: Launcher;
@@ -348,8 +339,6 @@ export interface Cycle {
   fleetHeld?: boolean;
   /** GY-2097: the dispatch step held a claimable item back under the in-flight cap this cycle — `maxInFlight` items are being built or waiting to merge, and the item is no "Hotfix: …". The measure reads this, the step's own decision, to count the wait under capacity instead of the loop's silence, the same reading a saturated fleet gets. Absent while the cap has room. */
   wipHeld?: boolean;
-  /** The decision histories read on earlier cycles of this loop (GY-1142), which the decisions step keeps while their ledger has not moved. */
-  heldDecisions: HeldDecisions;
   /** The panes this cycle's steps have closed so far: the cycle-start inventory still lists them. */
   closedPanes: Set<string>;
 }

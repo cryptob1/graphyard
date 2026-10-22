@@ -15,8 +15,7 @@ import { latencyBudget } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
-import { holdBoundWait } from './cycle-decisions.js';
-import { detailChanged } from './decisions.js';
+import { detailChanged } from './text.js';
 import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, loadedHeldSnapshot, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
 import { checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
 import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
@@ -64,8 +63,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     reclaim: state.reclaim,
     // The host's memory as the last cycle read it; while `low`, launches on this host are deferred (GY-612).
     memory: state.memory,
-    // Every decision the loop has put to an approver and not yet seen applied and retired.
-    approvals: Object.entries(state.approvals).map(([key, watch]) => ({ key, ...watch })),
     // The master session the loop launches, adopts, wakes and rotates (GY-898): the live handle,
     // its age against the configured budget, why the last one ended, and the last wake's causes.
     master: masterSummary(state.master, now),
@@ -124,21 +121,13 @@ export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof w
 /**
  * Take back the headless runs a restart left running (GY-453): on the loop's start, and on every
  * later cycle any run no live process watches — one an executor left running when it stopped and
- * was not started again. An approver's run reports its record on the watch of the decision it
- * judges when it ends, as a run this loop launched would.
+ * was not started again.
  */
 export async function adoptHeadlessRuns(state: DaemonState, effects: DaemonEffects, log: (line: string) => void, when: 'start' | 'cycle' = 'start') {
   if (!effects.adoptRuns) return [];
   try {
     const adopted = await effects.adoptRuns();
     if (adopted.length) log(`[graphyard-master] adopted ${adopted.length} headless run(s) ${when === 'start' ? 'left running by a restart' : 'no live process was watching'}: ${adopted.map(run => `${run.name} (${run.role} for ${run.work}${run.live ? '' : ', ended while unwatched'})`).join(', ')}`);
-    for (const run of adopted) {
-      if (run.role !== 'approver') continue;
-      run.settled.then(async record => {
-        const watch = Object.values(state.approvals).find(entry => entry.agentName === run.name && entry.decision === run.subject);
-        if (watch) { watch.run = record; await effects.persist(state); }
-      }).catch(() => { /* the next cycle judges the decision from the control plane */ });
-    }
     return adopted;
   } catch (error) { log(`[graphyard-master] could not adopt the headless runs a restart left: ${message(error)}`); return []; }
 }
@@ -315,7 +304,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         }
       // A loop stopped during startup runs no cycle (GY-1603).
       } else while (!stopping) {
-        let phase: 'reload' | 'cycle' = 'reload', wait: number, wakeable = false, holdBound: number | null = null;
+        let phase: 'reload' | 'cycle' = 'reload', wait: number, wakeable = false;
         try {
           if (options.reload) {
             for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
@@ -334,9 +323,6 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           // The configured interval is the idle cadence; while anything is actionable the loop comes
           // back inside the responsive window so ready work cannot sit out a long interval.
           wait = cycleDelay(interval(), result.actionable.length);
-          // GY-1622: a docs-sync hold left standing ends the idle wait at its bound, so the step that releases it runs then.
-          const held = holdBoundWait(state, wait, now()); holdBound = held.next;
-          if (held.bound !== null) { wait = held.wait; log(`[graphyard-master] the next cycle runs in ${Math.round(wait / 1000)}s, at the docs-sync hold bound ${new Date(held.bound).toISOString()}`); }
           wakeable = true;
         } catch (error) {
           // The cycle failed; the loop did not. The counter advances, the cause is on the cursor, and
@@ -363,8 +349,6 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
         // is for a cycle that hangs, and a thrown one has just proved it did not.
         if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
         if (options.once || stopping) break;
-        // GY-1622: the sleep left after the guard never runs past the earliest hold bound, whether the bound ended the wait or lay just beyond it.
-        if (holdBound !== null) wait = Math.min(wait, Math.max(0, holdBound - now()));
         // GY-1490: after a cycle that ran, the dispatcher wakes the sleep for work this loop acts on;
         // a failed cycle's backoff is never cut short, so a fault is still not hammered.
         if (wakeable && options.wake) {

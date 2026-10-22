@@ -8,7 +8,7 @@ import { message, type DaemonActionKind, type DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
 import { conflictRoute, docsSyncHoldDeadline, docsSyncHoldMs, docsSyncStallMs, docsSyncWatchFor, docsSyncWatchKey, docsSyncWatchSchema, routedConflictRetention, routedConflictSchema, routedConflictWindowMs, type DocsSyncWatch } from '../model/docs-sync.js';
 import { docsSyncSessionName, docsSyncStoppedMs, type DocsSyncPlan } from '../docs-sync.js';
-import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.js';
 
 /**
  * The decision step's docs-sync route. A confirmed conflict of the current head is classified once

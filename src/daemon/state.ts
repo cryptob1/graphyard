@@ -4,9 +4,8 @@ import { readlinkSync } from 'node:fs';
 import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
-import { runRecordSchema } from '../runner/types.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
-import { boundDetail } from './decisions.js';
+import { boundDetail } from './text.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
 import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
@@ -55,7 +54,7 @@ export type StepCost = z.infer<typeof stepCostSchema>;
 export const cycleStepsSchema = z.object({
   /** Reading the coordination snapshot and reconciling the actions an interrupted cycle left. */
   observe: stepCostSchema,
-  /** Closing finished sessions, failing over exhausted ones, stopping orphaned supervisors, and reclaiming worktrees and quarantines. */
+  /** Closing finished sessions, failing over exhausted ones, and reclaiming worktrees and lapsed leases. */
   close: stepCostSchema,
   /** Requesting, supervising and retiring the routine decisions an approver applies. */
   decisions: stepCostSchema,
@@ -186,79 +185,10 @@ export const hostMemoryStateSchema = z.object({
 export { itemClockSchema, latencySampleSchema, type ItemClock, type LatencySample } from './latency-clock.js';
 
 /**
- * What the loop last saw of an assignment whose Herdr session is gone: enough for a later cycle
- * to tell a lease that is still being renewed from one that has simply not lapsed yet. Without
- * that second look, every session that ends a moment before its lease does would read as an
- * orphaned supervisor.
- */
-export const orphanObservationSchema = z.object({
-  epoch: z.number().int().min(0), owner: z.string().max(200),
-  pid: z.number().int().positive(), unit: z.string().max(200),
-  firstSeenAt: z.string(), leaseExpiresAt: z.string(),
-  /** How many times this supervisor has been stopped, and the expiry it was last stopped at. */
-  stops: z.number().int().min(0).default(0),
-  stoppedLeaseExpiresAt: z.string().nullable().default(null),
-  /** When both observations first held, whatever the stop then did; status names only established orphans (GY-1617). */
-  establishedAt: z.string().nullable().default(null),
-}).strict();
-export type OrphanObservation = z.infer<typeof orphanObservationSchema>;
-
-/**
- * One decision this loop has put to an approver, kept until the item no longer needs it. Reviews
- * and producers have a ledger because launched sessions die, drop their prompt and hit account
- * limits; an approver is a launched session like any other, and a request whose approver is gone
- * is a decision nobody will ever judge. This is what each cycle looks at again.
- */
-export const approvalWatchSchema = z.object({
-  work: z.string().max(40), action: z.string().max(40), decision: z.string().max(100),
-  agentName: z.string().max(200).nullable().default(null), pane: z.string().max(200).nullable().default(null),
-  requestedAt: z.string(), launchedAt: z.string().nullable().default(null),
-  /** Approver sessions launched (or attempted) for this decision; bounded by `maxApproverLaunches`. */
-  launches: z.number().int().min(0).default(0),
-  /** Headless approver runs lost for this decision (GY-453) whose launch was given back; bounded by `maxLostApproverRuns`. */
-  lostRuns: z.number().int().min(0).default(0),
-  /** Requests made for this binding, counting the ones the server settled without applying; bounded by `maxDecisionRequests`. */
-  requests: z.number().int().min(0).default(1),
-  /** How each earlier session ended without a judgement, oldest first. */
-  ended: z.array(z.string().max(300)).max(10).default([]),
-  /** Set once the decision is applied: the watch is kept so the same binding is not requested again. */
-  settledAt: z.string().nullable().default(null),
-  /** GY-1298. When and by whom the decision was approved while it stood unapplied, so its wait names the apply it owes, not an approver judgement. */
-  approvedAt: z.string().nullable().default(null), approvedBy: z.string().max(200).nullable().default(null),
-  /** Set once every launch is spent on a decision still unjudged: the loop has escalated it. */
-  exhaustedAt: z.string().nullable().default(null),
-  closeAttempts: z.number().int().min(0).default(0),
-  /** The GitHub observation a rework request was decided from (GY-144): its time and candidate head. */
-  observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
-  /** The account and runtime the current session was launched on, so its exhaustion holds the right account (GY-182). */
-  account: z.string().max(200).nullable().default(null), runtime: z.string().max(40).nullable().default(null),
-  /** Retired (GY-1992): the scope request a decision answered; a cursor written before keeps parsing. */
-  scope: z.unknown().optional(), coveringAdopt: z.unknown().optional(), givenBack: z.unknown().optional(),
-  /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged or its quota is spent (GY-182). */
-  session: z.string().max(200).nullable().default(null),
-  /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
-  capacity: z.string().max(500).nullable().default(null),
-  /** A headless approver's run (GY-169): its last events, its result, and what became of its verdict. */
-  run: runRecordSchema.nullable().default(null),
-  /** The decision and launch whose spent-account hold and capacity `exhausted` report the loop already wrote (GY-316): a retried failover writes neither again. */
-  reportedExhaustion: z.string().max(200).nullable().default(null),
-  /** The decision and launch whose spent-account hold alone is written (GY-489): a capacity report that failed after it is retried without writing the hold again. */
-  heldExhaustion: z.string().max(200).nullable().default(null),
-  /** GY-1612. A replacement pane first seen while its predecessor's registry end was refused, and when: its rebind dates from that sight. */
-  movedPane: z.object({ pane: z.string().max(200), at: z.string() }).strict().nullable().default(null),
-  /** GY-1394. An attest decision's refusal and the head it bound: the loop returns that head to a worker on it, with no approver. */
-  refusal: z.object({ approver: z.string().max(200), reason: z.string().max(1200), at: z.string(), proof: z.string().max(200), sha: z.string().max(64), baseSha: z.string().max(64), policyRevision: z.number().int().min(0) }).strict().nullable().default(null),
-}).strict();
-export type ApprovalWatch = z.infer<typeof approvalWatchSchema>;
-/** What a re-keyed watch takes over from the one it retires: the session and what it runs on, so its exhaustion holds the account it spent (GY-182). */
-export const carriedSession = (prior: ApprovalWatch) => ({ launches: prior.launches, lostRuns: prior.lostRuns, agentName: prior.agentName, pane: prior.pane, launchedAt: prior.launchedAt,
-  exhaustedAt: prior.exhaustedAt, account: prior.account, runtime: prior.runtime, session: prior.session, movedPane: prior.movedPane });
-
-/**
  * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a runtime call that failed, a
  * configuration reload that could not be read — is a failed cycle, not the end of the process: it is recorded here, the cycle counter
  * advances, and the next cycle runs after a delay that grows with the consecutive count. An unhandled rejection or uncaught exception
- * anywhere in the process — a detached promise in the dispatcher, an approver watch, a Herdr read — is caught at the process level and
+ * anywhere in the process — a detached promise in the dispatcher, a Herdr read — is caught at the process level and
  * counted here too. The supervisor's restart is reserved for a process that hangs, which the watchdog detects; nothing here ends the process.
  */
 export const cycleFailureSchema = z.object({
@@ -404,16 +334,12 @@ export const daemonStateSchema = z.object({
   silence: z.unknown().optional(),
   /** Retired (GY-1992): the scope requests this loop decided; a cursor written before keeps parsing. */
   scope: z.unknown().optional(),
-  /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
-  orphans: z.record(z.string(), orphanObservationSchema).default({}),
-  /** Per decision action key, the request this loop put to an approver and what became of it. */
-  approvals: z.record(z.string(), approvalWatchSchema).default({}),
+  /** Retired (GY-2874): orphaned supervisors, approver watches, absent sessions and deferred decisions; a cursor written before keeps parsing. */
+  orphans: z.unknown().optional(), approvals: z.unknown().optional(), absences: z.unknown().optional(), decisionsDeferred: z.unknown().optional(),
   /** Per item, head and base tip, the docs-sync session the loop launched for a docs-only conflict (GY-566). */
   docsSyncs: z.record(z.string(), docsSyncWatchSchema).default({}),
   /** Every confirmed conflict the loop routed, newest last: master status reads its hotspots from here (GY-566). */
   conflicts: z.array(routedConflictSchema).default([]),
-  /** Per work item, a live lease whose session Herdr no longer reports while no fence stands (see step 1d). */
-  absences: z.record(z.string(), z.object({ epoch: z.number().int().min(0), owner: z.string().max(200), firstSeenAt: z.string(), cycle: z.number().int().min(0) }).strict()).default({}),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
   /**
@@ -424,15 +350,13 @@ export const daemonStateSchema = z.object({
   baseFailures: z.record(z.string(), baseFailureSchema).default(() => ({})),
   /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base
-   * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
-   * losses seen — and the last cycle's report, one line per invariant, for `master status`.
+   * refreshes per candidate, when each merge candidate was first seen mergeable — and the last
+   * cycle's report, one line per invariant, for `master status`.
    */
   invariants: invariantRecordSchema.default(emptyInvariantRecord),
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
-  /** The item keys the decisions step reached past its time budget last cycle, which this cycle reaches first (GY-1286). */
-  decisionsDeferred: z.array(z.string().max(200)).max(5000).default(() => []),
-  /** Shared project memory (GY-1125): recent approved decisions and merges. */
+  /** Shared project memory (GY-1125): recent decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;

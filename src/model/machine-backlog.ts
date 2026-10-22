@@ -124,10 +124,9 @@ export const triageJudgementSchema = z.discriminatedUnion('outcome', [
 export type TriageJudgement = z.infer<typeof triageJudgementSchema>;
 /**
  * The triage record on the item. A release is applied as it is recorded; a closure or merge is
- * `proposed` until an independent approver approves the `close` decision the loop requests for it
- * (`applied`) or refuses it (`refused`, and the item is judged again).
+ * `proposed` while it closes the item (`applied`), or `refused` when the loop withdrew it.
  */
-export interface TriageRecord { judgement: TriageJudgement; state: 'applied' | 'proposed' | 'refused'; by: string; at: string; runtime?: string; decision?: string | null; refusal?: string | null }
+export interface TriageRecord { judgement: TriageJudgement; state: 'applied' | 'proposed' | 'refused'; by: string; at: string; runtime?: string; refusal?: string | null }
 export const triageRecordSchema = z.object({ judgement: triageJudgementSchema, runtime: z.string().trim().min(1).max(200).optional() }).strict();
 /**
  * The loop withdrawing a closure it proposed (GY-1632): the proposal recorded at `triageAt` no longer holds — a
@@ -164,7 +163,7 @@ export function backlogCounts(all: readonly Triageable[], now: number) {
     overdue: overdueTriage(all, now).length };
 }
 
-/** The closure a triage judgement proposes, as the `close` decision carries it to the approver and the control plane applies it. */
+/** The closure a triage judgement proposes, which the control plane applies at once. */
 export function triageClosure(judgement: TriageJudgement): { kind: 'superseded' | 'obsolete' | 'duplicate'; ref: string | null; reason: string } | null {
   if (judgement.outcome === 'release') return null;
   if (judgement.outcome === 'merge') return { kind: 'duplicate', ref: judgement.into, reason: `Merged into ${judgement.into} by triage: ${judgement.reason}`.slice(0, 2000) };
@@ -175,7 +174,7 @@ export function triageClosure(judgement: TriageJudgement): { kind: 'superseded' 
 //
 // From GY-845 to GY-1249 an approval's findings on an unshipped parent were held on it
 // (`pendingFollowUps`) and filed as one follow-up item once it shipped. Nothing holds or files them
-// any more; stored items carrying the field still load, and it is never read for a decision.
+// any more; stored items carrying the field still load, and it is never read.
 
 /** `pendingFollowUps` as items stored before GY-1249 carry it: read so they still load, never written. */
 export interface PendingFollowUps {

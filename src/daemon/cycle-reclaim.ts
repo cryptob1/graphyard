@@ -1,18 +1,14 @@
-// Concern: cycle step 3 — reclaim disk, bounded resources and dead sessions' quarantines.
+// Concern: cycle step 3 — reclaim disk, bounded resources, lapsed leases and leftover panes.
 import { describeReclaim, describeStandingTmpPass, tmpPassErrors, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
-import { diskThresholdBytes, containmentPhase } from '../master.js';
+import { diskThresholdBytes } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema, standingTmpKey } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { boundDetail, detailChanged } from './decisions.js';
-import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
+import { boundDetail, detailChanged } from './text.js';
+import { launchAppearanceMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 import type { SessionHandle } from '../model/sessions.js';
-import type { ContainmentAssessment } from '../master.js';
-import { containmentQuarantines } from '../master.js';
-import { type ContainmentObservation, containmentClock, unmeasured } from '../master/containment.js';
-import { closablePane, endedScopeStates, leaseLapsedEnding, loopEndedAttempt, containmentSettlementRefusals } from '../quarantine.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { planeUnavailable } from '../model/refusal.js';
 import { unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs } from '../model/attempt-bound.js';
@@ -21,243 +17,9 @@ import type { DaemonAction, DaemonState } from './state.js';
 import type { DaemonEffects } from './effects.js';
 import { carriedCall, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
-/**
- * Session cleanup for a worker whose supervisor scope has ended (GY-189). `watch` exiting leaves
- * the launch pane behind, the pane's own shell still sitting in the worktree; nothing runs there any
- * more, so the pane is closed, once. Only a pane the host probe found to be the recorded session's
- * idle shell in this item's worktree is closed, whatever the session ledger (which the worker can
- * write) names; a pane whose scope is still live, or whose shell runs anything, is left alone.
- *
- * Settlement may have excused that very shell, so until the close is recorded done the item's
- * assessment is withdrawn from `assessments` and the fence stays up for a later cycle. A pane closed
- * this cycle is probed again once it is gone, since the shell may have started something after the
- * first probe counted its children: only that fresh assessment may lower the fence. Closing is safe
- * to repeat, so a close a restart interrupted (`started`, then `indeterminate`) is simply retried.
- */
-export async function closeEndedWorkerPanes(state: DaemonState, effects: DaemonEffects, open: Work[], assessments: Record<string, ContainmentAssessment>,
-  observed: ContainmentObservation, now: () => number, performed: DaemonAction[]) {
-  const closed: Work[] = [];
-  for (const item of open) {
-    const assessment = assessments[item.id], quarantine = item.containmentQuarantine, recorded = assessment?.verification?.recordedScope;
-    if (!quarantine || !assessment?.verification) continue;
-    // A launch that recorded a scope has its pane closed only once that scope ended (GY-189); one
-    // whose runtime never started may have recorded none, and its pane's idle shell is proven by
-    // Herdr and the process table instead (GY-413, closablePane).
-    const scopeEnded = !!quarantine.scope && !!recorded && recorded.unit === quarantine.scope.unit && recorded.pid === quarantine.scope.pid && endedScopeStates.includes(recorded.activeState);
-    if (quarantine.scope && !scopeEnded) continue;
-    const pane = closablePane(item, assessment.verification);
-    if (!pane) continue;
-    const epoch = quarantine.epoch, key = `close:ended-scope:${item.id}:${epoch}:${pane}`, previous = state.actions[key];
-    if (previous?.state === 'done') continue;
-    delete assessments[item.id];
-    const interrupted = previous?.state === 'started' || previous?.state === 'indeterminate';
-    if (!interrupted && !readyToRetry(previous, state.cycle)) continue;
-    const attempts = (previous?.attempts ?? 0) + 1, why = scopeEnded ? `its supervisor scope ${recorded!.unit} is ${recorded!.activeState}` : 'its launch recorded no supervisor scope and its pane shell runs nothing';
-    const entry = (outcome: 'started' | 'done' | 'failed', detail: string) => record(state, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
-    try {
-      await entry('started', `Closing pane ${pane} of ${item.key} epoch ${epoch}: ${why}`);
-      let gone = false;
-      try { await effects.closeSession(pane); } catch (error) { if (!paneAlreadyGone(error)) throw error; gone = true; }
-      performed.push(await entry('done', `${gone ? 'Pane was already gone' : 'Closed pane'} ${pane} of ${item.key} epoch ${epoch}: ${why}, so its shell no longer lingers in the worktree`));
-      closed.push(item);
-    } catch (error) {
-      // GY-1774: a close past the step's bound is in flight; it is joined next cycle, and the quarantine stays until then.
-      if (stepCallCarried(error)) { try { await recordCarried({ state, now, performed, effects }, key, { kind: 'close', work: item.key, principal: quarantine.owner, epoch }, error, `Closing pane ${pane} of ${item.key} epoch ${epoch}`); } catch { /* recorded next cycle */ } continue; }
-      try { performed.push(await entry('failed', `Could not close pane ${pane} of ${item.key} epoch ${epoch} (${why}): ${message(error)}; the containment quarantine stays until it is closed`)); } catch { /* recorded next cycle */ }
-    }
-  }
-  if (!closed.length || !effects.containment) return;
-  let fresh: Record<string, ContainmentAssessment> = {};
-  try { fresh = await carriedCall({ state, now, performed, effects }, 'reclaim', 'reclaim', 'containment', () => effects.containment!(closed, observed), () => ({} as Record<string, ContainmentAssessment>)); } catch { /* re-probed next cycle */ }
-  // A shell still exiting after its pane closed, or a probe that failed, is left to the next
-  // cycle's probe, which settles or escalates it; the pre-close assessment is never used.
-  for (const item of closed) if (fresh[item.id]?.settleable) assessments[item.id] = fresh[item.id];
-}
-
-/**
- * What blocks a containment settlement, without what each cycle measures: the clock read's round
- * trip and which read took it (GY-1044). An intermittently failing timed read alternates between
- * the timed and the snapshot read, and neither flip nor number is a new cause.
- */
-export function containmentRefusalCause(detail: string) {
-  return unmeasured(detail).replace(/the (?:timed|snapshot) read of the control-plane clock took/g, 'the read of the control-plane clock took');
-}
-/** Room the measured round trip and read source take beyond their masked form. */
-const measuredRoom = 32;
-/**
- * A containment escalation's detail as it is stored: whole while its cause fits the detail bound
- * with room for the measurement, else the cause alone, bounded. Masking before truncating keeps two
- * cycles' stored forms comparable: truncating first moves the cut with the number's width (GY-1044).
- */
-export function containmentEscalationDetail(detail: string) {
-  const cause = containmentRefusalCause(detail);
-  return cause.length <= actionDetailMax - measuredRoom ? detail : boundDetail(cause);
-}
-
-/** What a settle action refused only by the plane's own state says, so the next cycle can tell it from a refusal the host caused (GY-1155). */
-const transientRetry = 'retried next cycle with a fresh probe';
-/**
- * Why a settlement POST was refused only transiently, or null when the refusal is the host's: the
- * plane answering 5xx — Railway's 502 "Application failed to respond" among them — the plane not
- * answering at all (a refused or reset connection, `fetch failed`, the request's own timeout —
- * GY-2151: the plane-silence classes every other control-plane client reads), or refusing
- * nothing but a verification that went stale on its way there. A pid or epoch that happens to
- * read 5xx is no status, and a stale verification refused beside any other cause is not transient.
- */
-export function transientSettlementRefusal(error: unknown) {
-  const text = message(error);
-  if ((error as { confirmedRefusal?: unknown })?.confirmedRefusal === false || /Application failed to respond/.test(text)
-    || /(?:\bHTTP\/?[\d.]*\s+|"(?:status|code|statusCode)"\s*:\s*)5\d\d\b|\(5\d\d\):|^5\d\d [A-Z]/.test(text)) return 'the control plane answered 5xx';
-  if (planeUnavailable(error)) return 'the control plane did not answer';
-  const refused = /Automatic containment settlement refused: (.*?)\. Confirm the previous worker is stopped/s.exec(text)?.[1];
-  const stale = /Host verification is older than \d+s; verify the host again/g;
-  return refused && stale.test(refused) && !refused.replace(stale, '').replace(/[;\s]/g, '') ? 'the host verification went stale before the plane judged it' : null;
-}
-/**
- * Whether a containment settlement is due this cycle: never once done, at once after a transient
- * refusal (the next cycle probes afresh), and on the widening action backoff after any other.
- */
-export function settleDue(previous: DaemonAction | undefined, cycle: number) {
-  if (!previous) return true;
-  if (previous.state === 'done') return false;
-  return previous.state === 'failed' && previous.detail.includes(transientRetry) ? cycle > previous.cycle : readyToRetry(previous, cycle);
-}
-/** GY-1774: the control-plane clock read under the step's bound: carried, it is recorded on the step's row and the measurement falls back to the snapshot read, as a failed read always did. */
-const measuredClock = (cycle: Pick<Cycle, 'state' | 'now' | 'performed' | 'effects'>) => cycle.effects.controlPlaneClock
-  ? () => carriedCall(cycle, 'reclaim', 'settle', 'controlPlaneClock', () => cycle.effects.controlPlaneClock!(), error => { throw error; }) : undefined;
-/**
- * Lower a verified-dead containment fence: the autosettle POST, recorded as the item's settle
- * action. A fence already gone from the record — its supervisor settled it after the probe — is
- * done, and a refusal the plane caused is marked to be retried on the next cycle.
- */
-export async function settleQuarantine(cycle: Cycle, item: Work, assessment: ContainmentAssessment, judged: Work = item) {
-  const { state, effects, now, performed } = cycle;
-  const epoch = assessment.epoch, key = `settle:${item.id}:${epoch}`, attempts = (state.actions[key]?.attempts ?? 0) + 1;
-  // GY-2151: the plane lowers the fence against its own record, not the record this settlement was
-  // judged on. A POST the loop's snapshot or ending record called settleable has been refused on a
-  // deadline the plane's live record still held — the worker's last heartbeat renewed the lease the
-  // quarantine retained (GY-2085, GY-2113), and the session observation written after the close
-  // replaced the close outcome the record the loop judged waived the windows on. Judged on the
-  // record the plane holds now, at the latest control-plane time the verification's measured clock
-  // bound allows, a POST only leaves when the plane's own referee would lower the fence; anything
-  // else waits, recorded as still in motion, for a cycle whose fresh probe and fresh record agree.
-  const live = effects.readWork ? await effects.readWork(judged).catch(() => null) : null;
-  if (live?.containmentQuarantine && assessment.verification) {
-    const observed = Date.parse(cycle.snapshot.now);
-    const at = Math.max(Number.isFinite(observed) ? observed : -Infinity, now() - assessment.verification.clockOffset.min);
-    const refusals = containmentSettlementRefusals(live, assessment.verification, { now: at });
-    if (refusals.length) {
-      performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'waiting', detail: `The settlement of ${item.key} epoch ${epoch} waits: the control plane's own record still fences it (${refusals.join('; ')}), so posting would be refused; the fence is re-probed and settled once its windows pass`, attempts, epoch, cycle: state.cycle }, now(), effects.persist));
-      return false;
-    }
-  }
-  await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'started', detail: `Settling the verified-dead containment quarantine of ${item.key} epoch ${epoch}`, attempts, epoch, cycle: state.cycle }, now(), effects.persist);
-  const settled = (detail: string) => record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'done', detail, attempts, epoch, cycle: state.cycle }, now(), effects.persist);
-  try {
-    await effects.settleContainment!(judged, assessment);
-    performed.push(await settled(`Settled the containment quarantine of ${item.key} epoch ${epoch}: its supervisor is verified gone on ${assessment.host ?? 'this host'}, so the item can be claimed again`));
-    return true;
-  } catch (error) {
-    // GY-1774: a settlement past the step's bound is in flight; the next cycle settles again, joining the write or consuming its answer.
-    if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'settle', work: item.key, epoch }, error, `Settling the containment quarantine of ${item.key} epoch ${epoch}`); return false; }
-    if (/Containment quarantine is missing, superseded, or does not match/.test(message(error))) {
-      performed.push(await settled(`The containment quarantine of ${item.key} epoch ${epoch} was already lowered when the loop settled it: its supervisor is verified gone on ${assessment.host ?? 'this host'}`));
-      return true;
-    }
-    const transient = transientSettlementRefusal(error);
-    performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Containment settlement refused for ${item.key} epoch ${epoch}${transient ? ` (${transient}, so it is ${transientRetry})` : ''}: ${message(error)}`, attempts, epoch, cycle: state.cycle }, now(), effects.persist));
-    return false;
-  }
-}
-
-/** How long the loop waits, across the actions of one cycle that ended attempts, for the supervisors it stopped to be verified gone (GY-1155). */
-export const endedFenceWaitMs = 10_000;
 export { standingTmpKey };
 /** The most attempts an action row holds (storeAction clamps to the schema's bound): past it a run's count reads as a floor. */
 const actionAttemptsMax = 1000;
-/** The deadline each cycle's ended-attempt waits share, so a cycle ending several fenced attempts stalls one bound, not one per attempt. */
-const endedFenceDeadlines = new WeakMap<Cycle, number>();
-/** How the loop ended an attempt: the preserve it recorded (the reason its exhaustion reads), or its close of a submitted attempt's session (the outcome). */
-export type AttemptEnding = { epoch: number; owner: string; preserved?: string; closed?: string };
-/**
- * The item as the record reads once the loop has ended an attempt (GY-1155): the lease the ending
- * released, and the loop's own record of the ending, which the snapshot the cycle began with does
- * not carry yet. It is what this host judges the settlement with; the plane judges its own record.
- */
-export function endedRecord(item: Work, ending: AttemptEnding, at: string): Work {
-  const { epoch, owner } = ending, id = `${owner}:${epoch}`;
-  const exhaustions = item.capacity?.exhaustions ?? [];
-  const preserved = ending.preserved && !exhaustions.some(entry => entry.role === 'worker' && entry.epoch === epoch)
-    ? [...exhaustions, { role: 'worker' as const, epoch, cause: 'interrupted' as const, profile: owner, account: null, runtime: null, reason: ending.preserved.slice(0, 500), resetsAt: null, partialWork: { state: 'not-applicable' as const }, at, owner, recordedBy: 'graphyard-loop' }]
-    : exhaustions;
-  const sessions = item.sessions ?? [], handle = sessions.find(entry => entry.id === id);
-  return {
-    ...item,
-    lease: item.lease?.epoch === epoch ? null : item.lease,
-    capacity: { exhaustions: preserved, escalations: item.capacity?.escalations ?? [] },
-    sessions: ending.closed ? [...sessions.filter(entry => entry.id !== id), { ...(handle ?? { id, kind: 'implementation', principal: owner, epoch: null }), state: 'finished', outcome: ending.closed.slice(0, 500), endedAt: handle?.endedAt ?? at } as SessionHandle] : sessions,
-  };
-}
-/**
- * Settle the fence of an attempt the loop has just ended, in that same action (GY-1155), judged on
- * the record the ending wrote. The host is probed until the stopped supervisor is verified gone,
- * within a bound the cycle's endings share; a fence still held at the bound, or refused, is left to the reclaim step, which
- * retries it on later cycles without the grace window.
- */
-export async function settleEndedAttemptFence(cycle: Cycle, item: Work, ending: AttemptEnding, wait: { boundMs: number; pollMs: number } = { boundMs: endedFenceWaitMs, pollMs: 500 }) {
-  const { state, effects, config, clockOffset, snapshot, now } = cycle;
-  if (item.containmentQuarantine?.epoch !== ending.epoch || item.containmentQuarantine.owner !== ending.owner) return false;
-  if (!effects.containment || !effects.settleContainment || !containmentQuarantines([item], config.hostId).length) return false;
-  if (!settleDue(state.actions[`settle:${item.id}:${ending.epoch}`], state.cycle)) return false;
-  const ended = endedRecord(item, ending, new Date(now()).toISOString());
-  const measured = await containmentClock(clockOffset, measuredClock(cycle));
-  const observed: ContainmentObservation = { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source };
-  const deadline = endedFenceDeadlines.get(cycle) ?? Date.now() + wait.boundMs;
-  endedFenceDeadlines.set(cycle, deadline);
-  for (;;) {
-    let assessment: ContainmentAssessment | undefined;
-    try { assessment = (await carriedCall(cycle, 'reclaim', 'settle', 'containment', () => effects.containment!([ended], observed), () => ({} as Record<string, ContainmentAssessment>)))[item.id]; } catch { return false; }
-    if (assessment?.settleable) {
-      if (!await settleQuarantine(cycle, item, assessment, ended)) return false;
-      // The fence is gone from the record, so this cycle's later steps — dispatch, the faults pass — read it gone too.
-      item.containmentQuarantine = null;
-      return true;
-    }
-    if (!assessment || Date.now() + wait.pollMs > deadline) return false;
-    await new Promise(resolve => setTimeout(resolve, wait.pollMs));
-  }
-}
-
-/**
- * Why the stopped supervisor of `item`'s fenced attempt is not verified gone on this host, or null
- * once it is (GY-1460): its recorded scope ended and nothing left running in its worktree. Probed
- * within the bound the cycle's endings share. An attempt with no recorded scope here, or a loop
- * that cannot inspect the host, has nothing more to verify than the pane it closed.
- */
-export async function supervisorStillRunning(cycle: Cycle, item: Work, ending: { epoch: number; owner: string }, wait: { boundMs: number; pollMs: number } = { boundMs: endedFenceWaitMs, pollMs: 500 }) {
-  const { effects, config, clockOffset, snapshot, now } = cycle;
-  const fence = item.containmentQuarantine;
-  if (fence?.epoch !== ending.epoch || fence.owner !== ending.owner || !fence.scope || !effects.containment || !containmentQuarantines([item], config.hostId).length) return null;
-  const ended = endedRecord(item, ending, new Date(now()).toISOString());
-  const measured = await containmentClock(clockOffset, measuredClock(cycle));
-  const observed: ContainmentObservation = { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source };
-  const deadline = endedFenceDeadlines.get(cycle) ?? Date.now() + wait.boundMs;
-  endedFenceDeadlines.set(cycle, deadline);
-  for (;;) {
-    let running: string;
-    try {
-      const verification = (await effects.containment([ended], observed))[item.id]?.verification ?? null, recorded = verification?.recordedScope;
-      running = !verification ? 'the host reported no inspection of it'
-        : recorded?.unit !== fence.scope.unit || !endedScopeStates.includes(recorded.activeState) ? `scope ${fence.scope.unit} is ${recorded?.unit === fence.scope.unit ? recorded.activeState : 'unread'}`
-          : verification.processes.length || verification.scopes.some(scope => scope.processes.length) ? `${verification.processes.length + verification.scopes.reduce((sum, scope) => sum + scope.processes.length, 0)} processes still run in ${verification.workspacePath}`
-            : '';
-    } catch (error) { return `the host could not be inspected: ${message(error)}`; }
-    if (!running) return null;
-    if (Date.now() + wait.pollMs > deadline) return running;
-    await new Promise(resolve => setTimeout(resolve, wait.pollMs));
-  }
-}
-
 /**
  * How many leftover panes one pass closes, so a backlog drains over cycles rather than in one burst
  * of closes (GY-842). Twelve a pass drains 300 in 25 closing cycles: under an hour even at
@@ -429,10 +191,10 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   }
 }
 
-/** Step 3: reclaim disk, the loop's own bounded resources, and the items whose sessions died. */
-export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'], reclaimStepWithin); // GY-1774: every call the step makes — the disk and resource reclaims, the inventories, the clock read, each fence assessment, preservation and settlement, every pane close — is bounded
+/** Step 3: reclaim disk, the loop's own bounded resources, lapsed leases and leftover panes. */
+export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'preserveWork', 'reportCapacity'], reclaimStepWithin); // GY-1774: every call the step makes — the disk and resource reclaims, the inventories, every pane close — is bounded
 async function reclaimStepWithin(cycle: Cycle) {
-  const { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, open } = cycle;
+  const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
   // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
   //    it. Every attempt and every rework checks the repository out again, so without this step
   //    the host fills and the loop starts failing at whatever it happens to write next. A
@@ -510,13 +272,13 @@ async function reclaimStepWithin(cycle: Cycle) {
     }
   }
 
-  // 3a'. Stop renewing an attempt past its no-submission bound (GY-1460), before the fences are read.
+  // 3a'. Stop renewing an attempt past its no-submission bound (GY-1460).
   await stopUnboundedAttempts(cycle);
-  // 3a''. A lease that lapsed with nothing submitted and no fence is cleared by the control plane's
-  //      own reconciliation (GY-1984): the loop asks for it with one resync, this cycle.
+  // 3a''. A lease that lapsed with nothing submitted is cleared by the control plane's own
+  //      reconciliation (GY-1984): the loop asks for it with one resync, this cycle.
   if (effects.reclaimLease) for (const item of open) {
     const lease = item.lease;
-    if (!lease || item.submission || item.containmentQuarantine || Date.parse(lease.expiresAt) > clock) continue;
+    if (!lease || item.submission || Date.parse(lease.expiresAt) > clock) continue;
     await isolate('reclaim', item, item.key, async () => {
       await effects.reclaimLease!(item);
       performed.push(await record(state, `reclaim:lease:${item.id}:${lease.epoch}`, { kind: 'reclaim', work: item.key, principal: lease.owner, state: 'done',
@@ -524,65 +286,8 @@ async function reclaimStepWithin(cycle: Cycle) {
     });
   }
 
-  // 3b. Reclaim the items whose sessions died. A supervised launch fences its worker in a scope
-  //     unit; when that session dies the fence outlives it and the item cannot be claimed again
-  //     until somebody settles the quarantine. This host is the only one that can verify the
-  //     supervisor is gone, so it does: the probe is the same one `master settle-containment`
-  //     runs, the control plane re-evaluates every refusal itself, and an unverifiable signal is
-  //     recorded as an escalation rather than settled. A live worker's quarantine is never touched.
-  //     The clock is bounded by a light timed read taken just before the probe, not by the
-  //     snapshot's read: that read takes seconds on a loaded plane, and a bound that wide refused
-  //     every automatic settlement as unmeasurable (GY-811). Should the timed read fail, the
-  //     snapshot's bounds stand and the refusal names their round trip. The read is taken only
-  //     when a quarantine here could settle — registered on this host and past its grace window —
-  //     so a cycle with nothing to settle, or only fences still in grace, never pays for it.
-  //     The bound is only as good as the clock that stamps the `Date` header: behind a proxy or
-  //     edge (Railway's, say) that is the hop that answers, which must keep time with the plane.
-  //     A quarantine refused for a cause other than the clock still costs one read a cycle; the
-  //     read is kept, since judging it with the snapshot's wider bound would add a clock refusal
-  //     and change its escalation's cause on alternate cycles (GY-1044).
-  // GY-1155: an attempt the loop ended on its own record is settled once its supervisor is gone,
-  //     without waiting out the grace window, so its fence is assessable too.
-  const settling = (item: Work) => containmentPhase(item, clock)?.state === 'lapsed' || loopEndedAttempt(item);
-  const assessable = effects.containment && containmentQuarantines(snapshot.work, config.hostId).some(settling);
-  const measured = assessable ? await containmentClock(clockOffset, measuredClock(cycle)) : null;
-  const observed: ContainmentObservation = measured ? { now: snapshot.now, clockOffset: measured.clockOffset, clockRoundTripMs: measured.roundTripMs, clockSource: measured.source } : { now: snapshot.now, clockOffset };
-  const assessments = effects.containment ? await carriedCall(cycle, 'reclaim', 'reclaim', 'containment', () => effects.containment!(snapshot.work, observed), () => ({} as Record<string, ContainmentAssessment>)) : {};
-  // GY-1633: a delivered item's fence is settled here too. A worker still running when its item was
-  //     closed (a duplicate, a triage closure) leaves its fence on the delivered record, and only the
-  //     host can verify its supervisor gone; left out of this step it waited for a hand `recover`.
-  //     Its finished pane is cleaned up first, exactly as an open item's, so settling never lowers
-  //     a fence around an idle shell still sitting in its worktree.
-  const fenced = snapshot.work.filter(candidate => candidate.containmentQuarantine && settling(candidate));
-  const openIds = new Set(open.map(item => item.id));
-  await closeEndedWorkerPanes(state, effects, [...open, ...fenced.filter(item => !openIds.has(item.id))], assessments, observed, now, performed);
   // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.
   await reclaimLaunchedPanes(cycle);
-  for (const item of fenced) await isolate('settle', item, item.key, async () => {
-    const epoch = item.containmentQuarantine!.epoch;
-    const assessment = assessments[item.id];
-    const key = `settle:${item.id}:${epoch}`;
-    if (!assessment) return;
-    if (!assessment.settleable) {
-      const escalationKey = `escalation:containment:${item.id}:${epoch}`;
-      const detail = containmentEscalationDetail(`${item.key}: containment quarantine from epoch ${epoch} cannot be settled automatically: ${assessment.refusals.join('; ')}`);
-      // The refusal names each cycle's measured round trip and the read that took it, which
-      // differ every cycle: the escalation is recorded again only when what blocks the settlement
-      // changes, not the measurement.
-      const previous = state.actions[escalationKey];
-      if (detailChanged(previous && { detail: containmentRefusalCause(previous.detail) }, containmentRefusalCause(detail))) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, epoch, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
-    if (!effects.settleContainment || !settleDue(state.actions[key], state.cycle)) return;
-    // A supervisor verified gone with the lease lapsed is a worker killed outright — the whole
-    // tree stopped, or the host rebooted. Its partial work goes on the record before the fence is
-    // lowered, so the item is offered again only once the next attempt can be told where it is.
-    // A delivered item has nothing left to offer again, so there is no partial work to put on its record.
-    if (item.stage !== 'done') await preserveInterruptedAttempt(state, effects, item, epoch, config.workers.find(profile => profile.principal === item.containmentQuarantine!.owner), `${leaseLapsedEnding} and its supervisor (pid ${assessment.scope?.pid ?? 'unknown'}) is verified gone on ${assessment.host ?? 'this host'}`, now, performed);
-    // The fence is gone from the record, so this cycle's decisions step never asks a hand `recover` of it.
-    if (await settleQuarantine(cycle, item, assessment) && item.stage === 'done') item.containmentQuarantine = null;
-  });
-  return assessments;
 }
 
 /** The loop's record that it stopped renewing an attempt's lease (GY-1460). */
@@ -593,21 +298,17 @@ export const unboundedAttemptKey = (item: { id: string }, epoch: number) => `unb
  * inside the cadence stops being renewed (GY-1460). Its renewals come from the attempt's watch
  * supervisor, which a live session keeps alive for ever, so the loop ends the attempt through the
  * reclaim path a stalled attempt takes (`endWorkerAttempt`, as the idle bound does): what it left
- * is kept on its branch, the attempt ends on the record, its supervisor is stopped through the
- * scope it recorded (or stops on the ended lease) and its fence settles, so the item returns to the
- * queue with its worktree kept. A lease merely left to lapse would read as an unexplained lease loss
- * and wait on an operator. An end that cannot be made is recorded failed and retried on the action
+ * is kept on its branch, the attempt ends on the record and its supervisor stops on the ended
+ * lease, so the item returns to the queue with its worktree kept. An end that cannot be made is recorded failed and retried on the action
  * backoff; the fault keeps standing meanwhile.
  */
 export async function stopUnboundedAttempts(cycle: Cycle) {
   const { config, state, effects, now, clock, agents, performed, isolate, open } = cycle;
-  const local = new Set(containmentQuarantines(open, config.hostId).map(item => item.id));
   for (const item of open) {
     const attempt = unsubmittedAttempt(item, clock);
     if (!attempt?.reclaim || !attempt.live) continue;
     const profile = config.workers.find(worker => worker.principal === attempt.owner);
-    // Another host's attempt is that host's loop to stop: only this one can reach its supervisor.
-    if (!profile || (item.containmentQuarantine && !local.has(item.id))) continue;
+    if (!profile) continue;
     await isolate('session', item, item.key, async () => {
       const key = unboundedAttemptKey(item, attempt.epoch), previous = state.actions[key];
       if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;

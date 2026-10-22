@@ -143,7 +143,6 @@ export function applyPlanCommand(goal: Goal, next: Goal, command: Exclude<PlanCo
   } else if (command === 'plan-approve' || command === 'plan-refuse') {
     const data = planCommandSchemas[command].parse(input);
     demand(goal.stage === 'plan-review' && goal.plan, `${goal.key} is ${goal.stage}; only a plan awaiting approval is judged`);
-    demand(actor.id !== goal.plan.author, `Self-approval refused: ${actor.id} authored the plan of ${goal.key}; an approver on a different identity judges it`, 403);
     if (command === 'plan-approve') { next.planApproval = { by: actor.id, at, reason: data.reason }; next.stage = 'planned'; }
     else { next.planRefusal = { by: actor.id, at, reason: data.reason }; next.plan = null; next.stage = 'planning'; }
   } else if (command === 'plan-invalid') {

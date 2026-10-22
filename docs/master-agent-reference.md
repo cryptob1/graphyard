@@ -7,7 +7,7 @@ Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choi
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` makes installs autonomous; needs a reviewer profile; provisions operator-agent, approver.
+`graphyard master promote --admin-token-stdin` provisions the master's operator-agent identity.
 
 ## Conflict avoidance
 
@@ -19,11 +19,11 @@ Graphyard's one remote credential is the merge writer's deploy key ([install](in
 
 ## Typed actions
 
-`nextAction`: `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`/`escalate`. `dispatch`/`request-review` complete if a session answers the head. Three failures, unchanged reason: stalled rather than retrying; backoff never outlives it.
+`nextAction`: `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`. `dispatch`/`request-review` complete if a session answers the head. Three failures, unchanged reason: stalled rather than retrying; backoff never outlives it.
 
 ## Recovery
 
-Dead supervisor fences item; `containment` lists survivors: `settleable: true` → loop settles; past grace `master settle-containment GY-N REASON`. Explained `lease-loss` settles by reconciliation or `admin` `resolve … --attestation`; `security-concern`, `requirement-weakening`, `evidence-policy-conflict` need a two-party decision.
+A dead supervisor's lease lapses; the item is claimable again.
 
 ### Producer-runtime faults
 
@@ -35,4 +35,4 @@ The merge writer's trial, the only trial: the merge commit's build and affected 
 
 ## Pipeline speed
 
-Target: submit→merge p50 ≤30min, p90 ≤60min (`scripts/measure-pipeline-speed.mjs`). `leadTime` (top bar, `master status`): median released→merged, last 10 merges. Steps calling an approver, decision or session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none; one `decision.*` ledger read names moved items, an unmoved history is kept unread.
+Target: submit→merge p50 ≤30min, p90 ≤60min (`scripts/measure-pipeline-speed.mjs`). `leadTime` (top bar, `master status`): median released→merged, last 10 merges. Steps calling a session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none.

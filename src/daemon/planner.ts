@@ -1,11 +1,10 @@
 // Concern: the planner role (GY-1418) — a goal whose acceptance pull request merged is planned headless
 // into a short architecture note and a dependency-ordered set of work items with file boundaries, the
-// plan is judged headless by the approver identity (never its author), and only then are its items
+// plan is judged headless in a separate session, and only then are its items
 // created and released; the goal is delivered once every item is merged.
 import { z } from 'zod';
 import type { Goal } from '../model/goal.js';
 import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, mergedItem, type GoalPlan } from '../model/goal-plan.js';
-import { agentToken } from '../master/autonomy.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
 import { Refusal, RefusedResponse } from '../model/refusal.js';
@@ -20,13 +19,13 @@ import { registryHeadlessLaunch, registryRunner } from '../runner/roles.js';
 import type { Runner } from '../runner/types.js';
 import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
-import { detailChanged } from './decisions.js';
+import { detailChanged } from './text.js';
 import type { Cycle } from './cycle.js';
 import { carriedIsolate, stepCallCarried } from './step-budget.js';
 
 export const plannerRole = 'planner';
 export const planTool = 'graphyard_plan';
-/** The judgement run's Pi role and tool: the approver identity's verdict on one plan. */
+/** The judgement run's Pi role and tool: a separate judge session's verdict on one plan. */
 export const planJudgeRole = 'plan-judge';
 export const planJudgementTool = 'graphyard_plan_judgement';
 /** A run that returned nothing (a timeout, an exit, no payload), or a plan refused before approval, is tried again after this long: each try is a paid model run. A payload plan validation refused feeds its reason back and is tried again in planStepRetryMs (GY-1803). */
@@ -51,7 +50,7 @@ export interface PlannerEffects {
   plan: (goal: Goal, plan: GoalPlan) => Promise<Goal>;
   /** Record a plan refused before approval on the goal (POST /api/goals/:key/plan-invalid), so it counts toward maxPlanRounds across restarts. */
   invalid: (goal: Goal, reason: string) => Promise<Goal>;
-  /** Post the verdict as the approver identity, which never authored a plan. */
+  /** Post the verdict as the master's identity. */
   judge: (goal: Goal, judgement: PlanJudgement) => Promise<Goal>;
   /** Ask the control plane to create and release the approved plan's items in dependency order (POST /api/goals/:key/release). */
   release: (goal: Goal) => Promise<Goal>;
@@ -273,24 +272,17 @@ interface Calls {
 /**
  * The planner's effects under the live configuration: runners as the acceptance role's (the
  * registry's planner or approver role when an operator defines one, else Pi on `run.diagnostician`'s
- * models), plans posted as the master's operator-agent identity and verdicts as the approver
- * identity, so the author of a plan never judges it.
+ * models), plans and verdicts posted as the master's operator-agent identity.
  */
 export function plannerEffects(config: MasterConfig, root: string, calls: Calls): PlannerEffects {
   const settings = { ...diagnosticianSettings(config.run), enabled: true };
-  const asApprover = async (path: string, body: unknown, key: string) => {
-    const response = await calls.fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${await agentToken(root, config, 'approver')}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
-    const result = await response.json();
-    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
-    return result;
-  };
+
   return {
     settings, cwd: root,
     goals: async () => (await calls.asCoordinator('goals?open=1')).goals,
     runner: async (role, attempt, goal) => {
       if (attempt === 'primary') {
-        const [name, principal] = role === 'plan' ? [plannerRole, config.operatorAgent!.id] as const : ['approver', config.approver!.id] as const;
+        const [name, principal] = role === 'plan' ? [plannerRole, config.operatorAgent!.id] as const : ['approver', config.operatorAgent!.id] as const;
         const fleet = await selectFleetSession(config, name, { name, principal }, await heldAwareProbe(config, { work: goal.key })); // an account held here, or its twin, is spent (GY-1574)
         if (fleet) { const launched = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launched.command, model: launched.model, release: fleet.release }; }
       }
@@ -299,7 +291,7 @@ export function plannerEffects(config: MasterConfig, root: string, calls: Calls)
     },
     plan: (goal, plan) => calls.asOperatorAgent('POST', `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
     invalid: (goal, reason) => calls.asOperatorAgent('POST', `goals/${goal.key}/plan-invalid`, { reason: clip(reason, 2000) }, `planner:${goal.id}:${goal.revision}:invalid`),
-    judge: (goal, judgement) => asApprover(`goals/${goal.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goal.id}:${goal.revision}:judged`),
+    judge: (goal, judgement) => calls.asOperatorAgent('POST', `goals/${goal.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goal.id}:${goal.revision}:judged`),
     release: goal => calls.asOperatorAgent('POST', `goals/${goal.key}/release`, {}, `planner:${goal.id}:${goal.revision}:release`),
     deliver: (goal, items, reason) => calls.asOperatorAgent('POST', `goals/${goal.key}/deliver`, { items, reason }, `planner:${goal.id}:${goal.revision}:deliver`),
   };

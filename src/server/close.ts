@@ -1,14 +1,12 @@
 import type pg from 'pg';
-import { demand, operatorCapability, type Principal, type Work } from '../model.js';
+import { demand, type Principal, type Work } from '../model.js';
 import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
 import { deliveredObservationRefusal } from '../model/loop-observation.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';
-import { decisionGroundsMovedSince } from '../engine.js';
 import { endAttempt } from '../pipeline-speed.js';
 import { save } from '../store.js';
-import { foldDecisions } from '../model/approval.js';
-import { authenticated, digest, receipt, record } from './decisions.js';
+import { authenticated, digest, receipt, record } from './receipts.js';
 import type { Services } from './routes.js';
 import { lockedWork, workIdByRef } from '../store/locked-read.js';
 import { gitRunnerFor } from '../merge-writer/local-observation.js';
@@ -21,13 +19,10 @@ type Db = pg.PoolClient;
  * coordination lock moves the item to the terminal stage with a `closure` record, cancels every
  * open review and producer request, withdraws an open human-only request so the Needs-you page
  * stops listing it, retires the item's action rows through the ordinary evaluation, and appends
- * `work.closed` with the actor and the reason. A live worker lease refuses it, unless an approved
- * two-party close decision applies it (`decided`, GY-1463) at the revision its approval judged, or
- * one past it that moved nothing its grounds rest on: then the closure ends that lease, as a
- * release. A lease epoch change or any other grounds change since refuses it, named. Commit
- * ancestry is read from the checkout before the transaction, never inside it.
+ * `work.closed` with the actor and the reason. A live worker lease is ended by the closure, as a
+ * release. Commit ancestry is read from the checkout before the transaction, never inside it.
  */
-export async function closeWork(services: Services, caller: Principal, id: string, body: unknown, key: string, options: { decided?: { expectedRevision?: number } } = {}) {
+export async function closeWork(services: Services, caller: Principal, id: string, body: unknown, key: string) {
   const data = closeSchema.parse(body);
   const ref = data.ref ?? null;
   const fingerprint = digest({ id, close: data });
@@ -48,24 +43,13 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
-    if (actor.role === 'operator-agent') operatorCapability(actor, 'intent:create', work!, services.repository);
-    // The approval judged the item at its revision; a replacement claim since, or any other grounds change, was never judged.
-    const judged = options.decided?.expectedRevision;
-    const moved = judged === undefined ? null : await decisionGroundsMovedSince(db, work!, judged);
-    if (moved) demand(false, `${moved[0].toUpperCase()}${moved.slice(1)} since approved revision ${judged} moved the decision's grounds; the close was not applied`, 409);
-    const refused = closeRefusal(judged !== undefined && work!.lease ? { ...work!, lease: null } : work!, now.getTime()); demand(!refused, refused!, 409);
+    const refused = closeRefusal(work!); demand(!refused, refused!, 409);
     const badRef = closureRefRefusal(work!, all, data.kind, ref) ?? (data.kind === 'delivered-observation' ? deliveredObservationRefusal(work!, all, ref!, now) : null); demand(!badRef, badRef!, 422);
     if (ancestry) demand(ancestry.contained, `Commit ${ref} is not an ancestor of the base branch (${ancestry.base.slice(0, 12)}); an item is superseded only by work that landed`, 422);
     const closure: Closure = { kind: data.kind, reason: data.reason, ref, by: actor.id, at: now.toISOString(), from: work!.stage };
     const settled = settleOpenRequests(work!, closure, now);
-    // A lapsed lease reconciliation never reached ends here, as released; so does a live one an approved close decision ends.
-    // GY-1687: apply held requirements decisions before terminalizing — applyHeldDecisions refuses done items, and
-    // close never enters Engine.execute, so without this the approval would stay held forever (Codex review of fe3b4e08db8e).
-    const heldBefore = { lease: work!.lease, containmentQuarantine: work!.containmentQuarantine };
+    // A lease, lapsed or live, ends here, as released.
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
-    const engine = services.engine as unknown as { applyHeldDecisions(db: Db, work: Work, all: Work[], before: typeof heldBefore, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: Db) => Promise<void>)[]> };
-    for (const write of await engine.applyHeldDecisions(db, work!, all, heldBefore, now, { command: 'work.closed', submitted: false })) await write(db);
-    await settleHeldOnClose(db, work!, now, closure);
     Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, blocker: null });
     services.engine.evaluate(work!, all, now);
     // Nothing closed may be merged, whatever its last gates said.
@@ -80,21 +64,6 @@ export async function closeWork(services: Services, caller: Principal, id: strin
 }
 
 const readDocument = async (services: Services, ref: string): Promise<Work | undefined> => (await services.engine.store.pool.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [ref])).rows[0]?.document;
-
-/**
- * GY-1687: a held requirements decision that did not apply when the close ended the attempt (none was live)
- * must not remain `held` on a done item — nothing will end an attempt again. Settle each remaining hold
- * as failed, naming the closure. A hold that `applyHeldDecisions` already settled stale (or applied /
- * failed) in this transaction is folded out of `held` by `decision.stale` and is not failed again.
- */
-async function settleHeldOnClose(db: Db, work: Work, now: Date, closure: Closure) {
-  const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows as { actor: string; kind: string; payload: any; created_at: Date | string }[];
-  const held = foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload }))).filter(decision => decision.state === 'held' && decision.action === 'requirements');
-  for (const decision of held) {
-    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, decision.approvedBy ?? 'graphyard', 'decision.failed',
-      JSON.stringify({ id: decision.id, error: `Item closed as ${closure.kind}: ${closure.reason}; the held decision was not applied` })]);
-  }
-}
 
 /** Cancel the item's open dispatch requests, withdraw its human-only request and resolve its agent requests. */
 export function settleOpenRequests(work: Work, closure: Closure, now: Date) {

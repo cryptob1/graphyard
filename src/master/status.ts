@@ -7,7 +7,6 @@ import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacit
 import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } from '../model/human-request.js';
 import { observationPass } from '../model/loop-observation.js';
 import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, loopObservationProofs, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, isClosed, closedHistory } from '../model.js';
-import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
 import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry } from '../model/base-refresh.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
@@ -16,17 +15,15 @@ import { profileSessions, promotionCommand, type Supervision, type WorkerProfile
 import { sessionActivity } from './launch.js';
 import { launchingSession, sessionView } from '../model/session-state.js';
 import type { HerdrAgent } from './herdr.js';
-import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
-import { containmentInMotion } from '../model/containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
-import { launchFailedBeforeStart } from '../model/escalation.js';
+import { launchFailedBeforeStart } from '../model/lease-end.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import { maxInFlight, requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergeAuthorized, mergedWithoutAuthorization, refusedReconciliation, unauthorizedMergeViolation } from '../model/merge-authorization.js';
 import { splitRelation, splitReport } from '../decomposition.js';
 import type { ProjectMemory } from '../model/project-memory.js';
-import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.js';
 
 // Reviewer failover is a capacity decision the operator must see, not a silent retry.
 function reviewState(work: Work) {
@@ -130,13 +127,13 @@ export function roleConcurrency(role: 'reviewer' | 'producer', profiles: RolePro
 /** Who reviews and merges, as master status reads it (GY-1501): the config's supervision and the operator's GitHub login. */
 export interface SupervisionInput { mode?: Supervision; operatorLogin?: string | null }
 /**
- * Supervised mode in master status (GY-1501): one line saying no approver runs and naming the
+ * Supervised mode in master status (GY-1501): one line saying no operator-agent runs and naming the
  * promotion command; null in autonomous mode. Its heads are reviewed and merged as every other
  * install's are (GY-1978): the control plane is the only merge writer, so no pull request awaits the operator.
  */
 export function supervisionReport(supervision: SupervisionInput | undefined): string | null {
   if (supervision?.mode !== 'supervised') return null;
-  return `Supervised: an agent reviewer reviews each head and the control plane merges it; no operator-agent or approver runs, so the operator answers each decision. Promote to autonomy with ${promotionCommand}.`;
+  return `Supervised: an agent reviewer reviews each head and the control plane merges it; no operator-agent runs, so the operator answers each decision. Promote to autonomy with ${promotionCommand}.`;
 }
 /** A starved role is attention for the master: the limit and the wait, with what raises the one. */
 export const concurrencyStarvedMs = 10 * 60_000;
@@ -163,7 +160,7 @@ export function pendingReadings(rows: readonly { key: string; stage: string; obs
       loop: last ? { state: last.state, detail: last.detail, at: last.at, ageMs: Math.max(0, now - Date.parse(last.at)) } : null };
   });
 }
-export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, containment: Record<string, ContainmentAssessment> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: LoopStatusInput, supervision?: SupervisionInput) {
+export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profiles: WorkerProfile[], agents: HerdrAgent[], credentialHealth: Record<string, { available: boolean; reason: string | null }> = {}, reviews: { pending: any[]; completed: any[] } = { pending: [], completed: [] }, baseBranch = 'main', controlPlane?: ControlPlaneStatus, sessions: DispatchSessions = noSessions, candidateConflicts: { report: Record<string, ConflictReport>; available: boolean; reason: string | null } = { report: {}, available: false, reason: 'Candidate conflicts were not probed' }, roles?: RoleProfiles, cliPath = 'graphyard', loop?: LoopStatusInput, supervision?: SupervisionInput) {
   const supervised = supervisionReport(supervision);
   const now = Date.parse(snapshot.now);
   const scheduling = dispatchSchedule(snapshot.work, now);
@@ -201,29 +198,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const observingDetail = observing ? observing.waitingFor : passed ? `the loop's close of ${work.key} as delivered-observation on release ${passed.release.slice(0, 12)}, where its reading of ${passed.readings.map(entry => entry.proof).join(', ')} passed, which the loop records in its deployment-verification step` : null;
     const observationWindow = work.observationWindow ? { ...work.observationWindow, waiting: !!observationWindowHold(work, new Date(now)) } : null;
     const review = reviewState(work);
-    const assessed = containment[work.id];
-    const phase = containmentPhase(work, now);
-    const quarantine = work.containmentQuarantine && phase
-      ? { epoch: work.containmentQuarantine.epoch, owner: work.containmentQuarantine.owner, at: work.containmentQuarantine.at,
-        // A live owner's containment is its running session; the grace window and settlement apply only once the lease lapses.
-        phase: phase.state, lapsedAt: phase.state === 'live' ? null : phase.lapsedAt, graceRemainingMs: phase.state === 'grace' ? phase.remainingMs : null,
-        hold: containmentHold(work, now)!,
-        settleable: phase.state !== 'live' && (assessed?.settleable ?? false),
-        refusals: phase.state === 'live' ? [containmentHold(work, now)!] : assessed?.refusals ?? ['Supervisor absence has not been verified on the registered host'],
-        host: assessed?.host ?? work.workspaces.find(item => item.epoch === work.containmentQuarantine!.epoch)?.host ?? null,
-        scope: work.containmentQuarantine.scope ?? null,
-        // Each process the verification found holding the fence, with cmdline and cwd, so the
-        // master reads what it would stop before it stops anything.
-        held: assessed?.verification?.held ?? [],
-        verifiedAt: assessed?.verification?.observedAt ?? null,
-        // A refusal is only useful with the path that still works.
-        attestation: phase.state === 'live' || assessed?.settleable ? null : containmentAttestation(work.key) }
-      : null;
-    const seconds = (ms: number) => `${Math.ceil(ms / 1000)}s`;
-    const containmentAttention: [string, Parameters<typeof workAttentionOwner>[1]] | null = !quarantine || quarantine.phase === 'live' ? null
-      : quarantine.settleable ? [`Containment quarantine from epoch ${quarantine.epoch} is verified settleable; ${containmentInMotion(work, now) ? 'the loop settles it within its settle bound' : `run master settle-containment ${work.key}`}`, 'containment-settleable']
-      : quarantine.phase === 'grace' ? [`Worker lease for epoch ${quarantine.epoch} lapsed at ${quarantine.lapsedAt}; containment grace window has ${seconds(quarantine.graceRemainingMs!)} remaining before supervisor absence can be verified`, 'containment-grace']
-      : [`Containment quarantine from epoch ${quarantine.epoch} blocks dispatch: ${quarantine.lapsedAt ? `worker lease lapsed at ${quarantine.lapsedAt}, past the ${seconds(containmentGraceMs)} grace window; ` : ''}${quarantine.refusals[0]}`, 'containment'];
     const gaps = work.proofGaps ?? [];
     // Planned-file overlap holds nothing (dispatch is optimistic); an item beside another on the
     // same files shows what it runs concurrently with, so the overlap stays on the record.
@@ -252,8 +226,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       refusal: refusedReconciliation(work)?.violation ?? null,
       ...(reverted ? { reverted: { base: reverted.base, files: reverted.files, removedBy: reverted.removedBy, partial: !!reverted.partial } } : {}) } : null;
     const parked = parkedOnHuman(work) ? work.humanRequest! : null;
-    const [attention, cause]: [string | null, WorkAttentionCause | null] = containmentAttention ? containmentAttention
-      : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
+    const [attention, cause]: [string | null, WorkAttentionCause | null] = parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
       : merged?.reverted ? [`${work.key} was merged (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
         ? `removed by merge ${merged.reverted.removedBy.mergeSha?.slice(0, 12) ?? 'commit unknown'} of ${merged.reverted.removedBy.key ? `${merged.reverted.removedBy.key}, ` : ''}pull request #${merged.reverted.removedBy.pr}${merged.reverted.removedBy.commit ? ` (commit ${merged.reverted.removedBy.commit.slice(0, 12)})` : ', whose head carried this item\'s commits without their content'}`
         : 'and the merge that removed them could not be identified from the branch history'}. This is a reverted delivery, not an unreconciled merge: nothing is delivered until the content is restored${merged.refusal ? `; the last reconciliation was refused — ${merged.refusal}` : ''}`, 'merged-reverted']
@@ -267,7 +240,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : retrying ? [`${retrying.group ? `Producer session for ${retrying.group} proofs` : 'Reviewer session'} of ${work.key} ${retrying.session!.state} after attempt ${retrying.retry!.attempts} of ${retrying.retry!.limit}: ${retrying.session!.resolution ?? 'no reason recorded'}; ${retrying.retry!.exhausted ? 'no further automatic attempt' : `next attempt at ${retrying.retry!.nextAt}`}`, retrying.group ? 'launch-producer' : 'launch-review']
       : unacknowledged ? [`${unacknowledged.group ? `Producer session for ${unacknowledged.group} proofs` : 'Reviewer session'} of ${work.key} (${unacknowledged.session!.agentName}) is awaiting acknowledgement: no activity since its launch at ${unacknowledged.session!.requestedAt}, re-prompted once at ${unacknowledged.session!.repromptedAt}; the loop records it as never started if it stays quiet`, unacknowledged.group ? 'launch-producer' : 'launch-review']
       // A system-driven conflict rework the loop has not requested within its bound is the loop's step stalled (GY-1434).
-      : overdueRework ? [`The loop's decisions step has not requested ${work.key}'s conflict rework (round ${overdueRework.binding}) within ${conflictReworkBoundMs / 60_000} minutes of the conflict first recorded at ${overdueRework.since}: it fell due at ${overdueRework.dueAt} and is ${Math.ceil(overdueRework.overdueMs / 60_000)} minute(s) overdue. ${baseConflict}`, 'stalled-step']
+      : overdueRework ? [`The loop's rework step has not applied ${work.key}'s conflict rework (round ${overdueRework.binding}) within ${conflictReworkBoundMs / 60_000} minutes of the conflict first recorded at ${overdueRework.since}: it fell due at ${overdueRework.dueAt} and is ${Math.ceil(overdueRework.overdueMs / 60_000)} minute(s) overdue. ${baseConflict}`, 'stalled-step']
       : baseConflict ? [baseConflict, 'base-conflict']
       // An approval GitHub withdrew for a merge-base change is named with its time and commits (GY-145).
       : baseDismissal ? [mergeBaseDismissalAttention(work.key, baseDismissal), 'merge-base-dismissed']
@@ -283,7 +256,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       : work.blocker || dwellMs > 3_600_000 ? [first?.reasons[0] ?? `Work has remained at ${work.stage} for more than one hour`, 'gate'] : [null, null];
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
-    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, containment: quarantine, attention, attentionOwner,
+    return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, attention, attentionOwner,
       // The risk lane the item rides and its speed target (GY-883), stamped by the last evaluation
       // and shown per row: the lane names the ceremony the item's change is asked for.
       lane: work.lane ?? null, speedTarget: work.speedTarget ?? null,
@@ -355,7 +328,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       mergeCandidates: rows.filter(row => row.stage === 'merge' && !row.merged).length, mergedUnreconciled: rows.filter(row => row.merged && !row.merged.reverted).length, revertedDeliveries: rows.filter(row => row.merged?.reverted).length,
       dispatchRequested: rows.reduce((total, row) => total + (row.dispatch ? (row.dispatch.review ? 1 : 0) + row.dispatch.producers.length : 0), 0), dispatchRunning: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'running').length : 0), 0),
       dispatchAwaiting: rows.reduce((total, row) => total + (row.dispatch ? [row.dispatch.review, ...row.dispatch.producers].filter(request => request?.session?.state === 'pending' && request.session.activity === 'awaiting acknowledgement').length : 0), 0), reviewFailover: rows.filter(row => row.review?.failedOver.length).length,
-      quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
       humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: fleet.effective, idleWorkers: idle.length,
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.

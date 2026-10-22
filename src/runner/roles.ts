@@ -9,7 +9,7 @@ import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
 import { z } from 'zod';
 import { claimRunWatch, liveRun, runsDirectory, superviseRun, writeRunOwner, type Applied, type RunAdopter } from './registry.js';
-import { decidePayloadSchema, evidencePayloadSchema, graphyardTools, piRuntimeSchema, type DecidePayload, type EvidencePayload } from './payloads.js';
+import { evidencePayloadSchema, graphyardTools, piRuntimeSchema, type EvidencePayload } from './payloads.js';
 import { runRecord, type RunOptions, type RunRecord, type RunResult, type Runner } from './types.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 
@@ -31,7 +31,7 @@ export function confiningSpawn(base: typeof spawn = spawn, options: { coordinato
 
 /**
  * The coordinator confinement of every headless run (GY-888), as the runner's `confine` option:
- * the launcher's headless roles (a `pi` approver or producer run) start their runtime with no pane
+ * the launcher's headless roles (a `pi` producer run) start their runtime with no pane
  * command line to carry the wrapper, so the runner puts the bubblewrap words before Pi's command
  * itself, inside the run's shell (GY-453). The shell stays outside, because it writes the run's
  * output and exit to its directory under the coordinator checkout, which the confinement binds
@@ -46,12 +46,10 @@ export function runConfinement(options: { coordinatorRoot?: string | null; bwrap
 }
 
 /**
- * The narrow roles on the headless runner (GY-169): the approver and the unit proof producer. A
- * run's submission is applied by the loop through the route a terminal session would have used,
- * with the role's own credential — `approve` as the approver identity, `evidence` as the producer
- * principal — so the server applies exactly what it applies today: it refuses an approver that
- * requested, implemented or produced evidence for the decision, and it trusts evidence by the
- * producer's grants and the exercise rule, never by what the run says.
+ * The narrow role on the headless runner (GY-169): the unit proof producer. A run's submission is
+ * applied by the loop through the route a terminal session would have used, `evidence` as the
+ * producer principal, so the server trusts evidence by the producer's grants and the exercise rule,
+ * never by what the run says.
  */
 
 export function narrowRunner(pi: unknown): Runner {
@@ -127,7 +125,7 @@ const failure = (error: unknown) => error instanceof Error ? error.message : Str
  * and the `context` its role needs to apply the result, so a restart that leaves the run going
  * (it is detached) is followed by an adoption that applies it — once, whichever process sees it end.
  */
-export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'approver' | 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>; checkout?: string;
+export function startNarrowRun<T>(input: { runner: Runner; name: string; role: 'producer'; work: string; subject: string; prompt: string; options: RunOptions<T>; checkout?: string;
   apply: (result: RunResult<T>) => Promise<Applied[]>; root?: string; context?: Record<string, unknown> }) {
   const live = liveRun(input.name);
   if (live) throw new Error(`A ${live.role} run named ${input.name} is already running for ${live.work}`);
@@ -150,15 +148,6 @@ async function post(url: string, token: string, path: string, body: unknown, fet
   return result;
 }
 
-/** The approver's verdict, applied as the approver identity on the route `master approve`/`master refuse` use. */
-export async function applyDecision(url: string, token: string, work: { id: string }, payload: DecidePayload, fetcher: typeof fetch = fetch): Promise<Applied> {
-  const subject = `decision ${payload.decision}`;
-  try {
-    await post(url, token, `work/${encodeURIComponent(work.id)}/approve`, payload.approve ? { decision: payload.decision, reason: payload.reason } : { action: 'refuse', decision: payload.decision, reason: payload.reason }, fetcher);
-    return { subject, outcome: 'applied', detail: `${payload.approve ? 'approved' : 'refused'}: ${payload.reason}` };
-  } catch (error) { return { subject, outcome: 'refused', detail: failure(error) }; }
-}
-
 /** One proof's result, submitted as the producer principal on the route `graphyard evidence` uses. */
 export async function submitEvidence(url: string, token: string, work: { id: string }, payload: EvidencePayload, environment: string, fetcher: typeof fetch = fetch): Promise<Applied> {
   const subject = `proof ${payload.proof}`;
@@ -166,35 +155,6 @@ export async function submitEvidence(url: string, token: string, work: { id: str
     await post(url, token, `work/${encodeURIComponent(work.id)}/evidence`, { ...payload, environment: payload.environment ?? environment.slice(0, 100) }, fetcher);
     return { subject, outcome: 'applied', detail: `${payload.result} (${payload.executed} executed, ${payload.skipped} skipped; exercise ${payload.exercise.result})` };
   } catch (error) { return { subject, outcome: 'refused', detail: failure(error) }; }
-}
-
-/** The approver's run options: its submission must answer the decision it was launched for. */
-export const approverRunOptions = (cwd: string, decision: string, env: Record<string, string>, timeoutMs: number): RunOptions<DecidePayload> => ({
-  cwd, env: { ...env, GRAPHYARD_PI_ROLE: 'approver' }, tool: graphyardTools.decide, timeoutMs,
-  validate: payload => {
-    const parsed = decidePayloadSchema.parse(payload);
-    if (parsed.decision !== decision) throw new Error(`the verdict names decision ${parsed.decision}, not ${decision}`);
-    return parsed;
-  },
-});
-
-/** What an approver run's adoption after a restart needs (GY-453): never the token, which the adopter reads itself. */
-export const approverRunContext = (url: string, workId: string, decision: string, timeoutMs: number, checkout?: string) => ({ url, workId, decision, timeoutMs, ...(checkout ? { checkout } : {}) });
-const approverRunContextSchema = z.object({ url: z.string(), workId: z.string(), decision: z.string(), timeoutMs: z.number().int().positive(), checkout: z.string().optional() }).passthrough();
-/**
- * How a restarted loop takes back a headless approver run (GY-453, registry.ts adoptRuns): its
- * verdict is validated against the decision it was launched for and applied as the approver
- * identity, exactly as the launch would have applied it. The managed directory it works in (GY-391)
- * stays held while it lives and is settled, through `settle`, once it ends.
- */
-export function approverRunAdopter(token: () => Promise<string>, fetcher?: typeof fetch, settle?: (checkout: string) => Promise<unknown>): RunAdopter {
-  return async owner => {
-    const context = approverRunContextSchema.parse(owner.context);
-    const checkout = context.checkout;
-    return { options: approverRunOptions('', context.decision, {}, context.timeoutMs),
-      apply: async result => result.ok ? [await applyDecision(context.url, await token(), { id: context.workId }, result.payload as DecidePayload, fetcher)] : [],
-      ...(checkout ? { checkout, settled: () => settle?.(checkout) } : {}) };
-  };
 }
 
 /** The producer's run options: each submission must be one of its proofs on its exact binding. */
@@ -208,14 +168,6 @@ export const producerRunOptions = (cwd: string, binding: { sha: string; baseSha:
     return parsed;
   },
 });
-
-export function piApproverPrompt(config: { repository: string; cliPath: string }, key: string, decision: string, identity: string, clone?: string) {
-  const cli = `node ${config.cliPath}`;
-  return `You are the independent Graphyard approver for ${config.repository}, acting as ${identity}. Judge decision ${decision} on ${key}: run ${cli} master decisions ${key}, read the item with ${cli} status ${key}, its pull request and history, and weigh the requester's reason against the item's criteria and the operator's goals. `
-    + (clone ? `Your working directory is a scratch directory of your own. Read the code in ${clone}, a clone of the repository made for this run alone and removed when it ends: it has its own refs, index and working tree, detached at the commit you judge, and no remote, so a write inside the clone stays inside it. Every other checkout is read-only to you: judge it, never modify it, and work only in the clone and your working directory. ` : '')
-    + `Then call the graphyard_decide tool exactly once with decision "${decision}", approve true if the decision is justified or false if it is not, and your reason; a decline is a call with approve false, never an exit without one. Graphyard applies your verdict as ${identity}, so do not run master approve or master refuse yourself. `
-    + 'Never approve a decision you requested, implemented, or produced evidence for; never edit, push, merge, review, or submit evidence. Stop after the call.';
-}
 
 /**
  * The one definition of a live-install proof (GY-1170): a manual proof that installs Graphyard

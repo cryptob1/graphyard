@@ -60,16 +60,14 @@ const absent = (value: unknown) => value === null || value === undefined || type
 const stored = (work: Work) => work as Work & { queue?: unknown; queueHistory?: unknown[] };
 /**
  * A delivery nothing is owed for any more (GY-203): done, with no next action, queue entry, lease,
- * containment quarantine, action row or running session. The loop reads such an item only for what
- * it is — delivered, its delivery record, its gates — so the view keeps none of its histories, no
- * evidence but what binds its candidate, and no finished session. A delivered item still under
- * quarantine is not settled: the loop's containment recovery finds the quarantined epoch's pane in
- * its finished implementation session (`recordedPane` in src/quarantine.ts, GY-257). The work
+ * action row or running session. The loop reads such an item only for what it is — delivered, its
+ * delivery record, its gates — so the view keeps none of its histories, no evidence but what binds
+ * its candidate, and no finished session. The work
  * index stores exactly this view of it at write time (`settledSql` in src/store/coordination-sql.ts
  * is the SQL form; the two must agree), so the coordination snapshot serves it without reading its
  * document.
  */
-export const deliverySettled = (work: Work) => work.stage === 'done' && absent(work.nextAction) && absent(stored(work).queue) && absent(work.lease) && absent(work.containmentQuarantine)
+export const deliverySettled = (work: Work) => work.stage === 'done' && absent(work.nextAction) && absent(stored(work).queue) && absent(work.lease)
   && !(Array.isArray(work.actionQueue?.actions) && work.actionQueue.actions.length)
   && !(Array.isArray(work.sessions) && work.sessions.some(handle => handle?.state === 'running'));
 /** A record bound to a release, not a candidate: the loop's own reading or a `manual:post-deploy/*` proof (`relevantEvidence` in src/store/coordination-sql.ts keeps the same). */

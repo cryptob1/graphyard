@@ -12,7 +12,7 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { directMergeStatus } from '../../direct-merge.js';
-import { autoMergeStatus, mergeHolds, mergeWriterStatus } from '../../merger-mode.js';
+import { autoMergeStatus, mergeWriterStatus } from '../../merger-mode.js';
 import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
@@ -170,10 +170,7 @@ export const statusRoutes = defineRoutes('status', [
       // leave it whole, and what the SQL cut is added to what the view says it left out.
       const { trimmed, ...snapshot } = await services.engine.store.coordinationSnapshot();
       const trimmedView = coordinationSnapshot(scope(snapshot));
-      // GY-1927: each held candidate names its hold, so the control-plane merge writer starts no merge for it.
-      const holds = await mergeHolds(services.engine.store.pool, trimmedView.work);
       for (const work of trimmedView.work) {
-        if (holds.get(work.id)) work.mergeHold = holds.get(work.id);
         const cut = trimmed.get(work.id);
         if (cut) { trimmedView.omitted.evidence += cut.evidence; trimmedView.omitted.dispatchHistory += cut.dispatchHistory; trimmedView.omitted.queueHistory += cut.queueHistory; trimmedView.omitted.actionHistory += cut.actionHistory; trimmedView.omitted.sessions += cut.sessions; }
       }
@@ -223,9 +220,8 @@ export const statusRoutes = defineRoutes('status', [
     method: 'GET', path: '/api/events',
     async handle({ actor, url, services, operatorVisible }) {
       const query = parseEventHistoryQuery(url.searchParams);
-      // An approver judges decisions resting on the ledger (GY-642), so one scoped to every item
-      // reads it whole; the read grants nothing, and every other operator agent names its item.
-      const wholeLedger = actor.role === 'operator-agent' && !!actor.capabilities?.includes('decision:approve') && !!actor.scope?.workItems.includes('*');
+      // The master's identity, scoped to every item, reads the ledger whole; every other operator agent names its item.
+      const wholeLedger = actor.role === 'operator-agent' && !!actor.scope?.workItems.includes('*');
       if (actor.role === 'operator-agent' && !wholeLedger) { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = await services.engine.store.workDocument(query.work!); demand(item && item.id === query.work && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
       const history = await readEventHistory(services.engine.store.pool, query);
       return query.view === 'rows' ? history.events : history;

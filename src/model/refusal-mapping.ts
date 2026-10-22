@@ -1,5 +1,4 @@
 import { reviewNeed } from './dispatch.js';
-import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import type { Work } from './work.js';
 import type { NextActionKind } from './action-kinds.js';
@@ -111,7 +110,7 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
 
 /**
  * The single action kind a refusal maps to. `work` decides the cases the refusal text cannot: a
- * pull-request-era CI refusal, a merge-gate refusal raised by a standing escalation or lead hold rather than by the merge writer,
+ * pull-request-era CI refusal, a merge-gate refusal raised by a lead hold rather than by the merge writer,
  * and a review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
 export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
@@ -120,7 +119,7 @@ export function refusalAction(work: Work, gate: string, refusal: string, all: Wo
     if (standstill) return standstill.kind;
   }
   if (gate === 'merge') {
-    if (standingEscalations(work).some(entry => refusal.includes(entry.reason)) || leadHoldRefusal(work) === refusal) return 'escalate';
+    if (leadHoldRefusal(work) === refusal) return 'escalate';
   }
   const rule = refusalRules.find(candidate => (candidate.gate === null || candidate.gate === gate) && candidate.match.test(refusal));
   return rule!.kind;

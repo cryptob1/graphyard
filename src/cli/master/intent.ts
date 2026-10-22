@@ -1,18 +1,12 @@
-// Concern: `graphyard master` intent and two-party decision subcommands — autonomy, promote, goal-amend, close, withdraw, refuse.
+// Concern: `graphyard master` intent subcommands — autonomy, promote, goal-amend, adopt, close — applied at once with the master's identity.
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
-import { agentToken, decisionInput, autonomySubcommands, runAutonomyCommand, listHerdrAgents, readCredentialFile, promoteToAutonomy, assertPromotionRoute } from '../../master.js';
+import { agentToken, intentInput, autonomySubcommands, runAutonomyCommand, listHerdrAgents, promoteToAutonomy, assertPromotionRoute } from '../../master.js';
 import { readDaemonState } from '../../master-daemon.js';
-import { readProducerLedger } from '../../producer.js';
-import { readDispatchCursor } from '../../auto-dispatch.js';
 import { wholeDocument } from '../../model/work-summary.js';
 import { postDeployCriterionRefusal, postDeployOnlyRefusal, type Work } from '../../model/work.js';
 import { readSecretFromStdin } from '../context.js';
 import { closeRequest } from '../master-close.js';
-import { assertHandAction, handDecision } from '../hand-actions.js';
-import { assertHandRework, loopBaseFailed } from '../hand-rework.js';
-import { readMechanicalFixRequests } from '../../mechanical-findings.js';
-import { cappedEscalationKey } from '../../daemon/cycle-review-cap.js';
 import { unhandled, type MasterSession } from './session.js';
 
 /**
@@ -30,33 +24,20 @@ export async function derivedIntent(id: 'create' | 'requirements', args: string[
   // A settled delivery is a summary in the snapshot (GY-422); its requirements are read whole.
   const work = listed && await wholeDocument(listed, deps.coordinator);
   if (id === 'requirements' && !work) throw new Error(`Unknown work item ${args[0]}`);
-  const { plannedFiles: _retired, ...intent } = work ? decisionInput('requirements', work, input) : input;
+  const { plannedFiles: _retired, ...intent } = work ? intentInput('requirements', work, input) : input;
   const postDeploy = postDeployCriterionRefusal(intent.criteria ?? []) ?? postDeployOnlyRefusal(intent.criteria ?? []);
   if (postDeploy) throw new Error(postDeploy);
   return deps.mutate(work ? `work/${work.id}/requirements` : 'work', { ...intent, reason }, process.env.GRAPHYARD_REQUEST_ID ?? randomUUID(), await deps.token());
 }
 
-/** The master's own intent (create, requirements) and the decisions it requests, withdraws or refuses. */
+/** The master's own intent, applied at once with its operator-agent identity. */
 export async function intentCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterToken, masterApi, masterMutation, coordinator } = session;
   if (id === 'create' || id === 'requirements') return print(await derivedIntent(id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
-  // Evidence and merge decisions on a system-driven item are the loop's to request (GY-175),
-  // judged on the same work document the decision is built from.
-  // A rework the loop requests itself on its recorded grounds is its round, not the master's (GY-1389).
-  const assertDecision = async (work: any, action: string, input: unknown, now: number, flags: { precedent?: string }) => {
-    // Judged on the loop's own context: the base failures it set aside, its spent producer requests, the planned bot rounds.
-    const cursor = await readDispatchCursor(root, master), state = await readDaemonState(root, master).catch(() => null);
-    const exhausted = Object.entries(cursor.abandoned).filter(([, entry]) => entry.kind === 'producer')
-      .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason }));
-    assertHandRework(work, action, input, master, { now, requestsDecisions: !!master.operatorAgent, precedent: flags.precedent, baseFailed: loopBaseFailed(work, state), exhausted, mechanical: await readMechanicalFixRequests(root),
-      capEscalated: state && work.candidate ? !!state.actions[cappedEscalationKey(work, work.candidate.sha)] : null });
-    const loop = { sessions: (await readProducerLedger(root)).producers, failures: cursor.failures, now, requestsDecisions: !!master.operatorAgent };
-    const owned = handDecision(work, action, input, loop); if (owned) assertHandAction(work, owned);
-  };
   // GY-1502: a supervised install's autonomy apply is the promotion's, behind its checks and audit.
   if (id === 'autonomy') assertPromotionRoute(master, args);
   if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,
-    { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock, assertDecision, mutate: masterMutation }));
+    { coordinator: masterApi, readSecret: () => readSecretFromStdin(10_000), agents: listHerdrAgents, daemonLock: async () => (await readDaemonState(root, master)).lock }));
   if (id === 'promote') {
     // GY-1502: the operator's one audited transition to autonomy, with the admin credential read once from stdin; there is no demotion.
     if (args.some(arg => arg !== '--admin-token-stdin')) throw new Error('Use master promote --admin-token-stdin; it takes no other argument and there is no demotion');
@@ -87,25 +68,6 @@ export async function intentCommand(session: MasterSession): Promise<unknown> {
     // The master's own operator-agent identity when provisioned, else its coordinator credential.
     const { key, body } = closeRequest(args);
     return print(await masterMutation(`work/${encodeURIComponent(key)}/close`, body, randomUUID(), master.operatorAgent ? await agentToken(root, master, 'operatorAgent') : masterToken));
-  }
-  if (id === 'withdraw') {
-    // Runs under the operator-agent identity that made the request; the server resolves GY-N.
-    // The option form (`master withdraw --repo OWNER/NAME --apply`, GY-1871's merge-intent take-back
-    // beside `master protection`) is fleet's, not a decision on an item: defer it to the next concern.
-    if (args[0]?.startsWith('-')) return unhandled;
-    if (!args[0] || !args[1] || !args.slice(2).join(' ').trim()) throw new Error('Use master withdraw GY-N DECISION REASON');
-    return print(await masterMutation(`work/${encodeURIComponent(args[0])}/decide`, { action: 'withdraw', decision: args[1], reason: args.slice(2).join(' ') }, randomUUID(), await agentToken(root, master, 'operatorAgent')));
-  }
-  if (id === 'refuse') {
-    // The approver's decline is a recorded write, never a session that ends without approving
-    // (GY-141). Like approve, it runs only under the approver session's own credential.
-    if (process.env.GRAPHYARD_MASTER === '1') throw new Error('The master never judges its own decisions; to take one back, graphyard master withdraw GY-N DECISION REASON');
-    const file = process.env.GRAPHYARD_TOKEN_FILE;
-    if (!file) throw new Error('master refuse runs in an approver session, which carries its own credential file in GRAPHYARD_TOKEN_FILE');
-    if (!args[0] || !args[1] || !args.slice(2).join(' ').trim()) throw new Error('Use master refuse GY-N DECISION REASON');
-    const token = await readCredentialFile(file);
-    for (const own of [master.credentialFile, master.operatorAgent?.credentialFile]) if (own && token === await readCredentialFile(own).catch(() => null)) throw new Error('That is one of the master\'s own credentials; refusals come from the approver identity');
-    return print(await masterMutation(`work/${encodeURIComponent(args[0])}/approve`, { action: 'refuse', decision: args[1], reason: args.slice(2).join(' ') }, randomUUID(), token));
   }
   return unhandled;
 }

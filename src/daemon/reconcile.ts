@@ -2,7 +2,6 @@
 import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master.js';
 import { storeAction, type DaemonAction, type DaemonActionKind, type DaemonState } from './state.js';
-import type { RoutineDecision } from './decisions.js';
 
 /**
  * A daemon killed mid-action leaves a `started` cursor entry. Graphyard, not the cursor, decides
@@ -57,12 +56,9 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       next.state = 'done';
       next.detail = 'Resumed: per-item deployment records are retired; the item was delivered at its merge';
     } else if (action.kind === 'decision') {
-      // Both halves are safe to repeat: a request already standing on the item is adopted rather
-      // than made twice, and a session already listed under the decision's name is adopted rather
-      // than launched twice. Left indeterminate, the decision would never be looked at again.
-      next.state = state.approvals[key] ? 'done' : 'failed';
-      next.detail = next.state === 'done' ? 'Resumed: the decision was requested before the restart; its approver session is supervised from here'
-        : 'Resumed: no request was recorded before the restart; a standing one is adopted, otherwise it is requested again';
+      // A rework the restart interrupted is decided again from the snapshot: one that applied left the item reworked.
+      next.state = 'failed';
+      next.detail = 'Resumed: the rework was interrupted; the next cycle decides it again from the snapshot';
     } else if (action.kind === 'fault') {
       // The loop files no work item for a recurring fault class (GY-2186): a class past its
       // threshold is one master-status attention line. A filing a restart interrupted is retired,
@@ -82,5 +78,3 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
 export const dispatchKey = (work: Work) => `dispatch:${work.id}:${work.epoch}`;
 export const candidateKey = (kind: DaemonActionKind, work: Work) => `${kind}:${work.id}:${work.candidate?.sha ?? 'none'}:${work.candidate?.baseSha ?? 'none'}:${work.policyRevision}`;
 export const closeKey = (profile: WorkerProfile, pane: string) => `close:${profile.name}:${pane}`;
-/** One routine decision per action, item, binding (the head, or the quarantined epoch) and policy revision. */
-export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>) => `decision:${decision.action}:${work.id}:${decision.binding}:${work.policyRevision}`;

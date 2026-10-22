@@ -11,21 +11,21 @@ Keep cycling: `master status`; `master run` dispatches; merge gate-passing candi
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, `decide attest|merge`, loop-owned `decide rework` (`--precedent` answers refusals). The loop attests unproduced `manual:` proofs via an independent approver per head, base and policy revision.
+Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, loop-owned `rework`. The loop attests unproduced `manual:` proofs per head, base and policy revision.
 
 ### Session liveness is reconciled, not trusted
 
 Sweeps run every automatic-dispatch tick; a handle closes at the second consecutive miss. Closures: **Vanished**, **Ended** (terminal; `idle`/`done`/`blocked` are not terminal), **Superseded**, **Duplicate** — a closure decides no gate. Past its role's maximum a session is flagged, not closed.
 
-`blocked` frees its slot; [classes](protocol/work-commands.md#blocked-work-unblocks-itself) self-clear (`github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `host-supervisor`, `runtime-denial`, `runtime-exhaustion`, `github-outage`); `master-role` a master-role identity runs and unblocks; `needs-decision` approver. `genuine`/`human-only` escalate.
+`blocked` frees its slot; [classes](protocol/work-commands.md#blocked-work-unblocks-itself) self-clear (`github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `host-supervisor`, `runtime-denial`, `runtime-exhaustion`, `github-outage`); `master-role` a master-role identity runs and unblocks; `genuine`/`human-only` stay in `master status`.
 
-`invariant:` lines are attention, never items; `stale`/`withdrawn` decisions re-request ≤3×, then `decision-stale`. Review follow-ups: Pi (`run.research`) triages.
+`invariant:` lines are attention, never items. Review follow-ups: Pi (`run.research`) triages.
 
 ## Automatic dispatch at submit
 
 Past the build gate: a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then a review once passed. **The loop launches each request within 30 seconds** (`run.reviewerProfile`, producer profiles, 4 sessions each). Reviewer launches await head's bot reviews ≤`awaitReviewersMinutes` (8, 0 disables), skipping a bot under a usage-limit notice until it next reviews (`skipped: <bot> exhausted since <time>`, `dispatch.botReviewers`).
 
-**Concurrency is per role** (1–20, default 1). Unanswered sessions relaunch, then `dispatch.abandoned`; exhausted producers raise `escalation:proof-exhausted`, then rework. **Every role fails over on spent quota** or waits as one `capacity` line.
+**Concurrency is per role** (1–20, default 1). Unanswered sessions relaunch, then `dispatch.abandoned`; exhausted producers rework. **Every role fails over on spent quota** or waits as one `capacity` line.
 
 ### System invariants
 

@@ -17,25 +17,9 @@ the source of assignment and progression truth; Herdr supplies live session heal
 
 Autonomy is the default: act without asking. The operator sets goals; agents make
 every other call. Only three decisions are human: goals and priorities, spending money
-or opening third-party accounts, and issuing credentials to people. Every other
-decision names the agent that makes it and the independent agent that approves it.
-Create, release, unblock, and add requirements with your own operator-agent identity
-(\`graphyard master create|release|unblock|requirements\`). Request every other
-decision (requirement rewrites, escalation resolution, \`manual:\` attestation,
-rework, containment recovery, proof grants, and merge approval when automatic
-merging is off) with \`graphyard master decide GY-N ACTION REASON\`, then launch the
-independent approver with \`graphyard master approver GY-N DECISION\`, except for a
-low- or medium-lane rework, and a rework whose head failed a trusted proof, had its
-attestation refused or conflicts with its base in the control plane's own test merge,
-which the server applies as it is requested (\`approvedBy: graphyard-risk-lane\`), so
-no approver is launched for it.
-Put a \`manual:\` docs or criterion judgement to the attestation's approver rather than
-requesting a rework on it: the loop returns a refused head on its own. The loop
-watches that session as it watches its own approvers and closes it, recording why,
-once its decision settles or its item is delivered; it closes any other approver
-session left open the same way. The server
-refuses self-approval and any approver that held an assignment on the item or produced
-its evidence. Never ask a human to run a command an agent identity may run: \`master
+or opening third-party accounts, and issuing credentials to people. You apply every
+other decision at once with your own operator-agent identity: \`graphyard master
+create|release|unblock|requirements|rework|attest|close\`. Never ask a human to run a command an agent identity may run: \`master
 status\` names who resolves each attention item and the next command.
 
 Dispatch only ready work with \`graphyard master dispatch GY-N PROFILE\`. The

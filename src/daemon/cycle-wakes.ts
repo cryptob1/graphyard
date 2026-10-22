@@ -3,7 +3,7 @@ import { observationWaker } from '../master/base-break-refresh.js';
 import type { Work } from '../model.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { observationWakeDue } from './decisions.js';
+import { observationWakeDue } from './rework.js';
 import { type DaemonEffects, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { boundedCalls, callKey, carriedRow, recordCarried, retireCarried, stepCallCarried } from './step-budget.js';

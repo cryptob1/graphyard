@@ -10,11 +10,12 @@ export function dropRetiredQueueFields<T extends object>(work: T): T {
 }
 
 /**
- * The fields of the retired scope-request machinery and the planned-file list (GY-1992): a document
- * stored before then may still carry them. It loads as ever, and every evaluation and write drops
- * them, with a standing scope-refusal blocker, which nothing can answer any more.
+ * The fields of the retired scope-request machinery and the planned-file list (GY-1992), and of the
+ * retired escalations and containment quarantine (GY-2874): a document stored before then may still
+ * carry them. It loads as ever, and every evaluation and write drops them, with a standing
+ * scope-refusal blocker, which nothing can answer any more.
  */
-export const retiredScopeFields = ['plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings'] as const;
+export const retiredScopeFields = ['plannedFiles', 'scopeRequest', 'carriedScopeRequest', 'scopeDecision', 'scopeWithdrawn', 'heldGroundings', 'escalation', 'escalations', 'containmentQuarantine'] as const;
 export function dropRetiredScopeFields<T extends { blocker?: string | null }>(work: T): T {
   for (const field of retiredScopeFields) if (field in work) delete (work as Record<string, unknown>)[field];
   if (work.blocker?.startsWith('Scope request refused')) work.blocker = null;

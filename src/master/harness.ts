@@ -277,12 +277,12 @@ export async function prepareSessionHarness(root: string, config: MasterConfig, 
  * control-plane truth (master-session.ts masterRequest), so both paths start the same session.
  */
 export function masterPrompt(config: MasterConfig): string {
-  // GY-1501: a supervised install has no approver by design; that is its mode, not an onboarding fault.
+  // GY-1501: a supervised install has no operator-agent identity by design; that is its mode, not an onboarding fault.
   const supervised = config.supervision === 'supervised';
-  const supervisedInstruction = `This install is supervised: an agent reviewer reviews each head and the control plane merges it, but no two-party decision can be approved yet, because supervised mode provisions no operator-agent or approver identity; that is the mode the operator chose, not an onboarding fault, so do not report the missing identities. Record what needs the operator in master status and leave it there; promotion to autonomy (${promotionCommand}) is the operator's choice.`;
-  const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and leave dispatch, review, proof production and routine merge of system-driven items (every item not created with "systemDriven": false) to node ${config.cliPath} master run, whose loop performs each; the master CLI refuses those hand actions on them. The loop drives an item created with "systemDriven": false the same way; opting out only also allows those hand actions, so take one only where master status shows the loop has not, and merge by hand only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${supervised ? supervisedInstruction : `Create, release, unblock and add requirements with node ${config.cliPath} master create, release, unblock, or requirements; request every other decision with node ${config.cliPath} master decide GY-N ACTION REASON and launch its independent approver with node ${config.cliPath} master approver GY-N DECISION.${config.operatorAgent ? '' : ` Your operator-agent and approver identities are not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`}`;
+  const supervisedInstruction = `This install is supervised: an agent reviewer reviews each head and the control plane merges it, but supervised mode provisions no operator-agent identity; that is the mode the operator chose, not an onboarding fault, so do not report the missing identity. Record what needs the operator in master status and leave it there; promotion to autonomy (${promotionCommand}) is the operator's choice.`;
+  const prompt = `You are the dedicated Graphyard master agent for ${config.repository}. Do not implement product work, claim worker leases, submit evidence, weaken requirements, or bypass gates. Read AGENTS.md, run node ${config.cliPath} master guide, then run node ${config.cliPath} master status. Use Graphyard as assignment and progression truth and Herdr only for session health and control. Route ready work to configured worker profiles, require workers to claim for themselves, preserve handoffs, and leave dispatch, review, proof production and routine merge of system-driven items (every item not created with "systemDriven": false) to node ${config.cliPath} master run, whose loop performs each; the master CLI refuses those hand actions on them. The loop drives an item created with "systemDriven": false the same way; opting out only also allows those hand actions, so take one only where master status shows the loop has not, and merge by hand only through graphyard master merge after every exact-candidate gate passes. Act without asking: only goals and priorities, spending money or opening third-party accounts, and issuing credentials to people belong to the human. ${supervised ? supervisedInstruction : `Every decision is yours to apply at once with your own identity: node ${config.cliPath} master create, release, unblock, requirements, rework, attest or close.${config.operatorAgent ? '' : ` Your operator-agent identity is not provisioned yet; report that onboarding must run node ${config.cliPath} master autonomy --admin-token-stdin --apply once.`}`}`;
   const reviewInstruction = supervised
-    ? `Independent review starts on its own: when a candidate passes the build gate, node ${config.cliPath} master run launches a reviewer session for its exact head and the control plane merges it once every gate passes. It launches no approver or escalation session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
+    ? `Independent review starts on its own: when a candidate passes the build gate, node ${config.cliPath} master run launches a reviewer session for its exact head and the control plane merges it once every gate passes. It launches no other session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
     : config.reviewer
     ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery of a review request the loop has stopped relaunching: its session settled without answering it, its automatic sessions are exhausted, or its launch reached the dispatch failure limit with no request-review row still queued; on a system-driven item it is refused before then.`
     : `No reviewer identity is registered yet. Run node ${config.cliPath} master reviewer setup before routing work that needs independent review; once it is registered, master run launches reviews and producers for every submitted head on its own. Never approve a candidate yourself.`;
@@ -327,32 +327,25 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
 }
 
 // ---- Autonomy ----------------------------------------------------------------------------------
-// Humans set goals; agents run the loop. Everything a human used to approve is either the master's
-// own operator-agent capability (non-weakening intent) or a two-party decision that a separate
-// approver agent approves. What stays human is this list, and nothing else.
+// Humans set goals; agents run the loop. Everything a human used to approve the master applies with
+// its own operator-agent identity. What stays human is this list, and nothing else.
 export const humanOnlyDecisions = ['goals and priorities', 'spending money or opening third-party accounts', 'issuing credentials to people'] as const;
-export const masterOperatorCapabilities = ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements', 'policy:review-provider',
-  'decision:resolve', 'decision:attest', 'decision:merge', 'decision:rework', 'decision:grant'] as const;
-export const approverAgentCapabilities = ['decision:approve'] as const;
-export const autonomyReason = 'Master autonomy onboarding: agent identities for the master and its independent approver';
-
-/** The two agent identities onboarding provisions, and where their credentials live. */
+export const masterOperatorCapabilities = ['policy:requirements', 'policy:review-provider', 'e2e:record'] as const;
+export const autonomyReason = 'Master autonomy onboarding: the master\'s operator-agent identity';
+/** The one agent identity onboarding provisions: the master's own, which applies every decision. */
 export function autonomyPlan(config: MasterConfig) {
   const name = config.repository.split('/').at(-1)!.replace(/[^a-zA-Z0-9._-]/g, '-');
   const directory = dirname(config.credentialFile), stem = basename(config.credentialFile, '.token');
   const scope = { repositories: [config.repository], workItems: ['*'] };
   return {
     operatorAgent: { id: config.operatorAgent?.id ?? `graphyard-master-${name}-operator`.slice(0, 100), displayName: `Graphyard master for ${config.repository}`.slice(0, 100), capabilities: [...masterOperatorCapabilities], scope,
-      credentialFile: config.operatorAgent?.credentialFile ?? resolve(directory, `${stem}-operator.token`), role: 'Requests two-party decisions and applies non-weakening intent (create, release, unblock, add requirements) alone' },
-    approver: { id: config.approver?.id ?? `graphyard-approver-${name}`.slice(0, 100), displayName: `Graphyard approver for ${config.repository}`.slice(0, 100), capabilities: [...approverAgentCapabilities], scope,
-      credentialFile: config.approver?.credentialFile ?? resolve(directory, `${stem}-approver.token`), role: 'Approves the master\'s decisions from its own session; never requests, implements, or produces evidence' },
+      credentialFile: config.operatorAgent?.credentialFile ?? resolve(directory, `${stem}-operator.token`), role: 'Applies every decision the master makes (create, release, unblock, requirements, rework, close, attest) under its own name' },
   };
 }
 
 /** Rules every master session gets on top of its loop rules: it cannot borrow another identity. */
 const autonomyDeny = (credentialHome: string): HarnessRule[] => [
-  { rule: 'Bash(*GRAPHYARD_TOKEN_FILE=*)', why: 'The master acts only as its own identities; pointing a command at the approver\'s or a worker\'s credential file would let one agent approve its own decision.' },
-  { rule: 'Bash(*GRAPHYARD_APPROVER=*)', why: 'Only a launched approver session carries the approver marker; the master never claims it.' },
+  { rule: 'Bash(*GRAPHYARD_TOKEN_FILE=*)', why: 'The master acts only as its own identities; pointing a command at a worker\'s or producer\'s credential file would let it borrow another identity.' },
   { rule: `Edit(//${credentialHome}/**)`, why: 'Agent credentials are issued by onboarding and rotated through the API, never edited in place.' },
 ];
 /** Thrown when the checkout a harness apply resolved is not one it may apply against (GY-1662); `unit` is the unit file to update, when one names the right checkout elsewhere. */

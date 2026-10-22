@@ -128,7 +128,6 @@ export function blockerSummary(text: string, now: number, work?: Pick<Work, 'key
   const kind = view?.class ?? classified.class;
   // Spent: the loop has cleared it `maxAutomaticClears` times (daemon/cycle-blockers.ts) and left it to the master.
   const spent = view?.needsSomeone ?? false;
-  if (kind === 'needs-decision') return { sentence: spent ? 'Waiting on a decision that keeps coming back; the master agent decides it and clears the block.' : 'Waiting on an agent decision; an approver agent judges it, then Graphyard clears the block.', kind };
   const cause = routineCause[kind];
   if (cause) return { sentence: spent ? `${cause}, again and again; the master agent must clear it.` : `${cause}; Graphyard re-checks it every cycle and clears it on its own.`, kind };
   // Only a blocker no class explains reads as a wait on another item: a classified fault that merely mentions one

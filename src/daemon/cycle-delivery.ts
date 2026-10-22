@@ -5,7 +5,8 @@ import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../model
 import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, message, storeAction } from './state.js';
 import { candidateKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { detailChanged, exhaustedProofEscalation, exhaustedProofKey, standingVerdict } from './decisions.js';
+import { detailChanged } from './text.js';
+import { exhaustedProofEscalation, exhaustedProofKey, standingVerdict } from './rework.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, deploymentDetail, deploymentStepBudgetMs, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
@@ -19,7 +20,7 @@ export async function shepherdStep(cycle: Cycle) {
   //    records exactly one request per candidate and escalates what only a human may resolve.
   //    Proofs gate nothing and no producer is requested (GY-1266, GY-1235).
   //    A producer request whose attempts are used up is raised here the cycle it is first seen
-  //    (GY-496); the decision step requests the rework on a later cycle (cycle-decisions.ts).
+  //    (GY-496); the rework step applies the rework on a later cycle (rework.ts).
   const exhausted = await cycle.exhaustedProofs();
   for (const item of open.filter(candidate => candidate.submission && candidate.candidate && !candidate.reworkRequested && !standingVerdict(candidate))) await isolate('proof', item, item.key, async () => {
     const reviewGate = item.gates.find(gate => gate.name === 'review');
@@ -48,14 +49,14 @@ export async function shepherdStep(cycle: Cycle) {
 /**
  * Step 6: the control-plane merge writer's trial, push and merge ledger are authoritative for what
  * landed (docs/delivery.md); this step merges nothing. It names, once, a merge whose gates had not
- * passed on its head — held as a violation until a two-party decision reconciles it.
+ * passed on its head — held as a violation, with a follow-up item to re-verify what it skipped.
  */
 export async function mergeStep(cycle: Cycle) {
   const { state, effects, now, performed, isolate, open } = cycle;
   for (const item of open.filter(mergedWithoutAuthorization)) await isolate('escalation', item, item.key, async () => {
     const key = `${candidateKey('escalation', item)}:merged`;
     if (state.actions[key]?.state === 'done') return;
-    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage until a two-party decision reconciles it: graphyard master decide ${item.key} merge REASON, then graphyard master approver ${item.key} DECISION; Graphyard re-checks the record at the merge cutoff and delivers on the approved decision`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage with its violation; graphyard master create FILE files the follow-up that re-verifies what the merge skipped`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
 }
 

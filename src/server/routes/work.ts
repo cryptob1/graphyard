@@ -3,17 +3,14 @@ import { RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
-import { approveDecision, requestDecision } from '../decisions.js';
-import { listDecisions } from '../decision-ledger.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
-import { readEscalationContext } from '../escalation-context.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { recordBlockerProbe } from '../blocker-probe.js';
 import { closeWork } from '../close.js';
 import { recordTriage } from '../followups.js';
 import { answerResearch, recordResearch } from '../../research.js';
 import { recordDecomposition } from '../../decomposition.js';
-import { recordReviewLaunch, recordReviewVerdict, withdrawReviewVerdict } from '../review-verdict.js';
+import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
@@ -35,24 +32,11 @@ const refuseLead = async ({ actor, services }: RouteContext, id: string | null, 
   demand(false, 'Slice leads cannot perform lifecycle mutations', 403);
 };
 
-/** Work mutations: two-party decisions, the guarded merge broker and every engine command. */
+/** Work mutations: the human-only waits, the merge writer's record and every engine command. */
 export const workRoutes = defineRoutes('work', [
-  // Two-party decisions: an agent requests, a second independent agent approves, and the
-  // control plane applies. They precede the generic route, which would read them as commands.
-  { method: 'GET', path: /^\/api\/work\/([^/]+)\/decisions$/, handle: ({ actor, services }, [id]) => listDecisions(services, actor, decodeURIComponent(id)) },
-  // The context a spawned escalation handler decides from: four layers, deterministic, bounded.
-  { method: 'GET', path: /^\/api\/work\/([^/]+)\/context$/, handle: ({ actor, services, url }, [id]) => readEscalationContext(services, actor, decodeURIComponent(id), url.searchParams) },
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/(decide|approve)$/,
-    async handle(context, [id, action]) {
-      await refuseLead(context, id, action);
-      const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
-      return action === 'decide' ? requestDecision(context.services, context.actor, target, data, key) : approveDecision(context.services, context.actor, target, data, key);
-    },
-  },
   // The two waits that stall only their own item (GY-89): a human-only decision a worker records
   // (`park`) and the human answers (`answer`), and the provider capacity the loop observes
-  // (`capacity`). They precede the generic route for the same reason the decisions do.
+  // (`capacity`). They precede the generic route, which would read them as commands.
   { method: 'GET', path: '/api/human-requests', handle: ({ actor, services }) => listHumanRequests(services, actor) },
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/(park|answer|capacity)$/,
@@ -118,16 +102,6 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'review-launch' ? recordReviewLaunch(context.services, context.actor, target, data, key) : recordReviewVerdict(context.services, context.actor, target, data, key);
-    },
-  },
-  // GY-2078: the loop's withdrawal of a control-plane review verdict — a capped change request an
-  // independent approver refused as non-blocking — recorded in the control plane's own review record,
-  // with no GitHub request: a control-plane head has no pull request to dismiss a review on.
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/review-withdraw$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'review-withdraw');
-      return withdrawReviewVerdict(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // The merge writer's ledger (GY-1524): intent, trial, pushed, reconciled and refused, recorded by the

@@ -3,15 +3,13 @@ import { environmentBlocked, blockedPath } from '../worker-sandbox.js';
 import { blockerView } from '../model/blocker-class.js';
 import { humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
-import { type Work, standingEscalations } from '../model.js';
-import { refusedReconciliation } from '../model/merge-authorization.js';
+import type { Work } from '../model.js';
 import { missingBaseAncestry } from '../merge-base-ancestry.js';
 import { type ProductionReport, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';
 import { roleAtCapacity } from '../fleet.js';
 import { humanOnlyDecisions } from './harness.js';
-import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
-import { containmentInMotion, containmentSettleWaitBoundMs } from '../model/containment.js';
+import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.js';
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
 export interface ControlPlaneStatus {
@@ -30,16 +28,16 @@ export interface ControlPlaneStatus {
 }
 /**
  * Who resolves an attention item and the next command they run. `role` is an agent role
- * (master, approver, reviewer, control plane); `human` is true only for the human-only list,
+ * (master, reviewer, control plane); `human` is true only for the human-only list,
  * and `humanOnly` then names which of those decisions it is.
  */
-export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' | 'human'; approvedBy: 'approver' | null; human: boolean; humanOnly: typeof humanOnlyDecisions[number] | null; next: string }
+export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' | 'human'; human: boolean; humanOnly: typeof humanOnlyDecisions[number] | null; next: string }
 /** One attention line. `resource` names the registered resource a symptom was attributed to (GY-1272). */
 export interface AttentionItem extends AttentionOwner { subject: string; text: string; resource?: string;
   /** Until when the loop is itself carrying what the line names (GY-1315): shown in master status. */
   inMotionUntil?: string }
-export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
-export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
+export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string): AttentionOwner => ({ role, human: false, humanOnly: null, next });
+export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', human: true, humanOnly, next });
 /** The sources of installation attention. */
 export const installationSources = ['app-permissions', 'held-jobs', 'delegation-limits', 'production'] as const;
 /** The owner of one installation attention line, by the source that raised it. */
@@ -56,13 +54,12 @@ export function installationOwner(source: typeof installationSources[number], te
     : 'Fix the failing deployment of the base branch, which production tracks, with the configured provider');
 }
 /** Why a work item raises attention. */
-export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
+export const workAttentionCauses = ['human-request', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
   'stalled-step', 'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const;
 export type WorkAttentionCause = typeof workAttentionCauses[number];
 /**
  * The owner of a work item's attention, from the same facts that raised it. Everything an agent
- * identity may run is routed to an agent: decisions a human used to make go to the master and
- * its independent approver through graphyard master decide.
+ * identity may run is routed to an agent: decisions a human used to make the master applies at once.
  */
 export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = Date.now()): AttentionOwner {
   const key = work.key;
@@ -82,15 +79,9 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
     const reverted = work.observation!.revertedDelivery!;
     return agentOwner('master', `graphyard master create FILE for a follow-up item that restores ${reverted.files.map(file => file.path).join(', ')} to the base branch as ${key} shipped them${reverted.removedBy ? `, naming merge ${reverted.removedBy.mergeSha?.slice(0, 12) ?? `of pull request #${reverted.removedBy.pr}`}${reverted.removedBy.key ? ` of ${reverted.removedBy.key}` : ''} as what removed them` : ''}; request no merge decision for ${key} until the base branch holds its content — a reconciliation now would record a delivery for work that is not there`);
   }
-  // The merge already happened and cannot be re-run: the only way to a correct delivery record is
-  // the two-party merge decision the engine re-checks against the record at the merge cutoff. Once
-  // the record has refused one, what remains is the operator's: a decision citing that refusal,
-  // with an admin credential on one side, delivers the merge as operator-authorized (GY-94).
-  if (cause === 'merged-unauthorized') {
-    const refused = refusedReconciliation(work);
-    return refused ? agentOwner('master', `graphyard master decide ${key} merge REASON with a REASON that cites refused decision ${refused.decision}, then the operator approves it with their admin credential (GRAPHYARD_TOKEN_FILE=ADMIN_TOKEN_FILE graphyard master approve ${key} DECISION REASON); the next observation delivers it as operator-authorized, stating that no execution authorized the merge and what the record lacked`, 'approver')
-      : agentOwner('master', `graphyard master decide ${key} merge REASON, then graphyard master approver ${key} DECISION; the next observation re-checks the record at the merge cutoff and delivers on the approved decision, or records why it cannot`, 'approver');
-  }
+  // The merge already happened and cannot be re-run: it stays on the record as a violation, and
+  // the work it skipped is a follow-up item.
+  if (cause === 'merged-unauthorized') return agentOwner('master', `graphyard master create FILE for a follow-up item that re-verifies what ${key}'s merge skipped; its unauthorized-merge violation stays on the record`);
   // Graphyard absorbs a moved base itself; a conflict is the one case it cannot, so the candidate
   // goes back to a worker for a fresh attempt rather than waiting for a refresh that cannot land.
   // On a system-driven item that rework is the loop's own round (GY-1389), which refuses a hand request:
@@ -99,27 +90,18 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
     const due = conflictReworkDue(work, now);
     const bound = due ? ` (due at ${due.dueAt}, ${conflictReworkBoundMs / 60_000} minutes after the conflict was first recorded at ${due.since})` : '';
     return cause === 'stalled-step'
-      ? agentOwner('master', `Nothing to run by hand: a hand rework of ${key} is refused. Check the loop is cycling (master status names its liveness; systemctl --user restart graphyard-master.service restarts a stopped loop), and file the decisions-step defect that left its conflict rework unrequested${bound}`)
-      : agentOwner('control plane', `Nothing to run by hand: the loop's decisions step requests ${key}'s rework itself${bound}; past that bound master status names the step as stalled`);
+      ? agentOwner('master', `graphyard master rework ${key} REASON returns it now; check the loop is cycling (master status names its liveness), since its rework step left the conflict rework unapplied${bound}`)
+      : agentOwner('control plane', `Nothing to run by hand: the loop's rework step returns ${key} to a worker itself${bound}; past that bound master status names the step as stalled`);
   }
-  if (cause === 'base-conflict') return agentOwner('master', `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION`, 'approver');
-  // GY-1633: a lapsed fence inside its settle bound is the loop's reclaim step's to verify and settle; a hand settlement
-  // of it is a second executor for one fence, so the owner names the step and the bound, never the command.
-  if ((cause === 'containment-settleable' || cause === 'containment-grace') && containmentInMotion(work, now))
-    return agentOwner('control plane', `Nothing to run by hand: the loop's reclaim step verifies the host and settles ${key}'s fence itself within ${containmentSettleWaitBoundMs / 60_000} minutes of its grace window ending; past that bound graphyard master settle-containment ${key} REASON settles it`);
-  if (cause === 'containment-settleable') return agentOwner('master', `graphyard master settle-containment ${key} REASON`);
-  if (cause === 'containment-grace') return agentOwner('master', `Wait out the grace window, then graphyard master status verifies the host and graphyard master settle-containment ${key} REASON once settleable`);
-  if (cause === 'containment') return agentOwner('master', `Stop the recorded supervisor on its host, then graphyard master decide ${key} ${work.stage === 'done' ? 'recover' : 'rework'} REASON and graphyard master approver ${key} DECISION`, 'approver');
+  if (cause === 'base-conflict') return agentOwner('master', `graphyard master rework ${key} REASON`);
   // A system-driven item is never pushed by hand (GY-175): the owner text names the loop step, not a command the CLI refuses.
   const driven = work.systemDriven === true;
   if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, ${driven ? `the loop's dispatcher launches ${key} again` : `graphyard master dispatch ${key} PROFILE`}`);
-  if (cause === 'proof-gap') return agentOwner('master', `graphyard master decide ${key} grant '{"principal":"PRODUCER","patterns":["${(work.proofGaps ?? [])[0] ?? 'PROOF'}"]}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  if (cause === 'proof-gap') return agentOwner('master', `graphyard grants grant PRODUCER ${(work.proofGaps ?? [])[0] ?? 'PROOF'} REASON`);
   const reviewNext = driven ? `the loop relaunches the review on its own; graphyard master review ${key} only once the loop has stopped relaunching its request` : `graphyard master review ${key}`;
   if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then ${reviewNext}`);
   if (cause === 'launch-review') return agentOwner('master', `Fix the refusal reason, then ${reviewNext}`);
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
-  const escalation = standingEscalations(work)[0];
-  if (escalation) return agentOwner('master', `graphyard master decide ${key} resolve '{"trigger":"${escalation.trigger}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
   // A blocker of a routine class is the loop's to clear (GY-1008): it probes the cause every cycle.
   const blocker = blockerView(work);
   // A sandbox refusal the probe keeps failing on is the launcher's grant to fix (GY-134); the loop clears it once the grant lands.
@@ -130,8 +112,8 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
   const first = work.gates.find(gate => !gate.passed);
   const manual = first?.name === 'acceptance' ? /(manual:[\w./-]+)/.exec(first.reasons.join(' '))?.[1] : undefined;
-  if (manual && driven && automatableProof(work, manual)) return agentOwner('control plane', `The loop's producer session produces ${manual} on the exact head; once the loop stops relaunching its request, graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`);
-  if (manual) return agentOwner('master', `graphyard master decide ${key} attest '{"proof":"${manual}"}' REASON, then graphyard master approver ${key} DECISION`, 'approver');
+  if (manual && driven && automatableProof(work, manual)) return agentOwner('control plane', `The loop's producer session produces ${manual} on the exact head; once the loop stops relaunching its request, graphyard master attest ${key} ${manual} REASON`);
+  if (manual) return agentOwner('master', `graphyard master attest ${key} ${manual} REASON`);
   if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
   if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `Nothing to run by hand: GitHub merges ${key} once its merge gate passes`);
   // A master-role refusal is not a cause anyone clears (GY-1761): the token's role is by design, so the

@@ -12,14 +12,13 @@ import type { Work } from './work.js';
 // were a GitHub credential failure fixed hours earlier, four were environment faults and one needed
 // its already-requested approver launched. Nothing re-checked a blocker once it was recorded. Here
 // each recorded blocker is read into one named class from its own text; the loop probes the cause
-// of every environmental class each cycle and clears the blocker once the probe passes, launches a
-// needs-decision blocker's approver,
+// of every environmental class each cycle and clears the blocker once the probe passes,
 // and only a genuine or human-only blocker counts as needing someone. Browser-safe: the board
 // classifies with it too, and the control plane re-classifies before it lets a probe clear.
 // ---------------------------------------------------------------------------
 
 export const blockerClasses = ['github-credential', 'control-plane-error', 'sandbox-path', 'worktree-mismatch', 'outside-scope-test-failure',
-  'dispatch-failure', 'host-supervisor', 'runtime-denial', 'runtime-exhaustion', 'github-outage', 'master-role', 'needs-decision', 'human-only', 'genuine'] as const;
+  'dispatch-failure', 'host-supervisor', 'runtime-denial', 'runtime-exhaustion', 'github-outage', 'master-role', 'human-only', 'genuine'] as const;
 export type BlockerClass = typeof blockerClasses[number];
 
 /** The classes whose cause lies outside the item: the loop probes each, every cycle, and clears the blocker once its probe passes. */
@@ -44,15 +43,12 @@ export const blockerClassMeaning: Record<BlockerClass, string> = {
   'runtime-exhaustion': "the worker's runtime account reached its usage limit; cleared once a worker profile can take a launch on an account dispatch would choose (configured, not held, under its provider quota, or the agent registry's pick), which resumes the kept work",
   'github-outage': 'GitHub answered a git or gh operation with its own server error; cleared once githubstatus.com reports Git Operations, API Requests and Pull Requests operational and git ls-remote and a dry-run push pass inside the worker confinement',
   'master-role': 'a step only the master role can take (a master command, or the doctor-issued checkout-restore) recorded from a worker token; a master-role identity — the master session or a doctor run, from the coordinator checkout — takes the step itself and unblocks the item (GY-1761)',
-  'needs-decision': 'the item waits on a requested two-party decision; its approver is launched, and the blocker is cleared once the decision is judged',
   'human-only': 'one of the three decisions only a human may make',
   genuine: 'anything the classes above do not recognise: the master reads it and acts',
 };
 
 export interface BlockerClassification {
   class: BlockerClass;
-  /** Needs-decision: the decision id the blocker names, when it names one. */
-  decision: string | null;
   /** Sandbox path: the path the blocker says could not be written. */
   path: string | null;
 }
@@ -121,8 +117,6 @@ const fileRefusal = /\bEACCES\b|\bEPERM\b|Operation not permitted|Permission den
 const worktree = /\bworktree\b[^.]*\b(?:another|other|different|wrong|mismatch|belongs to|not (?:this|the) item|instead of)\b|\b(?:another|other|different|wrong) (?:item's )?(?:worktree|checkout)\b|attached to (?:the )?\S+ worktree|worktree mismatch/i;
 const suiteFailure = /\b(?:tests?|suites?|specs?|checks?|typecheck)\b[^.]*\b(?:fail\w*|red|broken)\b|\b(?:fail\w*|red|broken)\b[^.]*\b(?:tests?|suites?|specs?)\b/i;
 const outsideScope = /\boutside (?:(?:the|its|this item's|my) )?(?:plannedFiles|planned files|scope|item)|\bnot in (?:the |its )?(?:plannedFiles|planned files|scope)|\bunrelated\b|\bon (?:main|the base(?: branch)?)\b|\bpre-?existing\b/i;
-const decisionWords = /\b(?:decision|approver|approval)\b/i;
-const decisionWait = /\b(?:needs?|await\w*|waits?|waiting|requested|pending|launch\w*|judge\w*|unanswered)\b/i;
 /**
  * The recorded refusal of a step the master role gates (GY-1761): the master connection file only the coordinator checkout holds
  * (`graphyard master status` refuses without it), the master role a worker's token is narrowed away from by design, and the
@@ -130,7 +124,6 @@ const decisionWait = /\b(?:needs?|await\w*|waits?|waiting|requested|pending|laun
  * the role, so the class is a hand-off: a master-role identity takes the step itself, then unblocks the item.
  */
 export const masterRoleBlocker = /\.graphyard\/master\.json does not exist|\bno master role\b|\bmaster-role session\b/i;
-const uuidToken = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
 /** How every blocker the loop recorded for repeated dispatch failures opens (GY-1078; the loop records none since GY-2873, one still standing reads here). */
 const dispatchFailureBlocker = /^Dispatch failed \d+ consecutive times with the same cause since \S+, so the master loop stopped redispatching /;
@@ -166,18 +159,17 @@ function refusedPath(text: string): string | null {
 
 /**
  * The class a recorded blocker belongs to, read from its text and whether the item waits on a
- * human. Unrecognised text is `genuine`. A decision wait that names no decision id is still
- * `needs-decision`: the loop acts on whichever decision stands requested on the item.
+ * human. Unrecognised text is `genuine`.
  */
 export function classifyBlocker(text: string | null | undefined, context: { humanRequest?: boolean } = {}): BlockerClassification {
   const blocker = (text ?? '').trim();
-  const none = { decision: null, path: null };
+  const none = { path: null };
   if (context.humanRequest || blocker.startsWith(humanRequestBlocker) || /^A human declined /.test(blocker)) return { class: 'human-only', ...none };
   if (!blocker) return { class: 'genuine', ...none };
   // The loop's own record of repeated launch failures on a fleet-idle cause (GY-1322), whatever else its cause quotes.
   if (dispatchFailureBlocker.test(blocker) && fleetIdleCause(blocker)) return { class: 'dispatch-failure', ...none };
   // GY-1761: a step the master role gates, read before any other class — the refusal is precise, and
-  // no environmental probe or decision route answers it; the master identity takes the step itself.
+  // no environmental probe answers it; the master identity takes the step itself.
   if (masterRoleBlocker.test(blocker)) return { class: 'master-role', ...none };
   if (githubCredential(blocker)) return { class: 'github-credential', ...none };
   // GY-1567: the worker's session or GitHub, not the item: each clears without anyone.
@@ -191,7 +183,6 @@ export function classifyBlocker(text: string | null | undefined, context: { huma
   if (controlPlane.test(blocker)) return { class: 'control-plane-error', ...none };
   const path = refusedPath(blocker);
   if (readOnlyFileSystem.test(blocker) || (fileRefusal.test(blocker) && path)) return { class: 'sandbox-path', ...none, path };
-  if (decisionWords.test(blocker) && decisionWait.test(blocker)) return { class: 'needs-decision', ...none, decision: uuidToken.exec(blocker)?.[0].toLowerCase() ?? null };
   return { class: 'genuine', ...none };
 }
 

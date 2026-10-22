@@ -1,12 +1,11 @@
-// Concern: cycle step 2d — every standing blocker re-checked each cycle (GY-1008): environmental causes probed and cleared, a needs-decision blocker's approver launched.
+// Concern: cycle step 2d — every standing blocker re-checked each cycle (GY-1008): environmental causes probed and cleared.
 import { deferBoundMs, servingReleaseProof, type Work } from '../model.js';
 import { notBeforeInstants } from '../model/plain-status.js';
 import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, itemSpecificPlaneError, maxAutomaticClears, needsSomeone, type BlockerClassification } from '../model/blocker-class.js';
 import { loopHeldBlocker } from '../model/loop-owned.js';
-import { approvalWatchSchema, message, type DaemonAction } from './state.js';
-import { handWatchPrefix } from './cycle-decisions.js';
+import { message, type DaemonAction } from './state.js';
 import { profileHealth, readyToRetry } from './sessions.js';
-import { boundDetail, detailChanged } from './decisions.js';
+import { boundDetail, detailChanged } from './text.js';
 import { record } from './effects.js';
 import { workerHandle } from './cycle-resume.js';
 import { carriedRow, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
@@ -22,13 +21,11 @@ export const blockerEscalateMs = 2 * 60 * 60_000;
 /** How many blocker probes run at once: each child probe may take up to 30 s, so a serial cycle with several stalled ones would hold for minutes. */
 export const blockerProbeConcurrency = 4;
 // All are per blocker episode: keyed by the attempt that met the blocker and its text — the base
-// tip it failed on, when its probe first failed, its report to the master, the decisions it was
-// seen waiting on — and the approver launch by its decision. Each is retired with the blocker, so
-// the cursor holds none past it.
-const episodeKinds = ['base', 'failing', 'escalated', 'awaited', 'approver'] as const;
+// tip it failed on, when its probe first failed, and its report to the master. Each is retired with
+// the blocker, so the cursor holds none past it.
+const episodeKinds = ['base', 'failing', 'escalated'] as const;
 const episodeRow = (kind: typeof episodeKinds[number]) => (item: Pick<Work, 'id' | 'epoch'>, blocker: string) => `blocker:${kind}:${item.id}:${item.epoch}:${blocker.length}:${blocker.slice(0, 40)}`;
-const baseKey = episodeRow('base'), failingKey = episodeRow('failing'), escalatedKey = episodeRow('escalated'), awaitedKey = episodeRow('awaited');
-const approverKey = (item: Pick<Work, 'id'>, decision: string) => `blocker:approver:${item.id}:${decision}`;
+const baseKey = episodeRow('base'), failingKey = episodeRow('failing'), escalatedKey = episodeRow('escalated');
 const episodeKey = (item: Pick<Work, 'id'>, key: string) => episodeKinds.some(kind => key.startsWith(`blocker:${kind}:${item.id}:`));
 const episodeKeys = (state: { actions: Record<string, unknown> }, item: Pick<Work, 'id'>) => Object.keys(state.actions).filter(key => episodeKey(item, key));
 
@@ -58,17 +55,14 @@ export function timeBoundHold(item: Work, now: number): number | null {
  *   credential and write probes inside the confinement the worker's launch describes — once per
  *   cause per cycle, and the probe is written on the item; a passing probe clears the blocker in
  *   the same write, which the control plane allows only after classifying the blocker itself;
- * - a needs-decision blocker gets the approver of its standing decision launched when no session
- *   judges it yet — watched from launch as a hand-launched approver is, so the decision step closes
- *   it once the decision is judged — and is cleared once no decision on the item stands requested;
  * - a genuine or human-only blocker, or one this loop has cleared `maxAutomaticClears` times in a
  *   row, is left to the master (or the human), which is all `master status` counts as needing someone.
  * - a time-bound post-deploy follow-up (`timeBoundHold`) is held on its instant and its blocker
  *   cleared in one write (`window`, GY-1740), so it waits out of Blocked without a worker launch;
- * The per-episode cursor rows (the base tip, the approver launch) are retired once the blocker is
+ * The per-episode cursor rows (the base tip, the probe's first failure) are retired once the blocker is
  * gone, and a delivered or closed item's rows with it, so `state.actions` stays bounded.
  */
-export const blockerStep = (cycle: Cycle) => withinStepBudget(cycle, 'blockers', ['approver', 'closeSession', 'deferWindow', 'probeBlocker', 'decisions', 'approverLaunches', 'recordBlockerProbe', 'recordSession'], blockerStepWithin); // GY-1774: every call the step makes — the hold, each probe, the decision read, the launch listing, the probe record, the approver launch, the pane close and the handle it records — is bounded
+export const blockerStep = (cycle: Cycle) => withinStepBudget(cycle, 'blockers', ['closeSession', 'deferWindow', 'probeBlocker', 'recordBlockerProbe', 'recordSession'], blockerStepWithin); // GY-1774: every call the step makes — the hold, each probe, the decision read, the launch listing, the probe record, the approver launch, the pane close and the handle it records — is bounded
 async function blockerStepWithin(cycle: Cycle) {
   const { config, state, effects, now, clock, performed, isolate, open, launcher } = cycle;
   for (const item of open) await isolate('blocker', item, item.key, () => endCredentialBlockedSession(cycle, item));
@@ -180,47 +174,6 @@ async function blockerStepWithin(cycle: Cycle) {
         const seen = state.actions[baseKey(item, blocker)]?.detail ?? result.failedOn;
         if (!state.actions[baseKey(item, blocker)]) await note(baseKey(item, blocker), item, 'done', seen ?? result.baseTip);
         if (seen && seen !== result.baseTip) result = { ...result, passed: true, detail: `the base tip moved from ${seen.slice(0, 12)} to ${result.baseTip.slice(0, 12)}` };
-      }
-    } else if (classification.class === 'needs-decision') {
-      if (!effects.decisions) return;
-      const decisions = (await effects.decisions(item)).decisions;
-      const requested = decisions.filter(decision => decision.state === 'requested');
-      const decision = requested.find(entry => entry.id === classification.decision) ?? requested[0];
-      // The decisions this blocker was seen waiting on: only one of them being judged clears it.
-      const awaitedRow = state.actions[awaitedKey(item, blocker)];
-      const awaited = new Set([...(awaitedRow?.detail ? awaitedRow.detail.split(',') : []), ...requested.map(entry => entry.id)]);
-      if (requested.length && awaited.size !== (awaitedRow?.detail ? awaitedRow.detail.split(',').length : 0)) await note(awaitedKey(item, blocker), item, 'done', [...awaited].join(','));
-      if (!decision) {
-        // Judged means a decision this blocker names, or one it was seen waiting on, now stands
-        // judged. Prose that reads like a decision wait ("waiting for approval") on an item with
-        // no such decision is not one the loop can act on: the master reads it.
-        const judged = classification.decision ? decisions.some(entry => entry.id === classification.decision) : awaited.size > 0;
-        if (!judged) {
-          await handOver(`${item.key} is blocked on what reads as a decision wait, but ${classification.decision ? `no decision ${classification.decision} exists on it` : 'it names no decision and none on it was requested'}, so it needs the master: ${blocker}`);
-          return;
-        }
-        result = { probe: 'no decision on the item stands requested', passed: true, detail: classification.decision ? `decision ${classification.decision} was judged` : `every decision it waited on (${[...awaited].join(', ')}) was judged` };
-      } else {
-        result = { probe: 'no decision on the item stands requested', passed: false, detail: `decision ${decision.id} (${decision.action}) waits on its approver` };
-        const watched = Object.values(state.approvals).some(watch => watch.decision === decision.id && !watch.settledAt) || launcher.busy(`launch:approver:${decision.id}`)
-          || (await effects.approverLaunches?.().catch(error => { if (stepCallCarried(error)) throw error; return []; }) ?? []).some(entry => entry.decision === decision.id); // GY-1774: a carried listing is the item's carried handling, never an empty one
-        const launchKey = approverKey(item, decision.id), previous = state.actions[launchKey];
-        if (!watched && effects.approver && (!previous || carriedRow(previous) || (previous.state === 'failed' && readyToRetry(previous, state.cycle)))) {
-          const attempts = (previous?.attempts ?? 0) + 1;
-          try {
-            const launched = await effects.approver(item, decision.id);
-            // Watched from launch, as a `master approver` session is: the decision step's hand-watch
-            // supervision closes it once its decision is judged, and relaunches it within the bound.
-            const stamp = new Date(clock).toISOString();
-            state.approvals[`${handWatchPrefix}${decision.id}`] = approvalWatchSchema.parse({ work: item.key, action: decision.action, decision: decision.id, requestedAt: stamp, agentName: launched.agentName, pane: launched.pane,
-              launchedAt: stamp, launches: 1, account: launched.account ?? null, runtime: launched.runtime ?? null, session: launched.session ?? null });
-            performed.push(await note(launchKey, item, 'done', `${item.key} is blocked on decision ${decision.id} (${decision.action}) that no approver session judged; launched approver ${launched.agentName}${launched.pane ? ` in pane ${launched.pane}` : ''}`, attempts));
-            result = { ...result, detail: `decision ${decision.id} (${decision.action}): approver ${launched.agentName} launched` };
-          } catch (error) {
-            if (stepCallCarried(error)) await recordCarried(cycle, launchKey, { kind: 'blocker', work: item.key, epoch: item.epoch }, error, `Launching the approver of ${item.key}'s decision ${decision.id}`);
-            else performed.push(await note(launchKey, item, 'failed', `${item.key} is blocked on decision ${decision.id}; its approver could not be launched: ${message(error)}`, attempts));
-          }
-        }
       }
     }
     if (!result) return;

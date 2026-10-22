@@ -1,5 +1,5 @@
 // Concern: the acceptance role (GY-1417) — each open goal is drafted headless into customer outcomes and
-// required cases on one pull request, judged headless by the approver identity, landed by the control
+// required cases on one pull request, judged headless in a separate session, landed by the control
 // plane at its approved head and recorded merged (or closed unmerged, or conflicting, and drafted again).
 // Under the control-plane merger (GY-1535) the draft is one commit the merge writer lands instead: no pull request.
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -10,7 +10,6 @@ import { acceptanceChangeRisk, acceptanceDraftSchema, acceptanceName, acceptance
 import type { MergerMode } from '../merger-mode.js';
 import { baseMovedReason } from '../merge-writer/executor.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
-import { agentToken } from '../master/autonomy.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
@@ -24,14 +23,14 @@ import { ChildProcessError, type ChildRun } from '../child-runner.js';
 import { simplicityParagraph } from '../reviewer.js';
 import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
-import { detailChanged } from './decisions.js';
+import { detailChanged } from './text.js';
 import type { Cycle } from './cycle.js';
 import { caseChangeStep, clearCaseChangeJudgements } from './case-change-judge.js';
 import { carriedIsolate, stepCallCarried } from './step-budget.js';
 
 export const acceptanceRole = 'acceptance';
 export const acceptanceTool = 'graphyard_acceptance';
-/** The judgement run's Pi role and tool: the approver identity's verdict on one draft. */
+/** The judgement run's Pi role and tool: a separate judge session's verdict on one draft. */
 export const acceptanceJudgeRole = 'acceptance-judge';
 export const acceptanceJudgementTool = 'graphyard_acceptance_judgement';
 /** A run that returned nothing is tried again after this long: each try is a paid model run. */
@@ -66,9 +65,9 @@ export interface AcceptanceEffects {
   open: (goal: Goal, draft: AcceptanceDraft) => Promise<{ pr: number; branch: string; head: string }>;
   /** Post the draft as the master's operator-agent identity: its author. */
   draft: (goal: Goal, input: AcceptanceDraft & { pr: number | null; branch: string; head: string }) => Promise<Goal>;
-  /** Post the verdict as the approver identity, which never authored a draft. */
+  /** Post the verdict as the master's identity. */
   judge: (goal: Goal, judgement: Judgement) => Promise<Goal>;
-  /** GY-1806: post the approver's verdict on a requested case change (goal case-change-approve|refuse) as the approver identity. */
+  /** GY-1806: post the approver's verdict on a requested case change (goal case-change-approve|refuse) as the master's identity. */
   judgeCaseChange?: (goal: Goal, change: CaseChange, judgement: Judgement) => Promise<Goal>;
   pullRequest: (pr: number) => Promise<PullRequestState>;
   /**
@@ -390,7 +389,7 @@ async function landChange(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goa
 
 /**
  * GY-1535: one approved acceptance change through the merge writer's steps. The change is classified
- * sensitive (model/goal.ts acceptanceChangeRisk), so it lands only on the approver identity's verdict
+ * sensitive (model/goal.ts acceptanceChangeRisk), so it lands only on the judge session's verdict
  * on its exact head, by an identity other than its author, and only when the merge adds nothing but
  * its cases and the contract. The merge commit of the head onto the fetched tip is pushed leased on
  * that tip, made again on a moved tip up to the writer's retrials; a head the base already holds a
@@ -473,7 +472,7 @@ export const openAcceptancePullRequest = (run: ChildRun, root: string, scratch: 
     const open = JSON.parse(String(await run('gh', ['pr', 'list', '--repo', config.repository, '--head', branch, '--state', 'open', '--json', 'number', '--limit', '1']))) as { number: number }[];
     if (open[0]) return { pr: open[0].number, branch, head };
     const body = [`Acceptance for ${goal.key}: ${goal.statement}`, '', ...draft.outcomes.map(outcome => `- **${outcome.title}** (${outcome.id}), proved by required uat case \`${outcome.case.id}\`: ${outcome.criteria.join('; ')}`), '',
-      'Drafted by the acceptance role and judged by the approver identity, never its author; once approved Graphyard lands it at the approved head, and its cases and bindings are protected from then on.'].join('\n');
+      'Drafted by the acceptance role and judged in a separate session; once approved Graphyard lands it at the approved head, and its cases and bindings are protected from then on.'].join('\n');
     const url = String(await run('gh', ['pr', 'create', '--repo', config.repository, '--base', config.baseBranch, '--head', branch, '--title', `${goal.key}: acceptance — ${clip(goal.statement, 80)}`, '--body', body])).trim();
     const pr = Number(url.match(/\/pull\/(\d+)/)?.[1]);
     if (!Number.isSafeInteger(pr) || pr <= 0) throw new Error(`gh pr create answered ${clip(url, 200)}, which names no pull request`);
@@ -491,8 +490,7 @@ interface Calls {
 /**
  * The acceptance role's effects under the live configuration: runners as the diagnostician's (the
  * registry's acceptance or approver role when an operator defines one, else Pi on
- * `run.diagnostician`'s models, whatever its `enabled`), drafts posted as the master's operator-agent identity and verdicts as the
- * approver identity, so the author of a draft never judges it, and GitHub through `gh`. Under the
+ * `run.diagnostician`'s models, whatever its `enabled`), drafts and verdicts posted as the master's operator-agent identity, and GitHub through `gh`. Under the
  * control-plane merger (GY-1535) a draft is committed in the coordinator checkout instead and landed
  * by the merge writer's reads, recorded merged as the operator agent.
  */
@@ -500,15 +498,7 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
   // The diagnostician's model settings, but enabled on its own: `run.diagnostician.enabled: false` never holds a goal.
   const { run } = calls, settings = { ...diagnosticianSettings(config.run), enabled: true };
   const gh = async (args: string[]) => String(await run('gh', [...args, '--repo', config.repository]));
-  const asApprover = async (path: string, body: unknown, key: string) => {
-    const response = await calls.fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${await agentToken(root, config, 'approver')}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
-    // GY-1751: a proxy's non-JSON 502-504 keeps its status, so the plane's outage is told from the server's own refusal.
-    const text = await response.text();
-    let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: clip(text, 200) }; }
-    if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
-    return result;
-  };
+
   const read = async (pr: number): Promise<PullRequestState> => {
     const view = JSON.parse(await gh(['pr', 'view', String(pr), '--json', 'state,mergeCommit,headRefOid']));
     return { state: view.state === 'MERGED' ? 'merged' : view.state === 'CLOSED' ? 'closed' : 'open', mergeSha: view.mergeCommit?.oid ?? null, head: view.headRefOid ?? null };
@@ -518,7 +508,7 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
     goals: async () => (await calls.asCoordinator('goals')).goals, // every goal: a delivered one still protects its cases and may carry a requested change (GY-1806)
     runner: async (role, attempt, goal) => {
       if (attempt === 'primary') {
-        const [name, principal] = role === 'draft' ? [acceptanceRole, config.operatorAgent!.id] as const : ['approver', config.approver!.id] as const;
+        const [name, principal] = role === 'draft' ? [acceptanceRole, config.operatorAgent!.id] as const : ['approver', config.operatorAgent!.id] as const;
         const fleet = await selectFleetSession(config, name, { name, principal }, await heldAwareProbe(config, { work: goal.key })); // an account held here, or its twin, is spent (GY-1574)
         if (fleet) { const launched = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launched.command, model: launched.model, release: fleet.release }; }
       }
@@ -527,8 +517,8 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
     },
     open: (goal, draft) => openAcceptancePullRequest(run, root, worktreeRoot(root, config), config, goal, draft),
     draft: (goal, input) => calls.asOperatorAgent('POST', `goals/${goal.key}/draft`, input, `acceptance:${goal.id}:${goal.revision}`),
-    judge: (goal, judgement) => asApprover(`goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
-    judgeCaseChange: (goal, change, judgement) => asApprover(`goals/${goal.key}/case-change-${judgement.verdict}`, { change: change.id, reason: judgement.reason }, `acceptance:${goal.id}:case-change:${change.id}:judged`),
+    judge: (goal, judgement) => calls.asOperatorAgent('POST', `goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
+    judgeCaseChange: (goal, change, judgement) => calls.asOperatorAgent('POST', `goals/${goal.key}/case-change-${judgement.verdict}`, { change: change.id, reason: judgement.reason }, `acceptance:${goal.id}:case-change:${change.id}:judged`),
     pullRequest: read,
     land: goal => calls.asOperatorAgent('POST', `goals/${goal.key}/land`, {}, `acceptance:${goal.id}:${goal.revision}:land:${Date.now()}`),
     close: async (pr, comment) => { if ((await read(pr)).state === 'open') await gh(['pr', 'close', String(pr), '--comment', comment, '--delete-branch']); },

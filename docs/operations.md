@@ -8,14 +8,12 @@
 
 ## Incident decision tree
 
-- **Item not moving**: fix the refusal's cause; `master status` flags no progress 60min. Never weaken requirements. Escalation: a declared human runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](master-agent-reference.md#recovery)). Expired unsubmitted: [lost worker](#lost-worker-before-submission); retry: [rework](#submitted-implementation-needs-rework); fenced: [quarantine](#supervisor-died-leaving-a-containment-quarantine). A failed producer-runnable manual proof returns to worker, never to an operator escalation.
+- **Item not moving**: fix the refusal's cause; `master status` flags no progress 60min. Never weaken requirements. Expired unsubmitted: [lost worker](#lost-worker-before-submission); retry: [rework](#submitted-implementation-needs-rework). A failed producer-runnable manual proof returns to worker.
 
 ## Recovery recipes
 
 ```sh
 graphyard rework GY-N --previous-worker-stopped "reason"
-graphyard master settle-containment GY-N "reason"
-graphyard recover-containment GY-N --previous-worker-stopped "reason"
 graphyard unblock GY-N "reason"
 systemctl --user restart graphyard-master-OWNER-NAME
 graphyard master checkout-restore "reason"
@@ -37,7 +35,7 @@ Never attest a stop you have not confirmed.
 
 ## Resources and disk
 
-`resourceRegistry` bounds resources ([remedies](#control-plane-resources)); `disk` attention under `run.diskThresholdGb` is answered (reported only) while the latest worktree-reclaim pass is ≤30 min old and out of reach (nothing disposable now, no backlog or error, its removals included); ≤ half the threshold, or ENOSPC/EDQUOT, always raises. Otherwise `escalation:dirty-checkout`.
+`resourceRegistry` bounds resources ([remedies](#control-plane-resources)); `disk` attention under `run.diskThresholdGb` is answered (reported only) while the latest worktree-reclaim pass is ≤30 min old and out of reach (nothing disposable now, no backlog or error, its removals included); ≤ half the threshold, or ENOSPC/EDQUOT, always raises.
 
 ## Master coordination loop
 
@@ -45,11 +43,7 @@ Never attest a stop you have not confirmed.
 
 ## Lost worker before submission
 
-Leases expire 120s after last heartbeat (plane stall: 30s `stallRenewalWindowMs`, not another lease period); higher-epoch claim keeps worktree. Unexplained lapses raise [`lease-loss`](protocol/work-commands.md#how-a-lease-ends).
-
-## Supervisor died leaving a containment quarantine
-
-[`master settle-containment`](#recovery-recipes) verifies nothing survives; refused: confirm stop, then rework, or `recover-containment`.
+Leases expire 120s after last heartbeat (plane stall: 30s `stallRenewalWindowMs`, not another lease period); the attempt ends and the item is claimable again; higher-epoch claim keeps worktree.
 
 ## Accepted evidence turns out to be wrong
 

@@ -75,8 +75,6 @@ export const gateRefusalCatalogue: RefusalShape[] = [
   // merge
   { gate: 'merge', id: 'merge-writer-push', match: mergeWriterPushPattern, kinds: ['merge'], example: 'merge writer has not pushed aaaaaaaaaaaa' },
   { gate: 'merge', id: 'unobserved', match: /^The merge writer has not observed the current candidate$/, example: 'The merge writer has not observed the current candidate', kinds: ['resync'] },
-  { gate: 'merge', id: 'escalation', match: /^Unresolved .+ escalation requires operator resolution: /, kinds: ['escalate'],
-    example: 'Unresolved security-concern escalation requires operator resolution: the candidate ships a credential' },
   { gate: 'merge', id: 'lead-hold', match: /^Slice lead .+ ruled .+ under rule .+; delivery is blocked until the authorized recovery: /, kinds: ['escalate'],
     example: 'Slice lead lead-a ruled send-back under rule R-1; delivery is blocked until the authorized recovery: the slice is frozen for the release' },
 ];

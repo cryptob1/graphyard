@@ -10,12 +10,10 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, type PlaneDeploy, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
-import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
-import { containmentPhase } from './model/containment.js';
 import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { onto } from './model/base-refresh.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './model/merge-authorization.js';
@@ -43,16 +41,12 @@ import { observeBaseHold } from './model/behind-base.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
-import { loopOwnedRefusal } from './model/loop-owned.js';
+import { loopOwnedRefusal, ownerHoldRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
-import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, ownerHoldRefusal, quarantinedRevisionRefusal, requiredDecisionCapabilities, type Decision, type HeldApplication } from './model/approval.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { mechanicalHoldUntil } from './mechanical-findings.js';
 import { decompositionHoldGraceMs, deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
-
-/** When a containment fence's authority lapsed, read from the record before it was lowered; null while its lease is live or it records no deadline. */
-const fenceLapsedAt = (work: Work | null, now: number) => { const phase = work ? containmentPhase(work, now) : null; return phase && phase.state !== 'live' ? phase.lapsedAt : null; };
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -66,40 +60,18 @@ const evidenceArtifact = z.object({
   digest: z.string().regex(/^sha256:[a-f0-9]{64}$/).optional(), expiresAt: z.iso.datetime().optional(),
   availability: z.enum(['available', 'expired', 'redacted', 'missing', 'upload-failed', 'external']), url: publicArtifactUrl.optional(),
 }).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
-// Longer than acknowledgeContainment's three 30-second HTTP attempts plus retry delays.
-export const launchFenceMs = 120_000;
-export const containmentScopeSchema = z.object({ unit: z.string().trim().min(1).max(200), pid: z.number().int().positive() }).strict();
 // GY-1992: plannedFiles and scope widening are retired. An intent or a held decision recorded before then may still name them; they are ignored.
 const retiredField = z.unknown().transform(() => undefined).optional();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs, split: createSchema.shape.split }).strict(),
-  reviewpolicy: z.object({ provider: z.enum(reviewProviders), reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(), expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000) }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
-  // Only a human operator resolves an escalation, and only the one it has read:
-  // the trigger names which standing concern is cleared, and the revision binds
-  // the request to the incident the operator actually read, so a stale client
-  // cannot clear a later incident that happens to share a trigger.
-  // A reconcile-raised lease-loss may instead be settled by any admin session that cites the
-  // ledger attestation explaining the lapse; the citation is verified against the ledger.
-  resolve: z.object({ trigger: z.enum(escalationTriggers), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive(),
-    attestation: z.object({ kind: z.enum(attestationKinds), epoch: z.number().int().positive() }).strict().optional() }).strict(),
-  recover: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
   claim: z.object({}).strict(),
-  rereview: z.object({ epoch: epoch.optional() }).strict(),
   // GY-1764: the loop reports the review ledger's planned mechanical-fix round for the item (or its absence), the one ground the review gate's hold reads.
   mechanicalplan: z.object({ reviewId: z.number().int().positive(), head: sha, planned: z.boolean() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
-  // The supervisor names the exact systemd scope it launches the session in, and its own pid,
-  // so settlement can tell this assignment's containment from a neighbour's.
-  quarantine: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), scope: containmentScopeSchema.optional() }).strict(),
-  launch: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
-  settle: z.object({ epoch, settlementToken: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
-  // `origin: 'loop'` marks the loop's own settlement of a verified-dead fence, which the intervention
-  // report counts only when it came past the settle bound (GY-1392); a hand `master settle-containment` sends none.
-  autosettle: z.object({ epoch, settlementHash: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000), verification: containmentVerificationSchema, origin: z.literal('loop').optional() }).strict(),
   // GY-860 AC-2: `failure` releases a claim whose worktree the host could not create. The attempt
   // is undone — the epoch returns, the untouched reservation and timeline entry go, the lease is
   // released — and the ledger keeps the git message, so the failure is on the item without
@@ -177,17 +149,17 @@ const pullAssignmentSchema = z.object({ host: executorName.optional(), work: z.s
 /** The refusal a replay of one idempotency key with different input earns; read back by the pull. */
 export const idempotencyMismatch = 'Idempotency key reused with different input';
 export type Command = keyof typeof commands;
-const operatorCapabilitiesByCommand: Partial<Record<Command, OperatorCapability>> = { create: 'intent:create', ready: 'intent:ready', unblock: 'intent:unblock', window: 'intent:unblock', requirements: 'policy:requirements', reviewpolicy: 'policy:review-provider' };
+/** What the master's operator-agent identity applies directly, at once, under its own name. */
+const operatorCommands = new Set<Command>(['create', 'ready', 'unblock', 'window', 'requirements', 'rework', 'evidence']);
 
 function authorizeOperatorCommand(actor: Principal, command: Command, data: any, work: Work | undefined, repository: string) {
-  const capability = operatorCapabilitiesByCommand[command];
-  demand(capability, 'This operation is not available to operator agents', 403);
-  operatorCapability(actor, capability, work, repository);
-  demand(data.reason, 'Operator-agent mutations require a reason', 400);
+  demand(operatorCommands.has(command), 'This operation is not available to operator agents', 403);
+  demand(!!repository && actor.scope?.repositories.includes(repository), 'Repository is outside this operator-agent scope', 403);
+  if (work) demand(operatorScopeIncludes(actor, work), 'Work item is outside this operator-agent scope', 403);
+  demand(command === 'evidence' || data.reason, 'Operator-agent mutations require a reason', 400);
   if (command === 'create') {
     demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403);
     demand(data.policy.review, 'Operator-created work must require independent review');
-    if (data.policy.reviewProvider !== undefined) operatorCapability(actor, 'policy:review-provider', undefined, repository);
   }
 }
 
@@ -211,25 +183,6 @@ function preserveAssignment(work: Work) {
     work.lastAssignment = { owner: work.lease.owner, epoch: work.lease.epoch };
 }
 
-// A quarantine outlives the lease that raised it: reconciliation clears an expired lease,
-// and release, rework and changed requirements clear a live one. The deadline automatic
-// settlement measures its grace window from is therefore retained on the quarantine, which
-// only proof removes. It only ever moves forward, and only for the quarantined epoch.
-function retainQuarantineFence(work: Work) {
-  const quarantine = work.containmentQuarantine;
-  if (!quarantine || !work.lease || work.lease.epoch !== quarantine.epoch) return;
-  const retained = quarantine.leaseExpiresAt ? Date.parse(quarantine.leaseExpiresAt) : -Infinity;
-  const live = Date.parse(work.lease.expiresAt);
-  if (Number.isFinite(live) && !(live <= retained)) quarantine.leaseExpiresAt = work.lease.expiresAt;
-}
-// The attestations that explain a lease's end live in the append-only events ledger, written by
-// the very commands that caused it: the worker's `blocked` report and the admin's
-// `--previous-worker-stopped` rework or recovery. They are read back from there, never from a
-// client, so the classification rests on what was recorded when it happened.
-export async function readAttestations(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, workId: string): Promise<Attestation[]> {
-  const rows = (await db.query(`SELECT seq, actor, kind, payload->'details' AS details, ${eventWorkSql()}->'epoch' AS work_epoch, created_at FROM events WHERE work_id=$1 AND kind IN ('blocked','rework','recover') ORDER BY seq`, [workId])).rows;
-  return attestationsFromLedger(rows.map(row => ({ seq: Number(row.seq), actor: row.actor, kind: row.kind, at: new Date(row.created_at).toISOString(), details: row.details ?? undefined, workEpoch: row.work_epoch ?? undefined })));
-}
 /**
  * The plane stalls recorded around `fromMs`..`untilMs` (wall-clock ms): the gaps in the
  * reconciliation loop's own ticks (recordPlaneLiveness), each once in the ledger with no work of its
@@ -241,19 +194,6 @@ export async function readAttestations(db: { query: (text: string, values: unkno
 export async function readPlaneStalls(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, fromMs: number, untilMs: number): Promise<PlaneStall[]> {
   const rows = (await db.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.stall' AND created_at >= to_timestamp($1 / 1000.0) AND created_at <= to_timestamp($2 / 1000.0) ORDER BY created_at`, [fromMs, untilMs])).rows;
   return rows.map(row => { const details = row.details ?? {}; return { from: String(details.from), to: String(details.to) }; }).filter(stall => Number.isFinite(Date.parse(stall.from)) && Number.isFinite(Date.parse(stall.to)));
-}
-/**
- * The deploys recorded around `fromMs`..`untilMs` (wall-clock ms): the release changes the plane's
- * own liveness tick observed (recordPlaneLiveness), each once in the ledger with no work of its own.
- * They are read beside the stalls wherever a lapse is classed, so a lease that ran out inside a
- * deploy's release-skew window — the worker's release refuses every renewal client-side once the
- * newer release answers — is explained by the plane's record rather than counted as a lost worker
- * (GY-2177). The `created_at` index serves the read; the window is bounded by the caller.
- */
-export async function readPlaneDeploys(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, fromMs: number, untilMs: number): Promise<PlaneDeploy[]> {
-  const rows = (await db.query(`SELECT payload->'details' AS details FROM events WHERE kind = 'plane.deploy' AND created_at >= to_timestamp($1 / 1000.0) AND created_at <= to_timestamp($2 / 1000.0) ORDER BY created_at`, [fromMs, untilMs])).rows;
-  return rows.map(row => { const details = row.details ?? {}; return { commit: String(details.commit), from: String(details.from), to: String(details.to) }; })
-    .filter(deploy => /^[0-9a-f]{40}$/.test(deploy.commit) && Number.isFinite(Date.parse(deploy.from)) && Number.isFinite(Date.parse(deploy.to)));
 }
 /**
  * The lease a worker submitted under ended at that submission. A supervisor that keeps renewing it
@@ -282,12 +222,12 @@ export function sameBesideActions(read: Work, current: Work): boolean {
  * Whether two readings of one item differ only in the loop's own bookkeeping (GY-1257): the action
  * queue (`sameBesideActions`), plus what each save re-derives or the loop records about the item
  * rather than the submitted work — its next action, gates and the lane they stamp, the sessions it
- * reports, and the escalations it raises for attention. None of it is what a GitHub observation
+ * reports. None of it is what a GitHub observation
  * reads, and the observation's own save re-evaluates the gates, so it never stands on a stale one.
  */
 export function sameBesideBookkeeping(read: Work, current: Work): boolean {
   const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target,
-    sessions: _sessions, escalation: _escalation, escalations: _escalations, ...others }: Work) => stableJson(others);
+    sessions: _sessions, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);
 }
 /** How many saves behind a reader may be and still have its read resolved from the ledger. */
@@ -309,92 +249,6 @@ async function revisionAt(db: { query: (text: string, values: unknown[]) => Prom
   return read && read.revision === revision ? read : null;
 }
 
-/**
- * How many saves a requested decision's revision may fall behind and still have its grounds
- * re-checked (GY-1463): a worker renews its lease about every 12 s, so this covers an approver's
- * judgement of over three hours on a leased item.
- */
-export const decisionGroundsLookback = 1000;
-/**
- * What moved a requested decision's grounds between the item as it was requested (`read`) and as
- * it stands, named, or null when nothing that could affect them did (GY-1463). The loop's
- * bookkeeping (`sameBesideBookkeeping`), a lease renewal (the lease's expiry and the quarantine's
- * copy of it), the liveness of the launch, a GitHub observation and the sessions and workspaces
- * an attempt records cannot; a new submission or head, a stage move, a requirements or policy
- * revision, a lease epoch change or any other change to the item can. A resolve judged without a
- * pin rests on the escalation it names, so for it (`escalations`) a change to the standing
- * escalations moves its grounds too.
- */
-export function decisionGroundsChange(read: Work, current: Work, options: { escalations?: boolean } = {}): string | null {
-  const lease = (work: Work) => work.lease ? { owner: work.lease.owner, epoch: work.lease.epoch } : null;
-  const quarantine = (work: Work) => {
-    if (!work.containmentQuarantine) return null;
-    const { leaseExpiresAt: _lease, launchExpiresAt: _launch, launchAcknowledgedAt: _acknowledged, ...fence } = work.containmentQuarantine;
-    return fence;
-  };
-  const changed = (pick: (work: Work) => unknown) => stableJson(pick(read) ?? null) !== stableJson(pick(current) ?? null);
-  if (changed(work => work.submission)) return `a new submission (${current.submission ? `pull request #${current.submission.pr}, epoch ${current.submission.epoch}` : 'withdrawn'})`;
-  if (changed(work => work.candidate?.sha)) return `a new head (${current.candidate?.sha.slice(0, 12) ?? 'none'})`;
-  if (changed(work => [work.stage, work.ready])) return `a stage move (${read.stage} to ${current.stage}${current.ready === read.ready ? '' : current.ready ? ', released' : ', unreleased'})`;
-  if (changed(work => [work.policyRevision, work.policy, work.criteria]))
-    return `a requirements or policy revision (policy revision ${read.policyRevision} to ${current.policyRevision})`;
-  if (options.escalations && changed(work => [work.escalation, work.escalations])) return 'a change to its escalations';
-  if (changed(work => [work.epoch, lease(work)])) return `a lease epoch change (${lease(read) ? `epoch ${read.lease!.epoch}` : 'no lease'} to ${lease(current) ? `epoch ${current.lease!.epoch}` : 'no lease'})`;
-  const rest = (work: Work) => {
-    const { actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target, sessions: _sessions,
-      escalation: _escalation, escalations: _escalations, lease: _lease, lastAssignment: _assignment, containmentQuarantine: _quarantine, observation: _observation,
-      workspaces: _workspaces, ...others } = work as Work & Record<string, unknown>;
-    return { ...others, containmentQuarantine: quarantine(work) } as Record<string, unknown>;
-  };
-  const before = rest(read), after = rest(current);
-  const field = [...new Set([...Object.keys(before), ...Object.keys(after)])].sort().find(key => stableJson(before[key] ?? null) !== stableJson(after[key] ?? null));
-  return field ? `a change to its ${field}` : null;
-}
-/**
- * What moved a decision's grounds since `revision`, read from the ledger (`decisionGroundsChange`),
- * or null when nothing that could affect them did. A revision past the lookback cannot be re-checked.
- */
-export async function decisionGroundsMovedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, revision: number, options: { escalations?: boolean } = {}): Promise<string | null> {
-  if (revision === work.revision) return null;
-  const read = await revisionAt(db, work, revision, decisionGroundsLookback);
-  return read ? decisionGroundsChange(read, work, options) : `more saves than its grounds can be re-checked across (revision ${revision}, now ${work.revision})`;
-}
-
-/**
- * The decision as its approval judges and applies it (GY-1296, GY-1463): a release, an unblock, a
- * diagnostician's closure or a resolve without a pin is bound to the item revision it was requested
- * at. When the revision moved only in changes that cannot affect its grounds — the loop's
- * bookkeeping, lease renewals, liveness, observations, session records — it is rebased to the
- * current revision; when another decision was applied since, or anything else moved
- * (`decisionGroundsChange`), `change` names it and the decision is returned as it is. A resumption
- * applies the same (GY-1300).
- */
-export async function revisionRebase<D extends Pick<Decision, 'id' | 'action' | 'input'> & { pin: unknown }>(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, decision: D, work: Work): Promise<{ judged: D; change: string | null }> {
-  const revisionPinned = decision.action === 'release' || decision.action === 'unblock' || (decision.action === 'resolve' && !decision.pin)
-    || (decision.action === 'close' && decision.input.triageAt === undefined && decision.input.expectedRevision !== undefined);
-  if (!revisionPinned || decision.input.expectedRevision === work.revision) return { judged: decision, change: null };
-  const change = await decisionAppliedSince(db, work, decision.id) ?? await decisionGroundsMovedSince(db, work, decision.input.expectedRevision, { escalations: decision.action === 'resolve' });
-  return change ? { judged: decision, change } : { judged: { ...decision, input: { ...decision.input, expectedRevision: work.revision } }, change: null };
-}
-/** Another decision on the item applied after this one was requested, named, or null. */
-async function decisionAppliedSince(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, id: string): Promise<string | null> {
-  const row = (await db.query(`SELECT applied.payload->>'id' AS id, requested.payload->>'action' AS action FROM events applied
-    JOIN events requested ON requested.work_id=applied.work_id AND requested.kind='decision.requested' AND requested.payload->>'id'=applied.payload->>'id'
-    WHERE applied.work_id=$1 AND applied.kind='decision.applied' AND applied.payload->>'id'<>$2
-      AND applied.seq > (SELECT seq FROM events WHERE work_id=$1 AND kind='decision.requested' AND payload->>'id'=$2 ORDER BY seq LIMIT 1)
-    ORDER BY applied.seq LIMIT 1`, [work.id, id])).rows[0];
-  return row ? `another applied decision (${row.action} ${row.id})` : null;
-}
-
-/**
- * How a delivery that recovered from that violation was judged (GY-92): the two-party merge
- * decision it rests on, the cutoff the history was re-checked at, and the judgement itself.
- * Recorded on the delivery beside the snapshot revision and evidence instant it cites.
- */
-export interface MergeReconciliation {
-  decision: string; requestedBy: string; requestedAt: string; approvedBy: string; approvedAt: string; reason: string; approvalReason: string;
-  cutoff: string; snapshotRevision: number; judgement: string; proofs: string[]; violation: string;
-}
 /**
  * Why the record as it stood before the merge cutoff does not deliver the observed merge, or
  * nothing when it does (GY-1235). GitHub merges; a merge is the delivery when the record showed the
@@ -420,13 +274,7 @@ export function historicalAuthorizationRefusals(past: Work, _all: Work[], observ
   for (const violation of past.violations.filter(violation => !circular(violation))) refusals.push(`violation stood: ${violation}`);
   return refusals;
 }
-/**
- * How a delivery an operator authorized outside the guarded path was recorded (GY-94). No merge
- * execution authorized the merge and the record at the cutoff did not either — `unmet` is what it
- * lacked — so an admin credential on one side of a post-merge two-party merge decision took
- * responsibility, citing the refused reconciliation it overrides. Distinct from a reconciliation,
- * which delivers only when the record at the cutoff satisfied every gate on its own.
- */
+/** How a merge inside a direct-merge window (direct-merge.ts) was recorded as operator-authorized: `unmet` is what the record lacked. */
 export interface OperatorAuthorizedDelivery {
   decision: string; requestedBy: string; requestedAt: string; approvedBy: string; approvedAt: string; reason: string; approvalReason: string;
   /** The admin credential that authorized the merge, and the refused reconciliation its decision cites. */
@@ -434,37 +282,6 @@ export interface OperatorAuthorizedDelivery {
   cutoff: string; snapshotRevision: number; judgement: string; violation: string;
   /** Always null: the statement that no merge execution authorized this merge. */
   execution: null;
-}
-/** A post-merge merge decision with the roles its two parties held, read from the ledger. */
-interface PostMergeDecision extends Decision { requesterRole: string | null; approverRole: string | null }
-/**
- * The two-party merge decisions that judge an observed, unauthorized merge: applied — so
- * requested by one agent identity and approved by an independent one — for exactly the observed
- * candidate at the policy revision the pre-cutoff record carried, and requested after the merge
- * cutoff, so each is a judgement of the merge that happened rather than a pre-merge approval.
- * Oldest first; the caller judges the latest one the record has not already answered.
- */
-async function postMergeDecisions(db: { query: (text: string, values: unknown[]) => Promise<{ rows: any[] }> }, work: Work, observation: Observation, policyRevision: number, cutoff: number): Promise<PostMergeDecision[]> {
-  const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind IN ('decision.requested','decision.approved','decision.applied','decision.failed') ORDER BY seq", [work.id])).rows;
-  const decisions = foldDecisions(work.id, rows.map(row => ({ kind: row.kind as string, actor: row.actor as string, at: new Date(row.created_at).toISOString(), payload: row.payload })));
-  const role = (kind: string, id: string, party: 'requester' | 'approver') => rows.find(row => row.kind === kind && row.payload?.id === id)?.payload?.[party]?.role ?? null;
-  return decisions.filter(decision => decision.action === 'merge' && decision.state === 'applied' && !!decision.approvedBy && decision.approvedBy !== decision.requestedBy
-    && decision.input?.sha === observation.candidate.sha && decision.input?.baseSha === observation.candidate.baseSha && decision.input?.policyRevision === policyRevision
-    && Date.parse(decision.requestedAt) >= cutoff)
-    .map(decision => ({ ...decision, requesterRole: role('decision.requested', decision.id, 'requester'), approverRole: role('decision.approved', decision.id, 'approver') }));
-}
-/**
- * The operator authorizing a merge outside the guarded path, or the reason the decision is not
- * that: an operator-authorized delivery needs an admin credential — the operator, not the
- * master's agent pair — on one side of the decision, and a reason that cites a refused
- * reconciliation of this merge, so the override names exactly what the record lacked.
- */
-function operatorAuthorizing(decision: PostMergeDecision, refused: Set<string>): { operator: string; refusedDecision: string } | { refusal: string | null } {
-  const cited = [...refused].find(id => decision.reason.includes(id));
-  if (!cited) return { refusal: null };
-  const operator = decision.requesterRole === 'admin' ? decision.requestedBy : decision.approverRole === 'admin' ? decision.approvedBy! : null;
-  return operator ? { operator, refusedDecision: cited }
-    : { refusal: `an operator-authorized delivery needs an admin credential as requester or approver; ${decision.requestedBy} is ${decision.requesterRole ?? 'of unrecorded role'} and ${decision.approvedBy} is ${decision.approverRole ?? 'of unrecorded role'}` };
 }
 /** The ledger kind of a lease renewal that failed server-side (GY-558). */
 export const renewalFaultEvent = 'lease.renewal-failed';
@@ -835,8 +652,7 @@ export class Engine {
   private conflictTransitions = new WeakMap<Work, ReviewConflictTransition[]>();
   /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
   documentation: DocumentationPolicy = configuredDocumentation();
-  // The launch fence is a deployment-independent safety default; only tests shorten it.
-  constructor(public store: Store, public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '', public launchFence = launchFenceMs) {}
+  constructor(public store: Store, public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   /** The commit this process first recorded itself serving (recordPlaneLiveness); undefined until its first tick named one (GY-2177). */
   private servedCommit: string | null | undefined;
   private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
@@ -1104,7 +920,7 @@ export class Engine {
       demandWork(work);
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
       await this.renewalGrace(db, work, now);
-      preserveAssignment(work); retainQuarantineFence(work);
+      preserveAssignment(work);
       demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       this.renewLease(work, actor, data.epoch, now);
       await save(db, work, actor.id, command, now, data);
@@ -1183,7 +999,7 @@ export class Engine {
       demandWork(work);
       // GY-1760: an item only the master side can satisfy — the loop's own measurement, or a
       // master-role session's observation of the master checkout — is never released to a worker, whoever asks.
-      // GY-2605: nor is an owner-held item, unless the owner's own human admin session asks or the item carries an owner-recorded decision (GY-2606).
+      // GY-2605: nor is an owner-held item, unless the owner's own human admin session asks or the owner answered on the item (GY-2606).
       if (command === 'ready') { const owned = loopOwnedRefusal(work!) ?? ownerHoldRefusal(work!, actor); demand(!owned, owned!, 409); }
       // A lease past its expiry that a recorded server-side renewal fault still covers stays live (GY-558).
       await this.renewalGrace(db, work, now);
@@ -1193,12 +1009,10 @@ export class Engine {
         if (command === 'ready') demand(work.stage === 'backlog' && !work.ready, 'Only unreleased backlog work can be released');
         if (command === 'unblock') demand(work.blocker, 'Task has no blocker to clear');
       }
-      // The only commands a delivered item still accepts: containment cleanup, and the
-      // post-deployment smoke fact that extends the delivery snapshot without reopening the merge.
+      // The only command a delivered item still accepts: the post-deployment smoke fact that
+      // extends the delivery snapshot without reopening the merge.
       const postDeployment = command === 'evidence' && data.proof === deploySmokeProof;
-      const containmentCleanup = ['settle', 'recover', 'autosettle'];
-      const deliveredContainmentCleanup = work.stage === 'done' && containmentCleanup.includes(command);
-      // Ending a session handle an item still carries is the third thing a delivered item accepts,
+      // Ending a session handle an item still carries is the other thing a delivered item accepts,
       // and only that: a review or proof session is often still running when its candidate merges,
       // and the liveness sweep must be able to close its record (GY-113). A closure is a record of
       // a runtime fact, never a decision — it decides no gate, ends no lease and binds no
@@ -1210,8 +1024,8 @@ export class Engine {
       const deliveredSessionClosure = work.stage === 'done' && command === 'session'
         && (work.sessions ?? []).some(handle => handle.id === data.id
           && (data.state === 'finished' || handle.state === 'running' && data.observed !== undefined && ['coordinator', 'admin'].includes(actor.role)));
-      preserveAssignment(work); retainQuarantineFence(work);
-      if (command !== 'create' && !containmentCleanup.includes(command) && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
+      preserveAssignment(work);
+      if (command !== 'create' && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
       if (command === 'mechanicalplan') {
         demand(['coordinator', 'admin'].includes(actor.role), 'Coordinator permission required', 403);
         // `at` is the control plane's own instant of the report: the review gate holds only while the loop
@@ -1220,86 +1034,18 @@ export class Engine {
         work.mechanicalPlan = data.planned ? { reviewId: data.reviewId, head: data.head, at: now.toISOString() } : null;
         work.mechanicalAnswered = data.planned ? null : { reviewId: data.reviewId, head: data.head };
       }
-      if (command === 'rereview') {
-        if (actor.role !== 'admin') { demand(actor.role === 'worker', 'Worker or operator required', 403); activeLease(work, actor, data.epoch, now); }
-        demand(work.policy.review && ['codex', 'agent'].includes(reviewProviderOf(work.policy)) && work.submission && !work.observation?.merged, 'Open submitted work with a dispatched review provider is required');
-        work.reviewRequest = null; work.observation = null; work.mergeAuthorization = null;
-        // Re-review restarts failover at the first configured profile; the event ledger keeps
-        // every superseded exhaustion record for this candidate.
-        work.reviewFailovers = (work.reviewFailovers ?? []).filter(failover => failover.sha !== work.candidate?.sha
-          || failover.baseSha !== work.candidate?.baseSha || failover.policyRevision !== work.policyRevision);
-      }
-      if (command === 'reviewpolicy') {
-        if (actor.role !== 'operator-agent') admin(actor);
-        demand(!work.observation?.merged, 'Merged work requires a follow-up task');
-        demand(work.policy.review, 'Task must already require review');
-        demand(work.policyRevision === data.expectedPolicyRevision, 'Policy revision changed; reload before revising');
-        demand(data.provider === 'agent' ? !!data.reviewerProfiles : !data.reviewerProfiles, 'Reviewer profiles are required for agent review and rejected for every other provider');
-        demand(reviewProviderOf(work.policy) !== data.provider || JSON.stringify(work.policy.reviewerProfiles ?? null) !== JSON.stringify(data.reviewerProfiles ?? null), 'Review provider and reviewer profiles are already selected');
-        if (data.provider === 'agent') {
-          assertReviewerProfiles(data.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
-          demand(new Set(data.reviewerProfiles.map((profile: { name: string }) => profile.name)).size === data.reviewerProfiles.length
-            && new Set(data.reviewerProfiles.map((profile: { reviewerApp: string }) => profile.reviewerApp)).size === data.reviewerProfiles.length,
-          'Reviewer profile names and reviewer Apps must be unique');
-        }
-        const { reviewerProfiles: _previousProfiles, ...rest } = work.policy;
-        work.policy = { ...rest, reviewProvider: data.provider, ...(data.provider === 'agent' ? { reviewerProfiles: data.reviewerProfiles } : {}) };
-        work.policyRevision++;
-        work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
-        work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
-      }
-      if (command === 'requirements') await this.reviseRequirements(db, actor, work, all, data, key, now);
+      if (command === 'requirements') await this.reviseRequirements(db, actor, work, all, data, now);
       if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; await adoptFollowUpWindow(db, work); }
       if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; await adoptFollowUpWindow(db, work); }
-      if (command === 'resolve') {
-        // Resolution is a human judgement: no lead, worker, producer, or scoped
-        // operator agent may clear the escalation that refuses its own delivery.
-        // An admin credential that declares `ai`, or declares nothing, is not a
-        // human operator, exactly as for human-only intake. The one exception is a
-        // lease-loss the control plane itself raised (actor `graphyard`) for a lapse
-        // the ledger already explains: any admin session may settle that by citing the
-        // blocked report or stopped-worker attestation, which is verified here, never
-        // taken from the request. Lead-raised, security and requirement concerns stay human-only.
-        admin(actor);
-        const standing = standingEscalations(work);
-        demand(standing.length, 'Task has no escalation to resolve');
-        const target = standing.find(entry => entry.trigger === data.trigger);
-        demand(target, `Standing escalations are ${standing.map(entry => entry.trigger).join(', ')}; reload before resolving`);
-        demand(data.expectedRevision === work.revision, 'Task revision changed; reload before resolving');
-        let cited: Attestation | null = null;
-        if (data.attestation) {
-          demand(target!.trigger === 'lease-loss' && target!.actor === 'graphyard', `Only a lease-loss raised by the control plane is settled by citing an attestation; the standing ${target!.trigger} was raised by ${target!.actor}`);
-          const epoch = leaseLossEpoch(target!);
-          demand(epoch !== null && data.attestation.epoch === epoch, `The standing lease-loss belongs to epoch ${epoch ?? 'unknown'}; cite that epoch's attestation`);
-          cited = attestationFor(await readAttestations(db, work.id), epoch!, data.attestation.kind);
-          demand(cited, `The ledger holds no ${data.attestation.kind} ${data.attestation.kind === 'blocked' ? 'report' : 'attestation'} for epoch ${epoch}; a lapse nothing explains needs a declared human session`);
-        }
-        if (sessionKind(actor) !== 'human') demand(cited, `Escalation resolution requires a declared human session; ${actor.id} is ${sessionKind(actor)}. An admin session of any kind may settle only a control-plane-raised lease-loss, by citing the blocked report or stopped-worker attestation that explains it`, 403);
-        // Every other standing trigger survives: one resolution clears one concern.
-        resolveEscalation(work, data.trigger);
-        await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'escalation.resolved',
-          JSON.stringify({ details: { trigger: data.trigger, epoch: leaseLossEpoch(target!), escalation: target, resolvedBy: actor.id, sessionKind: sessionKind(actor), reason: data.reason, attestation: cited, at: now.toISOString() } })]);
-      }
       if (command === 'rework') {
-        admin(actor);
+        if (actor.role !== 'operator-agent') admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
-        demand(!work.containmentQuarantine || (!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime())
-          && (!work.containmentQuarantine.launchExpiresAt || Date.parse(work.containmentQuarantine.launchExpiresAt) <= now.getTime()),
-        `Worker startup for epoch ${work.containmentQuarantine?.epoch} remains fenced; stop its supervisor and wait for both lease and launch authority expiry before recovery`);
         work.reworkRequested = true;
-        work.containmentQuarantine = null;
-        // Reassignment discards whatever assignment still stood. A lease dropped
-        // here was never released by its worker, and clearing it is the last
-        // moment its end is visible: reconcile only ever sees an expired lease,
-        // and the replacement claim guards on `work.lease`, which is now null.
-        // So the end is recorded here. The operator's stopped-worker attestation
-        // is itself the explanation: the admin stopped the worker and says so in
-        // this same audited command, so the discarded lease is `lease.expired`
-        // with cause `stopped-by-attestation`, never a silently vanished worker.
+        // Reassignment discards whatever assignment still stood: its end is recorded here, the
+        // last moment it is visible, and the item is claimable again.
         preserveAssignment(work);
         if (work.lease) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
-          JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, cause: 'stopped-by-attestation',
-            attestation: { kind: 'stopped-worker', source: 'rework', epoch: work.epoch, actor: actor.id, at: now.toISOString(), reason: data.reason }, at: now.toISOString() } })]);
+          JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, cause: 'rework', at: now.toISOString() } })]);
         recordRework(work, now);
         work.lease = null;
         // Reopening implementation is the authorized recovery for send-back.
@@ -1307,39 +1053,19 @@ export class Engine {
         // be superseded by that lead's later approve-plan ruling.
         if (work.leadHold?.action === 'send-back') releaseLeadHold(work);
       }
-      if (command === 'recover') {
-        admin(actor);
-        demand(work.stage === 'done', 'Containment recovery is only available for delivered work');
-        demand(work.containmentQuarantine, 'Delivered work has no containment quarantine');
-        work.containmentQuarantine = null;
-      }
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
         demand(!work.children?.length, `${work.key} was split into ${work.children?.join(', ')} before dispatch; it is delivered when they are and is never claimed directly`);
-        // A supervised item refuses on its containment fence before ownership (the recovery contract reads the fence first).
-        demand(!work.containmentQuarantine, `Task is quarantined by unverified containment from epoch ${work.containmentQuarantine?.epoch}`);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
-        // A replacement claim over a lapsed lease is the last chance to record how that
-        // assignment ended, exactly as reconciliation would have: explained lapses are
-        // history, a silently vanished worker is an escalation the overwrite cannot erase.
+        // A replacement claim over a lapsed lease records how that assignment ended, exactly as reconciliation would have.
         if (work.lease) {
-          const lapsedStalls = await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime());
-          const lapsedDeploys = await readPlaneDeploys(db, now.getTime() - 24 * 3_600_000, now.getTime());
-          const explained = leaseLapseCause(work, work.lease, await readAttestations(db, work.id), lapsedStalls, lapsedDeploys);
-          if (explained) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
-            JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, ...explained, at: now.toISOString() } })]);
-          else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(work.lease), at: now.toISOString(), actor: 'graphyard' });
+          await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'lease.expired',
+            JSON.stringify({ details: { owner: work.lease.owner, epoch: work.lease.epoch, expiresAt: work.lease.expiresAt, submission: work.submission, at: now.toISOString() } })]);
           endLapsedAttempt(work, work.lease, now);
-          // GY-1687: the lapse this claim records is the end of the previous attempt, so the requirements decision
-          // held for it is applied here, before claim eligibility is derived and before the replacement lease is
-          // installed. A held revision can add an unfinished dependency or an exclusive resource another item
-          // holds; those checks must see the revised item, or the new attempt would be dispatched from stale
-          // requirements (review of fe3b4e08db8e).
-          const lapsed = work.lease; work.lease = null;
-          for (const write of await this.applyHeldDecisions(db, work, all, { lease: lapsed, containmentQuarantine: work.containmentQuarantine }, now, { command: null, submitted: false })) await write(db);
+          work.lease = null;
         }
-        // Eligibility against the (possibly just-revised) requirements: ready, dependencies, exclusive
+        // Eligibility against the requirements: ready, dependencies, exclusive
         // resources and slice capacity are all derived from the document the new attempt will hold.
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
         // GY-1735: the observation window holds the claim itself, so no loop or launcher that predates it (GY-1722, GY-1725) can start an attempt that can only escalate.
@@ -1367,37 +1093,9 @@ export class Engine {
       if (command === 'heartbeat') this.renewLease(work, actor, data.epoch, now);
       else {
         if (command === 'release') endedBySubmission(work, data.epoch);
-        if (['release', 'workspace', 'submit', 'blocked', 'defer', 'quarantine', 'launch'].includes(command)) activeLease(work, actor, data.epoch, now);
+        if (['release', 'workspace', 'submit', 'blocked', 'defer'].includes(command)) activeLease(work, actor, data.epoch, now);
       }
-      if (command === 'quarantine') {
-        demand(!work.containmentQuarantine || work.containmentQuarantine.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
-          && work.containmentQuarantine.settlementHash === data.settlementHash, 'Containment quarantine already exists and cannot be replaced');
-        work.containmentQuarantine ??= { owner: actor.id, epoch: data.epoch, at: now.toISOString(), settlementHash: data.settlementHash, ...(data.scope ? { scope: data.scope } : {}) };
-      }
-      if (command === 'launch') {
-        demand(work.containmentQuarantine?.owner === actor.id && work.containmentQuarantine.epoch === data.epoch
-          && work.containmentQuarantine.settlementHash === data.settlementHash,
-        'Containment quarantine is missing, superseded, or does not match this launch');
-        work.containmentQuarantine.launchAcknowledgedAt ??= now.toISOString();
-        work.containmentQuarantine.launchExpiresAt ??= new Date(now.getTime() + this.launchFence).toISOString();
-      }
-      if (command === 'settle') {
-        demand(actor.role === 'worker' && work.containmentQuarantine?.owner === actor.id && work.containmentQuarantine.epoch === data.epoch,
-          'Containment quarantine is missing, superseded, or owned by another worker');
-        demand(createHash('sha256').update(data.settlementToken).digest('hex') === work.containmentQuarantine.settlementHash,
-          'Containment settlement capability is invalid');
-        work.containmentQuarantine = null;
-      }
-      if (command === 'autosettle') {
-        // Verified death is proof, not an assertion: the control plane re-checks the fence
-        // deadlines and the reported verification itself before lowering a containment fence.
-        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        demand(work.containmentQuarantine?.epoch === data.epoch && work.containmentQuarantine?.settlementHash === data.settlementHash,
-          'Containment quarantine is missing, superseded, or does not match this verification');
-        const refusals = containmentSettlementRefusals(work, data.verification, { now: now.getTime() });
-        demand(!refusals.length, `Automatic containment settlement refused: ${refusals.join('; ')}. ${containmentAttestation(work.key)}`);
-        work.containmentQuarantine = null;
-      }
+
       if (command === 'release') {
         // GY-860 AC-2: a release carrying a workspace failure keeps the git message on the item and,
         // while the attempt is still the untouched claim it released, undoes it: the timeline entry
@@ -1409,7 +1107,7 @@ export class Engine {
         const timeline = pipelineTimeline(work);
         const open = data.failure ? timeline.attempts.find(entry => entry.epoch === data.epoch && entry.endedAt === null) : undefined;
         const untouched = open && work.lease && Date.parse(work.lease.expiresAt) === Date.parse(open.claimedAt) + this.leaseSeconds * 1000
-          && work.containmentQuarantine?.epoch !== data.epoch && work.submission?.epoch !== data.epoch ? open : undefined;
+          && work.submission?.epoch !== data.epoch ? open : undefined;
         if (data.failure) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'workspace.failed', JSON.stringify({ details: { epoch: data.epoch, message: data.failure.message, at: now.toISOString() } })]);
         // GY-1286: a rework workspace refused because the PR branch moved past the observed head can
         // only be built once that head is observed, so the release wakes the observation, prioritized.
@@ -1539,15 +1237,12 @@ export class Engine {
             demand(data.epoch !== undefined, `A ${data.type} names the attempt epoch that is asking; it is recorded by the session holding the item`);
             activeLease(work, actor, data.epoch, now);
           } else if (data.epoch !== undefined) activeLease(work, actor, data.epoch, now);
-          demand(data.type !== 'decision' || data.action, 'A decision request names the action an independent approver must approve');
-          demand(data.type !== 'escalation' || data.trigger, 'An escalation request names the trigger it raises');
           const request: AgentRequest = { id: randomUUID(), type: data.type, epoch: data.epoch ?? null, requestedBy: actor.id, at: now.toISOString(), reason: data.reason,
-            ...(data.action ? { action: data.action } : {}), ...(data.trigger ? { trigger: data.trigger } : {}), ...(data.humanDecision ? { humanDecision: data.humanDecision } : {}),
+            ...(data.humanDecision ? { humanDecision: data.humanDecision } : {}),
             decider: deciderFor(work.key, data), releasedLease: false, state: 'open' };
           // Each type projects onto the state the gates and the existing machinery already read,
           // so a typed request is the same fact as the command it replaces, with a decider named.
           if (data.type === 'blocker') { work.blocker = data.reason; recordIntervention(work, 'blocked'); }
-          if (data.type === 'escalation') raiseEscalation(work, { trigger: data.trigger, reason: data.reason, at: now.toISOString(), actor: actor.id });
           // A note is a record; every other type is a hand-off, so the attempt ends here rather
           // than holding the item while its session waits for an answer.
           const release = data.release ?? data.type !== 'note';
@@ -1653,7 +1348,7 @@ export class Engine {
         // GY-135: a pass is trusted only beside a recorded run that fails with the criterion's
         // behaviour removed; otherwise it is kept, untrusted, as not exercising its criterion.
         const unexercised = trusted && data.proof !== deploySmokeProof ? exerciseRefusal(work, all, data) : null;
-        // An approved attest decision names itself on the record it applies (GY-615), which is what
+        // A master attestation names itself on the record it applies (GY-615), which is what
         // lets a Graphyard-authored refresh of the same patch carry it; see model/carry.ts.
         const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(unexercised ? { unexercised } : {}), ...(context.attestation ? { attestation: context.attestation } : {}) };
         if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'evidence.exercise.refused',
@@ -1662,7 +1357,6 @@ export class Engine {
         // GY-162: a trusted e2e: record is also a run of its test case, appended to the case's history.
         await recordScenarioRun(db, work, evidence);
         if (data.proof === deploySmokeProof) work.delivery!.smoke = { evidenceId: evidence.id, result: data.result, sha: data.sha, mergeSha: data.baseSha, producer: actor.id, at: evidence.at, executed: data.executed, skipped: data.skipped, ...(data.url ? { url: data.url } : {}) };
-        if (trusted && data.policyRevision !== work.policyRevision) raiseEscalation(work, { trigger: 'evidence-policy-conflict', reason: `Evidence policy v${data.policyRevision} conflicts with current policy v${work.policyRevision}`, at: now.toISOString(), actor: actor.id });
       }
       if (command === 'revoke') {
         // Producer authority is the same live grant set that decides trust at submission.
@@ -1681,20 +1375,13 @@ export class Engine {
         // No execution is recalled: the revocation withdraws the authorization, and the next
         // observation fails the 'Graphyard / merge' check and dequeues the pull request (GY-258).
       }
-      // GY-1687: a requirements decision held for the attempt this command ended applies in this same
-      // transaction, before the evaluation below derives any rework or dispatch from the ended attempt.
-      for (const write of await this.applyHeldDecisions(db, work, all, before, now, { command, submitted: command === 'submit' })) await write(db);
-      retainQuarantineFence(work);
-      // Delivery is an immutable snapshot. A late containment cleanup or a post-deployment fact may
-      // append its audit/revision metadata, but stale inputs must not re-evaluate it.
-      if (!deliveredContainmentCleanup && !postDeployment && !deliveredSessionClosure) this.evaluate(work, all, now);
+      // Delivery is an immutable snapshot. A post-deployment fact may append its audit/revision
+      // metadata, but stale inputs must not re-evaluate it.
+      if (!postDeployment && !deliveredSessionClosure) this.evaluate(work, all, now);
       // A delivered item's gates are an immutable snapshot; its queue is settled without re-evaluating the delivery.
       else settleDelivered(work, all, now);
       await this.recordDispatch(db, work, now);
-      await save(db, work, actor.id, command, now, command === 'settle' ? { epoch: data.epoch }
-        // The instant the fence's authority lapsed, from the record it lowered, so the report can date the settlement against it (GY-1392).
-        : command === 'autosettle' ? { ...data, lapsedAt: fenceLapsedAt(before, now.getTime()) }
-        : actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null }
+      await save(db, work, actor.id, command, now, actor.role === 'operator-agent' ? { before, intent: data, reason: data.reason ?? null }
         : data);
       if (work.submission && !postDeployment && !deliveredSessionClosure && !['heartbeat', 'release', 'claim', 'workspace'].includes(command)) await wakeJob(db, work.id);
       // A renewal's replay needs only the lease, not a whole document per renewal.
@@ -1705,32 +1392,19 @@ export class Engine {
     }, { lane: leaseCommands.has(command) ? 'lease' : 'request', itemLock: id ?? undefined });
   }
 
-  /**
-   * The `requirements` command: a revision of the item's criteria, dependencies, resources and producer
-   * proofs, applied inside the caller's transaction.
-   * `resume` (GY-1687) says what a submitted item does next: `rework` sends it back to a worker, as a hand
-   * revision always has; `rereview` keeps the head it just submitted and has it re-reviewed on the new revision.
-   */
-  private async reviseRequirements(db: PoolClient, actor: Principal, work: Work, all: Work[], data: any, key: string, now: Date, resume: 'rework' | 'rereview' = 'rework'): Promise<void> {
+  /** The `requirements` command: a revision of the item's criteria, dependencies, resources and producer proofs, applied inside the caller's transaction. */
+  private async reviseRequirements(db: PoolClient, actor: Principal, work: Work, all: Work[], data: any, now: Date): Promise<void> {
     demand(!work.children?.length, `${work.key} was split into child items; revise the child items directly rather than the parent`);
     if (actor.role !== 'operator-agent') admin(actor);
     demand(!work.observation?.merged, 'Merged work requires a follow-up task');
     // A revision read before the item's last one is refused as exactly that, first (GY-1293).
     demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
-    // GY-1687: these two refusals mean only that an attempt is live. An approved decision refused for
-    // exactly one of them is held by the server and applied here when the attempt ends (applyHeldDecisions).
-    demand(!work.containmentQuarantine, quarantinedRevisionRefusal(work.containmentQuarantine?.epoch));
-    demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), liveLeaseRevisionRefusal);
+    demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
     demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
     if (work.parent) {
       const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
       const refusal = parent ? splitChildRevisionRefusal(work, parent, data.criteria) : null;
       demand(!refusal, refusal!);
-    }
-    if (actor.role === 'operator-agent') {
-      demand(work.criteria.every(previous => data.criteria.some((next: typeof previous) => next.id === previous.id && next.text === previous.text && JSON.stringify(next.proofs) === JSON.stringify(previous.proofs))), 'Operator agents may add requirements but cannot weaken or rewrite existing criteria');
-      demand(work.dependencies.every(dependency => data.dependencies.includes(dependency)), 'Operator agents cannot remove dependencies');
-      demand((work.exclusiveResources ?? []).every(resource => data.exclusiveResources.includes(resource)), 'Operator agents cannot remove exclusive-resource containment');
     }
     demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
     demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
@@ -1751,15 +1425,6 @@ export class Engine {
       demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
       pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
     }
-    const retired = work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id));
-    const narrowed = work.criteria.filter(ac => { const next = data.criteria.find((n: { id: string }) => n.id === ac.id); return next && ac.proofs.some(proof => !next.proofs.includes(proof)); });
-    if (retired.length || narrowed.length) {
-      // The idempotency key is the caller's to choose, so a `decision:` key alone proves nothing: the
-      // escalation names a decision only when this item's ledger records it approved (GY-1347).
-      const decision = key.startsWith('decision:') ? key.slice('decision:'.length) : null;
-      const approved = decision && (await db.query(`SELECT 1 FROM events WHERE work_id=$1 AND kind='decision.approved' AND payload->>'id'=$2 LIMIT 1`, [work.id, decision])).rowCount;
-      raiseEscalation(work, { trigger: 'requirement-weakening', reason: `Requirement revision retires ${retired.map(ac => ac.id).join(', ') || 'no criterion'} and narrows proofs for ${narrowed.map(ac => ac.id).join(', ') || 'no criterion'}`, at: now.toISOString(), actor: actor.id, ...(approved ? { decision: decision! } : {}) });
-    }
     work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
     work.criteria = revised;
     work.dependencies = data.dependencies; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
@@ -1775,94 +1440,9 @@ export class Engine {
     recordIntervention(work, 'requirements');
     work.lease = null;
     work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
-    // A submitted implementation must be explicitly reconsidered for changed intent. GY-1687: a held decision
-    // applied as the attempt submits its head has that head re-reviewed on the new revision instead (`rereview`).
-    if (work.submission && resume === 'rework') work.reworkRequested = true;
+    // A submitted implementation must be explicitly reconsidered for changed intent.
+    if (work.submission) work.reworkRequested = true;
 
-  }
-
-  /**
-   * GY-1687. An approved requirements decision the engine refused only because the item held a live lease
-   * or an unverified containment fence was recorded `held` (server/decisions.ts), its approval kept. The
-   * transaction that frees the item — a completion, release or blocked report, a stopped worker's rework,
-   * a containment settlement, or reconciliation closing a lapsed lease — applies it here, before the
-   * evaluation derives any rework or dispatch from the ended attempt, at the policy revision it was
-   * approved against: a decision whose revision moved first (a live widening) settles stale with the race
-   * recorded, as its approval would have, and one the engine now refuses for another reason settles failed.
-   * An attempt that ended by submitting its head keeps that head for a re-review on the new revision
-   * (`rereview`) rather than being sent back on the stale verdict's rework. The document is changed in
-   * place; the ledger writes come back as closures so a reconciliation dry run (GY-1290) records nothing.
-   */
-  private async applyHeldDecisions(db: PoolClient, work: Work, all: Work[], before: Pick<Work, 'lease' | 'containmentQuarantine'> | null, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: PoolClient) => Promise<void>)[]> {
-    const free = (item: Pick<Work, 'lease' | 'containmentQuarantine'>) => !item.lease && !item.containmentQuarantine;
-    if (!before || work.stage === 'done' || !free(work) || free(before)) return [];
-    const rows = (await db.query("SELECT actor, kind, payload, created_at FROM events WHERE work_id=$1 AND kind LIKE 'decision.%' ORDER BY seq", [work.id])).rows as { actor: string; kind: string; payload: any; created_at: Date | string }[];
-    const held = foldDecisions(work.id, rows.map(row => ({ kind: row.kind, actor: row.actor, at: new Date(row.created_at).toISOString(), payload: row.payload }))).filter(decision => decision.state === 'held' && decision.action === 'requirements');
-    if (!held.length) return [];
-    const writes: ((db: PoolClient) => Promise<void>)[] = [];
-    const event = (actor: string, kind: string, payload: object) => writes.push(db => db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor, kind, JSON.stringify(payload)]).then(() => undefined));
-    const epoch = before.lease?.epoch ?? work.epoch;
-    const ending = ended.command ? `${ended.command} ended attempt ${epoch}` : `attempt ${epoch}'s lease lapsed`;
-    for (const decision of held) {
-      const expected = decision.input?.expectedPolicyRevision as number | undefined;
-      if (expected !== work.policyRevision) {
-        event('graphyard', 'decision.stale', { id: decision.id, action: decision.action, reason: `Policy revision changed (now ${work.policyRevision}); the held decision was approved against revision ${expected} and was not applied when ${ending}`,
-          expected: { policyRevision: expected }, current: { policyRevision: work.policyRevision }, observedBy: { id: 'graphyard', role: 'coordinator' } });
-        continue;
-      }
-      const application: HeldApplication = decision.held?.application ?? { actor: { id: decision.requestedBy, role: 'admin', sessionKind: 'ai' }, reason: decision.reason };
-      // The attempt that ended is a submitted one when the command says so or when its submission still stands unreworked:
-      // a contained attempt submits and keeps its fence until settlement, so the settlement that frees the item
-      // re-reviews that head instead of sending it back (Codex review of 24a0211d59b8).
-      const submitted = ended.submitted || work.submission?.epoch === epoch && !work.reworkRequested;
-      const resume = submitted ? 'rereview' : 'rework';
-      // Applied to a copy: a refusal leaves the document as the ending command left it.
-      const trial = structuredClone(work);
-      let data: any;
-      try {
-        // Codex review of fe3b4e08db8e: the delayed path must re-authorize the requester. The serialized
-        // HeldApplication.actor is an admin stand-in for the engine call; a requester revoked or stripped
-        // of policy:requirements while the attempt ran must not still mutate requirements here.
-        await this.authorizeHeldRequester(db, decision, trial);
-        data = commands.requirements.parse({ ...decision.input, reason: application.reason });
-        await this.reviseRequirements(db, application.actor, trial, all.map(item => item === work ? trial : item), data, `decision:${decision.id}`, now, resume);
-      } catch (error) {
-        if (!(error instanceof Refusal) && !(error instanceof z.ZodError)) throw error;
-        event(decision.approvedBy ?? 'graphyard', 'decision.failed', { id: decision.id, error: `${error.message}; the held decision was not applied when ${ending}` });
-        continue;
-      }
-      for (const field of Object.keys(work)) if (!(field in trial)) delete (work as unknown as Record<string, unknown>)[field];
-      Object.assign(work, trial);
-      // The approval resolves the requirement-weakening this application raised (GY-1348), as the approval's own application does.
-      const weakening = standingEscalations(work).find(entry => entry.trigger === 'requirement-weakening' && entry.decision === decision.id);
-      if (weakening) {
-        resolveEscalation(work, 'requirement-weakening');
-        event(decision.requestedBy, 'escalation.resolved', { details: { trigger: 'requirement-weakening', escalation: weakening, resolvedBy: decision.requestedBy, approvedBy: decision.approvedBy, decision: decision.id, sessionKind: 'ai',
-          reason: `Raised by requirements decision ${decision.id}, approved by ${decision.approvedBy}: ${decision.reason}`.slice(0, 2000), approvalReason: decision.approvalReason, at: now.toISOString() } });
-      }
-      const revised = work.policyRevision;
-      const outcome = `Requirements revised to policy revision ${revised} when ${ending}${resume === 'rereview' ? `; the submitted head is re-reviewed on revision ${revised}` : ''}${weakening ? '; the requirement-weakening it raised is resolved by this approval' : ''}`;
-      const detail = { ...data, heldDecision: { id: decision.id, approvedBy: decision.approvedBy, heldSince: decision.held?.at ?? null, appliedWhen: ending, resume } };
-      writes.push(db => save(db, work, application.actor.id, 'requirements', now, detail));
-      event(decision.approvedBy ?? 'graphyard', 'decision.applied', { id: decision.id, outcome, held: { since: decision.held?.at ?? null, appliedWhen: ending, resume } });
-    }
-    return writes;
-  }
-
-  /**
-   * GY-1687: re-resolve the held decision's requester in the attempt-ending transaction, as
-   * approveDecision and resumeApproved do before their engine call. A revoked operator agent, or one
-   * that lost `policy:requirements` or the item's scope while the attempt ran, fails the decision
-   * instead of mutating requirements under the admin stand-in HeldApplication.actor carries.
-   */
-  private async authorizeHeldRequester(db: PoolClient, decision: Pick<Decision, 'requestedBy' | 'action' | 'input'>, work: Work) {
-    let requester = this.principals.find(entry => entry.id === decision.requestedBy);
-    if (!requester) {
-      const agent = (await db.query('SELECT document FROM operator_agents WHERE id=$1', [decision.requestedBy])).rows[0]?.document as { id: string; revokedAt?: string | null; capabilities?: string[]; scope?: Principal['scope'] } | undefined;
-      demand(agent && !agent.revokedAt, `Requester ${decision.requestedBy} is no longer a live agent identity; the held decision was not applied`, 409);
-      requester = { id: agent!.id, role: 'operator-agent', capabilities: agent!.capabilities as Principal['capabilities'], scope: agent!.scope, sessionKind: 'ai' };
-    }
-    for (const capability of requiredDecisionCapabilities(decision.action, decision.input, work)) assertDecisionAuthority(requester!, capability, work, this.repository);
   }
 
   /**
@@ -2578,7 +2158,7 @@ export class Engine {
               // so `changed` no longer names it, and one noted here as a stand-in never left it.
               ...moved.map(move => move.id),
               ...this.reconcileOwed,
-              ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || standingEscalations(work).length > 0 || reaches.some(reach => readsFace(fleet.get(id)!, reach)); }),
+              ...live.filter(id => { const work = fleet.get(id)!.work; return !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime() || reaches.some(reach => readsFace(fleet.get(id)!, reach)); }),
               ...clockDue,
             ]);
             // How many items the moved faces made evaluated (GY-1898), for the slow-tick warning.
@@ -2751,7 +2331,7 @@ export class Engine {
     // The liveness invariant (GY-201) is judged on the record as it stood, before this tick
     // touched it, so a violation the tick repairs is recorded rather than silently absorbed.
     const stranded = livenessOf(work, all, now).violation;
-    preserveAssignment(work); retainQuarantineFence(work);
+    preserveAssignment(work);
     // A recorded server-side renewal fault keeps the lease for one more period (GY-558).
     await this.renewalGrace(db, work, now);
     const leaseLost = !!work.lease && Date.parse(work.lease.expiresAt) <= now.getTime();
@@ -2759,65 +2339,31 @@ export class Engine {
     // ledger, where delivery attribution reads it, and no longer holds the record.
     if (work.mergeExecution) work.mergeExecution = null;
     const ledger: { kind: string; details: Record<string, unknown> }[] = [];
-    // The ledger explains a lapse: the epoch's own blocked report or the admin's stopped-worker
-    // attestation. It is read only where a lapse or a standing lease-loss makes it relevant.
-    const standingLoss = standingEscalations(work).some(entry => entry.trigger === 'lease-loss');
-    const attestations = leaseLost || standingLoss ? await readAttestations(db, work.id) : [];
-    // The plane's own recorded stalls over the last day (recordPlaneLiveness): the read is rare and
-    // indexed, and it serves both the lapse being classed here and the standing losses a recorded
-    // stall explains (GY-1791).
-    const stalls = leaseLost || standingLoss ? await readPlaneStalls(db, now.getTime() - 24 * 3_600_000, now.getTime()) : [];
-    const deploys = leaseLost || standingLoss ? await readPlaneDeploys(db, now.getTime() - 24 * 3_600_000, now.getTime()) : [];
+    // A lapsed lease ends the attempt and the item is claimable again: nothing is escalated.
     const lost = leaseLost ? work.lease! : null;
     if (lost) {
       work.lease = null;
-      // A lease that lapses under the epoch it submitted is the expected end of an attempt
-      // whose candidate is already bound, and one that lapses under a carried blocked report
-      // or after a stopped-worker attestation for its epoch ended because the control plane
-      // acted — recorded as history with its cause, never as an incident. A lapse inside one of
-      // the plane's own recorded stalls is explained by the plane's record the same way. Only an
-      // epoch with no submission, no blocked report, no attestation and no stall covering its
-      // expiry — a worker that silently vanished while the plane was up — still escalates.
-      const explained = leaseLapseCause(work, lost, attestations, stalls, deploys);
-      if (explained) ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission, ...explained } });
-      else raiseEscalation(work, { trigger: 'lease-loss', reason: leaseLossReason(lost), at: now.toISOString(), actor: 'graphyard' });
+      ledger.push({ kind: 'lease.expired', details: { owner: lost.owner, epoch: lost.epoch, expiresAt: lost.expiresAt, submission: work.submission } });
       endLapsedAttempt(work, lost, now);
     }
-    // The lapse ended the attempt that filed any open scope request: close it, rather than let it refuse the next one (GY-597).
-    // A standing lease-loss for an epoch whose candidate was already bound predates that
-    // rule, and one the control plane raised for an epoch whose blocked report or stopped-worker
-    // attestation is in the ledger never needed a human either. Settle both here, on deploy and
-    // on every later tick, with the note that says why and the attestation it rests on, so the
-    // backlog does not wait on one click per item. A control-plane lease-loss whose lost attempt the
-    // record shows can no longer act is settled here too, not by an approver round: at once when a
-    // newer attempt superseded it (GY-1390), and once it has stood its bound when every attempt has
-    // ended with no lease and no fence (GY-1393).
-    for (const settled of settleableLeaseLoss(work, attestations, now.getTime(), stalls)) {
-      resolveEscalation(work, settled.escalation.trigger);
-      ledger.push({ kind: 'escalation.auto-settled', details: { trigger: settled.escalation.trigger, epoch: settled.epoch, escalation: settled.escalation, note: settled.note, cause: settled.cause, attestation: settled.attestation, submission: work.submission } });
-    }
-    // GY-1687: the lapse that ended the attempt applies the requirements decision held for it, before the
-    // evaluation derives a dispatch from the ended attempt; its ledger writes wait for the write phase.
-    const pending = lost ? await this.applyHeldDecisions(db, work, all, { lease: lost, containmentQuarantine: work.containmentQuarantine }, now, { command: null, submitted: false }) : [];
     const due = this.evaluate(work, all, now);
     // Every violation found at the start of the tick is repaired by the evaluation above — the
     // derivation names its successor and the queue opens its row — and the ledger says so.
     if (stranded) ledger.push(livenessRepairEntry(stranded, work, all, now));
     if (!jsonChanged(before, work)) return { wrote: false, due };
-    this.reconcileWrites.set(work, { ledger, pending });
+    this.reconcileWrites.set(work, { ledger });
     if (!dryRun) await this.writeReconciled(db, work, all, now);
     return { wrote: true, due };
   }
   /** What `reconcileItem`'s evaluation of a document decided to write, kept until it is written (GY-1290). */
-  private readonly reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind: string; details: Record<string, unknown> }[]; pending: ((db: PoolClient) => Promise<void>)[] }>();
+  private readonly reconcileWrites = new WeakMap<Work, { delivered: true } | { ledger: { kind: string; details: Record<string, unknown> }[] }>();
   /** Write `work` as `reconcileItem` evaluated it at `now`: its ledger entries, its dispatch transitions, the document and its wakes. */
   private async writeReconciled(db: PoolClient, work: Work, all: Work[], now: Date) {
     const write = this.reconcileWrites.get(work)!;
     this.reconcileWrites.delete(work);
     if ('delivered' in write) { await save(db, work, 'graphyard', 'delivery.settled', now); return; }
-    const { ledger, pending } = write;
+    const { ledger } = write;
     for (const entry of ledger) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', entry.kind, JSON.stringify({ details: { ...entry.details, at: now.toISOString() } })]);
-    for (const write of pending) await write(db);
     await this.recordDispatch(db, work, now);
     await save(db, work, 'graphyard', 'reconciled', now, ledger.length ? { ledger: ledger.map(entry => entry.kind) } : undefined);
     if (work.submission) await wakeJob(db, work.id);
@@ -2860,7 +2406,6 @@ export class Engine {
       let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
       // The instant the delivery was judged at: the last instant before the merge cutoff.
       let evidenceAsOf: string | null = null;
-      let reconciliation: MergeReconciliation | null = null; let refusedReconciliation: { decision: string; reasons: string[] } | null = null;
       let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
       if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
         const providerMergedTime = Date.parse(observation.mergedAt);
@@ -2870,7 +2415,7 @@ export class Engine {
         const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
         evidenceAsOf = new Date(cutoff - 1).toISOString();
         // The record as it stood immediately before the merge: what the delivery judgement reads,
-        // and what a two-party reconciliation re-checks (GY-92). A snapshot whose own observation
+        // and what a direct-merge window delivers. A snapshot whose own observation
         // already reports this pull request merged was written after the merge, whatever its
         // timestamp, and carries the merge's consequences, so it is never read (GY-94).
         // A row stored as a delta (store/snapshot-delta.ts) is read as the document it stands for.
@@ -2880,48 +2425,14 @@ export class Engine {
         // GitHub's merge of a head whose every gate passed on that head is the delivery.
         if (past && !historical.length) { authorizedSnapshot = past; authorizationRevision = past.revision; }
         // An observed merge of a head whose gates had not passed is a recorded violation that every
-        // later observation re-derives from immutable history. It is recoverable by a two-party
-        // merge decision for this candidate, requested after the merge, applied by an independent
-        // approver. The decision does not decide delivery by itself — the record before the cutoff
-        // must still show every gate passed for the merged head, apart from what the merge itself
-        // wrote — and the delivery then cites that snapshot and the decision. A decision the history refuses
-        // is recorded on the item with the reasons, once, so the item says why it cannot be.
-        // What the history refuses, an operator may still own (GY-94): a later decision with an
-        // admin credential on one side, citing the refusal, delivers the merge as operator-
-        // authorized — stating that no execution authorized it and what the record lacked.
-        // Inside a direct-merge window the operator owns every merge into the base branch: it is
-        // delivered as operator-authorized, naming the setting and who set it (direct-merge.ts).
+        // later observation re-derives from immutable history. Inside a direct-merge window the
+        // operator owns every merge into the base branch: it is delivered as operator-authorized,
+        // naming the setting and who set it (direct-merge.ts).
         const directMerge = !authorizedSnapshot && observation.mergeSha ? coveringWindow(await directMergeWindows(db, this.directMergeEnvironment), providerMergedTime) : null;
         if (directMerge) {
           const snapshot = past ?? structuredClone(work);
           authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision;
           operatorAuthorization = directMergeAuthorization(directMerge, { sha: observation.mergeSha!, at: observation.mergedAt }, snapshot.revision, new Date(cutoff).toISOString(), historical);
-        }
-        if (!authorizedSnapshot && past && observation.mergeSha) {
-          const decisions = await postMergeDecisions(db, work, observation, past.policyRevision, cutoff);
-          const refused = new Set<string>((await db.query("SELECT payload->'details'->>'decision' AS decision FROM events WHERE work_id=$1 AND kind='merge.reconciliation.refused'", [id])).rows.map(row => row.decision as string));
-          const decision = decisions.filter(entry => !refused.has(entry.id)).at(-1) ?? null;
-          const reconcilable = decision ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime, { reconciling: true }) : historical;
-          if (decision && !reconcilable.length) {
-            authorizedSnapshot = past; authorizationRevision = past.revision;
-            reconciliation = { decision: decision.id, requestedBy: decision.requestedBy, requestedAt: decision.requestedAt, approvedBy: decision.approvedBy!, approvedAt: decision.approvedAt!,
-              reason: decision.reason, approvalReason: decision.approvalReason ?? '', cutoff: new Date(cutoff).toISOString(), snapshotRevision: past.revision,
-              judgement: `Every gate passed for the merged head at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff; the merge was held as a violation and is delivered on the approved decision`,
-              proofs: [], violation: unauthorizedMergeViolation };
-          } else if (decision) {
-            const operator = operatorAuthorizing(decision, refused);
-            if ('operator' in operator) {
-              authorizedSnapshot = past; authorizationRevision = past.revision;
-              operatorAuthorization = { decision: decision.id, requestedBy: decision.requestedBy, requestedAt: decision.requestedAt, approvedBy: decision.approvedBy!, approvedAt: decision.approvedAt!,
-                reason: decision.reason, approvalReason: decision.approvalReason ?? '', operator: operator.operator, refusedDecision: operator.refusedDecision, unmet: reconcilable,
-                cutoff: new Date(cutoff).toISOString(), snapshotRevision: past.revision, execution: null, violation: unauthorizedMergeViolation,
-                judgement: `The gates did not pass for merge ${observation.mergeSha.slice(0, 12)}: the record at ${new Date(cutoff - 1).toISOString()}, the recorded merge cutoff, lacked ${reconcilable.join('; ')}; operator ${operator.operator} authorized it by decision ${decision.id}, citing refused reconciliation ${operator.refusedDecision}` };
-            } else {
-              const reasons = operator.refusal ? [...reconcilable, operator.refusal] : reconcilable;
-              const refusal = `${reconciliationRefusalPrefix}${decision.id} refused: ${reasons.join('; ')}`;
-              if (!work.violations.includes(refusal)) { work.violations.push(refusal); refusedReconciliation = { decision: decision.id, reasons }; }
-            }
-          }
         }
       }
       const previousObservation = work.observation;
@@ -2955,19 +2466,13 @@ export class Engine {
       if (observation.merged) {
         const violation = unauthorizedMergeViolation;
         if (authorizedSnapshot && observation.mergeSha) {
-          // A reconciled delivery is judged at the cutoff, not now: the violation it recovers from
-          // leaves the record (the ledger keeps it), and gates that moved since — evidence that
-          // expired while the item sat at the merge stage — are reported with the judgement, not
-          // recorded as a second violation.
           // An operator-authorized delivery is judged by the operator, not the gates: what the
           // record lacked is on the delivery, and the violation it owns leaves the record the same way.
-          if (reconciliation || operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
+          if (operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
           else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
           work.stage = 'done'; work.stageEnteredAt = now.toISOString();
           const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}) };
-          work.delivery = reconciliation ? Object.assign(delivery, { reconciliation }) : operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
-          if (reconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, reconciliation.requestedBy, 'merge.reconciled',
-            JSON.stringify({ details: { ...reconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
+          work.delivery = operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
           if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
             JSON.stringify({ details: { ...operatorAuthorization, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
           await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
@@ -2978,8 +2483,6 @@ export class Engine {
           await deliverSplitParent(db, work, all, now);
         } else {
           if (!work.violations.includes(violation)) work.violations.push(violation);
-          if (refusedReconciliation) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'merge.reconciliation.refused',
-            JSON.stringify({ details: { ...refusedReconciliation, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, at: now.toISOString() } })]);
         }
       }
       await this.recordDispatch(db, work, now);

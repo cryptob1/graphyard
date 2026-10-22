@@ -15,7 +15,7 @@ import { underTestRunner } from './supervisor.js';
 import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type SandboxExec } from './worker-sandbox.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { clientErrorStatus, retryStopAttention } from './retry-stop.js';
-import { defaultReviewRoundCap, findingLocation, pastReviewCap, reviewRoundCapOf, reviewRoundStatus, type ReviewRoundStatus } from './review-cap.js';
+import { findingLocation } from './review-cap.js';
 import { writeReviewBinding } from './review-post.js';
 import type { FleetProbe } from './fleet.js';
 /** The most threads one pull-request-era launch listed, and the most comment IDs one thread's record kept; bounds the fields old ledger records still carry. */
@@ -525,8 +525,6 @@ export function assertReviewCandidate(work: Work, observedAt: string, request?: 
 
 export type ReviewBinding = ReturnType<typeof assertReviewCandidate>;
 
-/** The changes-requested rounds after which only an unmet acceptance criterion may request changes (GY-167); the item's own round is capped by master.json `reviewRoundCap` (GY-1118). */
-export const reviewRoundCap = defaultReviewRoundCap;
 export type ReviewHistory = NonNullable<ReviewRecord['reviewRound']>;
 /**
  * What earlier review rounds of this pull request mean for the next launch (GY-167): the head the
@@ -569,67 +567,22 @@ export function earlierChangeRequest(observation: Work['observation'], sha: stri
 }
 
 /**
- * The prompt's review-round section: the delta since the head last reviewed, and the cap once three rounds requested changes (GY-167).
- * `rounds` is the item's own review round against the configured cap (GY-1118); past it the cap applies whatever this pull request's history holds.
+ * The prompt's review-round section: the delta since the head last reviewed (GY-167). No round is capped (GY-2874).
  * When the history carries the earlier round's findings (GY-1988, the item's observation), the delta names them and asks one Earlier: line per finding;
  * a new finding on code unchanged since that head is a Nit. Without findings — round one, or the ledger's head-only history — the text is unchanged.
  */
-export function reviewRoundSection(sha: string, history?: ReviewHistory, rounds?: ReviewRoundStatus) {
-  if (!history && !rounds?.capped) return '';
-  history ??= { changesRequested: 0 };
-  const cap = rounds?.cap ?? reviewRoundCap;
+export function reviewRoundSection(sha: string, history?: ReviewHistory) {
+  if (!history) return '';
   const delta = history.previousHead && history.earlierFindings?.length
     ? `You already reviewed an earlier head of this item, ${history.previousHead}: this round judges only what changed since then. Read the change with git diff ${history.previousHead} ${sha}. Your earlier round named these findings, verbatim: ${history.earlierFindings.map(finding => `- ${finding}`).join(' ')} `
       + `Start the review body with one line per earlier finding, exactly "Earlier: <finding> — FIXED" when this head fixes it or "Earlier: <finding> — NOT FIXED" when it does not. Judge only lines that changed since ${history.previousHead}: a new finding on code unchanged since ${history.previousHead} goes on a "Nit: PATH:LINE — FINDING" line — an advisory note kept with the verdict body and in project memory, not a change request and not a new item. `
     : history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch --no-write-fetch-head origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
       + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '';
   return delta
-    + (rounds?.capped || history.changesRequested >= cap ? `${rounds?.capped ? `This is review round ${rounds.round} of this item, past its cap of ${cap} rounds` : `This pull request has already had ${history.changesRequested} rounds of requested changes under this policy revision`}, the most review holds a change for: this round only an unmet acceptance criterion may request changes, and every other finding must be listed as a FOLLOW-UP. `
-      + 'Name each blocking finding — a real defect a user or operator would hit with this change, a criterion not met, a leaked secret, or lost or corrupted data, and nothing else — on its own line starting BLOCKING: in the body of REQUEST_CHANGES, and mention every other finding briefly as a nit; a change request with no BLOCKING: line is withdrawn by Graphyard and the head reviewed again, with nothing filed, and one with a blocking finding is escalated to an independent approver rather than reworked. ' : '')
     + (history.withdrawn ? `A previous approval of this head, review ${history.withdrawn.reviewId}, was withdrawn by Graphyard because its Resolved, Follow-up and Overridden threads lines did not account for listed review thread${history.withdrawn.threads.length === 1 ? '' : 's'} ${history.withdrawn.threads.join(' ')}: a thread described only in prose, or named by an ID that is neither its thread ID nor one of its listed comment IDs, is not accounted for. `
       + `Name each of ${history.withdrawn.threads.length === 1 ? 'that thread' : 'those threads'} by its thread ID on exactly one of those closing lines. ` : '');
 }
 
-/**
- * GY-1575 AC-2. The section of a re-review an approver's refusal of the head's capped rework asked
- * for: the request the withdrawal posted (the refusal's reasoning, the follow-up items), so the
- * reviewer lists those findings as FOLLOW-UP threads. A failed read of the decision history says so
- * and points at the withdrawal message on the pull request, never reads as "no refusal".
- */
-export type CappedRefusalContext = { request: string } | { failure: string };
-export function cappedRefusalSection(context: CappedRefusalContext | null | undefined) {
-  if (!context) return '';
-  if ('failure' in context) return `Graphyard could not read whether an independent approver refused this head's capped rework (${context.failure}). If this pull request shows a change request on this head that Graphyard withdrew after such a refusal, its withdrawal message is your request: list the findings it names as FOLLOW-UP threads, not as a change request. `;
-  return `An independent approver refused the capped rework this head's last change request asked for, and Graphyard withdrew that request and asks you to review the head again. Its request, verbatim: <<<${context.request}>>> `
-    + 'Judge the head afresh against its criteria. List each finding that refusal judged non-blocking as a FOLLOW-UP thread, naming the follow-up item filed for it when there is one, and do not request changes for it again; only a BLOCKING: finding the refusal did not judge holds this head. ';
-}
-
-/**
- * The default read of that context for a launch (GY-1575): the item's decision history and its open
- * items, read with the coordinator credential, once the item is past its review-round cap. The pure
- * builder lives with the review-cap step that posts the same text (src/daemon/cycle-review-cap.ts),
- * loaded on demand so this module takes on none of the loop's imports.
- */
-export function readCappedRefusal(config: Pick<MasterConfig, 'url' | 'credentialFile' | 'reviewRoundCap' | 'reviewer'>, fetcher: typeof fetch = fetch) {
-  return async (work: Work, sha: string): Promise<CappedRefusalContext | null> => {
-    try {
-      const token = await readCredentialFile(config.credentialFile);
-      const read = async (path: string) => {
-        const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
-        if (!response.ok) throw new Error(`GET /api/${path} answered ${response.status}`);
-        return response.json() as Promise<any>;
-      };
-      const { cappedRefusalRequest } = await import('./daemon/cycle-review-cap.js');
-      const history = ((await read(`work/${encodeURIComponent(work.id)}/decisions`)).decisions ?? []) as Parameters<typeof cappedRefusalRequest>[3];
-      // The open items, for the follow-ups the master filed, are read only once a refusal binds the
-      // head, and as the fleet `GET /api/work` serves (GY-1778): every open item whole and each
-      // settled delivery as its stored summary, never the settled documents.
-      if (!cappedRefusalRequest(work, sha, config, history, [])) return null;
-      const request = cappedRefusalRequest(work, sha, config, history, await read('work') as Work[]);
-      return request ? { request } : null;
-    } catch (error) { return { failure: (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 300) }; }
-  };
-}
 
 /** The paths whose changes run on every loop cycle (GY-404), shared with the scope rule's soak companion (GY-1892). */
 export const repeatingPaths = loopRepeatingPaths;
@@ -770,22 +723,16 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
     + 'APPROVE when every criterion is met and no finding is BLOCKING; mention the FOLLOW-UP nits in the body instead of requesting changes for them. Graphyard files no backlog item for a nit. '
     + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. ';
 }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
-  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification, cappedRefusal);
-  let rounds: ReviewRoundStatus | undefined;
-  if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
-    rounds = roundsOrMemory;
-  } else if (roundsOrMemory && !memory) {
-    memory = roundsOrMemory as ProjectMemory;
-  }
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
+  memory ??= projectMemory;
+  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, memory, verification);
   if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
-    + reviewRoundSection(binding.sha, history, rounds)
-    + cappedRefusalSection(cappedRefusal)
+    + reviewRoundSection(binding.sha, history)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + postDeployReviewSection(criteria)
     + findingClassificationSection()
@@ -837,10 +784,7 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + repetitionReviewSection(documentation?.files);
 }
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
-function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, cappedRefusal?: CappedRefusalContext | null) {
-  let rounds: ReviewRoundStatus | undefined;
-  if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') rounds = roundsOrMemory;
-  else if (roundsOrMemory && !memory) memory = roundsOrMemory as ProjectMemory;
+function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null) {
   const own = criteria;
   if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
@@ -851,8 +795,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     ? 'Name each finding that meets the blocking standard on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
     : '';
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
-    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, own, documentation, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history, rounds) })
-    + cappedRefusalSection(cappedRefusal)
+    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, own, documentation, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history) })
     + (research ? researchReviewSection(research) : '')
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
@@ -1021,7 +964,7 @@ export function reviewerProfileRefusalAttention(refusal: ReviewerProfileRefusal 
   return [{ subject: `unknown reviewer profile ${refusal.profile}`,
     text: `Review launches asking for reviewer profile ${refusal.profile} were refused ${refusal.refusals} times in a row, the last at ${refusal.at}: no configured reviewer profile carries that name, so no review can start. Run graphyard master environments --apply to write the reviewer and worker profiles from the logged-in environments; the next launch uses them and this clears`,
     // The master fixes the launcher fault (agentOwner('master', …)); a missing profile is a setup step the installation lacks.
-    role: 'master', approvedBy: null, human: false, humanOnly: null,
+    role: 'master', human: false, humanOnly: null,
     next: 'Run graphyard master environments --apply; it writes the reviewer and worker profiles, and the loop\'s next review launch succeeds and clears this' }];
 }
 
@@ -1048,8 +991,6 @@ export async function launchReview(root: string, work: Work, profileName: string
   verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
   /** A post-merge review (GY-1525 AC-4): the delivered merge commit, judged against its first parent (read from the coordinator checkout when not given). */
   postMerge?: { mergeSha: string; baseTip?: string };
-  /** How an approver's refusal of the head's capped rework is read for the prompt (GY-1575); readCappedRefusal by default, none for a test launch that substitutes `mint` and not this. */
-  cappedRefusal?: (work: Work, sha: string) => Promise<CappedRefusalContext | null>;
   /** How a control-plane launch is registered with the control plane (POST /api/work/:id/review-launch); the coordinator credential by default. */
   registerLaunch?: (work: Work, launch: ControlPlaneLaunchInput) => Promise<{ launch: string }>;
 } = {}) {
@@ -1230,13 +1171,9 @@ export async function launchReview(root: string, work: Work, profileName: string
         pane = created.pane; tabId = created.tab;
         const memory = await readProjectMemory(root).catch(() => null);
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
-        // Past the cap, a head whose capped rework an approver refused is re-reviewed with that refusal (GY-1575 AC-2); a
-        // control-plane launch carries the same section, so the re-review lists the refused findings as FOLLOW-UP there too (GY-2078).
-        const refusal = !reviewerApp && !plane || !pastReviewCap(work, reviewRoundCapOf(config)) ? null
-          : await (dependencies.cappedRefusal ?? (dependencies.mint ? async () => null : readCappedRefusal(config)))(work, binding.sha);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null, refusal), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();

@@ -4,17 +4,13 @@ import { masterBoard } from '../model/board.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
 import { mergeProtocolSkew, profileConcurrency, reclaimIdleMs, type AttentionItem, type MasterConfig } from '../master.js';
 import { launchStartMs, readSessionScreen } from '../master/launch.js';
-import { readApproverLaunches } from '../master/autonomy.js';
-import { stallScreenLines } from '../master/approver-stall.js';
 import { reviewLedgerSpec, sessionLedgerHeadroom } from '../reviewer.js';
 import { producerLedgerSpec } from '../producer.js';
 import { actionReport, sessionReport } from './loop-report.js';
 import { needsHumanActions } from './owed-report.js';
-import { loopAttestations } from './hand-actions.js';
 import type { Work } from '../model/work.js';
 import { agentRequestReport } from './loop-report.js';
 import { timedStep } from '../master/timings.js';
-import { terminalDecisions } from './decision-report.js';
 import { openThroughputOwner, throughputStatus } from '../throughput.js';
 import { throughputEscalatedAt } from '../daemon/cycle-delivery.js';
 import { readDaemonState } from '../daemon/state.js';
@@ -53,20 +49,18 @@ export async function assembleStatusSections<
   reviewRuntime: { available: boolean; reason: string | null };
   humanOnly: HumanRequestRow[];
   masterApi: any;
-  decisions: any;
-  approvals: Parameters<typeof loopAttestations>[1];
 }) {
   const {
     master, snapshot, coordinator, cli, probe, observation, health, hs,
     setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, lag, status, disk, managedRoot, inventory, reclaimPlan,
-    runtime, reviewRuntime, humanOnly, masterApi, decisions, approvals,
+    runtime, reviewRuntime, humanOnly, masterApi,
   } = inputs;
 
   return {
     ...directMergeLine(coordinator),
     ...mergeWriterLine(coordinator),
-    board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator, decisions.unanswered)),
+    board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator)),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     conflictHotspots: hs.report,
     // GY-1927: what the plane enforces, from its recorded setting; a plane that records none merges on gates alone.
@@ -101,7 +95,6 @@ export async function assembleStatusSections<
     },
     actions: needsHumanActions(actionReport(snapshot), owed.rows),
     // Decisions the loop requests itself, never a person (GY-521).
-    loopDecisions: { attestations: loopAttestations(snapshot, approvals) },
     sessions: sessionReport(snapshot),
     releaseLag: lag.report,
     requests: agentRequestReport(snapshot),
@@ -132,13 +125,9 @@ export async function assembleReportedAttention(
   coordinator: any,
   snapshot: { work: Work[]; now: string },
   observed: any,
-  context: { sections: ReportSections; generatedFiles: AttentionItem[]; overflow: any[] },
+  context: { sections: ReportSections; generatedFiles: AttentionItem[] },
 ) {
-  const { sections, generatedFiles, overflow } = context;
-  const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', async () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now(),
-    // GY-1598: the launch records `master approver` judges a listed approver's age by, so the command status names succeeds.
-    starts: { records: await readApproverLaunches(root).catch(() => []), boundMs: launchStartMs(master), read: agent => readSessionScreen(agent.pane_id ?? agent.name!, undefined, stallScreenLines) } }),
-    () => ({ listed: [], attentionItems: [] as AttentionItem[], unanswered: [], refused: 0 })));
+  const { sections, generatedFiles } = context;
   // GY-1609: the revision the loop raised the open owner's needs-decision at, from its cursor, so an
   // applied answer reads as answered rather than as the decision asked again. Read only while one is open. GY-1630: with
   // the operator-agent identity the loop requests that decision itself, so the attention names the loop, not a master.
@@ -151,7 +140,7 @@ export async function assembleReportedAttention(
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }, Number.isFinite(at) ? { now: at } : {}));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   const launches = await timedStep('attention: launches', () => workerLaunchStatus(root, master));
-  const items = [...resources.attention, ...generatedFiles, ...overflow, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items, ...launches.items];
+  const items = [...resources.attention, ...generatedFiles, ...(throughput.attention ? [throughput.attention] : []), ...derived.items, ...launches.items];
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
-  return { generatedFiles, overflow, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
+  return { generatedFiles, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }

@@ -775,8 +775,6 @@ export const throughputDecisionRelease = (detail: string | null | undefined) => 
  * GY-1630: who asks a raised needs-decision, as the loop's escalation record and the status attention name it: the loop
  * itself where it holds the decide and approver effects (the master's operator-agent identity), the hand path otherwise.
  */
-export const throughputSelfAsked = (owner: string) => `The loop requests the requirements decision on ${owner} itself and routes it to the independent approver, relaunching one that leaves it unanswered; it closes ${owner} once the revision is applied`;
-export const throughputHandAsked = (owner: string, settles = 'answers it') => `This loop runs without the decision effects, so it cannot request it: graphyard master decide ${owner} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${owner} DECISION; the loop closes ${owner} once it is applied`;
 
 /** The needs-decision as the escalation and the attention word it, asked on the owner item it names. */
 export function throughputStallText(stall: Omit<ThroughputStall, 'text'>) {
@@ -1054,8 +1052,7 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
     : `settles the population rule ${throughputClaim.item}'s claim is judged over or the coordination that leaves these fingerprints`;
   const attention = (reason: string): AttentionItem => {
     if (stall) return { subject: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
-      ...(selfRequest ? agentOwner('control plane', throughputSelfAsked(decideOn), 'approver')
-        : agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION`, 'approver')) };
+      ...agentOwner('master', `graphyard master requirements ${decideOn} revision.json "REASON" with a revision that ${settles}`) };
     const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}. ${progress}${superseded}`;
     if (applied) return { subject: 'throughput', text: `${text}; ${applied}`, ...agentOwner('master', command) };
     if (!pursuit) return { subject: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };

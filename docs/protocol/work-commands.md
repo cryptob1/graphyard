@@ -7,10 +7,9 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin`, operator agents additively; stale revisions refused first.
 - `decomposition` (coordinator): `decided` (`payload.children`) [splits](#splitting-an-item).
-- `ready`, `unblock` `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3); two-party `release`/`unblock`/pinned `close` decisions survive bookkeeping, others settle `stale`; loop-owned items refuse them, and owner-held ones (`Owner hold:` title, "until the owner releases it", `manual:owner-schedules…`) refuse all but a human admin session until a provided answer to a human-only request on the item records the owner's decision.
-- `resolve`: human `admin`, or an attestation explaining `lease-loss`; head-bound `rework` waits while another candidate stands.
-- `rework`, `recover` (delivered quarantine): `{"reason":…,"previousWorkerStopped":true}`; `repair` (coordinator/admin) rebuilds a head carrying another item's unlanded commits.
-- `claim` `{}`; `heartbeat`; `release` `{"epoch":1}` (`"cause"` or `"failure":{…}` → `workspace.failed`); `blocked` `{"epoch":1,…}` (reason releases, null clears); `blocker-probe` (`pass` clears a routine [blocker](#blocked-work-unblocks-itself)); `review-launch`/`review-verdict`/`review-withdraw` ([review](../coordination.md#review-gate-verdicts-not-threads)); `workspace` `{epoch, host, path, branch}`.
+- `ready`, `unblock` `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3); loop-owned items refuse them, and owner-held ones (`Owner hold:` title, "until the owner releases it", `manual:owner-schedules…`) refuse all but a human admin session until a provided answer to a human-only request on the item records the owner's decision.
+- `rework`: `{"reason":…,"previousWorkerStopped":true}`, waiting while another candidate stands; `repair` (coordinator/admin) rebuilds a head carrying another item's unlanded commits.
+- `claim` `{}`; `heartbeat`; `release` `{"epoch":1}` (`"cause"` or `"failure":{…}` → `workspace.failed`); `blocked` `{"epoch":1,…}` (reason releases, null clears); `blocker-probe` (`pass` clears a routine [blocker](#blocked-work-unblocks-itself)); `review-launch`/`review-verdict` ([review](../coordination.md#review-gate-verdicts-not-threads)); `workspace` `{epoch, host, path, branch}`.
 - `submit`: `{"epoch":1,"head":SHA}` (`complete GY-N EPOCH --head [SHA]`; nothing is pushed): the control plane, the only [merger](../delivery-redesign.md#the-merger), allocates one change number per head into `candidate.pr`/`submission.pr`; the older `{"epoch":1,"pr":123}` form answers only pre-merge-writer changes. complete first re-runs the failing tests the latest `trial failed: tests …` refusal names, refusing while one fails. `409` if applied retro check fails.
 - `deployment`, `triage` `{judgement}` (coordinator).
 
@@ -26,13 +25,13 @@ Claims last 120s, renewed every ≤30s; owner mutations carry epoch. Register br
 
 ### Watch
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss SIGTERM→SIGKILLs the process group. Calls ride 5xx/408/429 with backoff; refusals stop at once; an agent exiting before lease end releases with cause. A dead supervisor fences the item until attested stop or `POST /api/work/UUID/autosettle` proves authority expired, nothing alive. Workers get no remote credential and push nothing.
+`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss SIGTERM→SIGKILLs the process group. Calls ride 5xx/408/429 with backoff; refusals stop at once; on exit `watch` ends the attempt with cause; a dead supervisor's lease lapses and the item is claimable again. Workers get no remote credential and push nothing.
 
 ### How a lease ends
 
 - `submit`; later heartbeats are told to stop after `complete`.
 - `park` (human-only request naming every human step) or `blocked` releases; coordinator `capacity` (`event: "exhausted"`) frees another account.
-- Expiry classes (`lease.expired`): `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `control-plane-stall`, `control-plane-deploy`, `no-submission-bound`; none: `lease-loss` escalation.
+- Expiry classes (`lease.expired`): `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `control-plane-stall`, `control-plane-deploy`, `no-submission-bound`; any lapse ends the attempt.
 
 ### Blocked work unblocks itself
 

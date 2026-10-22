@@ -1,7 +1,7 @@
 // Concern: cycle step 7c — the machine-filed backlog (GY-402): the triage runs; the goals the acceptance role drafts (GY-1417) and the planner plans (GY-1418).
 import { researchRunner, researchSettings } from '../research.js';
 import { triageStep, type TriageStepInput } from '../triage.js';
-import { detailChanged } from './decisions.js';
+import { detailChanged } from './text.js';
 import { record } from './effects.js';
 import { acceptanceStep } from './acceptance.js';
 import { plannerStep } from './planner.js';

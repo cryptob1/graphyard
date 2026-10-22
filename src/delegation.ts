@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { blockingRulingActions, demand, escalationTriggers, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, raiseEscalation, leadHoldRefusal, sliceIds, standingEscalations, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
+import { blockingRulingActions, demand, holdDelivery, implementerIdentities, releaseLeadHold, operatorScopeIncludes, leadHoldRefusal, sliceIds, type BlockingRulingAction, type Principal, type SliceId, type Work } from './model.js';
 import { save, wakeJob, type Store } from './store.js';
 import { fileConflicts, resourceConflicts } from './coordination.js';
 import { workIdByRef } from './store/locked-read.js';
@@ -15,20 +15,17 @@ export const slices = [
   { id: 'docs-experience', name: 'Docs/experience' },
 ] as const;
 // Coordination actions a lead may take. Anything absent is refused and recorded.
-export const leadRulingActions = ['approve-plan', 'reject-plan', 'classify-failure', 'request-rerun', 'send-back', 'escalate'] as const;
+export const leadRulingActions = ['approve-plan', 'reject-plan', 'classify-failure', 'request-rerun', 'send-back'] as const;
 export const leadPermittedActions = ['coordinate', ...leadRulingActions] as const;
 export function leadMay(action: string) { return (leadPermittedActions as readonly string[]).includes(action); }
 const rulingSchema = z.object({
   action: z.enum(leadRulingActions),
   ruleId: z.string().trim().min(1).max(200), reason: z.string().trim().min(1).max(2000),
-  trigger: z.enum(escalationTriggers).optional(),
   // The rejection an approval supersedes, named by its ruling ID, so a delayed
   // approval prepared against an earlier rejection cannot clear a newer one.
   supersedes: z.string().uuid().optional(),
   expectedRevision: z.number().int().positive().optional(),
 }).strict().superRefine((data, ctx) => {
-  if (data.action === 'escalate' && !data.trigger) ctx.addIssue({ code: 'custom', message: 'An escalation must name its trigger' });
-  if (data.action !== 'escalate' && data.trigger) ctx.addIssue({ code: 'custom', message: 'Only escalations carry a trigger' });
   if (data.action !== 'approve-plan' && data.supersedes) ctx.addIssue({ code: 'custom', message: 'Only an approve-plan ruling supersedes a standing plan rejection' });
 });
 export const routineIntakeOrigins = ['explicit-feedback', 'defect', 'unfinished-dependency', 'verification-finding'] as const;
@@ -210,8 +207,8 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
     return { ...slice, lead: lead ? identify(lead.id) : null,
       engineers: [...activeEngineers(items, slice.id, now)].map(identify),
       workers: workers.map(w => ({ key: w.key, ...identify(w.lease!.owner) })),
-      bottlenecks: items.filter(w => w.blocker || standingEscalations(w).length || w.leadHold || w.gates.some(g => !g.passed))
-        .map(w => ({ key: w.key, reason: w.blocker ?? standingEscalations(w)[0]?.reason ?? leadHoldRefusal(w) ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
+      bottlenecks: items.filter(w => w.blocker || w.leadHold || w.gates.some(g => !g.passed))
+        .map(w => ({ key: w.key, reason: w.blocker ?? leadHoldRefusal(w) ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
   // The snapshot lists every producer that is not lane-only; the reviewer limits count only proof holders.
   }), reviewers: principals.filter(p => p.role === 'producer' && !laneOnlyProducer(p)).map(p => identify(p.id)) };
 }
@@ -229,7 +226,7 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
     const work = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document as Work | undefined;
     demand(work, 'Work item not found', 404); demand(work.slice === actor.slice, 'Slice leads may coordinate only their own slice', 403);
     // Delivery is an immutable snapshot. A ruling must never bump a delivered
-    // item's revision or attach new escalation state to it; use a follow-up task.
+    // item's revision or attach new state to it; use a follow-up task.
     demand(work.stage !== 'done', 'Delivered work is immutable; rulings cannot rewrite it, so create a follow-up task', 409);
     demand(data.expectedRevision === undefined || data.expectedRevision === work.revision, 'Task revision changed; reload before ruling');
     // A hold is owned by the ruling that raised it. An approval clears one only
@@ -242,9 +239,6 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
     }
     const ruling = { id: randomUUID(), workId: work.id, leadId: actor.id, slice: actor.slice, ...data, at: now.toISOString() };
     await db.query('INSERT INTO lead_rulings(id,work_id,lead_id,slice_id,action,rule_id,reason) VALUES($1,$2,$3,$4,$5,$6,$7)', [ruling.id, work.id, actor.id, actor.slice, data.action, data.ruleId, data.reason]);
-    // Append-only: a later ruling never overwrites or clears a standing escalation,
-    // and raising one refuses the merge gate in this same transaction.
-    if (data.action === 'escalate') raiseEscalation(work, { trigger: data.trigger!, reason: data.reason, at: ruling.at, actor: actor.id });
     // A blocking ruling is not advice: it takes merge authorization away in this
     // same transaction and leaves durable state the gate and the broker refuse on.
     if ((blockingRulingActions as readonly string[]).includes(data.action))
@@ -253,7 +247,7 @@ export async function recordLeadRuling(store: Store, actor: Principal, id: strin
     // rejection, and only the rejection the approval named. A send-back demands
     // new implementation, so only the operator rework lifecycle clears it.
     if (data.action === 'approve-plan' && data.supersedes && standingRejection) releaseLeadHold(work);
-    await save(db, work, actor.id, `lead.${data.action}`, now, { ruleId: data.ruleId, reason: data.reason, ...(data.trigger ? { trigger: data.trigger } : {}), ...(data.supersedes ? { supersedes: data.supersedes } : {}) });
+    await save(db, work, actor.id, `lead.${data.action}`, now, { ruleId: data.ruleId, reason: data.reason, ...(data.supersedes ? { supersedes: data.supersedes } : {}) });
     // A ruling withdraws the merge authorization; the observation that follows fails the
     // check and dequeues the pull request (GY-258) rather than waiting for its next reading.
     if (work.submission) await wakeJob(db, work.id);

@@ -2,14 +2,13 @@
 import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master.js';
 import { message, type DaemonAction } from './state.js';
-import { boundDetail } from './decisions.js';
+import { boundDetail } from './text.js';
 import { readyToRetry } from './sessions.js';
 import { clearedBefore, clearedBlockerKey, failedAttemptCount, overlongKey, overlongReason, reblockedKey, reblockedMarker, reblockedReason } from './reblocked-attempts.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
 import { roleSessionMaximumMs } from '../model/sessions.js';
 import { credentialBlockedKey, credentialBlockedReason, credentialFailure } from '../worker-credential.js';
 import type { Cycle } from './cycle.js';
-import { settleEndedAttemptFence, supervisorStillRunning } from './cycle-reclaim.js';
 import { carriedRow, owedWrite, recordCarried, stepCallCarried, withinStepBudget, type OwedWriteOutcome } from './step-budget.js';
 
 /** A worker's implementation handle, written by the loop: the one record `master status` and the item's history show of it. What became of the write tells the caller whether the handle can be believed yet (`sent`), is still owed (`owed`), or was refused for its own sake (`refused`). */
@@ -28,34 +27,19 @@ export function workerHandle(cycle: Cycle, item: Work, profile: WorkerProfile, e
  * Ends a worker's attempt on the record and hands the item to a new one — the reclaim path a
  * session that cannot go on takes: what it left uncommitted is kept on its branch, the attempt ends
  * (which ends the lease, so the dispatch step claims the item again next cycle and the next
- * attempt's request names that commit), its supervisor is stopped and its pane closed.
+ * attempt's request names that commit), and its pane is closed; its supervisor stops on the ended lease.
  */
 export async function endWorkerAttempt(cycle: Cycle, item: Work, profile: WorkerProfile, epoch: number, pane: string | null, reason: string, observed: string, options: { endsBlocker?: true; stopFirst?: true } = {}) {
   const { state, effects, now, performed } = cycle;
-  const scope = item.containmentQuarantine?.epoch === epoch && item.containmentQuarantine.owner === profile.principal ? item.containmentQuarantine.scope : undefined;
-  let stop = 'its supervisor stops on the ended lease';
-  const halt = async () => {
-    try {
-      if (scope && effects.stopSupervisor) { await effects.stopSupervisor({ id: item.id, key: item.key, epoch, owner: profile.principal, profile: profile.name, agentName: profile.agentName, scope, leaseExpiresAt: item.lease!.expiresAt }, 'SIGTERM'); stop = `its supervisor (pid ${scope.pid}) was stopped through ${scope.unit}`; }
-    } catch (error) { if (stepCallCarried(error)) throw error; stop = `its supervisor could not be signalled (${message(error)}) and stops on the ended lease`; } // GY-1774: a carried stop is the ending's carried call
-    // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
-    if (pane) await effects.closeSession(pane);
-  };
-  // GY-1460: a session still at work is stopped, and verified gone, before its worktree is kept, so
-  // the snapshot never races an agent still editing or running git there.
-  if (options.stopFirst) {
-    await halt();
-    const running = await supervisorStillRunning(cycle, item, { epoch, owner: profile.principal });
-    if (running) throw new Error(`${stop}, but it is not yet verified gone, so its worktree is not kept yet: ${running}`);
-  }
+  // A session already gone from Herdr has no pane left to close (GY-867 ends such attempts too).
+  const halt = async () => { if (pane) await effects.closeSession(pane); };
+  // GY-1460: a session still at work is stopped before its worktree is kept.
+  if (options.stopFirst) await halt();
   const preserved = await preserveInterruptedAttempt(state, effects, item, epoch, profile, observed, now, performed, options.endsBlocker ? { endsBlocker: true } : {});
   if (preserved && preserved.state !== 'done') throw new Error(`its attempt could not be ended on the record: ${preserved.detail}`);
   if (!options.stopFirst) await halt();
   await workerHandle(cycle, item, profile, epoch, pane ?? 'none', `closed as failed: ${reason}`, true);
-  // GY-1155: the ending is on the record and the supervisor was stopped, so the fence is settled
-  // in this same action once the host verifies it gone, rather than waiting out the grace window.
-  const settled = scope && await settleEndedAttemptFence(cycle, item, { epoch, owner: profile.principal, ...(preserved ? { preserved: observed } : {}), closed: `closed as failed: ${reason}` });
-  return `the attempt ended on the record, ${stop}, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, ${settled ? 'its containment fence was settled, ' : ''}and ${item.key} is dispatched again`;
+  return `the attempt ended on the record, its supervisor stops on the ended lease, ${pane ? `pane ${pane} was closed` : 'no pane was left to close'}, and ${item.key} is dispatched again`;
 }
 
 /** How long a worker holding a live lease may show no activity before it is re-prompted once (GY-524). */
@@ -138,7 +122,7 @@ export function checkPaneStillBelongs(item: Work, handleId: string, pane: string
  * refusing every resolution for ever (GY-953).
  */
 export const resumeStep = (cycle: Cycle, failedOver: Set<string>, listingLive: boolean) =>
-  withinStepBudget(cycle, 'resume', ['promptSession', 'closeSession', 'stopSupervisor', 'recordSession', 'preserveWork', 'reportCapacity', 'containment', 'controlPlaneClock', 'settleContainment'], bounded => resumeStepWithin(bounded, failedOver, listingLive)); // GY-1774: every call the step makes — the re-prompts, the pane close, the supervisor stop, the handle record, the preservation and the fence settlement — is bounded
+  withinStepBudget(cycle, 'resume', ['promptSession', 'closeSession', 'recordSession', 'preserveWork', 'reportCapacity'], bounded => resumeStepWithin(bounded, failedOver, listingLive)); // GY-1774: every call the step makes — the re-prompts, the pane close, the supervisor stop, the handle record, the preservation and the fence settlement — is bounded
 async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLive: boolean) {
   const { config, state, effects, now, clock, performed, isolate, agents, heldBy } = cycle;
   const live = new Set<string>();

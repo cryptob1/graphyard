@@ -4,7 +4,7 @@ import { detectExhaustion, detectRetryingExhaustion } from '../model/capacity.js
 import { paneAlreadyGone } from '../request-settlement.js';
 import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEffects } from './effects.js';
 import { actionableSubjects } from './metrics.js';
-import { detailChanged } from './decisions.js';
+import { detailChanged } from './text.js';
 import { message } from './state.js';
 import { emptyMasterSession, type DaemonAction, type DaemonState, type MasterSessionState } from './state.js';
 import type { MasterConfig } from '../master.js';
@@ -123,8 +123,8 @@ async function masterSessionStepWithin(cycle: Cycle) {
 
   // Launch: nothing live holds the role, so the handover is composed from control-plane truth and one launch handed over.
   if (!live.agentName && !live.launching && !listed(config.masterAgentName)) {
-    const subjects = actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals });
-    const handover = masterHandover({ cliPath: config.cliPath, work: snapshot.work, now: clock, approvals: Object.values(state.approvals), subjects });
+    const subjects = actionableSubjects(config, snapshot.work, clock);
+    const handover = masterHandover({ cliPath: config.cliPath, work: snapshot.work, now: clock, subjects });
     live.launching = true;
     await effects.persist(state);
     cycle.launch('session', null, masterLaunchKey, [], async sink => {
@@ -163,7 +163,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
   const runtimeGone = !!agent && !agent.agent && agent.agent_status === 'unknown';
   for (const key of Object.keys(live.subjects)) if (!agent || runtimeGone) delete live.subjects[key];
   if (agent && !runtimeGone && effects.promptSession && !launching) {
-    const subjects = actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals });
+    const subjects = actionableSubjects(config, snapshot.work, clock);
     const causes = subjects.filter(subject => live.subjects[subject.key] !== promptDigest(subject.detail)).map(subject => subject.key);
     const reference = live.lastWake?.at ?? live.startedAt;
     const quietMs = reference ? Math.max(0, clock - Date.parse(reference)) : 0;

@@ -6,7 +6,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { worktreeReclaimPass } from './worktree-reclaim.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
-import type { DecisionSituation } from '../model/approval.js';
 import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, type BlockerProbeResult } from './blocker-probes.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
@@ -18,19 +17,12 @@ import { readProducerLedger, saveProducerLedger, launchProducer } from '../produ
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
-import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type SessionIdentity } from '../master.js';
-import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
-import { annotatePaneShell } from '../quarantine.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, holdRepeatedLimitAccount, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type SessionIdentity } from '../master.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
-import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
-import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
-import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
-import { decisionEventKinds } from './decision-reads.js';
 import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import { worktreeRoot } from '../install/worktree-root.js';
@@ -72,19 +64,14 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const fetcher = timedFetch(deps.fetcher ?? fetch, () => current().url);
   const snapshot = async () => { await (await import('../master/environments.js')).reportPendingExhaustions(current(), { fetch: fetcher }).catch(() => {}); return timedCall('server', 'GET work-snapshot', deps.snapshot); }; // resending first any account hold the agent registry has not heard of (GY-1573)
   const mutate = (path: string, data: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => deps.mutate(path, data, requestId));
-  /**
-   * One call as the master's own operator-agent identity — the identity that requests decisions.
-   * The coordinator credential cannot, and the approver's
-   * credential is never read here: an agent that requested a decision may not approve it.
-   */
+  /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
   const asOperatorAgent = async (method: 'GET' | 'POST', path: string, body?: unknown, key: string = randomUUID()) => {
     const config = current();
-    if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can request routine decisions');
+    if (!config.operatorAgent) throw new Error('No master operator-agent identity is provisioned; run graphyard master autonomy --admin-token-stdin --apply so the loop can apply routine rework');
     const token = await agentToken(root, config, 'operatorAgent');
     const response = await fetcher(`${config.url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key }, ...(body === undefined ? {} : { body: JSON.stringify(body) }), signal: AbortSignal.timeout(30_000) });
     const text = await response.text(); // GY-1751: a proxy's empty or HTML 502-504 keeps its status
     let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: text.slice(0, 200) }; }
-    // The body is kept on the error: a decision refusal names the standing refused decision as a field (GY-265).
     // GY-1713: the message carries error and zod issues.
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedBodyDetail(result)}`, response.status, result);
     return result;
@@ -98,53 +85,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
     return result;
   };
-  const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
-    const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
-    try { return await post(work); }
-    catch (error) {
-      // A resolve names the item's revision, and a heartbeat between the snapshot and this request
-      // moves it. Any other mutation moves it too — the lease-loss settled and another raised — so
-      // the item is read again and asked once more only when it still needs this very resolve on
-      // the same grounds; otherwise the refusal stands and the next cycle decides afresh. Its
-      // approval is pinned by resolvePin, so later heartbeats do not refuse it.
-      if (action !== 'resolve' || !/Task revision changed/.test(message(error))) throw error;
-      const fresh = (await snapshot()).work.find(entry => entry.id === work.id);
-      const before = neededDecision(work, current()), after = fresh ? neededDecision(fresh, current()) : null;
-      if (!fresh || !before || !after || after.action !== 'resolve' || after.binding !== before.binding || after.reason !== before.reason) {
-        throw new Error(`${message(error)}; ${work.key} ${after?.action === 'resolve' ? `now needs the resolve on other grounds (${after.binding})` : 'no longer needs this resolve'}, so it is not asked again at the new revision`);
-      }
-      return post(fresh);
-    }
-  };
-  // The approver's runtime and account come from the registry's approver role; naming a kind here
-  // would be a runtime read out of code, and the role would decide nothing.
-  // The inventory says whether Herdr could be read (GY-205): one it could not judges no approver session gone.
-  const approver: DaemonEffects['approver'] = async (work, decision) => { const launched = await launchApprover(root, work, decision, undefined, await observeHerdrAgents(run), run, {}, handle => mutate(`work/${work.id}/session`, handle)); return { agentName: launched.agentName, pane: launched.pane, account: launched.account?.environment ?? null, runtime: launched.runtime, session: launched.session, run: launched.run, settled: launched.settled, ...(launched.replaced ? { replaced: launched.replaced } : {}) }; };
+  const rework: DaemonEffects['rework'] = (work, reason) => asOperatorAgent('POST', `work/${work.id}/rework`, { reason, previousWorkerStopped: true });
   const docsSyncing = docsSyncEffects(root, run, work => handle => mutate(`work/${work.id}/session`, handle));
   const endRegistrySession: DaemonEffects['endRegistrySession'] = async (session, reason) => {
     const config = current();
     if (config.url) await httpFleetClient({ url: config.url, credentialFile: config.credentialFile }).end(session, reason);
   };
-  // The same route, as the same requester: only the identity that asked may take a request back.
-  const withdraw: DaemonEffects['withdraw'] = (work, decision, reason) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason });
-  const resume: DaemonEffects['resume'] = (work, decision) => asOperatorAgent('POST', `work/${work.id}/decide`, { action: 'resume', decision });
-  const decisions: DaemonEffects['decisions'] = work => asOperatorAgent('GET', `work/${encodeURIComponent(work.id)}/decisions`);
-  // One coordinator read of the decision ledger's kinds after the last seq the loop saw (GY-1142).
-  const decisionChanges: DaemonEffects['decisionChanges'] = async after => {
-    const query = new URLSearchParams({ kind: decisionEventKinds.join(','), payload: 'none', routine: 'include', order: after ? 'asc' : 'desc', limit: after ? '1000' : '1', view: 'page' });
-    if (after) query.set('cursor', after);
-    const read = await asCoordinator(`events?${query}`) as { events: { seq: string; work_id: string }[]; page: { hasMore: boolean } };
-    return { seq: (after ? read.events.at(-1)?.seq : read.events[0]?.seq) ?? after ?? '0', work: [...new Set(read.events.map(event => event.work_id))], complete: !!after && !read.page.hasMore };
-  };
   let publishedEnvironment: string | null = null, publishedMergeQueue: string | null = null;
   /** GY-1524: the recorded merger, read from /api/status afresh for every merge decision (AC-6), never cached: a switch to `github` stops the next merge, not the one after a window. */
   // The control plane is the only merge writer.
   const recordedMerger = async () => 'control-plane' as const;
-  /** GY-1927: the automatic-merging hold over one item, read from the plane afresh before the writer opens a merge and before it pushes; a plane without the route (404) records no hold, and any other failure stops the merge. */
-  const recordedHold = async (work: { id: string }) => {
-    try { return ((await asCoordinator(`auto-merge?work=${encodeURIComponent(work.id)}`)) as { hold?: string | null }).hold ?? null; }
-    catch (error) { if (error instanceof RefusedResponse && error.status === 404) return null; throw error; }
-  };
   // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
   let writtenMemory: string | null = null;
   const persistLoop = async (state: DaemonState) => {
@@ -218,38 +168,15 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         record: handle => mutate(`work/${work.id}/session`, handle),
       });
     },
-    escalationSessions: () => readEscalationSessions(root),
-    approverLaunch: agentName => readApproverLaunch(root, agentName),
-    approverLaunches: () => readApproverLaunches(root),
     endRegistrySession,
-    endEscalation: async (session, resolution, waiting) => {
-      if (session.session) await endRegistrySession(session.session, resolution.slice(0, 500));
-      try { if (session.pane) await closeHerdrPane(session.pane, run); } catch (error) { if (!paneAlreadyGone(error)) throw error; }
-      await saveEscalationSession(root, session.work, session.trigger, waiting ? { ...session, pane: null, session: null, waiting, idleSince: undefined } : null);
-    },
-    markEscalation: session => saveEscalationSession(root, session.work, session.trigger, session),
-    relaunchEscalation: async session => {
-      // A registry session a failed launch could not end is ended first, so the relaunch has its slot.
-      if (session.session) {
-        await endRegistrySession(session.session, `escalation handler for ${session.work} (${session.trigger}) is launched again`);
-        await saveEscalationSession(root, session.work, session.trigger, { ...session, session: null });
-      }
-      // The same escalation, from a context assembled again now: the one the ended handler read may be stale.
-      const context = verifiedContext(await asOperatorAgent('GET', `work/${encodeURIComponent(session.work)}/context?trigger=${encodeURIComponent(session.trigger)}`));
-      const launched = await launchEscalationHandler(root, current(), context, session.kind as NonNullable<WorkerProfile['kind']>, await listHerdrAgents(run), run, handle => mutate(`work/${encodeURIComponent(session.work)}/session`, handle));
-      return { agentName: launched.agentName, account: launched.account };
-    },
     roleHealth: async () => {
       const config = current();
       return {
-        ...(config.approver && config.operatorAgent ? { approver: await approverRoleHealth(config) } : {}),
-        ...(config.operatorAgent ? { 'escalation-handler': await escalationRoleHealth(config, {}, (await readEscalationSessions(root).catch(() => [] as EscalationSession[])).filter(session => session.waiting).map(session => session.runtime ?? session.kind)) } : {}),
         ...(config.reviewers.length ? { reviewer: { profiles: config.reviewers, health: await inspectProfileAccounts(config, 'reviewer', config.reviewers, Object.fromEntries(config.reviewers.map(profile => [profile.name, { available: true, reason: null as string | null }]))) } } : {}),
         ...(config.producers.length ? { producer: { profiles: config.producers, health: await inspectProducerCredentials(root, config.producers) } } : {}),
       };
     },
     herdr: async () => { const runtime = await observeHerdrAgents(run); return { agents: runtime.agents, available: runtime.available }; },
-    stopSupervisor: async (orphan, signal) => { await stopWatchSupervisor(orphan, signal, run); },
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     snapshot,
     followUpThreads: async (work, at) => {
@@ -268,15 +195,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
-    get withdrawReview() {
-      // GY-2078: a change request is withdrawn in the control plane's own review record; no GitHub request is made.
-      return (work: Work, reviewId: number, message: string) =>
-        mutate(`work/${work.id}/review-withdraw`, { reviewId, reason: message.slice(0, 7000) }, randomUUID()).then(() => {});
-    },
     // `root` is this checkout: containment is derived from its object store, never from the forge.
     observeDeployment: (delivered, retained) => observeDeployment(current(), delivered, run, fetcher, () => Date.now(), { root, retained }),
     // GY-1524: the executor merges in this checkout's object store, pushes with the install's deploy key alone, records each step as the coordinator under one key per (step, commits), and acts only while the recorded merger is control-plane (read before every merge decision).
-    get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger, hold: recordedHold }); },
+    get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }); },
     publishProductionEnvironment: async () => {
       const environment = deploymentEnvironmentName(current(), root);
       if (environment === publishedEnvironment) return;
@@ -315,26 +237,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // Finished worktrees are removed outright first, a bounded number per pass (GY-360); the
     // inventory that remains is the one the dependency reclaim judges and `master status` reads.
     reclaim: (work, now) => worktreeReclaimPass(root, current(), run, work, now),
-    // The decision effects exist only while the live configuration names the master's operator-agent identity. Without one the loop
-    // has no way to request anything, so the cycle sees them absent and records each routine decision as the escalation naming the
-    // two commands, instead of a request that fails on every retry; provisioning the identity brings them back on the next reload, with no restart.
-    get decide() { return current().operatorAgent ? decide : undefined; },
-    get approver() { return current().operatorAgent ? approver : undefined; },
+    // Rework exists only while the live configuration names the master's operator-agent identity; provisioning it brings it back on the next reload.
+    get rework() { return current().operatorAgent ? rework : undefined; },
     get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths, docsSyncSettled: docsSyncing.docsSyncSettled,
-    get withdraw() { return current().operatorAgent ? withdraw : undefined; },
-    get resume() { return current().operatorAgent ? resume : undefined; },
-    get decisions() { return current().operatorAgent ? decisions : undefined; },
-    get decisionChanges() { return current().operatorAgent ? decisionChanges : undefined; },
     // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
-    get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
-      writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger, hold: recordedHold }) }) : undefined; },
-    get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
-    controlPlaneClock: () => readControlPlaneClock(current().url, { fetcher }),
-    containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
-      work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),
-      () => herdrJson(['status', 'server', '--json'], run)) }),
-    settleContainment: (work, assessment) => mutate(`work/${work.id}/autosettle`, { epoch: assessment.epoch, settlementHash: work.containmentQuarantine!.settlementHash,
-      reason: `The master loop verified on ${assessment.host ?? current().hostId} that the supervisor of epoch ${assessment.epoch} is gone; the item is released for a fresh attempt`, verification: assessment.verification, origin: 'loop' }),
+    get acceptance() { const config = current(); return config.operatorAgent ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
+      writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },
+    get planner() { const config = current(); return config.operatorAgent ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
     // systemd-notify keep-alive (NOTIFY_SOCKET; NotifyAccess=all; bounded child via `run`). GY-437: upgrade between cycles, re-exec under the cgroup unit.
     // GY-1899: the release the loop records is the checkout its loaded code comes from — the one
     // the running CLI starts from, read once at process startup — never the managed repository's

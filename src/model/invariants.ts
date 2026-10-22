@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { isClosed } from './closure.js';
-import { standingEscalations } from './escalation.js';
 import type { Work } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -16,7 +15,7 @@ import type { Work } from './work.js';
 // hold every one of them over simulated days of the real loop, so a change that breaks one fails CI.
 // ---------------------------------------------------------------------------
 
-export const systemInvariants = ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog', 'deploy-lease-loss'] as const;
+export const systemInvariants = ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog'] as const;
 export type SystemInvariant = typeof systemInvariants[number];
 
 
@@ -39,9 +38,6 @@ export const invariantThresholdsSchema = z.object({
   /** Machine-filed backlog items left untriaged longer than this number at most `untriagedBacklogMax`. */
   untriagedBacklogHours: z.number().int().min(1).max(720).default(24),
   untriagedBacklogMax: z.number().int().min(0).max(1000).default(0),
-  /** Worker leases lost within `deployWindowMinutes` of a control-plane deploy number at most `deployLeaseLosses`. */
-  deployLeaseLosses: z.number().int().min(0).max(100).default(0),
-  deployWindowMinutes: z.number().int().min(1).max(120).default(10),
 }).strict();
 export type InvariantThresholds = z.infer<typeof invariantThresholdsSchema>;
 export const invariantDefaults: InvariantThresholds = invariantThresholdsSchema.parse({});
@@ -49,16 +45,15 @@ export const invariantDefaults: InvariantThresholds = invariantThresholdsSchema.
 /**
  * What the loop carries between cycles to judge the invariants that are about history rather than
  * one snapshot: each candidate's base refreshes since its own last head change, when each merge-stage
- * candidate was first seen mergeable, the control-plane builds seen (a change is a deploy), the
- * lease losses seen, and the last cycle's report for `master status`.
+ * candidate was first seen mergeable, and the last cycle's report for `master status`.
  */
 export const invariantRecordSchema = z.object({
   refreshes: z.record(z.string(), z.object({ head: z.string().max(64), count: z.number().int().min(0).max(10_000), seen: z.array(z.string().max(200)).max(20) }).strict()).default({}),
   mergeable: z.record(z.string(), z.object({ sha: z.string().max(64), since: z.string() }).strict()).default({}),
-  builds: z.array(z.object({ commit: z.string().max(64), firstSeenAt: z.string(), lastSeenAt: z.string() }).strict()).max(20).default([]),
-  losses: z.array(z.object({ work: z.string().max(40), at: z.string(), epoch: z.number().int().min(0).nullable() }).strict()).max(200).default([]),
-  report: z.array(z.object({ invariant: z.enum(systemInvariants), /** Retired (GY-2873): a cursor written before keeps parsing. */ faultClass: z.unknown().optional(), threshold: z.string().max(200), reading: z.string().max(500), holds: z.boolean(),
-    observed: z.boolean(), subjects: z.array(z.string().max(40)).max(20), line: z.string().max(700) }).strict()).default([]),
+  /** Retired with the lease-loss escalation (GY-2874): a cursor written before keeps parsing. */
+  builds: z.unknown().optional(), losses: z.unknown().optional(),
+  report: z.preprocess(entries => Array.isArray(entries) ? entries.filter(entry => (systemInvariants as readonly unknown[]).includes(entry?.invariant)) : entries, z.array(z.object({ invariant: z.enum(systemInvariants), /** Retired (GY-2873): a cursor written before keeps parsing. */ faultClass: z.unknown().optional(), threshold: z.string().max(200), reading: z.string().max(500), holds: z.boolean(),
+    observed: z.boolean(), subjects: z.array(z.string().max(40)).max(20), line: z.string().max(700) }).strict())).default([]),
   at: z.string().nullable().default(null),
 }).strict();
 export type InvariantRecord = z.infer<typeof invariantRecordSchema>;
@@ -206,27 +201,6 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   const untriaged = work.filter(item => open(item) && item.stage === 'backlog' && !item.ready && machineFiled(item) && now - (time(item.createdAt) ?? now) > triageBound);
   judge('untriaged-backlog', `at most ${limits.untriagedBacklogMax} machine-filed backlog item(s) untriaged past ${limits.untriagedBacklogHours} h`,
     untriaged.length ? `${untriaged.length} untriaged, the oldest ${untriaged[0].key}` : 'every machine-filed backlog item is triaged or younger than the bound', untriaged.length <= limits.untriagedBacklogMax, untriaged.map(item => item.key));
-
-  // 7. No worker lease lost to a deploy: a lease-loss raised within the window after the control plane's build changed.
-  const retain = now - 24 * 3_600_000;
-  for (const item of work) for (const escalation of standingEscalations(item)) {
-    if (escalation.trigger !== 'lease-loss' || escalation.actor !== 'graphyard' || record.losses.some(loss => loss.work === item.key && loss.at === escalation.at)) continue;
-    const epoch = /lost lease epoch (\d+)/.exec(escalation.reason)?.[1];
-    record.losses.push({ work: item.key, at: escalation.at, epoch: epoch ? Number(epoch) : null });
-  }
-  record.losses = record.losses.filter(loss => (time(loss.at) ?? 0) >= retain).slice(-200);
-  if (input.build) {
-    const last = record.builds.at(-1);
-    if (last?.commit === input.build) last.lastSeenAt = at;
-    else record.builds = [...record.builds, { commit: input.build, firstSeenAt: at, lastSeenAt: at }].slice(-20);
-  }
-  // A deploy happened between the last cycle that saw the old build and the first that saw the new one.
-  const deploys = record.builds.slice(1).map((build, index) => ({ commit: build.commit, from: Date.parse(record.builds[index].lastSeenAt), to: Date.parse(build.firstSeenAt) }));
-  const windowMs = limits.deployWindowMinutes * 60_000;
-  const lost = record.losses.filter(loss => { const when = time(loss.at); return when !== null && deploys.some(deploy => when >= deploy.from && when <= deploy.to + windowMs); });
-  if (!record.builds.length) judge('deploy-lease-loss', `at most ${limits.deployLeaseLosses} lease(s) lost within ${limits.deployWindowMinutes} min of a deploy`, 'the control plane reported no build this cycle', true, [], false);
-  else judge('deploy-lease-loss', `at most ${limits.deployLeaseLosses} lease(s) lost within ${limits.deployWindowMinutes} min of a deploy`,
-    lost.length ? `${lost.length} lease(s) lost to a deploy, e.g. ${lost[0].work} at ${lost[0].at}` : `${deploys.length} deploy(s) seen, no lease lost to one`, lost.length <= limits.deployLeaseLosses, lost.map(loss => loss.work));
 
   record.report = checks; record.at = at;
   return checks;

@@ -5,14 +5,15 @@ import type { Work } from './model.js';
 import { runChild, type ChildRun } from './child-runner.js';
 import type { CoordinatorConfinement, MasterConfig } from './master/profiles.js';
 import { loadMasterConfig } from './master/config.js';
-import { accountLaunch } from './master/environments.js';
+import { accountLaunch, heldAwareProbe, selectAccount, type AccountSkip, type LaunchAccount } from './master/environments.js';
 import { closeFailedLaunch, launchStartMs, prepareConfinedGitPaths, sessionConfinement, startAgentSession } from './master/launch.js';
 import { checkoutGitDirectory } from './master/checkout-git.js';
 import { prepareSessionHarness, sessionHarnessFile } from './master/harness.js';
 import { sessionGitAdminDirectory } from './master/profiles.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './master/herdr.js';
 import { autonomousSession, destructivePromptGuidance, herdrAttach } from './master/dispatch.js';
-import { selectApproverAccount, type ApproverSelection, type SessionRegistrar } from './master/autonomy.js';
+import { type FleetLaunchAccount, type FleetProbe, selectFleetSession } from './fleet.js';
+import type { SessionHandleInput } from './model/sessions.js';
 import { registeredLaunch } from './model/session-state.js';
 import { sessionName } from './session-name.js';
 import { failureText, settleCheckout } from './master/worktrees.js';
@@ -190,14 +191,24 @@ async function reclaimDocsSyncHarnesses(root: string, visible: readonly string[]
   return removed;
 }
 
+type SessionRegistrar = (handle: SessionHandleInput) => Promise<unknown>;
+type DocsSyncSelection = { fleet: { release: (reason: string) => Promise<boolean>; account: FleetLaunchAccount } | null; account: LaunchAccount | null; profile: string; skipped: AccountSkip[] };
+/** A reviewer-class account for a docs-sync session: the registry's reviewer role when it defines one, else the first reviewer profile naming accounts, else the runtime's own login. */
+async function selectDocsSyncAccount(config: MasterConfig, work: string, principal: string, probe: FleetProbe = {}): Promise<DocsSyncSelection> {
+  const fleet = await selectFleetSession(config, 'reviewer', { name: 'docs-sync', principal }, await heldAwareProbe(config, { ...probe, work }));
+  if (fleet) return { fleet, account: fleet.account, profile: 'docs-sync', skipped: fleet.skipped };
+  const profile = config.reviewers.find(entry => entry.accounts?.length);
+  if (!profile) return { fleet: null, account: null, profile: 'docs-sync', skipped: [] };
+  const selected = await selectAccount(config, 'reviewer', profile, { ...probe, work });
+  return { fleet: null, account: selected.account, profile: profile.name, skipped: selected.skipped };
+}
 /**
- * Launch the docs-sync session for one plan on a reviewer-class account: the accounts the reviewer
- * profiles name, chosen as an approver's are (`selectApproverAccount`). The instruction is the
- * session's own first request, like every session Graphyard launches.
+ * Launch the docs-sync session for one plan on a reviewer-class account (`selectDocsSyncAccount`).
+ * The instruction is the session's own first request, like every session Graphyard launches.
  */
 export interface DocsSyncLaunchSeams {
   config?: () => Promise<MasterConfig>;
-  select?: (config: MasterConfig, key: string, principal: string, probe: { runtime: { agents: HerdrAgent[]; available: boolean } }) => Promise<ApproverSelection>;
+  select?: (config: MasterConfig, key: string, principal: string, probe: { runtime: { agents: HerdrAgent[]; available: boolean } }) => Promise<DocsSyncSelection>;
   confinement?: typeof sessionConfinement;
 }
 export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPlan, herdr: { agents: HerdrAgent[]; available: boolean }, run?: ChildRun, register?: SessionRegistrar, seams: DocsSyncLaunchSeams = {}) {
@@ -205,10 +216,10 @@ export async function launchDocsSync(root: string, work: Work, plan: DocsSyncPla
   const name = docsSyncSessionName(plan);
   if (!herdr.available) throw new Error(`Herdr's session inventory could not be read, so no docs-sync session for ${work.key} is launched into it; the launch is made again once Herdr answers`);
   if (herdr.agents.some(agent => agent.name === name)) throw new Error(`Docs-sync session ${name} is already visible in Herdr; let it finish first`);
-  const chosen = await (seams.select ?? selectApproverAccount)(config, work.key, config.approver?.id ?? 'graphyard-docs-sync', { runtime: herdr });
+  const chosen = await (seams.select ?? selectDocsSyncAccount)(config, work.key, 'graphyard-docs-sync', { runtime: herdr });
   const kind = chosen.account?.kind ?? config.reviewers[0]?.kind ?? config.workers[0]?.kind;
   const release = (why: string) => chosen.fleet?.release(why).catch(() => false);
-  if (!kind) { await release(`docs-sync launch for ${work.key} found no runtime`); throw new Error('No runtime is configured for a docs-sync session: name reviewer profiles or approver accounts'); }
+  if (!kind) { await release(`docs-sync launch for ${work.key} found no runtime`); throw new Error('No runtime is configured for a docs-sync session: name reviewer profiles'); }
   // GY-866: the worktree lies in a managed checkout of the session's own under the managed
   // worktree root, never in the coordinator checkout. No ledger record owns that directory, so
   // this process holds it against the reclaim pass for the session's bounded life and settles it

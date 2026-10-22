@@ -1,4 +1,4 @@
-import { servingReleaseProof, loopObservationProofs, type Work } from './work.js';
+import { servingReleaseProof, loopObservationProofs, type Principal, type Work } from './work.js';
 import { namedPaths } from './documentation-glob.js';
 
 /**
@@ -53,3 +53,19 @@ const workerCannotServe = /\bnot a worker(?:'s)?(?=\s*(?:[(,;:]|\.(?:\s|$)|$|to\
 export const loopHeldBlocker = (work: Pick<Work, 'systemDriven' | 'criteria' | 'stage' | 'description' | 'lease'>, blocker: string, blockerClass: string, now: number) =>
   (blockerClass === 'genuine' || blockerClass === 'master-role') && workerCannotServe.test(blocker) && (!work.lease || Date.parse(work.lease.expiresAt) <= now)
   && (loopOwned(work) || !!loopObservationProofs(work));
+
+/**
+ * GY-2605: an item whose own record reserves its release to the owner (GY-1857): an `Owner hold:` title,
+ * a description or criterion saying it leaves the backlog only when the owner releases it, or a manual
+ * proof that records the owner scheduling it. Only the owner, a declared human admin session, releases it,
+ * or anyone once the item carries an owner's provided answer (GY-2606).
+ */
+const ownerHoldWording = /\b(?:leaves the backlog only when|stays in the backlog until) the owner releases it\b/i;
+export const ownerHeld = (work: Pick<Work, 'title' | 'description' | 'criteria'>) => /^owner hold:/i.test(work.title)
+  || ownerHoldWording.test([work.description ?? '', ...work.criteria.map(criterion => criterion.text)].join('\n'))
+  || work.criteria.some(criterion => criterion.proofs.some(proof => proof.startsWith('manual:owner-schedules')));
+const ownerAnswered = (work: Pick<Work, 'humanRequest' | 'humanRequests'>) =>
+  [work.humanRequest, ...work.humanRequests ?? []].some(request => request?.answer?.outcome === 'provided');
+export const ownerHoldRefusal = (work: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'humanRequest' | 'humanRequests'>, actor?: Pick<Principal, 'id' | 'role' | 'sessionKind'>) =>
+  !ownerHeld(work) || ownerAnswered(work) || (actor?.role === 'admin' && actor.sessionKind === 'human') ? null
+    : `${work.key} is under an owner hold: its record reserves the release to the owner, so ${actor?.id ?? 'an agent'} may not release it. It stays in the backlog until the owner releases it with their own human admin session`;

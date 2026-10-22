@@ -65,7 +65,7 @@ async function githubOwnerType(_owner: string): Promise<'User' | 'Organization' 
  * the control plane became the only merge writer resumes with its deploy-key step still to run.
  */
 
-/** `up --local` installs supervised (GY-1501): no operator-agent or approver identity; the operator answers each decision. */
+/** `up --local` installs supervised (GY-1501): no operator-agent identity; the operator answers each decision. */
 export const upSupervised = (request: Pick<UpRequest, 'provider'>) => request.provider === 'local';
 /** GY-1552: every `up` — the control plane is the merge writer, with no GitHub Apps. */
 export const upMergerControlPlane = (request: Pick<UpRequest, 'merger'>) => request.merger === 'control-plane';
@@ -228,7 +228,7 @@ export interface UpDependencies {
   ensureDeployKey?(installDir: string, repository: string): Promise<string>;
   /**
    * GY-1851: the HTTP status the control plane gave each credential this install recorded (the
-   * coordinator, operator-agent and approver) at a status read; one that drew no answer is left out.
+   * coordinator and operator-agent) at a status read; one that drew no answer is left out.
    * Absent, nothing is judged stale; the real dependencies read recordedCredentialAnswers here.
    */
   credentialAnswers?(adminToken: string | null): Promise<{ identity: string; status: number; listed?: boolean | null }[]>;
@@ -419,7 +419,7 @@ const reissueSteps: readonly UpStep[] = ['control-plane', 'host-supervisor', 'ma
 const masterJson = (root: string) => readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
 /**
  * GY-1851: GET /api/status at SERVER with each credential master.json records (the coordinator's,
- * the operator-agent's and the approver's), answering the HTTP status of each. A credential with no
+ * the operator-agent's), answering the HTTP status of each. A credential with no
  * readable file, or a request that drew no answer, is left out: only the plane's answer judges it.
  * A refused agent identity carries `listed`: true when the plane's operator-agent listing (read with
  * ADMIN) still holds it (revoked, say: its database row stands, so the database is not fresh), false
@@ -427,7 +427,7 @@ const masterJson = (root: string) => readFile(resolve(root, '.graphyard/master.j
  * failed): its absence is then unknown. CONFIG is master.json and READ reads a file it names.
  */
 async function credentialAnswersFrom(config: any, read: (file: string) => Promise<string>, server: string, fetcher: typeof fetch, admin: string | null) {
-  const recorded = [['coordinator', null, config?.credentialFile], ['operator-agent', config?.operatorAgent?.id, config?.operatorAgent?.credentialFile], ['approver', config?.approver?.id, config?.approver?.credentialFile]] as const;
+  const recorded = [['coordinator', null, config?.credentialFile], ['operator-agent', config?.operatorAgent?.id, config?.operatorAgent?.credentialFile]] as const;
   const call = (path: string, token: string) => fetcher(`${server.replace(/\/+$/, '')}/api/${path}`, { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) });
   const answers: { identity: string; status: number; listed?: boolean | null }[] = [];
   let listing: unknown[] | null | undefined;
@@ -486,10 +486,10 @@ export async function stopRecordedLoop(root: string): Promise<{ unit: string | n
   return { unit };
 }
 
-/** Both of the master's agent identities are recorded in master.json and their credential files are readable. */
+/** The master's agent identity is recorded in master.json and its credential file is readable. */
 async function provisioned(root: string) {
   const config = await readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
-  const identities = [config?.operatorAgent, config?.approver];
+  const identities = [config?.operatorAgent];
   if (identities.some(identity => typeof identity?.credentialFile !== 'string')) return false;
   return (await Promise.all(identities.map(identity => readFile(identity.credentialFile, 'utf8').then(text => text.trim().length >= 32, () => false)))).every(Boolean);
 }
@@ -803,7 +803,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         // The onboarding item and the goal lived in the old database: they are filed again on the fresh one.
         state.onboardingWork = null; state.onboardingRequest = null; state.goal = null; state.goalRequest = null;
         await writeState(deps.root, state);
-        deps.emit({ kind: 'note', text: `The control plane refused the recorded ${refused.join(', ')} credential${refused.length > 1 ? 's' : ''} (401): it serves a fresh database, so this run re-issues the coordinator, operator-agent and approver credentials and starts the master loop on a fresh cursor, archiving the old one beside itself.` });
+        deps.emit({ kind: 'note', text: `The control plane refused the recorded ${refused.join(', ')} credential${refused.length > 1 ? 's' : ''} (401): it serves a fresh database, so this run re-issues the coordinator and operator-agent credentials and starts the master loop on a fresh cursor, archiving the old one beside itself.` });
       }
     }
     const installedBefore = state.completed.includes('control-plane');
@@ -857,7 +857,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // Recorded on every run (idempotent), so a resumed run that skipped master init still installs supervised.
     if (supervised && deps.supervise) {
       const { operatorLogin } = await deps.supervise();
-      deps.emit({ kind: 'note', text: `Supervised mode: an agent reviewer reviews each head and the control plane merges it; no operator-agent or approver runs, so you${operatorLogin ? ` (${operatorLogin})` : ''} answer each decision.` });
+      deps.emit({ kind: 'note', text: `Supervised mode: an agent reviewer reviews each head and the control plane merges it; no operator-agent runs, so you${operatorLogin ? ` (${operatorLogin})` : ''} answer each decision.` });
     }
 
     // GY-1552: the merge writer's deploy key under the install directory. No GitHub protection is set.
@@ -878,16 +878,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       });
     }
 
-    // GY-1479: the master's operator-agent and approver identities (`master autonomy --apply`), provisioned
+    // GY-1479: the master's operator-agent identity (`master autonomy --apply`), provisioned
     // with the admin credential the install saved, so the new master creates, releases and unblocks work
     // with no further command. That credential is never something an agent session may read.
     // Control-plane merger (GY-1552) still provisions them: no reviewer App, but the master decides with its own identities.
-    if (supervised) deps.emit({ kind: 'step', step: 'master-autonomy', state: 'skipped', detail: 'supervised: no operator-agent or approver identity is provisioned; the operator answers each decision' });
+    if (supervised) deps.emit({ kind: 'step', step: 'master-autonomy', state: 'skipped', detail: 'supervised: no operator-agent identity is provisioned; the operator answers each decision' });
     else await step('master-autonomy', async () => {
       const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
       // An install whose operator already ran the command keeps those identities; the admin credential only refreshes them.
       // A re-issue (GY-1851) never keeps the files the fresh database refused.
-      if (!admin && !state.reissue?.length && await provisioned(deps.root)) return 'the master\'s operator-agent and approver identities were already provisioned';
+      if (!admin && !state.reissue?.length && await provisioned(deps.root)) return 'the master\'s operator-agent identity was already provisioned';
       if (!admin) throw new UpStop(`master-autonomy: the operator's admin credential is not on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, so the master's agent identities cannot be provisioned; pipe it to graphyard master autonomy --admin-token-stdin --apply here, then rerun ${rerun()}`, upExitCodes.prerequisite);
       await run('master-autonomy', ['master', 'autonomy', '--admin-token-stdin', '--apply', '--harness', request.master], { stdin: admin });
       return 'the master creates, releases and unblocks work with its own operator-agent identity';
@@ -1046,7 +1046,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         if (stopped.unit) await (deps.startUnit ?? (async (unit: string) => { await (await import('./child-runner.js')).defaultChildRun('systemctl', ['--user', 'start', unit], { timeoutMs: 120_000 }); }))(stopped.unit);
         else await run('master-loop', ['master', 'restart']);
         fresh = archived ? `the loop started a fresh cursor; the old one (cycle ${archived.cycle}) is archived at ${archived.file}` : 'the loop started a fresh cursor';
-        deps.emit({ kind: 'note', text: `Re-issued the coordinator, operator-agent and approver credentials for the fresh database; ${fresh}.` });
+        deps.emit({ kind: 'note', text: `Re-issued the coordinator and operator-agent credentials for the fresh database; ${fresh}.` });
       } else if (!(await checklist()).find(item => item.id === 'master-loop')?.done || (loopStale && rewrote !== 'updated' && rewrote !== 'created')) await run('master-loop', ['master', 'restart']);
       // A loop that refuses to run is a failed setup step naming its cause, never a wait that stalls.
       const refused = async () => {
