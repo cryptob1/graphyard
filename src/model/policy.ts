@@ -27,6 +27,7 @@ export interface BootstrapMode extends BootstrapDeclaration { declaredBy: string
 export interface Criterion { id: string; text: string; proofs: string[]; bootstrap?: BootstrapMode }
 export const policySchema = z.object({
   checks: z.array(z.string().min(1).max(200)).min(1).max(30).default(['test', 'typecheck']),
+  /** Retired (GY-2876): every item follows the one review rule; kept so stored policies parse. */
   review: z.boolean().default(true),
   reviewProvider: z.enum(reviewProviders).optional(),
   reviewerProfiles: z.array(reviewerProfileSchema).min(1).max(10).optional(),
@@ -38,7 +39,6 @@ export const policySchema = z.object({
     if (policy.reviewerProfiles) context.addIssue({ code: 'custom', message: 'Reviewer profiles require reviewProvider "agent"', path: ['reviewerProfiles'] });
     return;
   }
-  if (!policy.review) context.addIssue({ code: 'custom', message: 'Agent review requires review: true', path: ['review'] });
   const profiles = policy.reviewerProfiles ?? [];
   if (!profiles.length) context.addIssue({ code: 'custom', message: 'Agent review requires at least one reviewer profile', path: ['reviewerProfiles'] });
   if (!distinct(profiles.map(profile => profile.name))) context.addIssue({ code: 'custom', message: 'Reviewer profile names must be unique', path: ['reviewerProfiles'] });

@@ -54,7 +54,7 @@ export interface ReviewFailover {
 // `github` is the default provider: the reviewer session the loop launches, whose verdict the control plane records on the observation
 // (server/review-verdict.ts). The identifier predates the control-plane merger and is kept so stored policies still read.
 export const reviewProviderOf = (policy: Work['policy']): ReviewProvider => policy.reviewProvider ?? 'github';
-export const nativeReviewRequired = (policy: Work['policy']) => !!policy.review && reviewProviderOf(policy) === 'github';
+export const nativeReviewRequired = (policy: Work['policy']) => reviewProviderOf(policy) === 'github';
 // Failover is derived, never stored: the recorded exhaustion history for the exact
 // candidate and policy selects the next untried reviewer profile in configured order.
 export function exhaustedReviewerProfiles(work: Work): string[] {

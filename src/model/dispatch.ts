@@ -77,7 +77,6 @@ const binds = (request: Pick<DispatchRequest, 'sha' | 'baseSha' | 'policyRevisio
 export type ReviewState = 'required' | 'not-required' | 'approved' | 'carried' | 'changes-requested'
   | 'base-not-contained' | 'provider-dispatched' | 'provider-exhausted' | 'proofs-pending' | 'proof-failed';
 export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): { needed: boolean; reason: string; state: ReviewState } {
-  if (!work.policy.review) return { needed: false, state: 'not-required', reason: 'the policy requires no independent review' };
   const provider = reviewProviderOf(work.policy);
   const approval = exactApproval(work);
   if (approval) return { needed: false, state: 'approved', reason: `approved by ${approval.reviewer} on ${short(approval.sha)}` };

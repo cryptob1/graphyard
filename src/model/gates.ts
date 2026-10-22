@@ -90,7 +90,7 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   // merge delta (model/risk-class.ts). A sensitive delta needs the exact-head approval before it
   // merges; any other passes here and owes one post-merge review (model/post-merge-review.ts), which
   // the evaluation marks on the item. A pull-request-era observation still needs its approval.
-  const byRisk = current && obs!.source === 'control-plane' && work.policy.review ? riskOf(work) : null;
+  const byRisk = current && obs!.source === 'control-plane' ? riskOf(work) : null;
   const beforeMerge = byRisk ? reviewedBeforeMerge(byRisk.risk) : true;
   const riskRefusal = reviewPassed || !beforeMerge ? [] : byRisk?.risk === 'sensitive' ? [sensitiveReviewRefusal(byRisk.reasons)] : [reviewRefusal];
   const postMerge = byRisk ? postMergeReviewMark(work, beforeMerge ? 'sensitive' : byRisk.risk, reviewPassed) : {};
@@ -98,11 +98,7 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   // request is attention for the post-merge pass, never a merge gate (GY-1525).
   const changeRequestHold = changesRequested && beforeMerge
     ? ['Outstanding change requests must be resolved through a new review'] : [];
-  add('review', work.policy.review ? [
-    ...riskRefusal,
-    ...changeRequestHold,
-    ...(mechanicalHold ? [mechanicalHold] : []),
-  ] : []);
+  add('review', [...riskRefusal, ...changeRequestHold, ...(mechanicalHold ? [mechanicalHold] : [])]);
   // GY-2010: gates never read GitHub. The merge writer's ledger stands for the test and merge
   // gates for every observed candidate — including a document that still carries pull-request-era
   // checks, PR numbers and mergeability. Those fields load; they do not refuse progression.

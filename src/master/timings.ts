@@ -89,8 +89,6 @@ export class Timings {
 const context = new AsyncLocalStorage<Timings>();
 /** Runs `body` with `timings` as the recorder every call beneath it reports to. */
 export const withTimings = <T>(timings: Timings, body: () => T): T => context.run(timings, body);
-/** Runs `body` outside every recorder: a detached refresh must not land in a cycle that already ended. */
-export const withoutTimings = <T>(body: () => T): T => context.exit(body);
 export const currentTimings = () => context.getStore();
 
 /** Times one external call and reports it to the recorder in force, when there is one. */
@@ -177,19 +175,6 @@ export async function mapBounded<T, R>(items: readonly T[], limit: number, body:
   const worker = async () => { while (next < items.length) { const index = next++; results[index] = await body(items[index], index); } };
   await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, worker));
   return results;
-}
-
-const seconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
-/** The `n` slowest steps, slowest first. */
-export const slowestSteps = (report: Pick<TimingReport, 'steps'>, n = 3) => [...report.steps].sort((a, b) => b.ms - a.ms).slice(0, n);
-/**
- * The timings as one line: the three slowest steps and the slowest call, each with its duration —
- * what a cycle's completion line and a status report name so a slow one says where it went.
- */
-export function describeTimings(report: TimingReport, n = 3) {
-  const steps = slowestSteps(report, n).map(step => `${step.step} ${seconds(step.ms)}`).join(', ');
-  const call = report.calls[0];
-  return `slowest steps: ${steps || 'none'}${call ? `; slowest call: ${call.kind} ${call.name} ${seconds(call.ms)}${call.step ? ` in ${call.step}` : ''}${report.slowCalls > 1 ? ` (${report.slowCalls} calls of ${seconds(slowCallMs)} or more)` : ''}` : ''}`;
 }
 
 /** Times `body` as a step of the recorder in force, or just runs it when there is none. */

@@ -223,8 +223,8 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   // its decisions, merges and closes. Each launch holds a distinct healthy profile from hand-off
   // until it settles, across cycles: a profile an earlier cycle's launch still holds is taken.
   const taken = cycle.launcher.held();
-  // The `launches` step is the hand-off: choosing each item's profile and handing its launch over.
-  await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
+  // The hand-off: choosing each item's profile and handing its launch over.
+  for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
     // GY-860: a workspace failure hands the epoch back, so the next dispatch reuses this key; it
@@ -279,7 +279,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     // waits in the queue, so the cycle's fetch is held from now until the launch settles.
     const releaseBase = holdCycleBase(snapshot.now);
     if (!cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued).finally(releaseBase))) releaseBase();
-  }) === 'stop') break; });
+  }) === 'stop') break;
 
   /** What a dispatch that starts on a hot file adds to its record, so master status can show the contention (GY-882). */
   function hotspotNote(beside: Pick<Hotspot, 'file'> & { beside: string[] } | null) {

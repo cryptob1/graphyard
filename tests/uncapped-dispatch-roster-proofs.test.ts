@@ -32,17 +32,25 @@ test('unit:uncapped-dispatch-roster-proofs — six ready items with six free wor
   await runCycle(config, state, effects, () => clock);
   assert.deepEqual(dispatched.sort(), work.map(item => item.key).sort(), 'every ready item dispatches in the one cycle');
 
-  // No throughput, lead-time, latency or reclaim reading is written anywhere the loop writes.
+  // No throughput, lead-time, latency or reclaim reading is written anywhere the loop writes: a cycle
+  // records what it could act on and did, never how long it or any step or call took, nor what the host holds.
+  assert.ok(written.length > 0);
   for (const cursor of [state, ...written]) {
     for (const field of ['latency', 'clocks', 'reclaim', 'memory']) assert.equal(field in cursor, false, `the cursor carries no ${field}`);
-    for (const metric of cursor.metrics) for (const field of ['stages', 'lead', 'production', 'postDeploy']) assert.equal(field in metric, false, `a cycle records no ${field}`);
-    assert.deepEqual(Object.keys(cursor.actions).filter(key => /^(throughput|wip|reclaim:(resources|trees|tmp)|attention:dispatch:memory)/.test(key)), []);
+    for (const metric of cursor.metrics) assert.deepEqual(Object.keys(metric).sort(), ['actionable', 'actions', 'at', 'cycle', 'open'], 'a cycle records no measurement');
+    assert.deepEqual(Object.keys(cursor.actions).filter(key => /^(throughput|wip|reclaim:(resources|trees|tmp)|attention:dispatch:memory|sweep:panes:)/.test(key)), []);
+    assert.doesNotMatch(JSON.stringify(cursor), /durationMs|childWaitMs|workMs|planeWaitMs|timings|standing agentless/);
   }
 
   // Proof authority is the roster's --proof patterns: one without a pattern is refused, one with it accepted.
+  // The admin role grants nothing of its own: a manual proof needs the admin's own roster pattern too.
   const bare: Principal = { id: 'producer-a', role: 'producer' }, seeded: Principal = { id: 'producer-b', role: 'producer', proofs: ['unit:*'] };
+  const admin: Principal = { id: 'admin-a', role: 'admin' }, attester: Principal = { id: 'admin-b', role: 'admin', proofs: ['manual:*'] };
   assert.equal(authorizedForProof(bare, 'unit:works'), false);
   assert.equal(authorizedForProof(seeded, 'unit:works'), true);
+  assert.equal(authorizedForProof(admin, 'manual:works'), false);
+  assert.equal(authorizedForProof(attester, 'manual:works'), true);
+  assert.deepEqual(unauthorizedProofs([admin], ['manual:works']), ['manual:works']);
   assert.deepEqual(unauthorizedProofs([bare], ['unit:works']), ['unit:works']);
   assert.deepEqual(unauthorizedProofs([bare, seeded], ['unit:works']), []);
   // No grant route serves or changes it, and no table holds it: the migration drops the old ones.

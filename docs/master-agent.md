@@ -29,4 +29,4 @@ Past the build gate: a producer request per proof group (`unit`, `integration`; 
 
 ### System invariants
 
-Per cycle (`daemon.invariants.lines`): `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s); `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts`.
+Per cycle (`daemon.invariants.lines`): `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min); `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts`.

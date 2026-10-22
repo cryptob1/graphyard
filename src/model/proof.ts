@@ -26,10 +26,10 @@ export function proofMatchesGrant(pattern: string, proof: string): boolean {
 export const grantsAuthorize = (patterns: readonly string[], proof: string) => patterns.some(pattern => proofMatchesGrant(pattern, proof));
 /** Roles that can never hold proof authority, whatever their roster entry says. */
 export const ungrantableRoles = ['worker', 'reader', 'coordinator', 'operator-agent'] as const;
-/** One principal's proof authority: an admin attests any manual proof, a producer proves its roster patterns, no other role proves anything. */
+/** One principal's proof authority: an admin or a producer proves exactly its roster patterns, no other role proves anything. */
 export interface ProofAuthority { principalId: string; role: Principal['role']; patterns: string[] }
 export const proofAuthority = (principal: Pick<Principal, 'id' | 'role' | 'proofs'>): ProofAuthority => ({ principalId: principal.id, role: principal.role,
-  patterns: principal.role === 'admin' ? ['manual:*'] : principal.role === 'producer' ? [...principal.proofs ?? []] : [] });
+  patterns: principal.role === 'admin' || principal.role === 'producer' ? [...principal.proofs ?? []] : [] });
 /** The single authorization question every trusted-evidence path asks. */
 export const authorizedForProof = (actor: Pick<Principal, 'id' | 'role' | 'proofs'>, proof: string) =>
   !(ungrantableRoles as readonly string[]).includes(actor.role) && grantsAuthorize(proofAuthority(actor).patterns, proof);
@@ -37,7 +37,7 @@ export const authorizedForEveryProof = (actor: Pick<Principal, 'id' | 'role' | '
   proofs.length > 0 && proofs.every(proof => authorizedForProof(actor, proof));
 /**
  * Required proof names no configured principal may produce. A manual proof the work names in
- * `producerProofs` is run by a producer session, never attested, so the admin role's `manual:*` does not cover it.
+ * `producerProofs` is run by a producer session, never attested, so an admin's `manual:*` pattern does not cover it.
  */
 export const unauthorizedProofs = (principals: readonly Pick<Principal, 'id' | 'role' | 'proofs'>[], proofs: readonly string[], producerProofs: readonly string[] = []) =>
   proofs.filter(proof => !principals.some(principal => (principal.role === 'producer' || !producerProofs.includes(proof)) && authorizedForProof(principal, proof)));

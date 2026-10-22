@@ -1,7 +1,7 @@
-// Concern: one coordination cycle — the snapshot it reads, the order of its steps, and its measures.
+// Concern: one coordination cycle — the snapshot it reads and the order of its steps.
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
-import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
+import { cycleMetricsSchema, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { reworkStep, type ExhaustedProof } from './rework.js';
 import { actionableSubjects } from './subjects.js';
@@ -16,7 +16,6 @@ import { baseFailureStep } from './cycle-base-failures.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
 import { checkInvariants } from '../model/invariants.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
-import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
@@ -63,8 +62,7 @@ export class Launcher {
     while (this.running < Math.max(1, this.concurrency) && this.queue.length) {
       const { key, body } = this.queue.shift()!, sink: DaemonAction[] = [];
       this.running += 1;
-      // A launch outlives the cycle that handed it over, so its calls are not that cycle's timings.
-      void withoutTimings(() => Promise.resolve().then(() => body(sink))).catch(() => undefined).finally(() => {
+      void Promise.resolve().then(() => body(sink)).catch(() => undefined).finally(() => {
         this.running -= 1;
         this.flying.delete(key);
         this.reports.push(...sink);
@@ -78,28 +76,24 @@ export class Launcher {
 /**
  * One coordination cycle: close finished sessions, reclaim the disk finished assignments hold,
  * dispatch claimable work to a healthy profile, shepherd reviews and proofs, invoke only the
- * guarded merge, verify the deployed SHA, and measure the stages. A step that fails is logged and runs again next cycle. The cursor is persisted before and after every external action, so a kill between
+ * guarded merge and verify the deployed SHA. A step that fails is logged and runs again next cycle. The cursor is persisted before and after every external action, so a kill between
  * them leaves an entry the next start reconciles against Graphyard instead of repeating.
  */
 export async function runCycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number = Date.now, launcher?: Launcher, log: (line: string) => void = line => console.error(line)) {
-  // Every step this cycle runs is timed, and every external call beneath it of a second or more is
-  // recorded against the step it was made in (GY-377): the recorder is found through the async
-  // context, so the dispatcher running beside the cycle in the same process keeps its own calls.
-  const timings = new Timings(now);
   // Without a launcher the loop keeps across cycles (a single cycle, a test), the cycle is its own
   // and settles its launches after each step that makes them, as one cycle always did: the step's
   // launches run at once, bounded only by the profiles free for them, and are reported in the cycle.
-  return withTimings(timings, () => cycle(config, state, unbounded, now, timings, launcher ?? new Launcher(Number.POSITIVE_INFINITY), !launcher, log));
+  return cycle(config, state, unbounded, now, launcher ?? new Launcher(Number.POSITIVE_INFINITY), !launcher, log);
 }
 
-async function cycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number, timings: Timings, launcher: Launcher, settle: boolean, log: (line: string) => void) {
+async function cycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number, launcher: Launcher, settle: boolean, log: (line: string) => void) {
   // Every pane a step of this cycle closes, so a later step reading the same cycle-start inventory
   // never closes it again (GY-980).
   const closedPanes = new Set<string>();
   const effects = trackClosedPanes(serialPersist(boundedPersist(unbounded), unbounded), closedPanes);
   if (!settle) launcher.concurrency = config.run.launchConcurrency ?? defaultLaunchConcurrency;
   const startedAt = now();
-  const read = await timings.step('snapshot', () => effects.snapshot());
+  const read = await effects.snapshot();
   const readAt = now();
   const snapshot = read;
   const observedAt = Date.parse(snapshot.now), clock = Number.isFinite(observedAt) ? observedAt : startedAt;
@@ -109,14 +103,14 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // What the launches handed over by earlier cycles recorded since the last one is this cycle's to report.
   const performed: DaemonAction[] = launcher.drain();
   // The merge queue batches by this loop's configuration; a failed publication is retried next cycle.
-  if (effects.publishMergeSettings) await timings.step('merge settings', () => effects.publishMergeSettings!().catch(() => undefined));
+  if (effects.publishMergeSettings) await effects.publishMergeSettings().catch(() => undefined);
   // A launch still queued or running is not interrupted: its `started` entry is its own to settle,
   // so it is kept out of the reconciliation a restart's leftovers get.
   const inFlight = launcher.keys().flatMap(key => state.actions[key]?.state === 'started' ? [[key, state.actions[key]] as const] : []);
   for (const [key] of inFlight) delete state.actions[key];
   const resumed = reconcilePendingActions(state, snapshot.work, clock);
   for (const [key, action] of inFlight) state.actions[key] = action;
-  if (resumed.length) { performed.push(...resumed); await timings.step('reconcile', () => effects.persist(state)); }
+  if (resumed.length) { performed.push(...resumed); await effects.persist(state); }
   // One item's failure is that item's failed action, never the cycle's (GY-187). Each step handles
   // its items one at a time inside this: a throw — a malformed field, an effect that failed outside
   // its own try, a value no step anticipated — is recorded against the item it was handling, and
@@ -132,21 +126,8 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
       return undefined;
     }
   };
-  // Where this cycle's time goes. Each `spent` closes the step that just ran with its wall time
-  // and, of that, the time at least one child process was in flight (the runner's ledger, drained
-  // at the boundary), so the cycle can say which step outgrew the interval and whether that step
-  // was computing or waiting on Herdr, gh or git.
-  const steps = emptyCycleSteps();
-  let stepStartedAt = startedAt;
-  const spent = (step: CycleStepName) => {
-    const at = now(), ms = Math.max(0, at - stepStartedAt);
-    steps[step].ms += ms; steps[step].childWaitMs += Math.min(ms, Math.max(0, Math.round(effects.childWaits?.() ?? 0)));
-    stepStartedAt = at;
-  };
-  spent('observe');
-
-  const agents = await timings.step('observe', () => effects.agents());
-  const credentials = await timings.step('credentials', () => effects.credentials(config.workers));
+  const agents = await effects.agents();
+  const credentials = await effects.credentials(config.workers);
   const open = snapshot.work.filter(item => item.stage !== 'done');
   const owns = (principal: string) => open.some(item => !!item.lease && item.lease.owner === principal && Date.parse(item.lease.expiresAt) > clock);
   /** The item a worker profile holds a live lease on, which a failure while handling that profile is recorded against. */
@@ -183,84 +164,66 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
       }
     }
   });
-  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, closedPanes };
+  const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, closedPanes };
   /**
    * One step of the cycle. A step that throws or times out is one log line naming the step and the
    * error; the cycle goes on with its other steps and the step runs again next cycle. Nothing is
    * classified, remedied or escalated.
    */
   const step = async <T>(name: string, body: () => Promise<T>): Promise<T | undefined> => {
-    try { return await timings.step(name, body); }
+    try { return await body(); }
     catch (error) { log(`[graphyard-master] cycle ${state.cycle}: the ${name} step failed and runs again next cycle: ${message(error)}`); return undefined; }
   };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
-  const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
+  const settleLaunches = async () => { if (settle && launcher.pending) { await launcher.idle(); performed.push(...launcher.drain()); } };
   await step('close', () => closeStep(cycle));
   await settleLaunches();
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
-  const health = profileHealth(config.workers, credentials, await timings.step('observe', () => effects.agents()), state, clock, snapshot.work);
+  const health = profileHealth(config.workers, credentials, await effects.agents(), state, clock, snapshot.work);
 
   // 1m. The loop's own master session (GY-898): launch, adopt, supervise, rotate, wake. Isolated
   //     like every step: a failed launch or wake is its own action, and the cycle goes on.
   await step('master session', () => masterSessionStep(cycle));
   await settleLaunches();
 
-  spent('close');
 
-  spent('decisions');
 
   await step('reclaim', () => reclaimStep(cycle));
-  spent('close');
 
   // 3a. A required check that fails on the base head too is set aside before anything decides on
   //     the item (GY-528).
   cycle.baseFailed = await step('base failures', () => baseFailureStep(cycle)) ?? new Map();
-  spent('decisions');
 
   await step('dispatch', () => dispatchStep(cycle, health));
   await settleLaunches();
-  spent('dispatch');
 
   // 4c. A head nothing can carry forward goes back to a worker at once, with the master's own identity.
   await step('rework', () => reworkStep(cycle));
-  spent('decisions');
 
   await step('reviews and proofs', () => shepherdStep(cycle));
-  spent('dispatch');
 
   await step('merges', () => mergeStep(cycle));
   // 6b'. The control-plane merge executor (GY-1524): open intents reconciled, then one head trial-merged,
   //      tested and pushed with the deploy key beside the cycle; active only under the control-plane merger.
   await step('merge writer', () => cycle.isolate('merge', null, 'merge writer', () => mergeWriterStep(cycle)));
-  spent('merge');
 
   await step('deployment verification', () => deploymentStep(cycle));
   // 7b. The system invariants (GY-404): properties of the running pipeline no per-item gate can see, one `master status` line each.
-  await step('invariants', async () => checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, agents, build: state.deployment?.sha ?? null }));
+  await step('invariants', async () => checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, agents, build: state.deployment?.sha ?? null }));
   // 7e. Setup (GY-1416): derived deployment variables the deployment lacks are set by the loop, never asked of a human.
   if (effects.selfProvision) await step('setup', () => cycle.isolate('config', null, 'setup self-provision', () => effects.selfProvision!()));
-  spent('deployment');
 
   await settleLaunches();
 
-  // 8. What the cycle could have acted on, from the snapshot it acted on, and how long it took.
-  const measuredFrom = now();
+  // 8. What the cycle could have acted on, from the snapshot it acted on.
   // GY-1890: the dispatch step's own saturation report answers whether any launch profile was free
   // when it dispatched. With none free a claimable item's wait is the fleet's slot capacity, so its
   // subject is a capacity one; the master session's wake reads the kinds, so a held fleet reads as
   // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
   // not a recomputation beside it, so what reclasses a subject is what the step decided.
   const actionable = actionableSubjects(config, snapshot.work, clock, { baseFailed: cycle.baseFailed, fleetHeld: cycle.fleetHeld, launching: item => launcher.busy(dispatchKey(item)) });
-  // The cycle's duration, and of it the time at least one child was in flight: the difference is
-  // the loop's own work, which is what the liveness bound is judged on (cycleCost).
-  timings.add('measure', now() - measuredFrom);
-  const durationMs = Math.max(0, Math.round(now() - startedAt));
-  const childWaitMs = Math.min(durationMs, Object.values(steps).reduce((total, step) => total + step.childWaitMs, 0));
-  // GY-1344: time spent on requests the control plane never answered is the plane's outage, not the loop's work.
-  const report = timings.report(), planeWaitMs = Math.min(durationMs - childWaitMs, report.planeWaitMs ?? 0);
-  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs - planeWaitMs, ...(planeWaitMs ? { planeWaitMs } : {}), steps, timings: report, open: open.length, actions: performed.length,
-    actionable: actionable.length });
+  const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), open: open.length, actions: performed.length, actionable: actionable.length });
   state.metrics.push(metrics);
   state.cycle += 1;
   state.lastCycleAt = new Date(now()).toISOString();
@@ -306,8 +269,6 @@ export interface Cycle {
   isolate: <T>(kind: DaemonActionKind, item: Work | null, name: string, body: () => Promise<T>) => Promise<T | undefined>;
   agents: HerdrAgent[]; credentials: Awaited<ReturnType<DaemonEffects['credentials']>>; open: Work[];
   owns: (principal: string) => boolean; heldBy: (profile: WorkerProfile) => Work | null;
-  /** This cycle's step and call timings (GY-377); a step may time a phase of its own inside it. */
-  timings: Timings;
   /** Per item id, the required checks that fail on the base head too (GY-528): no rework is requested for them. */
   baseFailed: Map<string, Set<string>>;
   /** The producer requests the dispatcher stopped attempting (GY-496), read once per cycle for the proof and rework steps. */

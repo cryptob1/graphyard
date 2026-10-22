@@ -502,7 +502,6 @@ export async function reviewerBindingHealth(config: Pick<MasterConfig, 'credenti
 export function assertReviewCandidate(work: Work, observedAt: string, request?: { sha: string; baseSha: string; policyRevision: number }) {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('A reviewer launch requires a valid Graphyard snapshot clock');
-  if (!work.policy.review) throw new Error(`${work.key} does not require independent review`);
   const provider = work.policy.reviewProvider ?? 'github';
   if (provider !== 'github') throw new Error(`${work.key} uses the ${provider} review provider; its verdict comes from that provider, not from a launched reviewer session`);
   const candidate = work.candidate, observation = work.observation;

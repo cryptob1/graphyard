@@ -15,7 +15,7 @@ import type { Work } from './work.js';
 // hold every one of them over simulated days of the real loop, so a change that breaks one fails CI.
 // ---------------------------------------------------------------------------
 
-export const systemInvariants = ['lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90'] as const;
+export const systemInvariants = ['lingering-sessions', 'refresh-churn', 'merge-stall'] as const;
 export type SystemInvariant = typeof systemInvariants[number];
 
 
@@ -32,9 +32,8 @@ export const invariantThresholdsSchema = z.object({
   refreshesWithoutHeadChange: z.number().int().min(1).max(100).default(3),
   /** No item in the merge stage with a mergeable pull request for longer than this without a recorded refusal. */
   mergeableWithoutRefusalMinutes: z.number().int().min(1).max(1440).default(10),
-  /** The loop's cycle p90 stays under this, over the last `cycleWindowMinutes`. */
-  cycleP90Seconds: z.number().int().min(1).max(3600).default(30),
-  cycleWindowMinutes: z.number().int().min(5).max(1440).default(60),
+  /** Retired (GY-2876): the cycle-p90 invariant; a config written before keeps parsing. */
+  cycleP90Seconds: z.unknown().optional(), cycleWindowMinutes: z.unknown().optional(),
 }).strict();
 export type InvariantThresholds = z.infer<typeof invariantThresholdsSchema>;
 export const invariantDefaults: InvariantThresholds = invariantThresholdsSchema.parse({});
@@ -64,8 +63,6 @@ export interface InvariantInput {
   work: readonly Work[];
   now: number;
   thresholds?: Partial<InvariantThresholds>;
-  /** The loop's retained cycle measures: when each ran and how long it took. */
-  metrics?: readonly { at: string; durationMs: number; workMs?: number }[];
   /** The session runtime's listing this cycle; null when it could not be read. */
   agents?: readonly { name?: string; pane_id?: string }[] | null;
   /** The build the control plane reports it runs; null when it could not be read. */
@@ -143,14 +140,6 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   for (const id of Object.keys(record.mergeable)) if (!waiting.has(id)) delete record.mergeable[id];
   judge('merge-stall', `no merge-stage item mergeable ${limits.mergeableWithoutRefusalMinutes} min without a recorded refusal`,
     stalled.length ? `${stalled.length} item(s) mergeable and unmerged with nothing refusing them, the longest ${stalled[0].key} for ${minutes(Math.max(...stalled.map(entry => entry.ms)))}` : `${waiting.size} mergeable item(s), none past the bound`, !stalled.length, stalled.map(entry => entry.key));
-
-  // 5. The loop's cycle p90 over the window stays under its bound (GY-377). A cycle is judged on its own work (GY-1537), net of the child and
-  // control-plane waits liveness.ts already separates: a slow provider is not a slow loop, and the decisions step bounds its own share.
-  const from = now - limits.cycleWindowMinutes * 60_000;
-  const durations = (input.metrics ?? []).filter(metric => (time(metric.at) ?? -Infinity) >= from).map(metric => metric.workMs ?? metric.durationMs);
-  const p90 = percentile(durations, 0.9);
-  if (p90 === null) judge('cycle-p90', `p90 under ${limits.cycleP90Seconds} s over ${limits.cycleWindowMinutes} min`, 'no cycle measured in the window', true, [], false);
-  else judge('cycle-p90', `p90 under ${limits.cycleP90Seconds} s over ${limits.cycleWindowMinutes} min`, `p90 ${(p90 / 1000).toFixed(1)} s over ${durations.length} cycle(s)`, p90 < limits.cycleP90Seconds * 1000);
 
   record.report = checks; record.at = at;
   return checks;

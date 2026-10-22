@@ -75,9 +75,9 @@ export function pruneDaemonState(state: DaemonState) {
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
   // Retired fields a cursor written before GY-2874 still carries are dropped on its next write.
   delete state.orphans; delete state.approvals; delete state.absences; delete state.decisionsDeferred;
-  // And those GY-2876 retired: the reclaim, memory and latency readings.
+  // And those GY-2876 retired: the reclaim, memory, latency and cycle-duration readings.
   delete state.reclaim; delete state.memory; delete state.clocks; delete state.latency;
-  for (const metric of state.metrics) { delete metric.stages; delete metric.lead; delete metric.production; delete metric.postDeploy; delete metric.postDeployFailures; }
+  for (const metric of state.metrics) for (const field of ['durationMs', 'childWaitMs', 'workMs', 'planeWaitMs', 'steps', 'timings', 'stages', 'lead', 'production', 'postDeploy', 'postDeployFailures', 'idleMs', 'scope', 'scopeOpenMs'] as const) delete metric[field];
   // A cleared base failure is retired by its step once its candidates were rerun and refreshed; this bound drops the oldest, cleared first.
   const failures = Object.entries(state.baseFailures).sort((a, b) => Number(!a[1].cleared) - Number(!b[1].cleared) || Date.parse(a[1].raisedAt) - Date.parse(b[1].raisedAt));
   if (failures.length > retainedBaseFailures) for (const [key] of failures.slice(0, failures.length - retainedBaseFailures)) delete state.baseFailures[key];

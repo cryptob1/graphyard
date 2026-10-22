@@ -1,95 +1,12 @@
-// Concern: loop liveness — cycle cost, cycle-failure backoff, loop attention, the progress watchdog and the supervisor's watchdog.
+// Concern: loop liveness — cycle-failure backoff, loop attention, the progress watchdog and the supervisor's watchdog.
 import { type AttentionItem, agentOwner } from '../master.js';
 import { type Work } from '../model.js';
-import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, initialPidNamespace, liveProcess, type LoopRelease, message, pidNamespace, type PromotionState, type StepCost } from './state.js';
+import { boundDaemonState, type CycleFailures, type DaemonState, initialPidNamespace, liveProcess, type LoopRelease, message, pidNamespace, type PromotionState } from './state.js';
 import type { DaemonEffects } from './effects.js';
-import { slowestSteps } from '../master/timings.js';
 
 // ---- The loop's own liveness ---------------------------------------------------------------
-export type LoopState = 'running' | 'slow' | 'stalled' | 'absent';
-export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledAfterMs: number; cycle: number; lock: DaemonState['lock']; detail: string; restart: string; cost: CycleCost | null }
-
-/**
- * What the last measured cycle cost, against the cadence it is judged on. A cycle is the loop's
- * whole clock: while one runs nothing else coordinates, so a cycle longer than the interval is the
- * interval, and a cycle past the two-interval liveness bound is indistinguishable from a stopped
- * loop unless the measurement says otherwise. The bound is compared against the cycle's own work
- * (`workMs`), never against what it spent waiting on children: a cycle that waited eighty seconds
- * on gh is a slow provider, and one that computed for eighty seconds is a slow loop — only the
- * second has a step to shorten, which `slowest` names.
- */
-export interface CycleCost {
-  cycle: number; at: string; durationMs: number; childWaitMs: number; workMs: number; intervalMs: number; stalledAfterMs: number;
-  /** Time at least one request was in flight on the control plane, answered or not (GY-1344, GY-1562): the plane's time, so not in `workMs`. */
-  planeWaitMs: number;
-  steps: CycleSteps | null;
-  /** The step with the most of its own work, when any step worked at all. */
-  slowest: { step: CycleStepName; ms: number; childWaitMs: number } | null;
-  /** The step that waited longest on children, when any step waited at all. */
-  longestWait: { step: CycleStepName; childWaitMs: number } | null;
-  /** Both judged on `workMs`: the loop's own time, net of its child waits. */
-  withinInterval: boolean; withinLivenessBound: boolean;
-  /** The step breakdown as an operator sentence, longest first, each step's wait beside it. */
-  breakdown: string;
-  /** The cycle's three slowest timed steps by wall time (GY-616), slowest first. */
-  slowestSteps: { step: string; ms: number }[];
-  /**
-   * The step the loop-cost lines name as slowest and to shorten (GY-1355): the slowest timed step
-   * (metrics.timings) whenever the cycle recorded timings, else the coarse bucket `slowest`, named
-   * as the roll-up it is. Several timed steps share the coarse 'deployment' bucket, so naming the
-   * bucket would file another step's cost against deployment.
-   */
-  culprit: { step: string; ms: number; timed: boolean; phrase: string } | null;
-}
-/**
- * The timed steps each coarse bucket rolls up (src/daemon/cycle.ts `spent`), for naming a bucket
- * honestly when no timings say which step inside it took the time.
- */
-export const cycleBucketSteps: Record<CycleStepName, string> = {
-  observe: 'the snapshot, follow-up threads, merge settings and reconcile steps',
-  close: 'the observe, credentials, close, launches, master session and reclaim steps',
-  decisions: 'the scope, successors, base failures, review cap and decisions steps',
-  dispatch: 'the dispatch and reviews and proofs steps',
-  merge: 'the merges step',
-  deployment: 'the deployment verification, invariants and setup steps',
-};
-/** A cycle whose wall time passes this raises a liveness attention naming its three slowest steps (GY-616). */
-export const slowCycleMs = 60_000;
-/** The window `master status` reports the cycle-time percentiles over (GY-616). */
-export const cycleTimeWindowMs = 30 * 60_000;
-const seconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
-export function cycleCost(metrics: CycleMetrics | null | undefined, intervalMs: number): CycleCost | null {
-  if (!metrics) return null;
-  const steps = metrics.steps ?? null;
-  const childWaitMs = metrics.childWaitMs ?? (steps ? Object.values(steps).reduce((total, step) => total + step.childWaitMs, 0) : 0);
-  const planeWaitMs = metrics.planeWaitMs ?? 0;
-  const workMs = metrics.workMs ?? Math.max(0, metrics.durationMs - childWaitMs - planeWaitMs);
-  const ordered = steps ? (Object.entries(steps) as [CycleStepName, StepCost][]).sort((a, b) => (b[1].ms - b[1].childWaitMs) - (a[1].ms - a[1].childWaitMs)) : [];
-  const slowest = ordered.length && ordered[0][1].ms - ordered[0][1].childWaitMs > 0 ? { step: ordered[0][0], ms: ordered[0][1].ms - ordered[0][1].childWaitMs, childWaitMs: ordered[0][1].childWaitMs } : null;
-  const waits = ordered.filter(([, cost]) => cost.childWaitMs > 0).sort((a, b) => b[1].childWaitMs - a[1].childWaitMs);
-  const longestWait = waits.length ? { step: waits[0][0], childWaitMs: waits[0][1].childWaitMs } : null;
-  // The timed steps name what ran (`dispatch`, `merges`, `close`); the coarse buckets are the fallback for a cycle recorded before them.
-  const slowestTimed = metrics.timings?.steps.length ? slowestSteps(metrics.timings, 3) : ordered.slice(0, 3).map(([step, cost]) => ({ step, ms: cost.ms }));
-  const timed = metrics.timings?.steps.length ? slowestSteps(metrics.timings, 1)[0] : undefined;
-  const culprit = timed && timed.ms > 0 ? { step: timed.step, ms: timed.ms, timed: true, phrase: `the ${timed.step} step` }
-    : slowest ? { step: slowest.step, ms: slowest.ms, timed: false, phrase: `the ${slowest.step} bucket, which rolls up ${cycleBucketSteps[slowest.step]} (this cycle recorded no timings naming which one)` } : null;
-  return { cycle: metrics.cycle, at: metrics.at, durationMs: metrics.durationMs, childWaitMs, workMs, planeWaitMs, intervalMs, stalledAfterMs: 2 * intervalMs, steps, slowest, longestWait, culprit, slowestSteps: slowestTimed.map(step => ({ step: step.step, ms: step.ms })),
-    withinInterval: workMs <= intervalMs, withinLivenessBound: workMs <= 2 * intervalMs,
-    breakdown: ordered.length
-      ? `${seconds(workMs)} of its own work and ${seconds(childWaitMs)} waiting on child processes${planeWaitMs ? `, ${seconds(planeWaitMs)} in flight on the control plane` : ''}; ${ordered.map(([step, cost]) => `${step} ${seconds(cost.ms)}${cost.childWaitMs ? ` (${seconds(cost.childWaitMs)} waiting)` : ''}`).join(', ')}`
-      : 'no step breakdown was recorded for this cycle' };
-}
-
-/**
- * The median and 95th-percentile cycle wall time over the last 30 minutes (GY-616), from the cycles
- * the cursor keeps: what `master status` shows beside the last cycle, so one slow cycle reads
- * against the loop's usual cadence. Null percentiles when no cycle completed in the window.
- */
-export function cycleTimes(metrics: Pick<CycleMetrics, 'at' | 'durationMs'>[], now: number, windowMs = cycleTimeWindowMs) {
-  const durations = metrics.filter(entry => { const at = Date.parse(entry.at); return Number.isFinite(at) && at >= now - windowMs && at <= now; }).map(entry => entry.durationMs).sort((a, b) => a - b);
-  const rank = (p: number) => durations.length ? durations[Math.min(durations.length - 1, Math.ceil(p * durations.length) - 1)] : null;
-  return { windowMs, cycles: durations.length, p50Ms: rank(0.5), p95Ms: rank(0.95) };
-}
+export type LoopState = 'running' | 'stalled' | 'absent';
+export interface LoopLiveness { state: LoopState; lagMs: number | null; stalledAfterMs: number; cycle: number; lock: DaemonState['lock']; detail: string; restart: string }
 
 /**
  * Whether this reader can probe the lock's pid at all: a pid means something only in the PID
@@ -117,14 +34,10 @@ export const hostPidProbe = lockPidProbe;
 /**
  * Whether the loop is cycling, from its own cursor. Nothing else in the installation notices a
  * coordinator that stopped: the work simply stops moving. Two intervals without a completed cycle
- * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence.
- * A measured cycle that itself accounts for the lag is `slow`, not stalled: the loop is inside a
- * long cycle, and the cost says whether that cycle is computing (a step to shorten) or waiting on
- * a child (a provider to look at), so nobody restarts a loop that is still cycling. A reader that
+ * is a stall, and no lock at all — or a lock whose process is gone on this host — is an absence. A reader that
  * cannot probe the pid (outside the lock's PID namespace) judges by the stall bound alone and says so.
  */
-export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures' | 'metrics'>>, now: number, intervalMs: number, hostId?: string, probe: (pid: number, recorded?: string | null) => boolean | null = (pid, recorded) => lockPidProbe(pid, pidNamespace, recorded)): LoopLiveness {
-  const cost = cycleCost(state.metrics?.at(-1) ?? null, intervalMs);
+export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCycleAt'> & Partial<Pick<DaemonState, 'failures'>>, now: number, intervalMs: number, hostId?: string, probe: (pid: number, recorded?: string | null) => boolean | null = (pid, recorded) => lockPidProbe(pid, pidNamespace, recorded)): LoopLiveness {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? Math.max(0, now - lastCycleAt) : null;
   // A loop backing off from failed cycles is waiting on purpose, not hung: its bound is two
@@ -137,24 +50,19 @@ export function loopLiveness(state: Pick<DaemonState, 'lock' | 'cycle' | 'lastCy
   const gone = alive === false;
   const unprobed = alive === null ? `; pid ${lock!.pid} could not be probed from this PID namespace (the lock was taken in ${lock!.pidNamespace ?? 'the host\'s initial one'}), so the cycle lag alone judges the loop` : '';
   if (!lock || gone) {
-    return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
+    return { state: 'absent', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
       detail: gone ? `No master loop is running: the cursor's lock (pid ${lock!.pid} on ${lock!.host}) names a process that is gone, last cycle ${state.lastCycleAt ?? 'never'}. Nothing is dispatching, deciding or merging until it is restarted.`
         : `No master loop holds this repository${state.lastCycleAt ? `; the last cycle was at ${state.lastCycleAt}` : ' and none has ever cycled'}. Nothing is dispatching, deciding or merging until it is started.` };
   }
   if (lagMs === null || lagMs > stalledAfterMs) {
-    // The last measured cycle explains the lag while the lag is no longer than that cycle plus the
-    // bound: the loop is inside another cycle like it. Past that, nothing explains the silence.
-    const slow = cost && lagMs !== null && cost.durationMs > stalledAfterMs && lagMs <= cost.durationMs + stalledAfterMs;
-    if (slow) return { state: 'slow', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
-      detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle for ${Math.round(lagMs / 1000)}s, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s, but cycle ${cost.cycle} took ${Math.round(cost.durationMs / 1000)}s of its own: ${cost.breakdown}. The loop is inside a slow cycle, not stalled${cost.withinLivenessBound ? `: its own work fits the bound, and the time went to child processes${cost.longestWait ? ` in the ${cost.longestWait.step} step` : ''}` : cost.culprit ? `; ${cost.culprit.phrase} is the one to shorten` : ''}${unprobed}.` };
-    return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
+    return { state: 'stalled', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
       detail: `The master loop (pid ${lock.pid} on ${lock.host}) has not completed a cycle ${lagMs === null ? 'at all' : `for ${Math.round(lagMs / 1000)}s`}, past the two-interval bound of ${Math.round(stalledAfterMs / 1000)}s; cycle ${state.cycle} is stalled${unprobed}.` };
   }
   if (backoff) {
-    return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost,
+    return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart,
       detail: `Cycle ${backoff.last.cycle} failed ${Math.round(lagMs / 1000)}s ago in ${describeFailingCall(backoff.last)} (${backoff.last.reason}); ${backoff.consecutive} consecutive failure(s), the next cycle is due at ${backoff.last.nextAt}${unprobed}` };
   }
-  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, cost, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago${unprobed}` };
+  return { state: 'running', lagMs, stalledAfterMs, cycle: state.cycle, lock, restart, detail: `Cycle ${state.cycle} completed ${Math.round(lagMs / 1000)}s ago${unprobed}` };
 }
 
 // ---- A cycle that fails (GY-119) -----------------------------------------------------------
@@ -250,31 +158,13 @@ export function boundedPersist(effects: DaemonEffects): DaemonEffects {
   return new Proxy(effects, { get: (target, property, receiver) => property === 'persist' ? persist : Reflect.get(target, property, receiver) });
 }
 
-/** GY-1354: the culprit step's share of the cycle's own work, so a loop-cost line says how much of the cycle one step took (cycle 12624: 587s of 781s, 75%). */
-export const culpritShare = (cost: Pick<CycleCost, 'culprit' | 'workMs'>) => cost.culprit && cost.workMs > 0 ? Math.min(100, Math.round(100 * cost.culprit.ms / cost.workMs)) : 0;
-
 /**
  * The loop's own attention, ahead of every work item: a coordinator that is not cycling is why
  * nothing else on the list is moving.
  */
-export function loopAttention(report: { liveness: LoopLiveness; /** Retired (GY-1980): always null, ignored. */ silence?: null; failures?: CycleFailures | null; cost?: CycleCost | null }): AttentionItem[] {
+export function loopAttention(report: { liveness: LoopLiveness; /** Retired (GY-1980): always null, ignored. */ silence?: null; failures?: CycleFailures | null }): AttentionItem[] {
   const items: AttentionItem[] = [];
-  const cost = report.cost ?? report.liveness.cost;
-  // What to do about a long cycle depends on where its time went: a step that computed too long
-  // is shortened; one that waited on a child is a provider or a runtime to look at, and since
-  // GY-125 that wait blocks nothing else in the process. Neither is a restart.
-  const shorten = cost?.withinLivenessBound && cost.longestWait
-    ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; the time went to child processes in the ${cost.longestWait.step} step (${Math.round(cost.longestWait.childWaitMs / 1000)}s), so look at what Herdr, gh or git is slow on rather than restarting a loop that is still cycling`
-    : cost?.culprit ? `graphyard master status shows the last cycle's step breakdown under daemon.cost${cost.culprit.timed ? ' and its timed steps under daemon.metrics.timings' : ''}; shorten ${cost.culprit.phrase} rather than restarting a loop that is still cycling`
-      : 'graphyard master status shows the last cycle under daemon.cost';
-  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart) });
-  // A cycle whose own work does not fit its interval is raised whatever the lag says: the loop
-  // looks healthy the instant a long cycle ends, and the cost is the only reading that names
-  // what took the time. A cycle that merely waited is reported net: its work fit, and the wait is
-  // in the breakdown for anyone reading it.
-  if (cost && !cost.withinInterval && report.liveness.state !== 'slow' && report.liveness.state !== 'absent') {
-    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.culprit ? `. ${cost.culprit.timed ? `The ${cost.culprit.step} step is the slowest timed step, at ${Math.round(cost.culprit.ms / 1000)}s` : `The ${cost.culprit.step} bucket is the slowest, at ${Math.round(cost.culprit.ms / 1000)}s of work; it rolls up ${cycleBucketSteps[cost.culprit.step as CycleStepName]}, so no one step inside it is named`}. It is ${culpritShare(cost)}% of the cycle's own work` : ''}`, ...agentOwner('master', shorten) });
-  }
+  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.restart) });
   // A cycle that keeps failing is retried in-process with backoff; past the bound it names the
   // failing call, because a restart would not clear a read that times out every time.
   const failures = report.failures;
@@ -282,21 +172,6 @@ export function loopAttention(report: { liveness: LoopLiveness; /** Retired (GY-
     text: `The master loop has failed ${failures.consecutive} consecutive cycles, the last (cycle ${failures.last.cycle} at ${failures.last.at}) in ${describeFailingCall(failures.last)}: ${failures.last.reason}. It keeps cycling in-process, waiting ${Math.round(failures.last.delayMs / 1000)}s before the next attempt (due ${failures.last.nextAt}); a restart does not clear this`,
     ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
   return items;
-}
-
-/**
- * A cycle longer than a minute (GY-616), whatever its time divided into: the cost lines above judge
- * the loop's own work net of its child waits, which is right for "shorten a step or look at a
- * provider", but every merge, decision and close in a cycle waits for the whole of it, waiting
- * included. This liveness attention names the cycle's wall time and its three slowest steps, so a
- * burst of launches or a slow provider holding the delivery steps back is seen, not read as work.
- */
-export function slowCycleAttention(report: { liveness: Pick<LoopLiveness, 'state'>; cost?: CycleCost | null; cycleTime?: ReturnType<typeof cycleTimes> | null }): AttentionItem[] {
-  const cost = report.cost;
-  if (!cost || cost.durationMs <= slowCycleMs || report.liveness.state === 'absent') return [];
-  const usual = report.cycleTime?.p50Ms != null ? ` (p50 ${seconds(report.cycleTime.p50Ms)}, p95 ${seconds(report.cycleTime.p95Ms ?? report.cycleTime.p50Ms)} over the last ${Math.round(report.cycleTime.windowMs / 60_000)} minutes)` : '';
-  return [{ subject: 'loop', text: `Cycle ${cost.cycle} took ${seconds(cost.durationMs)}, past the ${seconds(slowCycleMs)} cycle bound${usual}, and every merge, decision and close in it waited that long; slowest steps: ${cost.slowestSteps.map(step => `${step.step} ${seconds(step.ms)}`).join(', ') || 'none recorded'}`,
-    ...agentOwner('master', `graphyard master status shows the cycle's timings under daemon.metrics.timings and the loop's cycle time under daemon.cycleTime; shorten the ${cost.slowestSteps[0]?.step ?? 'slowest'} step rather than restarting a loop that is still cycling`) }];
 }
 
 /**
@@ -376,21 +251,3 @@ export function progressAttention(work: readonly Work[], release: Pick<Promotion
   return items;
 }
 
-/**
- * How the coordination cycle keeps to its configured interval, from the durations the daemon
- * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
- * longer than its interval means the loop is falling behind the work it shepherds.
- */
-export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
-  const metrics = state.metrics;
-  const last = metrics.at(-1) ?? null;
-  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
-  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
-  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
-  const describe = (m: CycleMetrics) => ({ cycle: m.cycle, at: m.at, durationMs: m.durationMs, childWaitMs: m.childWaitMs ?? null, workMs: m.workMs ?? null });
-  return {
-    intervalMs, measured: metrics.length, lastCycle: last ? describe(last) : null,
-    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
-    lastOverrun: overruns.length ? describe(overruns.at(-1)!) : null,
-  };
-}

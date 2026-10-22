@@ -45,12 +45,3 @@ test(`manual:fault-class-loop — stalled-step ${key}: past the 10-minute bound 
   assert.equal(conflictReworkOverdue(stale, `${head}:checks`, at('06:01:56')), false, 'other grounds keep the wait');
 });
 
-for (const [instant, wall, work] of [[Date.parse('2026-10-07T22:05:07.171Z'), 62_000, 3_000], [Date.parse('2026-10-08T05:30:41.190Z'), 120_000, 5_000]] as const)
-test(`manual:fault-class-loop — invariant:cycle-p90 at ${new Date(instant).toISOString()}: a cycle is judged on its own work, not the child and control-plane waits it spent`, () => {
-  const now = instant, metric = (index: number, durationMs: number, workMs?: number) => ({ at: iso(now - index * 3 * minute), durationMs, ...(workMs === undefined ? {} : { workMs }) });
-  const check = (metrics: ReturnType<typeof metric>[]) => checkInvariants(emptyInvariantRecord(), { work: [], now, metrics }).find(entry => entry.invariant === 'cycle-p90')!;
-  const waiting = Array.from({ length: 10 }, (_, index) => metric(index, wall, work));
-  assert.equal(check(waiting).holds, true, `${wall / 1000} s of wall time that was ${work / 1000} s of work and the rest waits is a slow provider, not a slow loop`);
-  assert.equal(check(Array.from({ length: 10 }, (_, index) => metric(index, 90_000, 80_000))).holds, false, 'a loop that worked for 80 s violates');
-  assert.equal(check(Array.from({ length: 10 }, (_, index) => metric(index, 90_000))).holds, false, 'a cycle with no recorded split is judged on its wall time');
-});

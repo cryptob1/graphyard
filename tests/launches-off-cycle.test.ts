@@ -7,8 +7,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import { daemonSummary, emptyDaemonState, loopAttention, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { Launcher, defaultLaunchConcurrency } from '../src/daemon/cycle.js';
-import { cycleCost, cycleTimes, loopLiveness, slowCycleAttention, slowCycleMs } from '../src/daemon/liveness.js';
-import { type CycleMetrics, emptyCycleSteps } from '../src/daemon/state.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 snapshot `now` is the cycle's own logic clock (runCycle adopts snapshot.now); Date.now() only times the cycle and the launcher waves, which nothing compares with 2030.
@@ -58,10 +56,8 @@ test('unit:launches-off-cycle — the cycle hands 10 five-second launches to the
   const first = await runCycle(master, state, effects, Date.now, launcher);
   const elapsed = Date.now() - started;
   assert.ok(elapsed < 10_000, `the cycle completed in ${elapsed}ms without waiting on its launches`);
-  assert.ok(first.metrics.durationMs < 10_000);
   assert.equal(finished.length, 0, 'no five-second launch had finished when the cycle ended: it recorded the requests and moved on');
   assert.equal(launcher.pending, 10, 'all 10 launch requests are with the launcher');
-  assert.ok(first.metrics.timings!.steps.every(step => step.ms < 5_000), 'no step of the cycle waited on a launch');
   assert.ok(!first.actions.some(action => action.kind === 'dispatch' && action.state === 'done'), 'nothing is reported done before it is');
   // Each launch in flight holds its profile, and the next cycle neither repeats a launch nor
   // reconciles its `started` entry as interrupted.
@@ -112,40 +108,4 @@ test('unit:launches-off-cycle — the launcher queues past its concurrency, runs
   await launcher.idle();
   assert.equal(launcher.pending, 0);
   assert.deepEqual(launcher.drain().map(action => action.detail).sort(), ['launched b', 'launched c']);
-});
-
-test('unit:slow-cycle-attention — a 90 s cycle raises a liveness attention naming its three slowest steps, and master status shows the p50/p95 cycle time over the last 30 minutes', () => {
-  const now = clock;
-  // Only what the cost and the percentiles read: the cycle, its wall time and its timed steps.
-  const metric = (cycle: number, agoMs: number, durationMs: number, steps: { step: string; ms: number }[] = []) => ({ cycle, at: iso(-agoMs), durationMs, childWaitMs: 0, workMs: durationMs, steps: emptyCycleSteps(),
-    timings: { totalMs: durationMs, steps, calls: [], slowCalls: 0 } }) as unknown as CycleMetrics;
-  const slow = metric(40, 1_000, 90_000, [{ step: 'snapshot', ms: 2_000 }, { step: 'dispatch', ms: 41_000 }, { step: 'launches', ms: 30_000 }, { step: 'decisions', ms: 12_000 }, { step: 'merges', ms: 5_000 }]);
-  const state = { ...emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/dev/null', cliPath: cli, repository: 'owner/project', baseBranch: 'main', githubAppId: 1, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] })),
-    lock: { id: 'loop', pid: process.pid, host: 'machine-a', startedAt: iso(-hour), heartbeatAt: iso(-1_000) }, cycle: 41, lastCycleAt: iso(-1_000),
-    metrics: [metric(1, 45 * 60_000, 500_000), ...Array.from({ length: 19 }, (_, index) => metric(index + 20, (20 - index) * 60_000, (index + 1) * 1_000)), slow] };
-  // A 90 s cycle, on a two-minute interval: its work fit the interval and the loop is running, so
-  // nothing else says the delivery steps in it waited ninety seconds.
-  const cost = cycleCost(slow, 120_000)!;
-  assert.deepEqual(cost.slowestSteps, [{ step: 'dispatch', ms: 41_000 }, { step: 'launches', ms: 30_000 }, { step: 'decisions', ms: 12_000 }]);
-  const liveness = loopLiveness(state, now, 120_000, 'machine-a');
-  assert.equal(liveness.state, 'running');
-  assert.deepEqual(loopAttention({ liveness, cost }), [], 'the cost lines judge the loop\'s own work, which fit');
-  const summary = daemonSummary(state, now, 120_000, 'machine-a');
-  const items = slowCycleAttention(summary);
-  assert.equal(items.length, 1, 'a cycle past 60 s raises a liveness attention');
-  const [attention] = items;
-  assert.equal(attention.subject, 'loop'); assert.equal(attention.role, 'master');
-  assert.equal(attention.text, 'Cycle 40 took 90s, past the 60s cycle bound (p50 10s, p95 19s over the last 30 minutes), and every merge, decision and close in it waited that long; slowest steps: dispatch 41s, launches 30s, decisions 12s');
-  assert.match(attention.next, /shorten the dispatch step/);
-  assert.equal(slowCycleMs, 60_000);
-
-  // A cycle inside the bound raises none of it; nor does a loop that is not running at all.
-  assert.deepEqual(slowCycleAttention({ liveness, cost: cycleCost(metric(41, 1_000, 55_000, [{ step: 'dispatch', ms: 50_000 }]), 120_000) }), []);
-  assert.deepEqual(slowCycleAttention({ liveness: { state: 'absent' }, cost }), []);
-
-  // p50/p95 over the last 30 minutes: the 45-minute-old 500 s cycle is outside the window.
-  const times = cycleTimes(state.metrics, now);
-  assert.deepEqual(times, { windowMs: 30 * 60_000, cycles: 20, p50Ms: 10_000, p95Ms: 19_000 });
-  assert.deepEqual(summary.cycleTime, times, 'master status shows the cycle-time percentiles under daemon.cycleTime');
-  assert.deepEqual(cycleTimes([], now), { windowMs: 30 * 60_000, cycles: 0, p50Ms: null, p95Ms: null });
 });

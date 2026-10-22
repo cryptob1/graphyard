@@ -38,14 +38,14 @@ async function reviewerMaster(label: string) {
   return root;
 }
 
-/** A control-plane-observed item, so a launch needs no reviewer App to reach the profile lookup; review itself is not required, so a launch past the lookup stops there. */
+/** A control-plane-observed item, so a launch needs no reviewer App to reach the profile lookup; its codex provider takes no launched reviewer, so a launch past the lookup stops there. */
 function work(clock: number): Work {
   const candidate = { sha: H, baseSha: B, pr: 1850, branch: 'graphyard/gy-1850-1', author: 'implementer' };
   const at = new Date(clock).toISOString();
   return {
     id: 'work-1850', key: 'GY-1850', title: 'Reviewer profiles before the first review', description: '', type: 'bug', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }],
-    policy: { checks: [], review: false }, stage: 'review', revision: 1, policyRevision: 1,
+    policy: { checks: [], review: true, reviewProvider: 'codex' }, stage: 'review', revision: 1, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
     workspaces: [], candidate, submission: { epoch: 1, pr: 1850 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: { source: 'control-plane', candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
@@ -105,7 +105,7 @@ test('unit:unknown-profile-escalates — three review launches refused for an un
   // The profiles change: review-codex exists, the launch gets past the profile lookup, and the record — with it the attention and the backoff — is gone.
   clock += 60_000;
   await saveReviewerProfile(root, { name: 'review-codex', agentName: 'review-codex-1', kind: 'codex' });
-  await assert.rejects(launch('review-codex'), /does not require independent review/, 'the launch is refused no longer for the profile but by the item itself');
+  await assert.rejects(launch('review-codex'), /uses the codex review provider/, 'the launch is refused no longer for the profile but by the item itself');
   assert.equal(await readReviewerProfileRefusal(config), null, 'the profiles changed, so the fault is over');
   assert.deepEqual(reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config)), []);
   assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).items.length, 0, 'master status raises no attention once the profiles are written');
@@ -121,7 +121,7 @@ test('unit:unknown-profile-escalates — a launch through a replacement profile 
   for (let attempt = 0; attempt < 3; attempt++) await assert.rejects(launch('review-x'), /^Error: Unknown reviewer profile review-x$/);
   const config = await loadMasterConfig(root);
   assert.equal((await readReviewerProfileRefusal(config))?.refusals, 3);
-  await assert.rejects(launch('review-y'), /does not require independent review/, 'the replacement gets past the profile lookup');
+  await assert.rejects(launch('review-y'), /uses the codex review provider/, 'the replacement gets past the profile lookup');
   assert.equal(await readReviewerProfileRefusal(config), null, 'the old name\'s record is gone once a review launches');
   assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).items.length, 0);
 });

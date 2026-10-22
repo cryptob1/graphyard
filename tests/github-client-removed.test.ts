@@ -295,9 +295,6 @@ test('unit:shadow-gate-removed — the shadow gate is gone: its modules and rout
   const effects = { ...baseEffects(async () => [], () => clock), mergeWriter: { ...reads, advisory: undefined } } as unknown as DaemonEffects;
   await runCycle(master, state, effects, () => clock);
   await mergeWriterIdle(state);
-  const steps = state.metrics.flatMap(metric => metric.timings?.steps.map(entry => entry.step) ?? []);
-  assert.ok(steps.includes('merge writer'), `the writer's step ran: ${steps.join(', ')}`);
-  assert.ok(!steps.includes('shadow gate'), 'no shadow gate step ran');
   assert.ok(!children.some(args => args.some(arg => arg.startsWith('graphyard/') || arg.includes('refs/heads/graphyard/'))), `no worker branch was fetched: ${JSON.stringify(children)}`);
   assert.equal('shadow' in state, false, 'the cursor keeps no shadow verdicts');
   assert.equal('shadowGate' in daemonSummary(state, clock, 60_000), false, 'the run summary has no shadowGate section');

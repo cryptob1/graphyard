@@ -6,14 +6,13 @@ import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { ChildProcessError, ChildWaitLedger, childRunner, runChild } from '../src/child-runner.js';
-import { cycleCost, daemonSummary, emptyCycleSteps, emptyDaemonState, loopAttention, loopLiveness, runCycle, runDaemon, cycleMetricsSchema, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { cycleBudget } from '../src/cli/master-status.js';
 import { listHerdrAgents, masterConfigSchema, startAgentSession, type HerdrAgent, type MasterConfig, type MasterRun, type ProducerProfile, type WorkerProfile } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { DispatchRequest } from '../src/model/dispatch.js';
 import type { Work } from '../src/model.js';
-// Time-bomb allowance (GY-1694): the 2030-01-01 clock is handed to runCycle, loopLiveness and daemonSummary as their explicit now over fixtures derived from it; Date.now() only measures elapsed time and child deadlines.
+// Time-bomb allowance (GY-1694): the 2030-01-01 clock is handed to runCycle as its explicit now over fixtures derived from it; Date.now() only measures elapsed time and child deadlines.
 
 // GY-125. Each test is named for the proof it produces: unit:no-sync-child-processes,
 // integration:snapshot-read-unblocked-by-launch and unit:child-wait-attributed.
@@ -189,7 +188,7 @@ test('integration:snapshot-read-unblocked-by-launch — while the dispatcher wai
     assert.equal(state.failures.consecutive, 0);
     assert.ok(!log.some(line => /failed in the snapshot call|aborted due to timeout/.test(line)), log.join('\n'));
     // The cycle's own Herdr read went through the same runner, beside the stalled launch.
-    assert.ok(log.some(line => /cycle 0 complete in \d+ms \(\d+ms waiting on child processes\)/.test(line)), log.join('\n'));
+    assert.ok(log.some(line => /cycle 0 complete with /.test(line)), log.join('\n'));
     // Let the launch finish: the tick then records it as launched, exactly as a fast Herdr would.
     await herdr.release();
     const ticked = await tick;
@@ -199,102 +198,4 @@ test('integration:snapshot-read-unblocked-by-launch — while the dispatcher wai
     await new Promise<void>(done => server.close(() => done()));
     await rm(directory, { recursive: true, force: true });
   }
-});
-
-test('unit:child-wait-attributed — every cycle step reports its own childWaitMs, the cycle its work net of waits, and the liveness bound judges the work: eighty seconds waiting on gh and eighty seconds computing read differently', async () => {
-  // The ledger: overlapping children are one wait, not two, and a drain splits a running child
-  // between the steps its wait fell into.
-  let tick = 0;
-  const ledger = new ChildWaitLedger(() => tick);
-  const first = ledger.begin(); tick = 100; const second = ledger.begin(); tick = 300; first(); tick = 500; second();
-  assert.equal(ledger.drain(), 500, 'two children in flight from 0 to 500 are five hundred milliseconds of waiting, not eight hundred');
-  assert.equal(ledger.drain(), 0);
-  const third = ledger.begin(); tick = 800;
-  assert.equal(ledger.drain(), 300, 'a child still running is charged for the part of its wait inside the window');
-  tick = 1_000; third();
-  assert.equal(ledger.drain(), 200, 'and the rest of it goes to the next window');
-  // On real children through the runner: two concurrent sleeps are one overlapping wait.
-  const metered = new ChildWaitLedger();
-  const run = childRunner({ ledger: metered });
-  await Promise.all([run(process.execPath, ['-e', 'setTimeout(() => {}, 300)']), run(process.execPath, ['-e', 'setTimeout(() => {}, 300)'])]);
-  const waited = metered.drain();
-  assert.ok(waited >= 250 && waited < 590, `two concurrent 300ms children are one wait of about 300ms, measured ${waited}ms`);
-
-  // A cycle whose dispatch step spent eighty seconds waiting on a child (a launch) and eight
-  // hundred milliseconds of its own work: the step says so, and so does the cycle.
-  const { directory, token } = await privateDirectory('attributed');
-  try {
-    const master = config(token, { run: { intervalSeconds: 20 }, workers: [{ name: 'launch', principal: 'worker-a', agentName: 'agent-launch', mode: 'launch', kind: 'codex', credentialFile: token, agentArgs: [], approvals: 'auto', environment: {} } as WorkerProfile] });
-    let now = clock, pending = 0;
-    const clockNow = () => now;
-    const childWaits = () => { const drained = pending; pending = 0; return drained; };
-    const state = emptyDaemonState(master);
-    const result = await runCycle(master, state, effects({
-      snapshot: async () => ({ work: [work()], now: iso(0) }),
-      // The launch: eighty seconds on the clock, all but 800ms of it waiting on the runtime.
-      dispatch: async () => { now += 80_000; pending += 79_200; },
-      // The deployment step: six seconds of the loop's own work, no child at all.
-      observeDeployment: async () => { now += 6_000; return { source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }; },
-      childWaits,
-    }), clockNow);
-    const metrics = result.metrics;
-    assert.ok(metrics.steps, 'the cycle records its steps');
-    assert.deepEqual(metrics.steps!.dispatch, { ms: 80_000, childWaitMs: 79_200 });
-    assert.deepEqual(metrics.steps!.deployment, { ms: 6_000, childWaitMs: 0 });
-    assert.equal(metrics.durationMs, 86_000); assert.equal(metrics.childWaitMs, 79_200); assert.equal(metrics.workMs, 6_800);
-    assert.deepEqual(Object.keys(metrics.steps!), ['observe', 'close', 'decisions', 'dispatch', 'merge', 'deployment']);
-    assert.ok(cycleMetricsSchema.safeParse({ ...metrics, steps: undefined, childWaitMs: undefined, workMs: undefined }).success, 'a cursor written before the loop metered its waits still parses');
-    assert.deepEqual(emptyCycleSteps().merge, { ms: 0, childWaitMs: 0 });
-
-    // The cost, against a twenty-second interval: the cycle took 86s but worked for 6.8s, so its
-    // work fits the interval and the liveness bound; the wait is named with its step.
-    const waiting = cycleCost(metrics, 20_000)!;
-    assert.deepEqual({ durationMs: waiting.durationMs, childWaitMs: waiting.childWaitMs, workMs: waiting.workMs, withinInterval: waiting.withinInterval, withinLivenessBound: waiting.withinLivenessBound }, { durationMs: 86_000, childWaitMs: 79_200, workMs: 6_800, withinInterval: true, withinLivenessBound: true });
-    assert.deepEqual(waiting.longestWait, { step: 'dispatch', childWaitMs: 79_200 });
-    assert.deepEqual(waiting.slowest, { step: 'deployment', ms: 6_000, childWaitMs: 0 }, 'the slowest step is judged on its own work, not its wait');
-    assert.match(waiting.breakdown, /^6\.8s of its own work and 79\.2s waiting on child processes; deployment 6s, dispatch 80s \(79\.2s waiting\)/);
-
-    // The same eighty seconds computed rather than waited: past the bound, with a step to shorten.
-    // Its timings say the same (GY-1355: the loop-cost lines name the slowest timed step).
-    const computed = cycleMetricsSchema.parse({ ...metrics, childWaitMs: 0, workMs: 86_000, steps: { ...metrics.steps!, dispatch: { ms: 80_000, childWaitMs: 0 } },
-      timings: { ...metrics.timings!, steps: [{ step: 'dispatch', ms: 80_000 }, ...metrics.timings!.steps.filter(step => step.step !== 'dispatch')] } });
-    const busy = cycleCost(computed, 20_000)!;
-    assert.deepEqual({ withinInterval: busy.withinInterval, withinLivenessBound: busy.withinLivenessBound, slowest: busy.slowest, longestWait: busy.longestWait }, { withinInterval: false, withinLivenessBound: false, slowest: { step: 'dispatch', ms: 80_000, childWaitMs: 0 }, longestWait: null });
-
-    // Liveness, sixty seconds after each cycle ended with a twenty-second interval (bound 40s):
-    // both loops are inside a slow cycle, not stalled — and the waiting one says the time went to
-    // children, the computing one names the step to shorten. Only past the cycle's own length
-    // plus the bound is either a stall.
-    const lock = { id: 'lock', pid: process.pid, host: 'machine-a', startedAt: iso(0), heartbeatAt: iso(86_000) };
-    const after = (cost: typeof metrics, lagMs: number) => loopLiveness({ lock, cycle: 1, lastCycleAt: iso(86_000), metrics: [cost] }, clock + 86_000 + lagMs, 20_000, 'machine-a');
-    const waitedLiveness = after(metrics, 60_000);
-    assert.equal(waitedLiveness.state, 'slow');
-    assert.match(waitedLiveness.detail, /inside a slow cycle, not stalled: its own work fits the bound, and the time went to child processes in the dispatch step/);
-    const computedLiveness = after(computed, 60_000);
-    assert.equal(computedLiveness.state, 'slow');
-    assert.match(computedLiveness.detail, /the dispatch step is the one to shorten/);
-    assert.equal(after(metrics, 86_000 + 40_000 + 1).state, 'stalled', 'a lag the cycle no longer explains is a stall');
-    assert.equal(loopLiveness({ lock, cycle: 1, lastCycleAt: iso(86_000), metrics: [] }, clock + 86_000 + 60_000, 20_000, 'machine-a').state, 'stalled', 'without a measured cycle the bound stands as before');
-
-    // Attention: a loop still cycling is never told to restart; what it is told depends on where
-    // the time went. A cycle whose work fits the interval raises nothing extra once it is running again.
-    const waitedAttention = loopAttention({ liveness: waitedLiveness });
-    assert.equal(waitedAttention.length, 1);
-    assert.match(waitedAttention[0].next, /the time went to child processes in the dispatch step \(79s\), so look at what Herdr, gh or git is slow on rather than restarting/);
-    const computedAttention = loopAttention({ liveness: computedLiveness });
-    assert.match(computedAttention[0].next, /shorten the dispatch step rather than restarting/);
-    assert.deepEqual(loopAttention({ liveness: after(metrics, 5_000) }), [], 'a cycle that waited but whose own work fits the interval is not an overrun');
-    const overrun = loopAttention({ liveness: after(computed, 5_000) });
-    assert.equal(overrun.length, 1);
-    assert.match(overrun[0].text, /^Cycle 0 spent 86s on its own work, longer than the 20s interval and past the two-interval liveness bound of 40s \(86s in all, 0s of it waiting on child processes\)/);
-    assert.match(overrun[0].text, /The dispatch step is the slowest timed step, at 80s/);
-
-    // Where an operator reads it: `master status` carries the cost beside the metrics, and the
-    // cycle budget carries each cycle's waits beside its duration.
-    const summary = daemonSummary(state, clock + 86_000 + 1_000, 20_000, 'machine-a');
-    assert.deepEqual({ childWaitMs: summary.cost?.childWaitMs, workMs: summary.cost?.workMs, longestWait: summary.cost?.longestWait }, { childWaitMs: 79_200, workMs: 6_800, longestWait: { step: 'dispatch', childWaitMs: 79_200 } });
-    assert.deepEqual(summary.liveness.cost?.steps?.dispatch, { ms: 80_000, childWaitMs: 79_200 });
-    const budget = cycleBudget(state, 20_000);
-    assert.deepEqual(budget.lastCycle, { cycle: 0, at: metrics.at, durationMs: 86_000, childWaitMs: 79_200, workMs: 6_800 });
-  } finally { await rm(directory, { recursive: true, force: true }); }
 });

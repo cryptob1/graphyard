@@ -35,12 +35,6 @@ test('unit:loop-liveness-foreign-namespace — a reader outside the lock\'s PID 
   assert.equal(lagging.state, 'stalled', 'past two intervals the lag rule judges it stalled, not absent');
   assert.match(lagging.detail, /is stalled; pid \d+ could not be probed from this PID namespace/);
 
-  const slowCursor = cursor({ pidNamespace: recorded }, now - 3 * interval);
-  slowCursor.metrics = [{ cycle: 12706, at: new Date(now - 3 * interval).toISOString(), durationMs: 5 * interval } as DaemonState['metrics'][number]];
-  const slow = loopLiveness(slowCursor, now, interval, 'machine-a', from(foreign));
-  assert.equal(slow.state, 'slow', 'a measured long cycle still explains the lag');
-  assert.match(slow.detail, /could not be probed from this PID namespace/);
-
   // The same lock read from its own namespace: a pid that is truly gone is an absent loop.
   const own = loopLiveness(cursor({ pidNamespace: recorded }, now - 5_000), now, interval, 'machine-a', from(recorded));
   assert.equal(own.state, 'absent');

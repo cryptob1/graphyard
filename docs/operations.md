@@ -39,7 +39,7 @@ The loop removes an assignment worktree (`git worktree remove`, never forced) on
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`; a step that throws is one log line and runs again next cycle.
+`master status` `daemon`: health; a step that throws is one log line and runs again next cycle.
 
 ## Lost worker before submission
 
@@ -55,7 +55,7 @@ Stop worker; [rework](#recovery-recipes) `--previous-worker-stopped`; next resub
 
 ## Proof authority
 
-A principal proves exactly its roster entry's `--proof` patterns (`graphyard principal add ID --role producer --proof PATTERN`); nothing is granted at runtime.
+A principal proves exactly its roster entry's `--proof` patterns (`graphyard principal add ID --role producer|admin --proof PATTERN`); admins included, nothing is granted at runtime.
 
 ## Credentials
 

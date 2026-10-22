@@ -1,7 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { defineCommands } from './registry.js';
-import { cycleBudget } from './master-status.js';
 import { masterInit } from './master-init.js';
 import { masterSetupCommand } from './master-setup.js';
 import { loadStoredMasterConfig, masterInstructions } from '../master.js';
@@ -111,5 +110,4 @@ export const masterCommands = defineCommands([
   ...sessionCommands,
 ]);
 
-export { cycleBudget };
 export { derivedIntent } from './master/intent.js';

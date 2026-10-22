@@ -52,6 +52,5 @@ test('unit:master-status-headroom — master status exports and report interface
   assert.equal(typeof masterStatus.masterStatusReport, 'function', 'masterStatusReport is exported');
   assert.equal(typeof masterStatus.reportedAttention, 'function', 'reportedAttention is exported');
   assert.equal(typeof masterStatus.actionReport, 'function');
-  assert.equal(typeof masterStatus.cycleBudget, 'function');
   assert.equal(typeof masterStatus.observationThroughputStatus, 'function');
 });

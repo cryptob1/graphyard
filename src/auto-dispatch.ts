@@ -4,7 +4,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { childRunner, type ChildRun } from './child-runner.js';
-import { Timings, timedCall, timedRun, serverCallName, describeTimings, timingsSchema, withTimings, type TimingReport } from './master/timings.js';
+import { timedCall, timedRun, serverCallName } from './master/timings.js';
 import type { Work } from './model.js';
 import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEntry } from './model/session-state.js';
 import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
@@ -131,8 +131,8 @@ export const dispatchCursorSchema = z.object({
       reason: z.string().max(cursorTextLimit), group: z.string().max(40).optional(),
       /** When the reviewer's verdict on the request settled (GY-1429): a request already answered waits from then, not from its request. */
       answeredAt: z.string().max(40).optional() }).strict()).max(launchWaitLimit).default([]),
-    /** Where the tick's time went (GY-377): its steps and its slowest external calls. Absent on older ticks. */
-    timings: timingsSchema.optional() }).strict().nullable().default(null),
+    /** Retired (GY-2876): the tick's step and call timings; a cursor written before still parses. */
+    timings: z.unknown().optional() }).strict().nullable().default(null),
   /**
    * A role none of whose accounts can launch (GY-89): why, and when its accounts are read again.
    * That is capacity, not a refusal, so it never counts toward a request's failure limit — a
@@ -666,7 +666,7 @@ export type PostMergeOutcome = NonNullable<ReviewRecord['postMergeFollowUps']>;
 /** The wait a normal-risk control-plane head's pre-merge review request reports (GY-1525): it merges on its trial and is reviewed after. */
 export const postMergeWaitReason = 'normal-risk delta in control-plane mode: it merges on its trial and is reviewed after the merge, so no pre-merge reviewer session is launched';
 /** Whether the item's pre-merge review request is answered by a post-merge review instead: a control-plane head whose merge delta reads normal (the one merge rule, model/gates.ts). */
-export const reviewedAfterMerge = (work: Work) => work.observation?.source === 'control-plane' && !!work.policy.review && !reviewedBeforeMerge(riskOf(work).risk);
+export const reviewedAfterMerge = (work: Work) => work.observation?.source === 'control-plane' && !reviewedBeforeMerge(riskOf(work).risk);
 /**
  * The dispatch request a post-merge review is launched under: one per delivered merge commit, bound
  * to nothing else. Its base is the merge commit's first parent, the tip the merge writer's ledger
@@ -759,9 +759,7 @@ export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused:
   /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
   sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
   /** Items whose observation this tick woke because a reviewer had answered their request (GY-1429). */
-  woken?: string[];
-  /** Where the tick's time went: every step it ran and its slowest external calls (GY-377). */
-  timings?: TimingReport }
+  woken?: string[] }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const retryDelay = (attempts: number) => Math.min(dispatchRetryMinMs * 2 ** Math.max(0, attempts - 1), dispatchRetryMaxMs);
@@ -813,24 +811,19 @@ async function launchWithFailover<P extends { name: string }>(profiles: P[], lau
  * the tick moves on, so a kill between two launches leaves nothing to repeat.
  */
 export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs, botReadTimeoutMs = botReviewReadTimeoutMs, launchBound = launchBoundMs(config)): Promise<DispatchTick> {
-  // Every step of the tick is timed, and its external calls are recorded against it rather than
-  // against the cycle running beside it in the same process (GY-377).
-  const timings = new Timings(now);
-  const tick = await withTimings(timings, () => dispatchTick(config, cursor, effects, now, readTimeoutMs, botReadTimeoutMs, timings, launchBound));
-  tick.timings = timings.report();
-  return tick;
+  return dispatchTick(config, cursor, effects, now, readTimeoutMs, botReadTimeoutMs, launchBound);
 }
 
-async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, botReadTimeoutMs: number, timings: Timings, launchBound: number): Promise<DispatchTick> {
-  const snapshot = await timings.step('snapshot', () => boundedRead(() => effects.snapshot(readTimeoutMs), readTimeoutMs));
+async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, botReadTimeoutMs: number, launchBound: number): Promise<DispatchTick> {
+  const snapshot = await boundedRead(() => effects.snapshot(readTimeoutMs), readTimeoutMs);
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
   const tick: DispatchTick = { at: new Date(clock).toISOString(), launched: [], refused: [], waiting: [], skipped: 0, closed: [], closeFailures: [] };
-  const herdr = await timings.step('herdr', () => effects.agents());
+  const herdr = await effects.agents();
   // GY-1490: the loop sleeping beside this tick is woken for what its next cycle acts on, within one tick of it appearing.
   try { effects.observeLoopSubjects?.(snapshot.work, herdr, clock); } catch { /* a wake that cannot be judged leaves the loop to its interval */ }
-  const { reviews, released } = await timings.step('reconcile reviews', () => effects.reconcileReviews(snapshot.work, herdr));
-  const { producers } = await timings.step('reconcile producers', () => effects.reconcileProducers(snapshot.work, herdr));
+  const { reviews, released } = await effects.reconcileReviews(snapshot.work, herdr);
+  const { producers } = await effects.reconcileProducers(snapshot.work, herdr);
   // Session liveness, swept on this same bounded interval (GY-113): a session that died reports
   // nothing, so nothing but a sweep ever contradicts a record that says it is running. The judgment
   // is made before anything launches, because the slot check below reads it.
@@ -848,7 +841,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   if (herdr) cursor.sessionMisses = Object.fromEntries(Object.entries(report.missing).slice(0, sessionMissLimit));
   const byId = new Map(snapshot.work.map(item => [item.id, item]));
   const sessions = tick.sessions = { observed: report.entries.length, written: 0, failures: [] as { work: string; id: string; reason: string }[] };
-  await timings.step('sessions', async () => {
+  await (async () => {
     for (const entry of report.entries.filter(entry => !entry.closed && entry.changed)) {
       const item = byId.get(entry.workId);
       // A delivered item takes the observation too (engine.ts): a session that outlives the delivery
@@ -865,7 +858,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       try { await effects.endSession?.(closure); tick.closed.push(closure); }
       catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
     }
-  });
+  })();
   const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
   // each profile's sessions against its limit; the requests wait and the tick says so.
@@ -876,7 +869,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   const releasedPanes = new Set((released ?? []).map(entry => `${entry.pane}\0${entry.agentName}`));
   const isReleased = (pane: string | null | undefined, name: string | null | undefined) => !!pane && !!name && releasedPanes.has(`${pane}\0${name}`);
   const agents = (herdr ?? []).filter(agent => !isReleased(agent.pane_id, agent.name));
-  const credentials = await timings.step('credentials', () => effects.credentials(config.producers));
+  const credentials = await effects.credentials(config.producers);
   // The sessions this tick has started join the inventory at once, so two requests in one tick
   // never both take a profile's last slot. A launcher that does not report its session name is
   // counted under the name it would have chosen for the request.
@@ -1216,7 +1209,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     return turn;
   };
   let outcomes: ({ error: unknown } | null)[] = [];
-  await timings.step('launches', async () => {
+  await (async () => {
     try {
       for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
         const review = item.autoDispatch!.review;
@@ -1267,14 +1260,14 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         }
       }
     } finally { outcomes = await Promise.all([...deferred, ...producerLaunches]); }
-  });
+  })();
   for (const outcome of outcomes) if (outcome) throw outcome.error;
   // Review by risk (GY-1525 AC-4): a normal-risk delta the merge writer delivered owes one review of
   // its merge delta. It launches through the same ledger, retry and capacity rules as a pre-merge
   // review, under a request of its own per merge commit; its verdict's BLOCKING findings become
   // follow-up items and the rest project memory, once per record.
   const owed = effects.launchPostMergeReview ? owedPostMergeReviews(snapshot.work) : [];
-  await timings.step('post-merge reviews', async () => {
+  await (async () => {
     for (const item of owed) {
       const request = postMergeRequest(item);
       if (!session('review', item, request, reviews)) continue;
@@ -1325,7 +1318,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       await effects.settlePostMerge?.(record, outcome);
       (tick.followUps ??= []).push({ work: item.key, sha: record.sha, filed: outcome.filed.map(entry => entry.key), memory: outcome.memory ?? 0, ...(outcome.failure ? { failure: outcome.failure } : {}) });
     }
-  });
+  })();
   for (const { key, wake } of settlementWakes.values()) {
     const failed = await wake;
     if (!failed) { (tick.woken ??= []).push(key); continue; }
@@ -1340,7 +1333,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
     // A launch that skipped an exhausted bot's wait says so beside the waits (GY-349).
     reasons: [...composed().map(([reason]) => reason), ...tick.launched.filter(launch => launch.reason).map(launch => bounded(`${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)}: launched; ${launch.reason}`, cursorTextLimit))].slice(0, 20),
-    waits: tickWaits(tick.waiting), timings: timings.report() };
+    waits: tickWaits(tick.waiting) };
   await persist();
   return tick;
 }
@@ -1394,8 +1387,6 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
       }
       const tick = await runDispatchTick(config, cursor, effects, now, tickReadTimeout(cursor.consecutiveFailures, interval, options.readTimeoutMs));
       ticks.push(tick);
-      // A tick that outgrew its interval says where its time went (GY-377): its slowest steps and call.
-      if (tick.timings && tick.timings.totalMs > interval) log(`[graphyard-dispatch] tick took ${tick.timings.totalMs}ms against its ${interval}ms interval; ${describeTimings(tick.timings)}`);
       for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}${launch.reason ? `; ${launch.reason}` : ''}`);
       for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
       for (const closure of tick.closed) log(`[graphyard-dispatch] closed ${closure.role} session ${closure.id} on ${closure.key}: ${closure.outcome}`);

@@ -152,10 +152,7 @@ function authorizeOperatorCommand(actor: Principal, command: Command, data: any,
   demand(!!repository && actor.scope?.repositories.includes(repository), 'Repository is outside this operator-agent scope', 403);
   if (work) demand(operatorScopeIncludes(actor, work), 'Work item is outside this operator-agent scope', 403);
   demand(command === 'evidence' || data.reason, 'Operator-agent mutations require a reason', 400);
-  if (command === 'create') {
-    demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403);
-    demand(data.policy.review, 'Operator-created work must require independent review');
-  }
+  if (command === 'create') demand(actor.scope?.workItems.includes('*'), 'Creating work requires wildcard work scope', 403);
 }
 
 /**
@@ -1639,7 +1636,7 @@ export class Engine {
       const work = all.find(w => w.id === id);
       requireCurrent(work && work.revision === expectedRevision && work.stage !== 'done' && !work.observation?.merged, 'Task changed during review dispatch');
       const provider = reviewProviderOf(work.policy);
-      demand(work.policy.review && (request.provider ?? 'codex') === provider && ['codex', 'agent'].includes(provider)
+      demand((request.provider ?? 'codex') === provider && ['codex', 'agent'].includes(provider)
         && request.sha === work.candidate?.sha && request.baseSha === work.candidate?.baseSha && request.policyRevision === work.policyRevision, 'Review request candidate or policy changed');
       if (provider === 'agent') {
         const selected = reviewerProfileFor(work);

@@ -203,7 +203,7 @@ export function rosterEntry(input: { id: string; role?: string; sessionKind?: st
   if (badProofs.length) throw new Error(`Unknown proof ${badProofs.join(', ')}; --proof takes unit:*, integration:*, e2e:* or manual:* patterns`);
   if (role === 'producer' && !grants.length && !proofs.length) throw new Error(`A producer is created only with an explicit grant (--grant ${principalGrants.join('|')}) or proof seed (--proof unit:*|integration:*|e2e:*|manual:*): an ungranted producer would be a standing credential with no lane, and widening it later is never automatic`);
   if (role !== 'producer' && grants.length) throw new Error(`A grant names a producer lane; ${role} ${input.id} holds none. Use --role producer`);
-  if (role !== 'producer' && proofs.length) throw new Error(`A proof seed names producer proof authority; ${role} ${input.id} holds none. Use --role producer`);
+  if (role !== 'producer' && role !== 'admin' && proofs.length) throw new Error(`A proof seed names proof authority; ${role} ${input.id} holds none. Use --role producer or admin`);
   if (grants.includes(observeShaGrant) && (grants.length > 1 || proofs.length)) throw new Error(`${observeShaGrant} is held by a dedicated observer principal, beside no other grant or proof; add a separate principal for it`);
   return { id: input.id, role, sessionKind, ...(proofs.length ? { proofs } : {}), ...(grants.length ? { grants } : {}), source: 'principal' };
 }
@@ -260,9 +260,9 @@ export function plannedPrincipals(installId: string, options: { workers?: number
   // The declared kind travels with the principal into GRAPHYARD_PRINCIPALS: the operator is a
   // human session — an undeclared admin is refused every human-only answer (delegation.ts
   // `sessionKind`), which would strand the needs-you requests the loop parks for the operator —
-  // and every agent principal is ai.
+  // and every agent principal is ai. The operator attests manual proofs through its roster pattern.
   return [
-    { id: `${installId}-operator`, role: 'admin' as Role, sessionKind: 'human' as DeclaredSessionKind },
+    { id: `${installId}-operator`, role: 'admin' as Role, sessionKind: 'human' as DeclaredSessionKind, proofs: ['manual:*'] },
     { id: `${installId}-master`, role: 'coordinator' as Role, sessionKind: 'ai' as DeclaredSessionKind },
     ...Array.from({ length: workers }, (_, index) => ({ id: `${installId}-worker-${index + 1}`, role: 'worker' as Role, sessionKind: 'ai' as DeclaredSessionKind })),
     { id: `${installId}-dashboard`, role: 'reader' as Role, sessionKind: 'ai' as DeclaredSessionKind },

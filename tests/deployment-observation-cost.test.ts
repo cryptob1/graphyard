@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { cycleCost, daemonSummary, emptyDaemonState, loopAttention, loopLiveness, observeDeployment, runCycle, type ContainmentRetention, type CycleSteps, type DaemonEffects } from '../src/master-daemon.js';
+import { daemonSummary, emptyDaemonState, loopAttention, loopLiveness, observeDeployment, runCycle, type ContainmentRetention, type DaemonEffects } from '../src/master-daemon.js';
 import * as deploymentModule from '../src/daemon/deployment.js';
 import { masterConfigSchema, masterSettingsFromArgs, type MasterConfig, type MasterRun } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -168,102 +168,6 @@ function cycleEffects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
   };
 }
 
-test('integration:cycle-time-attributed — the cycle reports where its time went, and a deployment step that outgrows the interval is named as that step rather than reported as a stalled loop', async () => {
-  const directory = await temporaryDirectory('cycle-cost');
-  try {
-    const token = join(directory, 'coordinator.token');
-    await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const master = config(token);
-    const intervalMs = master.run.intervalSeconds * 1000;
-    assert.equal(intervalMs, 20_000);
-    const state = emptyDaemonState(master);
-    state.lock = { id: 'lock', pid: process.pid, host: master.hostId, startedAt: iso(0), heartbeatAt: iso(0) };
-    // A cycle whose deployment step takes eighty seconds against a twenty-second interval.
-    let running = clock;
-    const now = () => running;
-    const delivered = delivery('GY-1', 'a'.repeat(40), iso(-60_000));
-    const result = await runCycle(master, state, cycleEffects({
-      snapshot: async () => ({ work: [delivered], now: iso(0) }),
-      observeDeployment: async () => { running += 80_000; return { source: 'endpoint', sha: 'a'.repeat(40), at: iso(0), reason: null, deployed: ['GY-1'], pending: [], requests: 0, derived: 0, retained: 1 }; },
-    }), now);
-
-    // The breakdown is on the cycle's own measurement, step by step.
-    assert.deepEqual(Object.keys(result.metrics.steps!).sort(), ['close', 'decisions', 'deployment', 'dispatch', 'merge', 'observe']);
-    assert.deepEqual(result.metrics.steps!.deployment, { ms: 80_000, childWaitMs: 0 });
-    assert.equal(result.metrics.durationMs, 80_000);
-    assert.equal(result.metrics.steps!.merge.ms, 0);
-    assert.equal(result.metrics.workMs, 80_000, 'the deployment step computed: nothing was waiting on a child');
-
-    const cost = cycleCost(result.metrics, intervalMs)!;
-    assert.deepEqual(cost.slowest, { step: 'deployment', ms: 80_000, childWaitMs: 0 });
-    assert.equal(cost.withinInterval, false);
-    assert.equal(cost.withinLivenessBound, false);
-    assert.match(cost.breakdown, /waiting on child processes; deployment 80s,/);
-
-    // `master status` reads it from the daemon summary, against the interval it is judged on.
-    const summary = daemonSummary(state, running, intervalMs, master.hostId);
-    assert.equal(summary.cost!.steps!.deployment.ms, 80_000);
-    assert.equal(summary.cost!.durationMs, 80_000);
-    assert.equal(summary.cost!.intervalMs, intervalMs);
-    assert.equal(summary.metrics!.steps!.deployment.ms, 80_000);
-
-    // A cycle that finished is running, and the cost is still raised, naming the step.
-    const attention = loopAttention({ liveness: summary.liveness, cost: summary.cost });
-    assert.equal(summary.liveness.state, 'running');
-    assert.equal(attention.length, 1);
-    assert.equal(attention[0].subject, 'loop');
-    assert.match(attention[0].text, /Cycle 0 spent 80s on its own work, longer than the 20s interval/);
-    assert.match(attention[0].text, /deployment 80s/);
-    assert.match(attention[0].text, /The deployment verification step is the slowest timed step, at 80s/);
-    assert.match(attention[0].next, /shorten the deployment verification step rather than restarting a loop that is still cycling/);
-    assert.equal(attention[0].human, false);
-
-    // Mid-cycle, past the two-interval liveness bound, the measured cycle explains the silence:
-    // the loop is slow at a named step, not stalled, and the remedy is not a restart.
-    const midCycle = running + 50_000;
-    const slow = loopLiveness(state, midCycle, intervalMs, master.hostId);
-    assert.equal(slow.state, 'slow');
-    assert.match(slow.detail, /past the two-interval bound of 40s, but cycle 0 took 80s of its own: .*deployment 80s/);
-    assert.match(slow.detail, /inside a slow cycle, not stalled; the deployment verification step is the one to shorten/);
-    const slowItems = loopAttention({ liveness: slow });
-    assert.equal(slowItems.length, 1, 'the slow cycle is one attention item, not a stall and a cost');
-    assert.match(slowItems[0].text, /deployment 80s/);
-    assert.match(slowItems[0].next, /shorten the deployment verification step/);
-    assert.equal(/is stalled/.test(slowItems[0].text), false);
-
-    // Past that cycle's own cost, nothing explains the silence any more: it is a stall again.
-    const abandoned = loopLiveness(state, running + 80_000 + 40_001, intervalMs, master.hostId);
-    assert.equal(abandoned.state, 'stalled');
-    assert.match(abandoned.detail, /is stalled/);
-
-    // A cycle inside its interval raises nothing at all.
-    const quick = { ...result.metrics, cycle: 1, durationMs: 4_000, childWaitMs: 0, workMs: 4_000, steps: Object.fromEntries(Object.entries({ observe: 1_000, close: 500, decisions: 500, dispatch: 1_000, merge: 500, deployment: 500 }).map(([step, ms]) => [step, { ms, childWaitMs: 0 }])) as CycleSteps };
-    const quickCost = cycleCost(quick, intervalMs)!;
-    assert.equal(quickCost.withinInterval, true);
-    state.lastCycleAt = new Date(running).toISOString();
-    assert.deepEqual(loopAttention({ liveness: loopLiveness({ ...state, metrics: [quick] }, running + 5_000, intervalMs, master.hostId), cost: quickCost }), []);
-
-    // A deployment step whose eighty seconds went waiting on gh or git is named as the step that
-    // waited, not as work to shorten: the child-wait meter is drained at the step boundary.
-    let waited = 0;
-    const waiting = emptyDaemonState(master);
-    waiting.lock = state.lock;
-    const slowProvider = await runCycle(master, waiting, cycleEffects({
-      snapshot: async () => ({ work: [delivered], now: iso(0) }),
-      childWaits: () => { const drained = waited; waited = 0; return drained; },
-      observeDeployment: async () => { running += 80_000; waited = 80_000; return { source: 'endpoint', sha: 'a'.repeat(40), at: iso(0), reason: null, deployed: ['GY-1'], pending: [], requests: 0, derived: 0, retained: 1 }; },
-    }), now);
-    assert.deepEqual(slowProvider.metrics.steps!.deployment, { ms: 80_000, childWaitMs: 80_000 });
-    const waitingLiveness = loopLiveness(waiting, running + 50_000, intervalMs, master.hostId);
-    assert.equal(waitingLiveness.state, 'slow');
-    assert.deepEqual(waitingLiveness.cost!.longestWait, { step: 'deployment', childWaitMs: 80_000 });
-    const waitingItems = loopAttention({ liveness: waitingLiveness });
-    assert.equal(waitingItems.length, 1);
-    assert.match(waitingItems[0].text, /the time went to child processes in the deployment step/);
-    assert.match(waitingItems[0].next, /in the deployment step \(80s\)/);
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
 async function drive<T>(running: Promise<T>, stepMs = 500): Promise<T> {
   let settled = false;
   running.then(() => { settled = true; }, () => { settled = true; });
@@ -289,10 +193,9 @@ test('unit:deployment-step-cycle-budget — a release-landing verification slowe
       observeDeployment: () => { reads++; inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
         return new Promise(resolve => setTimeout(() => { inFlight--; resolve({ source: 'endpoint', sha, at: new Date(Date.now()).toISOString(), reason: null, deployed: ['GY-1'], pending: [], requests: 0, derived: 1, retained: 0 }); }, 587_100)); },
     });
-    const first = await drive(runCycle(master, state, effects, () => Date.now()));
-    const cost = cycleCost(first.metrics, intervalMs)!;
-    assert.ok(cost.withinInterval && cost.withinLivenessBound, `the cycle fits: ${cost.breakdown}`);
-    assert.ok(first.metrics.steps!.deployment.ms <= budgetMs + 1_000, `the step stopped at its budget: ${first.metrics.steps!.deployment.ms}ms`);
+    const startedAt = Date.now();
+    await drive(runCycle(master, state, effects, () => Date.now()));
+    assert.ok(Date.now() - startedAt <= budgetMs + 1_000, `the step stopped at its budget: ${Date.now() - startedAt}ms`);
     assert.equal(state.deployment!.sha, 'b'.repeat(40), 'the last verified observation stands');
     assert.deepEqual(state.deployment!.pending, ['GY-1']);
     assert.equal(deploymentModule.deploymentReadsPending(state), 1, 'the cut read is kept in flight');
@@ -301,9 +204,8 @@ test('unit:deployment-step-cycle-budget — a release-landing verification slowe
     for (let cycles = 0; cycles < 30 && deploymentModule.deploymentReadsPending(state); cycles++) {
       mock.timers.tick(30_000);
       const before = Date.now();
-      const next = await drive(runCycle(master, state, effects, () => Date.now()));
+      await drive(runCycle(master, state, effects, () => Date.now()));
       assert.ok(Date.now() - before <= 5_000, `a cycle finding the read in flight does not wait on it: ${Date.now() - before}ms`);
-      assert.ok(cycleCost(next.metrics, intervalMs)!.withinInterval);
     }
     assert.equal(reads, 1, 'the answer of the read in flight is taken, not read again');
     assert.equal(maxInFlight, 1);
@@ -398,15 +300,13 @@ test('unit:deployment-step-idle-cycle-cost — on a two-cycle replay with an unc
       const deployed = delivered.filter(item => item.key !== 'GY-3').map(item => item.key), pending = delivered.filter(item => item.key === 'GY-3').map(item => item.key);
       return { ...verifiedAt(new Date(running).toISOString(), deployed), pending }; },
   });
-  const first = await runCycle(master, state, effects, now);
+  await runCycle(master, state, effects, now);
   assert.equal(observations, 1);
-  assert.ok(first.metrics.steps!.deployment.ms >= 9_000, `the first cycle reads live: ${first.metrics.steps!.deployment.ms}ms`);
   running += 300_000;
-  const second = await runCycle(master, state, effects, now);
+  const secondAt = running;
+  await runCycle(master, state, effects, now);
   assert.equal(observations, 1, 'the unchanged release is not read again');
-  assert.ok(second.metrics.steps!.deployment.ms < 5_000, `deployment bucket ${second.metrics.steps!.deployment.ms}ms`);
-  assert.ok(second.metrics.durationMs < 30_000, `the whole cycle stays under the 30s cycle-p90 bound: ${second.metrics.durationMs}ms`);
-  assert.ok(Object.values(second.metrics.steps!).reduce((sum, step) => sum + step.ms, 0) < 30_000);
+  assert.ok(running - secondAt < 5_000, `the second cycle spent ${running - secondAt}ms`);
   // A new delivery the release does not serve yet is read live, and stays read live while pending.
   work = [...work, delivery('GY-3', 'c'.repeat(40), new Date(running).toISOString())];
   running += 300_000;

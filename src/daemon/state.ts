@@ -6,7 +6,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { z } from 'zod';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './text.js';
-import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
+import { waitReason } from '../model/action-kinds.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
@@ -39,54 +39,8 @@ export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
 /** A field a release retired: an older cursor's value still parses. */
 const retired = z.unknown().optional();
-/**
- * The six phases of one cycle, in the order the cycle runs them. Each carries the milliseconds the cycle spent in it (`ms`) and, of
- * those, how many it spent waiting on a child process (`childWaitMs`): Herdr, gh, git or systemctl, run through the asynchronous runner
- * and metered by its ledger (child-runner.ts). The difference is the step's own work. A cycle that outgrows its interval therefore says
- * both which step took the time and whether that step was computing or waiting — eighty seconds waiting on gh and eighty seconds of the
- * loop's own work are different faults, and only the second is a loop to worry about. The six sum to a little under `durationMs`: the
- * remainder is the cursor writes and the measurement itself, which belong to no step.
- */
-export const cycleStepNames = ['observe', 'close', 'decisions', 'dispatch', 'merge', 'deployment'] as const;
-export type CycleStepName = typeof cycleStepNames[number];
-const stepCostSchema = z.object({ ms: z.number().int().min(0), childWaitMs: z.number().int().min(0) }).strict();
-export type StepCost = z.infer<typeof stepCostSchema>;
-export const cycleStepsSchema = z.object({
-  /** Reading the coordination snapshot and reconciling the actions an interrupted cycle left. */
-  observe: stepCostSchema,
-  /** Closing finished sessions, failing over exhausted ones, removing ended attempts' worktrees and reconciling lapsed leases. */
-  close: stepCostSchema,
-  /** Re-checking blockers, setting base failures aside and sending reworks. */
-  decisions: stepCostSchema,
-  /** Dispatching claimable work and shepherding the review and proof requests. */
-  dispatch: stepCostSchema,
-  /** The guarded merges. */
-  merge: stepCostSchema,
-  /** Observing the deployed release and the post-deployment smoke requests. */
-  deployment: stepCostSchema,
-}).strict();
-export type CycleSteps = z.infer<typeof cycleStepsSchema>;
-export const emptyCycleSteps = (): CycleSteps => Object.fromEntries(cycleStepNames.map(step => [step, { ms: 0, childWaitMs: 0 }])) as CycleSteps;
-
 export const cycleMetricsSchema = z.object({
-  cycle: z.number().int().min(0), at: z.string(), durationMs: z.number().int().min(0),
-  /**
-   * Of `durationMs`, the wall-clock time at least one child process was in flight, and the rest,
-   * which is the loop's own work. Absent on a cycle recorded before the loop metered its waits.
-   */
-  childWaitMs: z.number().int().min(0).optional(),
-  workMs: z.number().int().min(0).optional(),
-  /** Of `durationMs`, the time at least one request was in flight on the control plane, answered or not (GY-1344, GY-1562), left out of `workMs`. Absent when none. */
-  planeWaitMs: z.number().int().min(0).optional(),
-  /** Where `durationMs` went, step by step. Absent on a cycle recorded before the loop measured its steps. */
-  steps: cycleStepsSchema.optional(),
-  /**
-   * Every step the cycle ran, finer than `steps` (snapshot, observe, close, scope, reclaim, dispatch
-   * and its launches, decisions, reviews and proofs, merges, deployment verification, faults), and
-   * its slowest external calls of a second or more — server route, GitHub request kind, Herdr
-   * command, account probe — each with the step it was made in (GY-377). Absent on older cycles.
-   */
-  timings: timingsSchema.optional(),
+  cycle: z.number().int().min(0), at: z.string(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
   /**
    * What the cycle could act on, and nothing else about them: stillness is the progress
@@ -94,12 +48,11 @@ export const cycleMetricsSchema = z.object({
    * recorded before the loop measured it.
    */
   actionable: z.number().int().min(0).optional(),
-  /** How long the longest unacted subject had waited, while the cursor field stood; never written now, kept so older cursors parse. */
-  idleMs: z.number().int().min(0).optional(),
-  /** Retired (GY-2876): stage, lead-time and post-deploy measurements; a cursor written before still parses. */
+  /** Retired (GY-2876): the cycle's durations, step costs and call timings, and the stage, lead-time and post-deploy measurements; a cursor written before still parses. */
+  durationMs: retired, childWaitMs: retired, workMs: retired, planeWaitMs: retired, steps: retired, timings: retired,
   stages: retired, lead: retired, production: retired, postDeploy: retired, postDeployFailures: retired,
-  /** Retired (GY-1992): the scope-request latency; nothing writes it, and a cursor written before keeps parsing. */
-  scope: z.unknown().optional(), scopeOpenMs: z.unknown().optional(),
+  /** Retired (GY-1992): the scope-request latency and the idle reading; nothing writes them, and a cursor written before keeps parsing. */
+  idleMs: retired, scope: retired, scopeOpenMs: retired,
 }).strict();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 

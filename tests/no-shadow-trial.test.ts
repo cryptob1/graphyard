@@ -59,10 +59,9 @@ test('unit:no-shadow-trial — the shadow gate is deleted: a cycle with submitte
     github, merge: github, shadow, mergeWriter,
   } as unknown as DaemonEffects;
   const state = emptyDaemonState(config), now = () => start;
-  const { metrics } = await runCycle(config, state, effects, now);
+  await runCycle(config, state, effects, now);
   await mergeWriterIdle(state);
   assert.deepEqual(trials, [sha(`merge:${sha('head1')}`)], 'one trial, the merge writer\'s, of the oldest head');
-  assert.ok(!(metrics.timings?.steps ?? []).some(step => step.step === 'shadow gate'), 'the cycle has no shadow gate step');
   assert.ok(!('shadowGate' in daemonSummary(state, start, 60_000, config.hostId)), 'the loop summary has no shadowGate');
 
   // A cursor an older loop wrote, its shadow verdicts included, loads; the verdicts are dropped.

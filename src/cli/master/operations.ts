@@ -4,7 +4,7 @@ import { resourceConflicts } from '../../coordination.js';
 import { dispatchWork, listHerdrAgents, readWorkerCredential, withReviewerDefaults, withRoleDefaults } from '../../master.js';
 import { observeDeployment, readDaemonState } from '../../master-daemon.js';
 import { localPostDeployChecks, type PostDeployChecksInput } from '../../master-verification.js';
-import { cycleBudget, masterStatusReport } from '../master-status.js';
+import { masterStatusReport } from '../master-status.js';
 import { masterHeartbeatMinutes, masterSessionMinutes } from '../../master/master-session.js';
 import { unhandled, type MasterSession } from './session.js';
 import { masterHarnessDrift } from './fleet.js';
@@ -64,7 +64,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const added = [...(harness ? [harness] : []), ...(holder ? [holder] : [])];
     const attention = added.length ? { attentionItems: [...report.attentionItems, ...added], counts: { ...report.counts, attention: report.counts.attention + added.length } } : {};
     // `mergeWriter` (GY-1524): the control-plane merge executor's queue (oldest first), the merge in flight, its last delivery and newest refusals.
-    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, cycleBudget: state ? cycleBudget(state, master.run.intervalSeconds * 1000) : null, ...(master2 ? { master: master2 } : {}) } });
+    return print({ ...report, ...attention, harnessDrift: harness?.drift ?? null, mergeWriter: mergeWriterSummary(state?.mergeWriter), daemon: { ...report.daemon, ...(master2 ? { master: master2 } : {}) } });
   }
   // GY-1658: the loop restores a dirty coordinator checkout to a named ref and restarts itself; this files the request and reports the outcome.
   if (id === 'checkout-restore') return print(await checkoutRestoreCommand(master, args, String(coordinator?.actor?.id ?? coordinator?.actor?.name ?? 'master')));

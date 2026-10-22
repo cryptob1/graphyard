@@ -10,7 +10,7 @@ import { worktreeRoot } from '../install/worktree-root.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
 import { carryUndeclared } from './state-cursor.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
-import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
+import { boundedPersist, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
 import { detailChanged } from './text.js';
@@ -18,7 +18,6 @@ import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, 
 import { checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
 import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
 import { divergedHead } from '../cli/checkout-restore-act.js';
-import { describeTimings } from '../master/timings.js';
 import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
 import { deployInFlight } from './continuous-deploy.js';
 import { detachRuns } from '../runner/registry.js';
@@ -32,7 +31,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
   const liveness = loopLiveness(state, now, intervalMs, hostId);
   return {
     // A loop inside a failed-cycle backoff is running: it announced when its next cycle is due.
-    running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running' || liveness.state === 'slow'),
+    running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running'),
     // Whether the loop is cycling at all, on the two-interval bound, with the restart command.
     liveness,
     // Failed cycles and the process-level events the loop survived (GY-119).
@@ -42,12 +41,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     escalations: recent.filter(action => action.kind === 'attention').slice(0, 20),
     actions: recent.slice(0, 40),
     metrics: state.metrics.at(-1) ?? null,
-    // Where the last cycle's time went, against the interval and the liveness bound it is judged
-    // on: its own work, its child waits, and the step behind each, so a long cycle is a step to
-    // shorten or a provider to look at, never a loop to restart.
-    cost: cycleCost(state.metrics.at(-1) ?? null, intervalMs),
-    // The cycle's usual wall time, p50 and p95 over the last 30 minutes (GY-616).
-    cycleTime: cycleTimes(state.metrics, now),
     deployment: state.deployment,
     // The control-plane merge executor (GY-1524): the heads queued oldest first, the merge in flight, the last delivery and the newest refusals.
     mergeWriter: mergeWriterSummary(state.mergeWriter),
@@ -199,7 +192,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     };
     const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
     host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
-    const cycles: { cycle: number; actions: number; durationMs: number; childWaitMs: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
+    const cycles: { cycle: number; actions: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
     // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
     // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
     const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
@@ -256,11 +249,10 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           // The end of a run of failures is written at once, so `master status` stops naming it.
           const recovered = noteCycleSuccess(state);
           if (recovered) await effects.persist(state);
-          cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length, durationMs: result.metrics.durationMs, childWaitMs: result.metrics.childWaitMs ?? 0 });
+          cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length });
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
-          // Both halves of every cycle: what it could act on, and what it did about it — and where its
-          // time went: its three slowest steps and its slowest external call (GY-377).
-          log(`[graphyard-master] cycle ${result.metrics.cycle} complete in ${result.metrics.durationMs}ms (${result.metrics.childWaitMs ?? 0}ms waiting on child processes); ${result.metrics.open} open, ${result.actionable.length} actionable, ${result.actions.length} action(s)${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}${result.metrics.timings ? `; ${describeTimings(result.metrics.timings)}` : ''}`);
+          // Both halves of every cycle: what it could act on, and what it did about it.
+          log(`[graphyard-master] cycle ${result.metrics.cycle} complete with ${result.metrics.open} open, ${result.actionable.length} actionable, ${result.actions.length} action(s)${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
           // The configured interval is the idle cadence; while anything is actionable the loop comes
           // back inside the responsive window so ready work cannot sit out a long interval.
           wait = cycleDelay(interval(), result.actionable.length);

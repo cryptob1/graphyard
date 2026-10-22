@@ -41,7 +41,6 @@ test('policy validation binds agent review to registered, distinct reviewer iden
   const agent = policySchema.parse({ checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }] });
   assert.equal(agent.reviewerProfiles![0].timeoutSeconds, 1800);
   assert.throws(() => policySchema.parse({ checks: ['test'], review: true, reviewProvider: 'agent' }), /at least one reviewer profile/);
-  assert.throws(() => policySchema.parse({ checks: ['test'], review: false, reviewProvider: 'agent', reviewerProfiles: profiles }), /review: true/);
   assert.throws(() => policySchema.parse({ checks: ['test'], review: true, reviewProvider: 'codex', reviewerProfiles: profiles }), /require reviewProvider/);
   assert.throws(() => policySchema.parse({ checks: ['test'], review: true, reviewProvider: 'github', reviewerProfiles: profiles }), /require reviewProvider/);
   for (const duplicated of [
@@ -72,7 +71,6 @@ test('native branch protection stays required only for formal GitHub review', ()
   assert.equal(nativeReviewRequired({ checks: ['test'], review: true, reviewProvider: 'github' }), true);
   assert.equal(nativeReviewRequired({ checks: ['test'], review: true, reviewProvider: 'codex' }), false);
   assert.equal(nativeReviewRequired({ checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: profiles }), false);
-  assert.equal(nativeReviewRequired({ checks: ['test'], review: false }), false);
 });
 
 test('profile selection follows configured order and only this candidate’s exhaustion', () => {

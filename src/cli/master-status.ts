@@ -10,7 +10,6 @@ import { type Work } from '../model/work.js';
 import { deployLine, leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { loopCodeRoot } from '../daemon/checkout-state.js';
 import { daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
-import { slowCycleAttention } from '../daemon/liveness.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { loopCursorLines, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
@@ -31,7 +30,6 @@ import { assembleReportedAttention, assembleStatusSections } from './master-stat
 
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // Read from here as they always were.
-export { cycleBudget } from '../daemon/liveness.js';
 
 // The report and the tests read the queue-head observation lag from here.
 export { observationThroughputStatus };
@@ -75,7 +73,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Loop health first: a stalled coordinator is why nothing else moves.
   const watchdogItems = progressAttention(snapshot.work, cursor?.promotion ?? null, Date.parse(snapshot.now) || Date.now());
   const loopItems: AttentionItem[] = cycling
-    ? [...loopAttention({ liveness: cycling.liveness, failures: cycling.failures, cost: cycling.cost }), ...watchdogItems, ...slowCycleAttention(cycling),
+    ? [...loopAttention({ liveness: cycling.liveness, failures: cycling.failures }), ...watchdogItems,
       ...loopCursorLines(cycling, master.baseBranch)]
     : [{ subject: 'loop', text: `The master loop's cursor cannot be read, so whether it is cycling is unknown: ${(daemonState as { error: string }).error}`, ...agentOwner('master', 'graphyard master restart (a supervised deployment restarts it on its own: systemctl --user restart graphyard-master)') }];
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.

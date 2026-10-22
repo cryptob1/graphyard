@@ -43,7 +43,6 @@ const mergeable = (key: string, head = sha('a')) => item(key, { stage: 'merge', 
 const refreshed = (key: string, n: number) => item(key, { stage: 'review', submission: { epoch: 1, pr: 43 } as Work['submission'],
   candidate: { sha: sha(`${n}`), baseSha: sha('b'), pr: 43, branch: 'b', author: 'worker' },
   baseRefresh: n ? { from: { sha: sha(`${n - 1}`), baseSha: sha('b') }, base: sha('c'), baseTree: sha('e'), policyRevision: 1, at: iso(n * minute), head: sha(`${n}`), conflict: null } : null } as Partial<Work>);
-const metrics = (seconds: number, n = 10) => Array.from({ length: n }, (_, index) => ({ at: iso(-index * 3 * minute), durationMs: seconds * 1000 }));
 
 /** The checks of one invariant over a sequence of cycles; the last cycle's check. */
 function judge(inputs: InvariantInput[]) {
@@ -55,7 +54,7 @@ function judge(inputs: InvariantInput[]) {
 const verdict = (checks: ReturnType<typeof judge>, invariant: SystemInvariant) => checks.find(check => check.invariant === invariant)!;
 
 test('unit:system-invariants-checked — each invariant driven over its threshold reports exactly one fault of its class; at its threshold it holds', () => {
-  assert.deepEqual([...systemInvariants], ['lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90']);
+  assert.deepEqual([...systemInvariants], ['lingering-sessions', 'refresh-churn', 'merge-stall']);
   // Each fixture drives one invariant over its threshold (`over`) and holds it at the threshold (`at`).
   const fixtures: Record<SystemInvariant, { over: InvariantInput[]; at: InvariantInput[] }> = {
     'lingering-sessions': {
@@ -69,7 +68,6 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
     'merge-stall': {
       over: [{ work: [mergeable('GY-10'), mergeable('GY-11', sha('f'))], now: clock }, { work: [mergeable('GY-10'), mergeable('GY-11', sha('f'))], now: clock + 11 * minute }],
       at: [{ work: [mergeable('GY-10')], now: clock }, { work: [mergeable('GY-10')], now: clock + 10 * minute }] },
-    'cycle-p90': { over: [{ work: [], now: clock, metrics: metrics(31) }], at: [{ work: [], now: clock, metrics: [...metrics(29), { at: iso(-2 * hour), durationMs: 300_000 }] }] },
   };
   for (const invariant of systemInvariants) {
     const over = judge(fixtures[invariant].over), check = verdict(over, invariant);
@@ -79,10 +77,10 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
     assert.equal(at.holds, true, `${invariant} at its threshold holds: ${at.line}`);
   }
   // Every invariant over its threshold at once: each is violated.
-  const all = judge([{ work: [], now: clock - 20 * minute, build: 'build-1', metrics: [] }, ...fixtures['refresh-churn'].over.map(input => ({ ...input, now: clock - 20 * minute + (input.now - clock), build: 'build-1' })),
+  const all = judge([{ work: [], now: clock - 20 * minute, build: 'build-1' }, ...fixtures['refresh-churn'].over.map(input => ({ ...input, now: clock - 20 * minute + (input.now - clock), build: 'build-1' })),
     { work: [refreshed('GY-8', 4), mergeable('GY-10')], now: clock - 12 * minute, build: 'build-2' },
     { work: [delivered('GY-5', 31 * minute, [session('reviewer-5')]), refreshed('GY-8', 4), mergeable('GY-10')],
-      now: clock, metrics: metrics(31), agents: [{ name: 'reviewer-5' }], build: 'build-2' }]);
+      now: clock, agents: [{ name: 'reviewer-5' }], build: 'build-2' }]);
   assert.deepEqual(all.filter(check => !check.holds).map(check => check.invariant).sort(), [...systemInvariants].sort(), all.filter(check => check.holds).map(check => check.line).join('\n'));
   // A source that could not be read is not observed, never violated.
   const blind = checkInvariants(emptyInvariantRecord(), { work: [delivered('GY-5', 2 * hour, [session('reviewer-5')])], now: clock, agents: null });
@@ -102,7 +100,7 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
   assert.equal(verdict(lenient, 'refresh-churn').holds, true);
   assert.equal(config({ invariants: { refreshesWithoutHeadChange: 4 } as MasterConfig['invariants'] }).invariants?.refreshesWithoutHeadChange, 4);
   assert.equal(config().invariants, undefined, 'unset, every invariant keeps its default threshold');
-  assert.deepEqual(invariantDefaults, { sessionAfterSettleMinutes: 30, refreshesWithoutHeadChange: 3, mergeableWithoutRefusalMinutes: 10, cycleP90Seconds: 30, cycleWindowMinutes: 60 });
+  assert.deepEqual(invariantDefaults, { sessionAfterSettleMinutes: 30, refreshesWithoutHeadChange: 3, mergeableWithoutRefusalMinutes: 10 });
 });
 
 function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
@@ -120,8 +118,6 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
       mergeable('GY-10')] };
   };
   const state = emptyDaemonState(config());
-  state.metrics = metrics(31).map((metric, index) => ({ cycle: index, at: metric.at, durationMs: metric.durationMs, open: 0, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 },
-    production: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeploy: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeployFailures: 0 }));
   const loop = (index: number) => effects({
     snapshot: async () => { const { now, work } = world(); return { work, now: new Date(now).toISOString() }; },
     agents: () => [{ name: 'reviewer-5', pane_id: 'pane-reviewer-5' }],
@@ -156,7 +152,7 @@ test('unit:reviewer-repeat-question — the review of a change to the loop, mast
   const start = guide.indexOf('### System invariants');
   assert.ok(start >= 0, 'docs/master-agent.md has the section');
   const section = guide.slice(start, guide.indexOf('\n## ', start)).replace(/\s+/g, ' ');
-  for (const phrase of [...systemInvariants.map(invariant => `\`${invariant}\``), '`lingering-sessions` (30 min)', '`refresh-churn` (3 per own head)', '`merge-stall` (10 min)', '`cycle-p90` (30 s)',
+  for (const phrase of [...systemInvariants.map(invariant => `\`${invariant}\``), '`lingering-sessions` (30 min)', '`refresh-churn` (3 per own head)', '`merge-stall` (10 min)',
     'daemon.invariants.lines', '`invariants` in `.graphyard/master.json`', 'tests/soak-*.test.ts'])
     assert.ok(section.includes(phrase), `docs/master-agent.md lists: ${phrase}`);
 });

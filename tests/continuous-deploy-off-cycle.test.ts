@@ -129,8 +129,6 @@ test('unit:continuous-deploy-off-cycle — with a deploy that outlasts several c
   await waitFor(() => state.cycle >= whileRunning.cycle + 3, 'the loop never completed cycles while the deploy ran');
   assert.notEqual(state.lock?.heartbeatAt, whileRunning.heartbeat, 'the heartbeat advanced while the deploy ran');
   assert.notEqual(state.lastCycleAt, null);
-  const steps = state.metrics.at(-1)?.steps;
-  assert.ok(steps && 'dispatch' in steps && 'merge' in steps, 'the cycles that completed ran their dispatch and merge steps');
   // One deploy is running: no second starts, nothing settles yet, and the checkout the deploy holds is never drift.
   assert.equal(started.length, 1, 'no second deploy started while the first runs');
   assert.equal(state.promotion === null, true, 'the deploy has settled nothing onto the cursor yet');

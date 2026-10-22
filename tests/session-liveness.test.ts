@@ -294,7 +294,7 @@ test('integration:slot-released-on-death — the launcher\'s busy check counts r
 
   // One reviewer profile, concurrency 1. A session it launched is recorded on another item, whose
   // own candidate asks for nothing, and is still reported by the runtime: the one slot is taken.
-  const other = await submitted({ ...reviewOnly, policy: { checks: ['test'], review: false } });
+  const other = await submitted({ ...reviewOnly, policy: { checks: ['test'], review: true, reviewProvider: 'codex' } });
   await engine.observe(other.id, (await reload(other)).revision, observation(await reload(other)));
   assert.equal((await reload(other)).autoDispatch?.review ?? null, null, 'nothing is requested for the item the busy session sits on');
   const busy = launchedSessionHandle('review', { ...review, id: 'review-elsewhere' }, `${other.key}: review elsewhere`, 'host-1', { pane: 'pane-90', agentName: 'review-claude' }, 'claude', 'wF');

@@ -362,7 +362,7 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
     environment: { NOTIFY_SOCKET: '/run/user/1000/systemd/notify', WATCHDOG_USEC: String(180 * 1_000_000) },
   });
   assert.deepEqual(notified, ['ready', 'alive']);
-  assert.match(log.join('\n'), /cycle 0 complete in \d+ms \(\d+ms waiting on child processes\); 1 open, 1 actionable, \d+ action\(s\)/, 'the cycle log carries both halves');
+  assert.match(log.join('\n'), /cycle 0 complete with 1 open, 1 actionable, \d+ action\(s\)/, 'the cycle log carries both halves');
   const unsupervised: string[] = [];
   await runDaemon(master, emptyDaemonState(master), simulation.effects({ notify: signal => { unsupervised.push(signal); } }), {
     once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: simulation.now, log: () => {}, signals: [], environment: {},

@@ -303,7 +303,7 @@ test('unit:external-import-requires-grant — a producer without external-runs:i
   assert.throws(() => rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [] }), /explicit grant/);
   assert.deepEqual(rosterEntry({ id: 'huck-engineer', role: 'producer', grants: [GRANT, GRANT] }), { ...huck, source: 'principal' });
   assert.deepEqual(rosterEntry({ id: 'restored-producer', role: 'producer', proofs: ['unit:*', 'integration:*'] }), { id: 'restored-producer', role: 'producer', sessionKind: 'ai', proofs: ['integration:*', 'unit:*'], source: 'principal' });
-  assert.throws(() => rosterEntry({ id: 'worker-a', role: 'worker', proofs: ['unit:*'] }), /proof seed names producer proof authority/);
+  assert.throws(() => rosterEntry({ id: 'worker-a', role: 'worker', proofs: ['unit:*'] }), /proof seed names proof authority/);
 });
 
 test('unit:principal-upsert-remove-single-entry-readback — on a bundle provider (Compose) principal add rewrites the bundle with every deployed value as it stands, an unrelated setting kept and a pull-request-era App\'s variables dropped (GY-2010), and changes only GRAPHYARD_PRINCIPALS', async () => {
