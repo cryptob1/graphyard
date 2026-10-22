@@ -63,8 +63,8 @@ function item(index: number, now: string): Work {
   } as unknown as Work;
 }
 
-/** A fake Graphyard server with the measured latencies, answering both the loop's fetch and master status's reader, and honouring each caller's timeout. */
-function slowServer(work: () => Work[]) {
+/** A fake Graphyard server with the measured latencies, scaled by `factor`, answering both the loop's fetch and master status's reader, and honouring each caller's timeout. */
+function slowServer(work: () => Work[], factor = scale) {
   const reads: string[] = [];
   let decision = 0;
   const latency = (path: string) => path.startsWith('work-snapshot') ? measured.snapshot : path === 'status' ? measured.status : path === 'actions' ? measured.actions
@@ -78,7 +78,7 @@ function slowServer(work: () => Work[]) {
   /** One read: it takes its measured time, scaled, unless the caller's own timeout ends it first. */
   const read = async (path: string, timeoutMs?: number) => {
     reads.push(path);
-    const ms = scaled(latency(path));
+    const ms = Math.round(latency(path) * factor);
     if (timeoutMs !== undefined && timeoutMs < ms) { await sleep(timeoutMs); throw new Error(`GET ${path} timed out after ${timeoutMs}ms`); }
     await sleep(ms);
     return answer(path);
@@ -134,8 +134,9 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
   const { root, master, work, cleanup } = await fixture(3, 3);
   try {
     // Two slow fakes the production wiring times: a GitHub deployment listing through the loop's
-    // child runner, and an account-quota probe; everything else answers at once.
-    const server = slowServer(() => work);
+    // child runner, and an account-quota probe; everything else answers at once — a tenth of the
+    // measured latencies, so a loaded host never stretches a read past the 1 s a recorded call takes.
+    const server = slowServer(() => work, 1 / 10);
     const run = timedRun(async (command: string, args: string[]) => { await sleep(args[1]?.includes('/deployments') ? 1_450 : 1); return '[]'; });
     const probe = timedFetch(async () => { await sleep(1_150); return new Response('{}'); });
     const lines: string[] = [];
@@ -165,7 +166,7 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     assert.match(complete, /slowest steps: deployment verification \d+(\.\d)?s, credentials \d+(\.\d)?s, \S[^,;]* \d+(\.\d)?s; slowest call: github gh api repos\/:repo\/deployments \d+(\.\d)?s in deployment verification \(2 calls of 1s or more\)/, complete);
 
     // master status: the same recorder over its own phases, returned under `timings`.
-    const status = slowServer(() => work);
+    const status = slowServer(() => work, 1 / 10);
     // Master status no longer reads GET actions; the board read is the one slow server read left to time.
     const slowBoard = async (path: string, _credential?: string, timeoutMs?: number) => path === 'board' ? (await sleep(1_250), status.read(path, timeoutMs)) : status.read(path, timeoutMs);
     const report = await masterStatusReport(root, master, slowBoard, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
