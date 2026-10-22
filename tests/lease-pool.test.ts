@@ -9,12 +9,11 @@ import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { Engine, LeaseHealth, RenewalFault, heartbeatLatencyAttentionMs, leaseHealthWindowMs, renewalFaultEvent } from '../src/engine.js';
+import { Engine, RenewalFault, renewalFaultEvent } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { leaseCommands, leasePoolConnections } from '../src/store/pools.js';
 import { isConfirmedCoordinationRefusal } from '../src/cli/context.js';
 import { renewalGraceMs, supervise } from '../src/supervisor.js';
-import { leaseHealthStatus } from '../src/cli/lease-health-attention.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-558: lease renewals timed out waiting for a connection behind slow report and observation
@@ -217,47 +216,3 @@ test('unit:server-fault-keeps-lease — the supervisor keeps renewing through a 
   assert.equal(renewalGraceMs(new TypeError('fetch failed')), null);
 });
 
-test('unit:heartbeat-latency-reported — status reports heartbeat p50/p95 and failed or refused renewals, and master status raises p95 over 5 s', async () => {
-  // The window and percentiles, on a controlled clock.
-  const health = new LeaseHealth();
-  const now = Date.now();
-  health.record('renewed', 99_999, now - leaseHealthWindowMs - 1);
-  for (let n = 1; n <= 100; n++) health.record(n === 100 ? 'failed' : n % 10 === 0 ? 'refused' : 'renewed', n * 10, now);
-  let report = health.report(now);
-  assert.equal(report.renewals, 100, 'a renewal older than ten minutes is not counted');
-  assert.equal(report.p50Ms, 500); assert.equal(report.p95Ms, 950);
-  assert.equal(report.failed, 1); assert.equal(report.refused, 9);
-  assert.equal(report.attention, null, 'no attention while p95 is within 5 s');
-  for (let n = 0; n < 20; n++) health.record('renewed', heartbeatLatencyAttentionMs + 1000, now);
-  report = health.report(now);
-  assert.ok(report.p95Ms! > heartbeatLatencyAttentionMs);
-  assert.match(report.attention!, /heartbeat p95 \d+ ms .*exceeds 5000 ms/);
-  const master = leaseHealthStatus({ leaseHealth: report });
-  assert.equal(master.attention.length, 1, 'master status raises one attention item');
-  assert.equal(master.attention[0].subject, 'leases');
-  assert.deepEqual(master.report, { p50Ms: report.p50Ms, p95Ms: report.p95Ms, renewals: report.renewals, refused: 9, failed: 1, windowMs: leaseHealthWindowMs });
-  assert.deepEqual(leaseHealthStatus({ leaseHealth: { ...report, p95Ms: 100, attention: null } }).attention, []);
-  assert.deepEqual(leaseHealthStatus(null), { report: null, attention: [] }, 'a server that predates the report raises nothing');
-
-  // The server counts its own renewals, refusals and server-side failures, and GET /api/status carries them.
-  const store = new Store(connection);
-  const engine = engineOn(store);
-  const http = await listening(engine);
-  try {
-    const work = await claimed(engine, 'latency-reported');
-    for (let n = 0; n < 3; n++) assert.equal((await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch })).status, 200);
-    assert.equal((await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch + 1 })).status, 409, 'a renewal for another epoch is refused');
-    const transaction = store.transaction.bind(store);
-    store.transaction = (async () => { store.transaction = transaction; throw new Error('canceling statement due to statement timeout'); }) as Store['transaction'];
-    const failed = await http.post(engineer, `work/${work.id}/heartbeat`, { epoch: work.epoch });
-    assert.equal(failed.status, 503);
-    assert.ok(failed.body.renewalFault?.graceUntil, 'the 503 names the grace its recorded fault earned');
-    const status = await http.get(operator, 'status');
-    assert.equal(status.status, 200);
-    const served = status.body.leaseHealth;
-    assert.equal(served.renewals, 5); assert.equal(served.refused, 1); assert.equal(served.failed, 1);
-    assert.ok(typeof served.p50Ms === 'number' && typeof served.p95Ms === 'number' && served.p95Ms >= served.p50Ms);
-    assert.equal(served.attention, null);
-  } finally { await http.close(); await store.close(); }
-
-});

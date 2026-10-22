@@ -3,7 +3,7 @@ import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
-import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
+import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
@@ -45,7 +45,6 @@ import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle
 import { worktreeRoot } from '../install/worktree-root.js';
 import type { ReadingEffects } from './reading-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
-import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
@@ -175,12 +174,6 @@ export interface DaemonEffects extends ReadingEffects {
    * reached reports no sessions, so nothing is concluded from an inventory that says it is unavailable.
    */
   herdr?: () => { agents: HerdrAgent[]; available: boolean } | Promise<{ agents: HerdrAgent[]; available: boolean }>;
-  /**
-   * Milliseconds this process spent waiting on child processes since the previous call — the
-   * runner's ledger (child-runner.ts), drained at each step boundary so every step of the cycle
-   * reports its own `childWaitMs`. A loop wired without it reports every step as its own work.
-   */
-  childWaits?: () => number;
   /**
    * Records a launched session's durable handle on the item: the runtime, host, Herdr coordinates
    * and transcript a human attaches to it with. A loop configured without it keeps

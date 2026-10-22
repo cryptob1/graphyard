@@ -22,9 +22,7 @@ import { derivedAttention, ledgerRefusalAttention } from '../master-status.js';
 import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, generatedManifestScript } from '../install/generated-files.js';
 import { ReportSections } from '../master/sections.js';
 import { promotionWait, releaseLagStatus } from '../master/release-lag.js';
-import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
 import { observationThroughputStatus } from '../observation-priority.js';
-import { leaseHealthStatus } from './lease-health-attention.js';
 import { coordinationStep } from './coordination-snapshot.js';
 import { assembleReportedAttention, assembleStatusSections } from './master-status-sections.js';
 
@@ -40,32 +38,29 @@ export { overlongSessionAttention } from './overlong-sessions.js';
 
 /** The `master status` report: work truth joined with Herdr session health, the ledgers, the dispatch schedule and the candidates' conflict sets. */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; now?: () => number } = {}) {
-  // Every phase is timed, server reads of a second or more named with route and phase, under `timings` (GY-377).
-  const timings = new Timings(dependencies.now);
-  const report = await withTimings(timings, () => buildStatusReport(root, master, timedApi(masterApi), coordinator, cli, dependencies));
-  return { ...report, timings: timings.report() };
+  return buildStatusReport(root, master, masterApi, coordinator, cli, dependencies);
 }
 
 async function buildStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost }) {
-  const runtime = await timedStep('herdr', () => observeHerdrAgents());
-  const credentials = await timedStep('credentials', () => inspectWorkerCredentials(root, master.workers));
-  const { snapshot, clockOffset } = await coordinationStep(run => timedStep('snapshot', run), masterApi);
+  const runtime = await observeHerdrAgents();
+  const credentials = await inspectWorkerCredentials(root, master.workers);
+  const { snapshot, clockOffset } = await coordinationStep(masterApi);
   const sections = new ReportSections(); // optional sections (GY-422)
   const { reviewRecords, reviewRuntime, producerRecords, reviews, producers, retries } = await reconcileLedgers(root, master, snapshot, runtime);
   // Setup that silently stops every launch, and the loop's supervision (GY-114), read from the host.
-  const { setup, attention: setupItems } = await timedStep('setup', () => setupHealth(root, master, dependencies.supervisorHost));
+  const { setup, attention: setupItems } = await setupHealth(root, master, dependencies.supervisorHost);
   // Status reads the cursor as the loop would; the loop logs and persists any repair.
   const dispatchCursor = await readDispatchCursor(root, master, () => {}).catch(error => ({ error: error instanceof Error ? error.message : 'Master dispatch cursor is unreadable' }));
   const stuck = stuckRequestReport({ reviews: reviewRecords, producers: producerRecords }, Date.now());
   const dispatch = 'error' in dispatchCursor ? { running: false, failures: [] as { requestId: string; kind: string; attempts: number; reason: string; at: string; nextAt: string }[], error: dispatchCursor.error } : withStuckRequests(dispatchSummary(dispatchCursor, Date.now(), master.run.dispatchIntervalSeconds * 1000, master.run.awaitReviewers ?? defaultAwaitReviewers.logins, snapshot.work, Date.parse(snapshot.now) || Date.now()), stuck.stuck);
   // Dispatcher failures, then long launch waits (GY-710).
   const dispatchItems = dispatchFailureAttention(dispatch);
-  const launches = await timedStep('worker launches', () => workerLaunchStatus(root, master)); // GY-417
+  const launches = await workerLaunchStatus(root, master); // GY-417
   dispatchItems.push(...launches.items);
   const daemonState = await readDaemonState(root, master).catch(error => ({ error: error instanceof Error ? error.message : 'Master daemon state is unreadable' }));
   const cursor = 'error' in daemonState ? null : daemonState;
   // The managed root, often its own volume, has its own minimum and budget.
-  const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
+  const managedRoot = await managedRootStatus(root, master, [...reviewRecords, ...producerRecords]);
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
@@ -79,8 +74,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Browser administration beside the work it unblocks: a pending sudo code, and who changed what.
   const administration = { browser: master.browser ? { profile: master.browser.profile } : null, ...summarizeAdministration((await readAdministrationLedger(root)).entries, await readSudoState(root)) };
   // Candidate session status and the conflict probe (GY-1157)
-  const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
-  const pipelined = await timedStep('build status', async () => buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState, { mode: master.supervision, operatorLogin: master.operatorLogin }));
+  const probe = await probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory());
+  const pipelined = await buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, reviews, master.baseBranch, coordinator, { producers, failures: dispatch.failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState, { mode: master.supervision, operatorLogin: master.operatorLogin });
   for (const worker of pipelined.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
   // Failed check a fixed base explains (GY-793).
   const status = nameBaseBreaks(pipelined, snapshot.work);
@@ -94,15 +89,15 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // GY-2015: the writer summary the cursor holds, so a held trial refusal reads as the loop reads it.
       mergeWriter: cycling?.mergeWriter ?? null,
       sections });
-  const lag = await timedStep('release lag', () => releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, promotion: 'error' in daemonState ? null : promotionWait(daemonState) }));
+  const lag = await releaseLagStatus(root, master.baseBranch, snapshot.work, { cliCommit: cli.commit, loop: cycling, promotion: 'error' in daemonState ? null : promotionWait(daemonState) });
   // GY-1773: a held snapshot ahead of the dirty checkout left behind.
   // GY-1899: the pin lives under the running CLI's checkout, where the upgrade's holdCliAt wrote it.
   const codeRoot = loopCodeRoot(master.cliPath, root);
   lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(codeRoot), codeRoot));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
-  // queue-head lag (GY-492), and slow renewals (GY-558).
-  const observation = observationThroughputStatus(snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...observation.attention, ...health.attention];
+  // and queue-head lag (GY-492).
+  const observation = observationThroughputStatus(snapshot);
+  const stalledItems = [...derivedStalls, ...observation.attention];
   const attentionItems = [...diskAttention, ...requests, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...overlong, ...budget, ...owed.items, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [])];
   // First: loop health, dispatcher, release lag (GY-437).
@@ -123,7 +118,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       attention: status.counts.attention + diskAttention.length + generatedFiles.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + overlong.length + ahead.length + budget.length + observation.attention.length + owed.counted } }, snapshot.work);
   const sectionsReport = await assembleStatusSections({
-    master, snapshot, coordinator, cli, probe, observation, health,
+    master, snapshot, coordinator, cli, probe, observation,
     setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, lag, status, managedRoot,
     runtime, reviewRuntime, humanOnly, masterApi,
@@ -148,10 +143,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
 /** The review and producer ledgers reconciled with the runtime and the snapshot, as the report reads them. */
 export async function reconcileLedgers(root: string, master: MasterConfig, snapshot: any, runtime: any) {
   let reviewRecords = (await readReviewLedger(root)).reviews, reviewRuntime = { available: true, reason: null as string | null };
-  try { reviewRecords = (await timedStep('reconcile reviews', () => reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null }))).reviews; }
+  try { reviewRecords = (await reconcileReviews(root, master, { work: snapshot.work, agents: runtime.available ? runtime.agents : null })).reviews; }
   catch (error) { reviewRuntime = { available: false, reason: `Reviewer verdicts could not be reconciled with GitHub: ${error instanceof Error ? error.message : 'unknown reason'}` }; }
   let producerRecords = (await readProducerLedger(root)).producers;
-  try { producerRecords = (await timedStep('reconcile producers', () => reconcileProducers(root, master, snapshot.work, runtime.available ? runtime.agents : null))).producers; } catch { /* the ledger as last written stands */ }
+  try { producerRecords = (await reconcileProducers(root, master, snapshot.work, runtime.available ? runtime.agents : null)).producers; } catch { /* the ledger as last written stands */ }
   const reviews = summarizeReviews(reviewRecords), producers = summarizeProducers(producerRecords);
   const retries = [...sessionRetries(reviewRecords, Date.now()), ...sessionRetries(producerRecords, Date.now())];
   return { reviewRecords, reviewRuntime, producerRecords, reviews, producers, retries };

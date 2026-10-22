@@ -219,7 +219,7 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
     assert.equal(workspaceSource.split('work-snapshot?view=coordination').length - 1, 1, 'sync attribution reads the coordination view');
     assert.doesNotMatch(workspaceSource, /work-snapshot\?view=bounded/, 'no CLI read asks for the unbounded default');
     const statusSource = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
-    assert.match(statusSource, /coordinationStep\(run => timedStep\('snapshot', run\), masterApi\)/, 'master status reads through the coordination snapshot step');
+    assert.match(statusSource, /coordinationStep\(masterApi\)/, 'master status reads through the coordination snapshot step');
     const stepSource = await readFile(new URL('../src/cli/coordination-snapshot.ts', import.meta.url), 'utf8');
     assert.match(stepSource, /read\('work-snapshot', undefined, undefined, \{ \[coordinationViewHeader\]: 'coordination' \}\)/, 'the coordination step sends the coordination header');
   } finally { await control.close(); await disposeFixture(); }

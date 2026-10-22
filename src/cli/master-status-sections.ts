@@ -10,7 +10,6 @@ import { actionReport, sessionReport } from './loop-report.js';
 import { needsHumanActions } from './owed-report.js';
 import type { Work } from '../model/work.js';
 import { agentRequestReport } from './loop-report.js';
-import { timedStep } from '../master/timings.js';
 import { derivedAttention } from '../master-status.js';
 import { workerLaunchStatus } from '../master/dispatch.js';
 import type { ReportSections } from '../master/sections.js';
@@ -26,7 +25,6 @@ export async function assembleStatusSections<
   cli: { commit: string | null };
   probe: any;
   observation: any;
-  health: any;
   setup: any;
   administration: any;
   daemon: any;
@@ -43,7 +41,7 @@ export async function assembleStatusSections<
   masterApi: any;
 }) {
   const {
-    master, snapshot, coordinator, cli, probe, observation, health,
+    master, snapshot, coordinator, cli, probe, observation,
     setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, lag, status, managedRoot,
     runtime, reviewRuntime, humanOnly, masterApi,
@@ -52,14 +50,13 @@ export async function assembleStatusSections<
   return {
     ...directMergeLine(coordinator),
     ...mergeWriterLine(coordinator),
-    board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator)),
+    board: await masterBoard(masterApi, snapshot, coordinator),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
     // GY-1927: what the plane enforces, from its recorded setting; a plane that records none merges on gates alone.
     autoMerge: coordinator?.autoMerge?.autoMerge !== false,
     mergeApproval: coordinator?.autoMerge?.line ?? 'routine merges permitted after gates pass',
     conflictProbe: probe,
     observationThroughput: observation,
-    leaseHealth: health.report,
     versionSkew: mergeProtocolSkew(coordinator, cli),
     cli,
     reviewer: master.reviewer ? {
@@ -107,8 +104,8 @@ export async function assembleReportedAttention(
   context: { sections: ReportSections; generatedFiles: AttentionItem[] },
 ) {
   const { sections, generatedFiles } = context;
-  const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
-  const launches = await timedStep('attention: launches', () => workerLaunchStatus(root, master));
+  const derived = await derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } });
+  const launches = await workerLaunchStatus(root, master);
   const items = [...generatedFiles, ...derived.items, ...launches.items];
   return { generatedFiles, derived, items, unavailable: sections.unavailable };
 }

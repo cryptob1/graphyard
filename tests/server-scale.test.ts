@@ -229,7 +229,7 @@ test('unit:status-degrades-per-section — master status returns every section f
     assert.ok(Date.now() - started < 20_000, `master status returned in ${Date.now() - started}ms`);
     assert.deepEqual(report.unavailable, [], 'no section is unavailable');
     // Every section is there, built from the bounded snapshot.
-    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'runtime', 'timings'])
+    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'runtime'])
       assert.ok(section in report && report[section] !== undefined, `master status returned its ${section} section`);
     assert.ok(report.work.length >= OPEN, 'the open items are reported');
 

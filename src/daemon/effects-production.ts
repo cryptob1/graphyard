@@ -3,7 +3,7 @@ import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
+import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
@@ -28,7 +28,6 @@ import { readingEffects } from './reading-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
-import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
 import { answeredMechanicalReviews } from './mechanical-plan-report.js';
@@ -44,17 +43,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   run?: ChildRun;
   fetcher?: typeof fetch;
 }): DaemonEffects {
-  // One runner, one ledger, for everything this loop runs — Herdr, gh, git, systemctl — so the
-  // cycle's `childWaitMs` counts the cycle's own children and not the dispatcher's beside it.
-  // Every child is awaited on the event loop and bounded by the runner's timeout (GY-125).
-  const ledger = new ChildWaitLedger();
+  // One runner for everything this loop runs — Herdr, gh, git, systemctl. Every child is awaited
+  // on the event loop and bounded by the runner's timeout (GY-125).
   const current = typeof source === 'function' ? source : () => source;
-  // Every child, server request and mutation is timed against the cycle that made it (GY-377): one
-  // of a second or more is recorded with its step, and the slowest is named on the cycle's line.
-  const run = timedRun(deps.run ?? childRunner({ timeoutMs: 90_000, ledger }));
-  const fetcher = timedFetch(deps.fetcher ?? fetch, () => current().url);
-  const snapshot = async () => { await (await import('../master/environments.js')).reportPendingExhaustions(current(), { fetch: fetcher }).catch(() => {}); return timedCall('server', 'GET work-snapshot', deps.snapshot); }; // resending first any account hold the agent registry has not heard of (GY-1573)
-  const mutate = (path: string, data: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => deps.mutate(path, data, requestId));
+  const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
+  const fetcher = deps.fetcher ?? fetch;
+  const snapshot = async () => { await (await import('../master/environments.js')).reportPendingExhaustions(current(), { fetch: fetcher }).catch(() => {}); return deps.snapshot(); }; // resending first any account hold the agent registry has not heard of (GY-1573)
+  const mutate = deps.mutate;
   /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
   const asOperatorAgent = async (method: 'GET' | 'POST', path: string, body?: unknown, key: string = randomUUID()) => {
     const config = current();
@@ -114,7 +109,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         if (!settled.has(session)) settled.set(session, reason);
       return reconcileFleetSessions(current(), runtime, settled);
     },
-    childWaits: () => ledger.drain(),
     // The tail of the session's own terminal, unwrapped so a notice the pane folded reads as one line.
     sessionOutput: async (agent, lines = 60) => { const target = agent.name ?? agent.pane_id; return target ? herdrCall(run, ['agent', 'read', target, '--source', 'recent-unwrapped', '--lines', String(lines), '--format', 'text']) : null; },
     // The decline is typed into the pane and given a moment to close the dialog, so the instruction

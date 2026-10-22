@@ -42,6 +42,14 @@ test('unit:uncapped-dispatch-roster-proofs — six ready items with six free wor
     assert.doesNotMatch(JSON.stringify(cursor), /durationMs|childWaitMs|workMs|planeWaitMs|timings|standing agentless/);
   }
 
+  // Nor does anything beside the loop: no heartbeat latency on the server, no step or call timings in
+  // master status, no child-wait ledger in the runner.
+  const modules = { engine: await import('../src/engine.js'), runner: await import('../src/child-runner.js') };
+  for (const name of ['LeaseHealth', 'leaseHealthWindowMs']) assert.equal(name in modules.engine, false, `the engine exports no ${name}`);
+  assert.equal('ChildWaitLedger' in modules.runner, false);
+  await assert.rejects(import('../src/master/timings.js' as string), /Cannot find module|ERR_MODULE_NOT_FOUND/);
+  await assert.rejects(import('../src/cli/lease-health-attention.js' as string), /Cannot find module|ERR_MODULE_NOT_FOUND/);
+
   // Proof authority is the roster's --proof patterns: one without a pattern is refused, one with it accepted.
   // The admin role grants nothing of its own: a manual proof needs the admin's own roster pattern too.
   const bare: Principal = { id: 'producer-a', role: 'producer' }, seeded: Principal = { id: 'producer-b', role: 'producer', proofs: ['unit:*'] };

@@ -62,8 +62,6 @@ export const statusRoutes = defineRoutes('status', [
         autoMerge: await autoMergeStatus(engine.store.pool),
         // Delivery defaults, applications and case bindings (GY-1901).
         project: projectDelivery(),
-        // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
-        leaseHealth: engine.leaseHealth.report(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):
         // whether a master loop is live, and who reviews and merges as the live loop names it (GY-1501):
         // `supervised` drops the reviewer App and reviewing account from the Setup checklist.

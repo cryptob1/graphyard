@@ -1,5 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { hostname } from 'node:os';
 import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
@@ -309,44 +308,6 @@ export function renewalFaultOf(error: unknown): string | null {
   const message = error instanceof Error ? error.message : String(error);
   return renewalFaultMessage.test(message) ? message : null;
 }
-/** How far back heartbeat health looks, and the p95 latency above which `master status` raises it (GY-558). */
-export const leaseHealthWindowMs = 10 * 60_000, heartbeatLatencyAttentionMs = 5_000;
-/**
- * Heartbeat latency and the renewals refused or failed server-side, over the last ten minutes in
- * this server process (GY-558), reported by GET /api/status as `leaseHealth`. The window is one
- * process's own, and the report says so (`scope` and `process`, GY-671): a multi-replica
- * deployment serves renewals from every replica and each reports separately, so fleet-wide p95
- * and failure counts are the per-replica reports compared, not one number. Aggregating them in
- * the server was declined there — it needs cross-replica state the store does not hold and would
- * put metric writes beside the coordination path — so the attention item repeats the caveat
- * whenever it is raised, naming the process that measured it.
- */
-export class LeaseHealth {
-  private samples: { at: number; ms: number; outcome: 'renewed' | 'refused' | 'failed' }[] = [];
-  record(outcome: 'renewed' | 'refused' | 'failed', ms: number, at = Date.now()) {
-    this.samples.push({ at, ms: Math.max(0, ms), outcome });
-    this.prune(at);
-    if (this.samples.length > 20_000) this.samples.splice(0, this.samples.length - 20_000);
-  }
-  private prune(now: number) {
-    const since = now - leaseHealthWindowMs;
-    const first = this.samples.findIndex(sample => sample.at >= since);
-    this.samples.splice(0, first < 0 ? this.samples.length : first);
-  }
-  report(now = Date.now()) {
-    this.prune(now);
-    const sorted = this.samples.map(sample => sample.ms).sort((a, b) => a - b);
-    const percentile = (p: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(p * sorted.length) - 1))] : null;
-    const p50Ms = percentile(0.5), p95Ms = percentile(0.95);
-    const refused = this.samples.filter(sample => sample.outcome === 'refused').length, failed = this.samples.filter(sample => sample.outcome === 'failed').length;
-    const reportedBy = `${hostname()}/${process.pid}`;
-    const attention = p95Ms !== null && p95Ms > heartbeatLatencyAttentionMs
-      ? `Lease renewals are slow: heartbeat p95 ${p95Ms} ms (p50 ${p50Ms} ms) over the last 10 minutes exceeds ${heartbeatLatencyAttentionMs} ms across ${sorted.length} renewal(s), ${failed} failed server-side and ${refused} refused; a renewal slower than the lease loses it — find what holds the coordination lock or the lease pool in the server logs. This window is one server process's own (${reportedBy}); a multi-replica deployment reports each replica separately, so slow renewals served by other replicas are missing here.`
-      : null;
-    return { windowMs: leaseHealthWindowMs, renewals: sorted.length, p50Ms, p95Ms, refused, failed, thresholdMs: heartbeatLatencyAttentionMs, attention, scope: 'process' as const, process: reportedBy };
-  }
-}
-
 /** A reconciliation batch that found the coordination lock held past its wait before it wrote (GY-727, GY-1290): it runs again. */
 class ReconcileContended extends Error {}
 /**
@@ -756,8 +717,7 @@ export class Engine {
     }
   }
   /**
-   * Run one command. A renewal is timed and counted in `leaseHealth` (GY-558), and one that fails
-   * server-side — what `renewalFaultOf` blames on the server: a connection or statement timeout,
+   * Run one command. A renewal that fails server-side — what `renewalFaultOf` blames on the server: a connection or statement timeout,
    * a lost connection, the database's server-error classes — is recorded against its lease
    * (`recordRenewalFault`) and answered 503 with the grace that record earns. Any other failure,
    * a programming error included, is refused without a grace, so bugs surface instead of
@@ -768,20 +728,14 @@ export class Engine {
     const started = new Date();
     this.renewing++;
     try {
-      const work = await this.executeCommand(actor, command, id, input, key, context);
-      this.leaseHealth.record('renewed', Date.now() - started.getTime());
-      return work;
+      return await this.executeCommand(actor, command, id, input, key, context);
     } catch (error) {
-      const fault = renewalFaultOf(error) !== null;
-      this.leaseHealth.record(fault ? 'failed' : 'refused', Date.now() - started.getTime());
-      if (!fault || !id) throw error;
+      if (renewalFaultOf(error) === null || !id) throw error;
       throw await this.recordRenewalFault(actor, id, Number((input as { epoch?: unknown } | null)?.epoch), started, error);
     } finally {
       if (--this.renewing === 0) for (const resume of this.renewalsDone.splice(0)) resume();
     }
   }
-  /** Heartbeat latency and the renewals refused or failed server-side, in this server process (GY-558). */
-  readonly leaseHealth = new LeaseHealth();
   /** Lease renewals in flight in this process, and the reconciliation steps waiting for them to finish (GY-1290). */
   private renewing = 0;
   private readonly renewalsDone: (() => void)[] = [];
@@ -1287,7 +1241,9 @@ export class Engine {
         work.lease = null;
       }
       if (command === 'reading') {
-        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
+        // A reading is the loop's own observation of the serving release, never producer evidence, so no roster
+        // pattern makes one: only the loop's coordinator records it, and an admin, whatever its patterns, does not (GY-2876).
+        demand(actor.role === 'coordinator', 'Coordinator permission required: only the loop records a reading', 403);
         // The one record of this kind: the loop's reading of a proof only it records (GY-1762), bound as loopObservation reads it.
         const proofs = loopObservationProofs(work);
         demand(!!proofs?.includes(data.proof), `${work.key} is not a loop-owned observation item owing ${data.proof}; a reading is recorded only on an item whose every criterion is a post-deploy observation the loop takes`, 409);

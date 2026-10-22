@@ -1,13 +1,12 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { hostname } from 'node:os';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
 import { z } from 'zod';
 import { Store } from '../src/store.js';
-import { Engine, LeaseHealth, RenewalFault, heartbeatLatencyAttentionMs, renewalFaultEvent, renewalFaultOf } from '../src/engine.js';
+import { Engine, RenewalFault, renewalFaultEvent, renewalFaultOf } from '../src/engine.js';
 import { Refusal } from '../src/model/refusal.js';
 import { renewalGraceMs } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
@@ -16,7 +15,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-671: follow-ups from the approved review of GY-558 (PR #299). Each test is named for the proof
 // it produces and pins one behaviour the review asked for: the fault record no longer rides the
 // lease pool whose exhaustion caused the failure, the 503 carries its grace before the record has
-// landed, leaseHealth names the one process that measured it, and only the server's trouble —
+// landed, and only the server's trouble —
 // never a programming error — earns a grace. Strip the src/engine.ts change and every case here
 // fails, so the manual proof exercises its criterion.
 const operator: Principal = { id: 'gy671-operator', role: 'admin', sessionKind: 'human' };
@@ -87,26 +86,6 @@ test('manual:review-followups-triaged GY-671.1: renewalFaultOf blames only the s
   assert.equal(renewalFaultOf(new Refusal('not yours', 403)), null, 'a sub-500 refusal earns nothing');
   assert.equal(renewalFaultOf(new TypeError('Cannot read properties of undefined (reading id)')), null, 'a programming error earns no grace');
   assert.equal(renewalFaultOf('boom'), null);
-});
-
-test('manual:review-followups-triaged GY-671.2: the leaseHealth report names the one process that measured it, and its attention item says a multi-replica deployment reports each replica separately', () => {
-  const now = Date.now();
-  const health = new LeaseHealth();
-  for (let n = 0; n < 20; n++) health.record('renewed', heartbeatLatencyAttentionMs + 1000, now);
-  const report = health.report(now);
-  assert.equal(report.scope, 'process', 'the report names its scope');
-  assert.equal(report.process, `${hostname()}/${process.pid}`, 'the report names the host and process that measured it');
-  assert.ok(report.attention);
-  assert.match(report.attention, /one server process's own/);
-  assert.match(report.attention, /each replica separately/);
-  assert.ok(report.attention.includes(report.process!), 'the attention item names the process it measured');
-
-  const quiet = new LeaseHealth();
-  quiet.record('renewed', 12, now);
-  const calm = quiet.report(now);
-  assert.equal(calm.attention, null, 'nothing raised while p95 is within the threshold');
-  assert.equal(calm.scope, 'process');
-  assert.equal(calm.process, `${hostname()}/${process.pid}`, 'every report says what measured it, raised or not');
 });
 
 test('manual:review-followups-triaged GY-671.3: the fault record is written on the main pool, so a lease pool with no connection to give still records the failure and grants the grace', async () => {

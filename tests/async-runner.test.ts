@@ -5,7 +5,7 @@ import { chmod, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
-import { ChildProcessError, ChildWaitLedger, childRunner, runChild } from '../src/child-runner.js';
+import { ChildProcessError, childRunner, runChild } from '../src/child-runner.js';
 import { emptyDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { listHerdrAgents, masterConfigSchema, startAgentSession, type HerdrAgent, type MasterConfig, type MasterRun, type ProducerProfile, type WorkerProfile } from '../src/master.js';
@@ -15,7 +15,7 @@ import type { Work } from '../src/model.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 clock is handed to runCycle as its explicit now over fixtures derived from it; Date.now() only measures elapsed time and child deadlines.
 
 // GY-125. Each test is named for the proof it produces: unit:no-sync-child-processes,
-// integration:snapshot-read-unblocked-by-launch and unit:child-wait-attributed.
+// integration:snapshot-read-unblocked-by-launch.
 
 const repository = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const launcher = join(repository, 'bin/graphyard.mjs');

@@ -4,7 +4,6 @@ import { basename, dirname, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { z } from 'zod';
 import { childRunner, type ChildRun } from './child-runner.js';
-import { timedCall, timedRun, serverCallName } from './master/timings.js';
 import type { Work } from './model.js';
 import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEntry } from './model/session-state.js';
 import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
@@ -1423,8 +1422,7 @@ export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCurs
 export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
   // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
   // its whole thirty seconds is awaited here, and the cycle's snapshot read beside it is served.
-  // Its children and server calls are timed against the tick that made them (GY-377).
-  const run = timedRun(deps.run ?? childRunner({ timeoutMs: 90_000 }));
+  const run = deps.run ?? childRunner({ timeoutMs: 90_000 });
   const current = typeof config === 'function' ? config : () => config;
   const log = deps.log ?? (line => console.error(line));
   // A repair is logged once per path: the same over-long string would otherwise be reported on
@@ -1442,12 +1440,12 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     if (!response.ok) throw new Error(typeof result?.error === 'string' ? result.error : JSON.stringify(result));
     return result;
   });
-  const mutate = (path: string, body: unknown, requestId?: string) => timedCall('server', serverCallName('POST', path), () => post(path, body, requestId));
+  const mutate = post;
   // An answered request's observation is woken at most once a minute per item (GY-1429): a prioritized
   // resync that waits on no tick, the same wake the loop sends for a refused step (GY-710).
   const observationWakes = new Map<string, number>();
   return {
-    snapshot: timeoutMs => timedCall('server', 'GET work-snapshot', () => deps.snapshot(timeoutMs)),
+    snapshot: deps.snapshot,
     agents: () => listHerdrAgents(run).then(herdrSessionListing).catch(() => null),
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),

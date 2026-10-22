@@ -320,6 +320,8 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   const code = await plant(base(0, { criteria: [{ id: 'AC-1', text: 'Code', proofs: ['unit:code'] }] }));
   const reading = { proof: own, sha: serving, baseSha: mergeSha, policyRevision: 1, result: 'pass' as const, detail: 'the advanced delivery log shows 0 failed deliveries in 24 hours' };
   await assert.rejects(engine.execute(worker, 'reading', item.id, reading, randomUUID()), /Coordinator permission required/);
+  // GY-2876: no admin records a trusted reading, with or without a roster pattern for the proof.
+  for (const admin of [operator, { ...operator, proofs: ['manual:*'] }]) await assert.rejects(engine.execute(admin, 'reading', item.id, reading, randomUUID()), /only the loop records a reading/);
   await assert.rejects(engine.execute(coordinator, 'reading', code.id, { ...reading, proof: 'unit:code' }, randomUUID()), /not a loop-owned observation item/);
   await assert.rejects(engine.execute(coordinator, 'reading', item.id, { ...reading, baseSha: sha('f') }, randomUUID()), /bound to the parent delivery's merge/);
   const { closeWork } = await import('../src/server/close.js');

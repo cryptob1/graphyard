@@ -15,7 +15,6 @@ import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { failureText } from './worktrees.js';
 import { shellQuote } from './dispatch.js';
-import { timedCall } from './timings.js';
 import { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, reconstructedHold, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 import { getCachedPlanUsage, setCachedPlanUsage, parseZaiUsage } from '../provider-usage.js';
@@ -121,9 +120,9 @@ export async function checkAgentEnvironment(environment: ProbedEnvironment, prob
   if (cached && now - cached.at >= 0 && now - cached.at < (probe.cacheMs ?? 30_000)) return cached.health;
 
   const account: { loggedIn: boolean; usage: AccountUsage[]; note: string | null; reached?: boolean; shared?: boolean; plan?: PlanReading } =
-    environment.kind === 'claude' ? await timedCall('account', `quota ${environment.name}`, () => claudeAccount(environment, probe, now))
-    : environment.kind === 'codex' ? await timedCall('account', `quota ${environment.name}`, () => codexAccount(environment, probe))
-    : environment.kind === 'opencode' || (environment.kind as string) === 'pi' ? await timedCall('account', `quota ${environment.name}`, () => zaiAccount(environment, probe, { id: planId, now }))
+    environment.kind === 'claude' ? await claudeAccount(environment, probe, now)
+    : environment.kind === 'codex' ? await codexAccount(environment, probe)
+    : environment.kind === 'opencode' || (environment.kind as string) === 'pi' ? await zaiAccount(environment, probe, { id: planId, now })
     : { loggedIn: (candidate => !!candidate && !!(candidate.userId || candidate.email))((await readJsonFile(resolve(environment.home, 'cli-config.json')))?.authInfo), usage: [], note: 'Cursor exposes no quota Graphyard can read; the session reports its own limit' };
 
   if (/^zai\//i.test(environment.model ?? '') && !account.usage.length && latestZaiReading)

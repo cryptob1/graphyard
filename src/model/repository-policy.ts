@@ -12,16 +12,21 @@ import { z } from 'zod';
  *
  * A sensitive entry is one glob (documentation-glob syntax: `dir/` a tree, `*` within a segment,
  * `**` across segments) and the rule a reason cites; several entries may share a rule.
+ *
+ * Retired keys a policy written before GY-2876 still carries parse and are dropped: `review` and an
+ * entry's `only`, whose `lane` entries only ever counted for the retired lanes, never for review.
  */
 const glob = z.string().trim().min(1).max(200)
   .refine(path => !path.startsWith('/') && !path.split('/').some(segment => segment === '..' || segment === '.') && !/[\s\u0000-\u001f]/.test(path), 'Sensitive paths are repository-relative globs without . or .. segments or whitespace');
 export const sensitiveEntrySchema = z.object({ rule: z.string().trim().min(1).max(120), glob }).strict();
 export type SensitiveEntry = z.infer<typeof sensitiveEntrySchema>;
+const declaredEntrySchema = sensitiveEntrySchema.extend({ only: z.enum(['risk', 'lane']).optional() }).strict();
 export const pendingOutcomeRules = ['non-blocking', 'blocking'] as const;
 /** What a failed release candidate does (GY-1848): `hold` names the failure and reverts nothing; `revert` is the behaviour a repository that declares nothing keeps. */
 export const releaseFailureActions = ['revert', 'hold'] as const;
 export const repositoryPolicySchema = z.object({
-  risk: z.object({ sensitive: z.array(sensitiveEntrySchema).min(1).max(200) }).strict().optional(),
+  risk: z.object({ sensitive: z.array(declaredEntrySchema).min(1).max(200) }).strict().optional(),
+  review: z.unknown().optional(),
   e2e: z.object({ pendingOutcomes: z.enum(pendingOutcomeRules) }).strict().optional(),
   release: z.object({ onFailure: z.enum(releaseFailureActions).optional(), revertUnmatched: z.boolean().optional() }).strict().optional(),
 }).strict();
@@ -63,7 +68,7 @@ export const defaultRepositoryPolicy: RepositoryPolicy = {
 export function resolveRepositoryPolicy(input: unknown): RepositoryPolicy {
   const declared = repositoryPolicySchema.parse(input ?? {});
   return {
-    risk: declared.risk ? { sensitive: declared.risk.sensitive, declared: true } : defaultRepositoryPolicy.risk,
+    risk: declared.risk ? { sensitive: declared.risk.sensitive.filter(entry => entry.only !== 'lane').map(({ rule, glob }) => ({ rule, glob })), declared: true } : defaultRepositoryPolicy.risk,
     e2e: declared.e2e ?? defaultRepositoryPolicy.e2e,
     release: {
       onFailure: declared.release?.onFailure ?? defaultRepositoryPolicy.release.onFailure,

@@ -3,8 +3,8 @@
 // view still answers and the bytes read stay flat however heavy the ledger's settled items are.
 import { coordinationViewHeader } from '../server/work-view.js';
 
-export const coordinationStep = (step: (run: () => Promise<any>) => Promise<any>, read: (path: string, credential?: string, timeoutMs?: number, headers?: Record<string, string>) => Promise<any>) =>
-  step(() => snapshotWithClock(() => read('work-snapshot', undefined, undefined, { [coordinationViewHeader]: 'coordination' })));
+export const coordinationStep = (read: (path: string, credential?: string, timeoutMs?: number, headers?: Record<string, string>) => Promise<any>) =>
+  snapshotWithClock(() => read('work-snapshot', undefined, undefined, { [coordinationViewHeader]: 'coordination' }));
 
 /** A snapshot read with its clock offset bound against the control plane, from the local clock before and after the read. */
 export async function snapshotWithClock<T extends { now: string }>(read: () => Promise<T>, clock: () => number = Date.now) {

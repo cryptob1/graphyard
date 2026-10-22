@@ -16,8 +16,7 @@ import { performance } from 'node:perf_hooks';
  * signal or a timeout rejects with a `ChildProcessError` carrying the same fields `execFileSync`'s
  * error did (`stdout`, `stderr`, `status`, `signal`, and `Command failed: …` as the message) so a
  * caller that reads Herdr's JSON refusal from the output, or git's exit status, reads it exactly
- * as before; and a runner may be handed a `ChildWaitLedger`, which is how a cycle knows how much
- * of its duration was spent waiting on children rather than on its own work.
+ * as before; a slow child delays only its caller.
  */
 
 export interface ChildRunOptions {
@@ -69,44 +68,6 @@ export class ChildProcessError extends Error {
 }
 
 /**
- * How long this process has been waiting on children, as wall-clock time during which at least
- * one child was in flight. Concurrent children overlap rather than add, so a cycle's `childWaitMs`
- * never exceeds its duration and `durationMs - childWaitMs` is the time the loop spent on its own
- * work. `drain` hands back the wait accumulated since the previous drain and charges a child still
- * running only for the part of its wait that fell inside the window, so consecutive steps of one
- * cycle split a long child between them rather than one step being charged for all of it.
- */
-export class ChildWaitLedger {
-  private inflight = 0;
-  private since = 0;
-  private settled = 0;
-  private readonly clock: () => number;
-  constructor(clock: () => number = () => performance.now()) { this.clock = clock; }
-  /** The number of children in flight right now. */
-  get running() { return this.inflight; }
-  /** Marks one child started; the returned function marks it ended, once. */
-  begin(): () => void {
-    if (this.inflight === 0) this.since = this.clock();
-    this.inflight += 1;
-    let ended = false;
-    return () => {
-      if (ended) return;
-      ended = true;
-      this.inflight -= 1;
-      if (this.inflight === 0) { this.settled += Math.max(0, this.clock() - this.since); }
-    };
-  }
-  /** Milliseconds waited since the previous drain, rounded; the window starts afresh from now. */
-  drain(): number {
-    const at = this.clock();
-    let total = this.settled;
-    this.settled = 0;
-    if (this.inflight > 0) { total += Math.max(0, at - this.since); this.since = at; }
-    return Math.max(0, Math.round(total));
-  }
-}
-
-/**
  * Run one child and resolve with its stdout. The child is bounded: at `timeoutMs` it is sent
  * SIGTERM and, `childKillGraceMs` later, SIGKILL; the rejection says the command timed out. Nothing
  * here blocks the event loop, so other reads and writes of this process are serviced while the
@@ -147,17 +108,9 @@ export function runChild(command: string, args: string[], options: ChildRunOptio
   });
 }
 
-/**
- * A runner bound to defaults and, when given one, to a ledger that meters every child it runs.
- * The daemon and the dispatcher each hold one, so a cycle's `childWaitMs` counts the cycle's own
- * children and not the dispatcher's launches beside it.
- */
-export function childRunner(defaults: { timeoutMs?: number; cwd?: string; env?: NodeJS.ProcessEnv; ledger?: ChildWaitLedger } = {}): BoundChildRun {
-  return async (command, args, options = {}) => {
-    const done = defaults.ledger?.begin();
-    try { return await runChild(command, args, { timeoutMs: defaults.timeoutMs, cwd: defaults.cwd, env: defaults.env, ...options }); }
-    finally { done?.(); }
-  };
+/** A runner bound to defaults. */
+export function childRunner(defaults: { timeoutMs?: number; cwd?: string; env?: NodeJS.ProcessEnv } = {}): BoundChildRun {
+  return (command, args, options = {}) => runChild(command, args, { timeoutMs: defaults.timeoutMs, cwd: defaults.cwd, env: defaults.env, ...options });
 }
 
 /** The process's default runner: bounded, captured, unmetered. */

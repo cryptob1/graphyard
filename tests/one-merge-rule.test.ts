@@ -4,6 +4,7 @@ import { evaluate, type Work } from '../src/model.js';
 import { mergeOne, mergeQueue, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import { riskOf } from '../src/model/risk-class.js';
+import { resolveRepositoryPolicy } from '../src/model/repository-policy.js';
 import * as dispatch from '../src/model/dispatch.js';
 import * as policy from '../src/model/policy.js';
 
@@ -87,4 +88,11 @@ test('unit:one-merge-rule — a sensitive head waits for one reviewer approval b
   for (const item of [sensitive, normal]) for (const field of ['lane', 'speedTarget']) assert.equal(field in item, false, `${item.key} carries no ${field}`);
   for (const name of ['maxInFlight', 'isHotfix', 'wipHoldWording']) assert.equal(name in dispatch, false, `no ${name}`);
   for (const name of ['lanes', 'determineLane', 'laneSpeedTargets', 'laneRequirements', 'itemLane']) assert.equal(name in policy, false, `no ${name}`);
+
+  // A deployment's policy value written by the previous installer still parses: its retired `review`
+  // section is dropped, and of its `only` entries a lane-only one never counted for review and still does not.
+  const upgraded = resolveRepositoryPolicy({ review: { normalChanges: 'post-merge' }, risk: { sensitive: [
+    { rule: 'store', glob: 'src/store/' }, { rule: 'auth', glob: 'src/auth.ts', only: 'risk' }, { rule: 'ceremony', glob: 'docs/', only: 'lane' }] } });
+  assert.deepEqual(upgraded.risk.sensitive, [{ rule: 'store', glob: 'src/store/' }, { rule: 'auth', glob: 'src/auth.ts' }]);
+  assert.equal('review' in upgraded, false);
 });
