@@ -14,7 +14,6 @@ import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatc
 import { nextAction } from '../src/model/next-action.js';
 import { neededRework } from '../src/daemon/rework.js';
 import { describeDispatch } from '../src/master/status.js';
-import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
 
 // GY-135: a proof that passes against an unchanged tree proves nothing. A pass is trusted only
 // beside the producer's run of the same proof failing against a tree with its criterion's
@@ -182,21 +181,4 @@ test('unit:nonexercising-proof-reworks a unit proof recorded as not exercising i
   const plain = unexercisedItem({ finding: false });
   assert.equal(nextAction(plain, [plain], clock)!.kind, 'request-review');
   assert.equal(neededRework(plain), null);
-});
-
-test('unit:nonexercising-proof-named master status names the item as awaiting rework for a non-exercising proof, not an unanswered producer request', () => {
-  const work = unexercisedItem();
-  const request = openProducerRequest(work, 'unit')!;
-  const session = { requestId: request.id, producer: 'p-1', profile: 'producer-a', agentName: 'producer-a-1', state: 'completed', attempt: 1, requestedAt: ago(51),
-    resolution: `evidence does not exercise its criterion: ${work.evidence[0].unexercised}` };
-  const dispatch = describeDispatch(work, { pending: [], completed: [] }, { producers: { pending: [], completed: [session] }, failures: [] }, clock.getTime());
-  const [item, ...rest] = unansweredRequestAttention([{ key: work.key, dispatch: dispatch as any }]);
-  assert.equal(rest.length, 0);
-  assert.match(item.text, /^GY-421 is awaiting rework for a non-exercising proof: /);
-  for (const named of [UNIT, 'AC-3', MUTATION]) assert.ok(item.text.includes(named), `the attention names ${named}: ${item.text}`);
-  assert.doesNotMatch(item.text, /stood unanswered|Producer request for/);
-  // A producer session that settled with no finding is still the unanswered request it was.
-  const plain = describeDispatch(work, { pending: [], completed: [] }, { producers: { pending: [], completed: [session] }, failures: [] }, clock.getTime());
-  const bare = { ...plain!, producers: plain!.producers.map(({ unexercised: _unexercised, ...entry }: any) => entry) };
-  assert.match(unansweredRequestAttention([{ key: work.key, dispatch: bare as any }])[0].text, /^Producer request for unit proofs for GY-421 has stood unanswered/);
 });

@@ -9,7 +9,6 @@ import { idleLeaseMs } from '../src/daemon/cycle-resume.js';
 import type { Observation, Work } from '../src/model.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonAction } from '../src/daemon/state.js';
-import type { BlockerProbeResult } from '../src/daemon/blocker-probes.js';
 
 /**
  * GY-1774: every loop step that calls a session or the control plane is bounded under one shared helper (GY-1766).
@@ -137,7 +136,7 @@ test('unit:step-calls-applied-once — a retried call joins the one in flight un
   const quick = sb.boundedCalls(base, {}, () => clock, () => 10_000, { step: 'dispatch', calls: ['rework'] });
   assert.deepEqual(await quick.rework!(item('GY-1'), 'why'), { reworked: 'GY-1: why' });
   assert.equal(sb.unboundedEffects(quick), base, 'the effects beneath a bound are reachable for a launch that holds no cycle');
-  const ended = sb.boundedCalls(effects([], { closeSession: slow.call as DaemonEffects['closeSession'] }), {}, () => clock, () => null, { step: 'triage', calls: ['closeSession'] });
+  const ended = sb.boundedCalls(effects([], { closeSession: slow.call as DaemonEffects['closeSession'] }), {}, () => clock, () => null, { step: 'master', calls: ['closeSession'] });
   const pass = ended.closeSession('pane-3') as Promise<void>;
   assert.equal(slow.calls.length, 5);
   assert.ok(pass instanceof Promise, 'after the step ended, the call passes through unbounded');
@@ -221,15 +220,13 @@ test('unit:step-calls-bounded — rework: a rework write that does not answer re
   slow.answer({});
 });
 
-test('unit:step-calls-bounded — every named step runs under the shared bound with the calls the item names, and the triage record passes through once the step has ended', async () => {
+test('unit:step-calls-bounded — every named step runs under the shared bound with the calls the item names', async () => {
   const sb = await helper();
   const steps: Record<string, { file: string; calls: string[] }> = {
-    blockers: { file: 'cycle-blockers.ts', calls: ['closeSession', 'deferWindow', 'probeBlocker', 'recordBlockerProbe', 'recordSession'] },
-    dispatch: { file: 'cycle-dispatch.ts', calls: ['agents', 'roleHealth', 'reportCapacity', 'planeHealth', 'hostMemory', 'recordDecomposition', 'recordResearch'] },
+    dispatch: { file: 'cycle-dispatch.ts', calls: ['agents', 'roleHealth', 'reportCapacity', 'planeHealth', 'hostMemory'] },
     sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'recordSession', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork'] },
     resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'recordSession', 'preserveWork', 'reportCapacity'] },
     reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'preserveWork', 'reportCapacity'] },
-    triage: { file: 'cycle-triage.ts', calls: ['recordTriage'] },
     master: { file: 'cycle-master.ts', calls: ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'] },
     rework: { file: 'rework.ts', calls: ['rework', 'recordMechanicalPlan'] },
   };
@@ -239,55 +236,9 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
   }
   // The preservation an ended attempt makes (sessions, resume, reclaim) carries like any other call: no failed preserve, no fault.
   assert.match(readFileSync(`${root}src/daemon/preserve.ts`, 'utf8'), /if \(stepCallCarried\(error\)\) \{ await recordCarried\(/);
-  // Triage: the record is bounded while the step runs; once the step has returned its budget is gone, so the step's own effects pass through, and cycle-triage.ts bounds a late record by the per-call bound alone (below).
-  const recorded = hanging();
-  const cfg = config(), state = emptyDaemonState(cfg);
-  const seen: (number | null)[] = [];
-  const stepCycle = { config: cfg, state, now: () => clock, effects: effects([], { recordTriage: recorded.call as DaemonEffects['recordTriage'] } as Partial<DaemonEffects>), isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as unknown as Parameters<Helper['withinStepBudget']>[0];
-  await sb.withinStepBudget(stepCycle, 'triage', ['recordTriage'], async bounded => {
-    const started = performance.now();
-    await assert.rejects(bounded.effects.recordTriage!(quiet('GY-8'), { judgement: { kind: 'close', reason: 'covered' } } as never) as Promise<unknown>, /the triage step's 30 ms per-call bound passed before GY-8's recordTriage call answered/);
-    seen.push(Math.round(performance.now() - started));
-  });
-  assert.ok(seen[0]! < 2_000, 'within the step the record is bounded');
-  const triage = readFileSync(`${root}src/daemon/cycle-triage.ts`, 'utf8');
-  assert.match(triage, /boundedCalls\(unboundedEffects\(effects\), state, now, \(\) => stepCallBoundMs, \{ step: 'triage', calls: \['recordTriage'\] \}\)/, 'a record a run makes after the step is bounded by the per-call bound alone');
-  assert.match(triage, /carried: stepCallCarried/, 'and a carried one stays owed to triage, which records it again next cycle');
-  recorded.answer(undefined);
 });
 
 // --- the review's findings on b396b7b3, each pinned (GY-1774 rework) -----------------------------------------------
-
-test('unit:step-calls-bounded — triage: the record a settled run makes after the step is bounded by the per-call bound; carried, the next cycle records it again in the step, carried on the item\'s row, joining the write, and the one after consumes its answer', async t => {
-  const sb = await helper();
-  const { clearTriageRuns, triageSettled } = await import('../src/triage.js');
-  t.after(clearTriageRuns);
-  const filed = quiet('GY-13', { title: 'Recurring action:dispatch faults: 4 in 24 hours', type: 'bug', stage: 'backlog', ready: false } as unknown as Partial<Work>);
-  const slow = hanging();
-  // The run settles only once the test says so: after the step that started it has returned.
-  let settle!: (result: unknown) => void;
-  const runner = { name: 'pi', start: (_prompt: string, options: { validate: (payload: unknown) => unknown }) => ({ id: 'run-1', events: [], onEvent: () => () => {}, cancel: () => {}, result: () => new Promise(resolve => { settle = () => resolve({ ok: true, tool: 'triage', payload: options.validate({ outcome: 'release', priority: 2, reason: 'real work' }), payloads: [] }); }) }) };
-  const cfg = config({ run: { intervalSeconds: 60, research: {} } });
-  const fx = effects([filed], { recordTriage: slow.call as DaemonEffects['recordTriage'], research: { cwd: process.cwd(), runner } } as unknown as Partial<DaemonEffects>);
-  const state = emptyDaemonState(cfg), key = `triage:${filed.id}:record`;
-  await cycle(state, fx, clock, cfg);
-  assert.equal(state.actions[`triage:${filed.id}:started`]?.state, 'done', `the run started: ${JSON.stringify(Object.keys(state.actions))}`);
-  settle(undefined);
-  await triageSettled();
-  assert.equal(slow.calls.length, 1, 'the settled run recorded its judgement after the step, under the per-call bound');
-  assert.ok(!(key in state.actions), 'no cycle ran, so no row yet');
-  await cycle(state, fx, clock + 60_000, cfg);
-  assert.equal(slow.calls.length, 1, 'the next cycle recorded it again in the step and joined the write in flight');
-  assert.ok(sb.carriedRow(state.actions[key]), `carried on the item's row: ${JSON.stringify(state.actions[key])}`);
-  assert.match(state.actions[key]!.detail, /the triage step's 30 ms per-call bound passed before GY-13's recordTriage call answered/);
-  assert.match(state.actions[`triage:${filed.id}:recorded`]?.detail ?? '', /Recording again the triage judgement of machine-filed GY-13 \(release\)/);
-  slow.answer(undefined);
-  await new Promise(resolve => setTimeout(resolve, 5));
-  await cycle(state, fx, clock + 120_000, cfg);
-  assert.equal(slow.calls.length, 1, 'the answer was consumed, never sent again');
-  assert.equal(state.actions[key]?.state, 'done', JSON.stringify(state.actions[key]));
-  assert.match(state.actions[key]!.detail, /Recorded the triage judgement of GY-13 \(release\) whose write was carried from an earlier cycle/);
-});
 
 // --- the review's findings on 20c8b1e7, each pinned (GY-1774 rework, round 3) -----------------------------------------
 
@@ -441,39 +392,6 @@ test('unit:step-calls-bounded — a step budget is spent on the wall as well as 
   assert.equal(budget.left(), null);
 });
 
-test('unit:step-calls-bounded — blockers: an environmental probe and its record are bounded; carried, the item\'s handling is recorded carried with no fault, the next cycle joins the probe still running and consumes its answer, and the record is joined until it answers', async () => {
-  const sb = await helper();
-  const probing = hanging<BlockerProbeResult>(), recording = hanging<Work>();
-  const work = quiet('GY-11', { blocker: 'graphyard complete failed: HTTP 502 Bad Gateway from the control plane', blockerProbe: null } as Partial<Work>);
-  const fx = effects([work], { probeBlocker: probing.call as DaemonEffects['probeBlocker'], recordBlockerProbe: recording.call as DaemonEffects['recordBlockerProbe'] } as Partial<DaemonEffects>);
-  const state = emptyDaemonState(config()), key = `carried:blocker:${work.id}`;
-  await cycle(state, fx, clock);
-  assert.equal(probing.calls.length, 1, 'the probe was started');
-  assert.ok(sb.carriedRow(state.actions[key]), `the item's handling is recorded carried: ${JSON.stringify(Object.keys(state.actions))}`);
-  assert.match(state.actions[key].detail, /the blockers step's 30 ms per-call bound passed before GY-11's probeBlocker call answered; the call stays owed and is retried next cycle/);
-  assert.equal(recording.calls.length, 0, 'nothing is recorded before the probe answers');
-  await cycle(state, fx, clock + 60_000);
-  assert.equal(probing.calls.length, 1, 'the next cycle joined the probe still running');
-  assert.ok(sb.carriedRow(state.actions[key]), 'still carried');
-  probing.answer({ probe: 'the server reports healthy', passed: false, detail: 'the server answered 500 on /healthz' });
-  await settle();
-  await cycle(state, fx, clock + 120_000);
-  assert.equal(probing.calls.length, 1, 'the retry consumed the probe\'s answer, never probing again');
-  assert.equal(state.actions[key]?.state, 'done', `the carried handling ran through: ${JSON.stringify(state.actions[key])}`);
-  assert.equal(recording.calls.length, 1, 'the answer was recorded on the item');
-  const row = state.actions[`blocker:${work.id}`];
-  assert.ok(sb.carriedRow(row), `the record is carried on the item's blocker row: ${JSON.stringify(row)}`);
-  assert.match(row.detail, /the blockers step's 30 ms per-call bound passed before GY-11's recordBlockerProbe call answered/);
-  await cycle(state, fx, clock + 180_000);
-  assert.equal(recording.calls.length, 1, 'the next cycle recorded the probe again and joined the write in flight');
-  recording.answer(work);
-  await settle();
-  await cycle(state, fx, clock + 240_000);
-  assert.equal(recording.calls.length, 1, 'the write\'s answer was consumed: recorded once');
-  assert.equal(state.actions[`blocker:${work.id}`]?.state, 'done', `the blocker row settles once the record answered: ${JSON.stringify(state.actions[`blocker:${work.id}`])}`);
-  assert.match(state.actions[`blocker:${work.id}`]!.detail, /the loop re-checks it every cycle: the server reports healthy fails/);
-});
-
 test('unit:step-calls-bounded — reclaim: the worktree reclaim is bounded; carried, it is recorded on the step\'s row with no fault, the next cycle reclaims again and joins it, and its answer, once consumed, is applied and retires the row', async () => {
   const sb = await helper();
   const slow = hanging<unknown>();
@@ -562,7 +480,7 @@ test('unit:step-calls-applied-once — the step-level helpers: a carried read an
   await sb.withinStepBudget(stepCycle(state), 'resume', ['recordSession'], bounded => sb.owedWrite(bounded, 'handle:GY-13:1', { kind: 'session', work: 'GY-13' }, 'Recording GY-13\'s handle', 'recordSession', write));
   assert.ok(sb.carriedRow(state.actions['owed:handle:GY-13:1']), 'the write is owed on its row');
   assert.equal(handles.calls.length, 1);
-  await sb.withinStepBudget(stepCycle(state), 'blockers', ['probeBlocker'], async () => {});
+  await sb.withinStepBudget(stepCycle(state), 'master', ['promptSession'], async () => {});
   assert.equal(handles.calls.length, 1, 'a step that does not bound the call leaves it owed');
   assert.ok(sb.carriedRow(state.actions['owed:handle:GY-13:1']));
   await sb.withinStepBudget(stepCycle(state), 'sessions', ['recordSession'], async () => {});
@@ -584,31 +502,6 @@ test('unit:step-calls-applied-once — the step-level helpers: a carried read an
 });
 
 // --- the review's findings on b859a10f, each pinned (GY-1774 rework) -----------------------------------------------
-
-test('unit:step-calls-bounded — dispatch: a split or research record carried past its bound holds its item, is recorded carried with no failed action, and the next cycle\'s record joins the call and retires the row', async () => {
-  const { guardCarried, settleCarriedWrites } = await import('../src/daemon/carried-writes.js');
-  const sb = await helper();
-  const slow = hanging(), work = quiet('GY-9');
-  const cfg = config(), state = emptyDaemonState(cfg);
-  const make = () => ({ config: cfg, state, now: () => clock, performed: [], effects: effects([work], { recordResearch: slow.call as DaemonEffects['recordResearch'] }), isolate: async (_k: unknown, _i: unknown, _n: unknown, body: () => Promise<unknown>) => body() }) as unknown as Parameters<Helper['withinStepBudget']>[0];
-  const pass = () => sb.withinStepBudget(make(), 'dispatch', ['recordResearch'], async bounded => {
-    const guarded = guardCarried(bounded.effects.recordResearch!);
-    await guarded.write(work, { event: 'started' } as never).catch(() => {});
-    await settleCarriedWrites(bounded, 'research', [work], guarded.carried);
-    return guarded.carried;
-  });
-  assert.ok((await pass()).has(work.id), 'the carried record is remembered by item, to hold it');
-  assert.ok(sb.carriedRow(state.actions[`carried:dispatch:research:${work.id}`]), 'recorded carried on the item\'s row');
-  assert.ok((await pass()).has(work.id));
-  assert.equal(slow.calls.length, 1, 'the retry joined the record in flight');
-  slow.answer(undefined);
-  await settle();
-  assert.equal((await pass()).size, 0, 'the answer is consumed by the retry');
-  assert.equal(slow.calls.length, 1, 'never sent twice');
-  assert.equal(state.actions[`carried:dispatch:research:${work.id}`]?.state, 'done', 'the row is retired');
-  const dispatch = readFileSync(`${root}src/daemon/cycle-dispatch.ts`, 'utf8');
-  assert.match(dispatch, /record: guarded\.write/);
-});
 
 test('unit:step-calls-bounded — master: a Herdr reading that does not answer returns the step, is carried with no fault and read again next cycle, joining it', async () => {
   const sb = await helper();
@@ -651,12 +544,12 @@ test('unit:step-calls-applied-once — a prompt is keyed by its intent: a wake f
   assert.deepEqual(slow.calls.map(call => call.args[1]), [continuation, resume]);
 });
 
-test('unit:step-calls-bounded — an effect object named in the bound (the merge writer, the acceptance role) is bounded method by method; a finished handle record waits for the running one of an item whose revision moved; a phase\'s nested effects wait at its gate', async () => {
-  const { boundedCalls, boundedPhase, stepCallCarried } = await helper();
+test('unit:step-calls-bounded — an effect object named in the bound (the merge writer) is bounded method by method; a finished handle record waits for the running one of an item whose revision moved', async () => {
+  const { boundedCalls, stepCallCarried } = await helper();
   const kept = {}, slow = new Promise<string>(() => {}), now = () => clock;
   let merges = 0;
   const effects = { stepCallBoundMs: 30, mergeWriter: { merger: () => { merges += 1; return slow; } }, recordSession: async () => undefined } as unknown as DaemonEffects;
-  const bounded = boundedCalls(effects, kept, now, () => 1000, { step: 'triage', calls: ['mergeWriter', 'recordSession'] });
+  const bounded = boundedCalls(effects, kept, now, () => 1000, { step: 'master', calls: ['mergeWriter', 'recordSession'] });
   // The merge-mode read: a slow answer is carried, never held; the retry joins it.
   await assert.rejects(() => bounded.mergeWriter!.merger(), (error: unknown) => stepCallCarried(error));
   await assert.rejects(() => bounded.mergeWriter!.merger(), (error: unknown) => stepCallCarried(error));
@@ -673,57 +566,4 @@ test('unit:step-calls-bounded — an effect object named in the bound (the merge
   assert.deepEqual(order, ['start:running']);
   release(); await new Promise(resolve => setTimeout(resolve, 20));
   assert.deepEqual(order, ['start:running', 'end:running', 'start:finished', 'end:finished']);
-  // A phase's acceptance goals() answered after its step returned starts no call behind it.
-  let goals = 0;
-  const phaseCycle = { state: { actions: {}, cycle: 1 }, now, performed: [], effects: { persist: async () => undefined, acceptance: { goals: async () => { goals += 1; } } } } as unknown as Cycle;
-  let later!: () => Promise<void>, resumeFirst!: () => void;
-  const first = new Promise<void>(resolve => { resumeFirst = resolve; });
-  let left: number | null = 1000;
-  await boundedPhase(phaseCycle, 'triage', 'acceptance', () => left, async phase => { await first; later = async () => { await phase.effects.acceptance!.goals!(); }; await later(); });
-  left = null;
-  resumeFirst(); await new Promise(resolve => setTimeout(resolve, 10));
-  assert.equal(goals, 0);
-});
-
-test('unit:step-calls-bounded — a carried acceptance write is carried, never noted as a failure', async () => {
-  const { boundedCalls, stepCallCarried, carriedRow } = await helper();
-  const { acceptanceStep } = await import('../src/daemon/acceptance.js');
-  const now = () => clock;
-  // An acceptance write that is carried rethrows to the carried isolation, so the goal is recorded waiting and no failure note is written.
-  const goal = { id: 'g1', key: 'GY-G1', stage: 'awaiting-approval', revision: 1 };
-  const closing = { stepCallBoundMs: 30, persist: async () => undefined, acceptance: { settings: { enabled: true }, goals: async () => [{ ...goal, stage: 'acceptance-drafting', refusal: { pr: 9, reason: 'no', by: 'x' } }], close: () => new Promise<void>(() => {}) } } as unknown as DaemonEffects;
-  const acceptanceState = { actions: {}, cycle: 1 } as unknown as DaemonState;
-  const performed: DaemonAction[] = [];
-  const cycle = { state: acceptanceState, now, clock, performed, config: {}, isolate: async (_kind: string, _item: unknown, _name: string, body: () => Promise<unknown>) => body(), effects: boundedCalls(closing, {}, now, () => 1000, { step: 'triage', calls: ['acceptance'] }) } as unknown as Cycle;
-  await acceptanceStep(cycle);
-  const rows = Object.values(acceptanceState.actions as Record<string, DaemonAction>);
-  assert.equal(rows.filter(entry => entry.state === 'failed').length, 0, 'no failure is noted for a carried close');
-  assert.ok(rows.some(entry => carriedRow(entry)), 'the carried close is recorded waiting');
-  assert.ok(stepCallCarried('x') === false);
-});
-
-test('unit:step-calls-bounded — triage: the merge-writer ports under the acceptance role wait at the phase gate and under the bound: a merged read answered after the step returned starts no fetch, merge or push behind it, and the next cycle joins the phase, under whose budget the landing runs through', async () => {
-  const { boundedCalls, boundedPhase, stepCallCarried, carriedRow } = await helper();
-  const now = () => clock, order: string[] = [];
-  let answerMerged!: (value: string | null) => void;
-  const merged = new Promise<string | null>(resolve => { answerMerged = resolve; });
-  const writer = { baseBranch: 'main', retrials: 2, merged: () => { order.push('merged'); return merged; }, fetch: async () => { order.push('fetch'); return 'tip'; }, merge: async () => { order.push('merge'); return 'sha'; }, push: async () => { order.push('push'); } };
-  const state = { actions: {}, cycle: 1 } as unknown as DaemonState;
-  const phaseCycle = { state, now, performed: [], effects: { persist: async () => undefined, acceptance: { settings: { enabled: true }, writer } } } as unknown as Cycle;
-  const land = async (phase: Cycle) => { const ports = (phase.effects.acceptance as unknown as { writer: typeof writer }).writer; if (await ports.merged()) return; await ports.fetch(); await ports.merge(); await ports.push(); };
-  let left: number | null = 30;
-  await boundedPhase(phaseCycle, 'triage', 'acceptance', () => left, land);
-  assert.ok(carriedRow((state.actions as Record<string, DaemonAction>)['carried:triage:acceptance']), 'the phase is carried past the bound');
-  // The step has returned; the read answers now: the landing's ports wait at the gate, so nothing runs behind the step.
-  left = null; answerMerged(null); await settle();
-  assert.deepEqual(order, ['merged'], 'no fetch, merge or push starts behind the returned step');
-  // The next cycle joins the phase: its gate opens and the landing runs through under that cycle's budget.
-  (state as unknown as { cycle: number }).cycle = 2; left = 1000;
-  await boundedPhase(phaseCycle, 'triage', 'acceptance', () => left, land);
-  assert.deepEqual(order, ['merged', 'fetch', 'merge', 'push']);
-  assert.equal((state.actions as Record<string, DaemonAction>)['carried:triage:acceptance']?.state, 'done', 'the carried phase ran through on its retry');
-  // Named in a step's bound, the nested ports are bounded by their path like the role's own calls.
-  const hanging = { stepCallBoundMs: 30, acceptance: { writer: { merged: () => new Promise<string | null>(() => {}) } } } as unknown as DaemonEffects;
-  const bounded = boundedCalls(hanging, {}, now, () => 1000, { step: 'triage', calls: ['acceptance'] });
-  await assert.rejects(() => bounded.acceptance!.writer!.merged('h'), (error: unknown) => stepCallCarried(error) && /acceptance\.writer\.merged call/.test(String(error)));
 });

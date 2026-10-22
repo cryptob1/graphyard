@@ -19,7 +19,7 @@ Exact-head approval lands; remote threads and reviews are never read or resolved
 
 ## Scope is a plan, not a lock
 
-The plan hints at the change; nothing refuses a file outside it. `graphyard sync GY-N` merges `origin/BASE`, regenerates generated files, reports only merge conflicts;
+`plannedFiles` is accepted and ignored; nothing requests, widens, splits or refuses a file. `graphyard sync GY-N` merges `origin/BASE`, regenerates generated files, reports only merge conflicts;
 
 Workers build, run `graphyard verify GY-N` (own proofs; CI: all), submit on pass, naming out-of-scope sandbox failures. `leftToCi` (exit 0, `passing`): all passed, abnormal end; failed/skipped/unexecuted block.
 
@@ -27,4 +27,4 @@ Workers build, run `graphyard verify GY-N` (own proofs; CI: all), submit on pass
 
 `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`: only deletion refuses; `sync` regenerates.
 
-[Speed](master-agent-reference.md#pipeline-speed), CI proofs. `graphyard diagnose GY-N` names holds; docs-only conflicts get [docs-sync](development.md#documentation-that-rarely-conflicts). Permanent installation-level stall reasons raise setup attention: `Deployment endpoint answered 4xx` → fix `deploymentUrl`; a credential-401 refusal → its remedy; a refused reviewer launch → repair the reviewer identity (GY-2008).
+[Speed](master-agent-reference.md#pipeline-speed), CI proofs. `graphyard diagnose GY-N` names holds. Permanent installation-level stall reasons raise setup attention: `Deployment endpoint answered 4xx` → fix `deploymentUrl`; a credential-401 refusal → its remedy; a refused reviewer launch → repair the reviewer identity (GY-2008).

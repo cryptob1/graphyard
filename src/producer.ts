@@ -755,13 +755,6 @@ export function holdCheckout(directory: string) {
   return () => { heldCheckouts.delete(held); };
 }
 
-/**
- * GY-866: the loop's scratch checkout, where research, triage and the diagnostician run. Its path is
- * the same for every loop of one repository, so a restarted loop finds the detached research runs
- * the loop before it registered there (GY-453) and adopts them, and it is never reclaimed: a run
- * may still be working in it while no loop holds it.
- */
-export const loopScratchCheckout = (base: string) => sessionCheckout(base, 'approval', 'loop-scratch', '0'.repeat(40), '0'.repeat(8));
 
 /**
  * The reclaim pass over the managed worktree root: every session directory no pending producer or
@@ -771,8 +764,8 @@ export const loopScratchCheckout = (base: string) => sessionCheckout(base, 'appr
 export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
   const now = options.now ?? Date.now();
   const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
-  // A live headless run's directory is owned by its run, not by a ledger record (GY-391); the loop's scratch checkout is kept always.
-  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...heldCheckouts, loopScratchCheckout(worktreeRoot(root, config)).directory];
+  // A live headless run's directory is owned by its run, not by a ledger record (GY-391).
+  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...heldCheckouts];
   return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 

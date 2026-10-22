@@ -3,7 +3,6 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
-import { researchWorkerSection } from '../research.js';
 import { appliedMechanicalRework, mechanicalWorkerSection, readMechanicalFixRequests, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
@@ -12,7 +11,6 @@ import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } from '../model/human-request.js';
 import { supersededByObservation } from '../model/park-withdrawal.js';
 import { loopOwnedRefusal } from '../model/loop-owned.js';
-import { documentationWorkerSection } from '../model/documentation.js';
 import { workerPreference } from '../model/worker-preference.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, servingReleaseProof, type Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
@@ -113,7 +111,6 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   // never reach a worker that must block on them.
   const loopOwned = loopOwnedRefusal(work);
   if (loopOwned) throw new Error(loopOwned);
-  if (work.children?.length) throw new Error(`${work.key} was split into ${work.children.join(', ')} before dispatch; it is delivered when they are and is never dispatched itself`);
   const unfinished = work.dependencies.map(id => allWork.find(item => item.id === id)).filter(dependency => !dependency || dependency.stage !== 'done');
   if (unfinished.length) throw new Error(`Dispatch blocked by unfinished dependencies: ${unfinished.map(dependency => dependency?.key ?? 'unknown').join(', ')}`);
   if (work.lease && Date.parse(work.lease.expiresAt) > now) throw new Error(`Dispatch blocked by active owner ${work.lease.owner}`);
@@ -498,7 +495,7 @@ export const destructivePromptGuidance = 'Avoid any command that triggers your r
 export const branchRewriteGuidance = 'Never rewrite the assigned branch: fix a wrong commit forward with a new commit. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'submission' | 'pipeline'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'candidate' | 'submission' | 'pipeline'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -536,10 +533,6 @@ export function workerPrompt(
     + (memoryDigest || '')
     // The maps for the areas the item's description and criteria name.
     + verificationMapDigest(verificationMaps, [...new Set([work.description ?? '', ...(work.criteria ?? []).map(criterion => criterion.text)].flatMap(namedPaths))], 'worker')
-    // The research brief recorded before build, with the product decisions it asked for (GY-259).
-    + (work.researchBrief && work.criteria ? researchWorkerSection({ ...work, criteria: work.criteria, description: work.description ?? '' }, config.cliPath) : '')
-    // The standard documentation criterion the control plane stamped at create time (GY-215).
-    + (work.documentation ? documentationWorkerSection(work.documentation, work.key, epoch, config.cliPath) : '')
     + submissionPolicyRule
     + destructivePromptGuidance
     + branchRewriteGuidance

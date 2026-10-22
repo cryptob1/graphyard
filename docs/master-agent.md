@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | loop -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; it no longer hand-decomposes goals ([goal pipeline](how-graphyard-works.md#from-goal-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
+The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; it files and releases items itself ([intent](how-graphyard-works.md#from-intent-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
 
 ## Operate
 
@@ -17,9 +17,9 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 Sweeps run every automatic-dispatch tick; a handle closes at the second consecutive miss. Closures: **Vanished**, **Ended** (terminal; `idle`/`done`/`blocked` are not terminal), **Superseded**, **Duplicate** — a closure decides no gate. Past its role's maximum a session is flagged, not closed.
 
-`blocked` frees its slot; [classes](protocol/work-commands.md#blocked-work-unblocks-itself) self-clear (`github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `host-supervisor`, `runtime-denial`, `runtime-exhaustion`, `github-outage`); `master-role` a master-role identity runs and unblocks; `genuine`/`human-only` stay in `master status`.
+`blocked` frees its slot; its [reason](protocol/work-commands.md#blocked-work) stays in `master status` until the master clears it.
 
-`invariant:` lines are attention, never items. Review follow-ups: Pi (`run.research`) triages.
+`invariant:` lines are attention, never items. Review follow-ups are ordinary backlog items the master releases.
 
 ## Automatic dispatch at submit
 
@@ -29,4 +29,4 @@ Past the build gate: a producer request per proof group (`unit`, `integration`; 
 
 ### System invariants
 
-Per cycle (`daemon.invariants.lines`): `follow-ups-per-parent` (1 open), `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s), `untriaged-backlog` (24 h); `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts`.
+Per cycle (`daemon.invariants.lines`): `lingering-sessions` (30 min), `refresh-churn` (3 per own head), `merge-stall` (10 min), `cycle-p90` (30 s); `invariants` in `.graphyard/master.json`; `tests/soak-*.test.ts`.

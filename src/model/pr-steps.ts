@@ -2,7 +2,7 @@ import { isClosed, type Gate, type Work } from '../model.js';
 import { noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
-import { ciCheckName, mergeWriterTrialPattern } from './ci-refusal.js';
+import { ciCheckRefusalPattern, mergeWriterTrialPattern } from './gates.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
 
@@ -64,7 +64,7 @@ export type CheckState = 'passed' | 'failed' | 'running';
 export function checkStates(work: Work): { name: string; state: CheckState }[] {
   const gate = work.gates.find(entry => entry.name === 'test');
   const reasons = gate?.reasons ?? [];
-  const named = (name: string) => !gate || reasons.some(reason => ciCheckName(reason) === name);
+  const named = (name: string) => !gate || reasons.some(reason => ciCheckRefusalPattern.exec(reason)?.[1] === name);
   if (reasons.some(reason => mergeWriterTrialPattern.test(reason))) {
     const refused = work.mergeLedger?.state === 'refused' && !!work.candidate && work.mergeLedger.head === work.candidate.sha;
     return (work.policy.checks ?? []).map(name => ({ name, state: refused ? 'failed' : 'running' }));
@@ -78,7 +78,7 @@ const reviewersExhausted = /^Every configured reviewer profile is exhausted/;
  * Merge refusals only the master agent clears — unverified branch protection, a standing
  * escalation, a slice lead's hold — and those a new head from the builder clears: a conflict with
  * the base, unresolved review threads, an ejection from the queue. The same refusals
- * src/model/refusal-mapping.ts maps to `attention` and `request-rework`.
+ * src/model/next-action.ts maps to `attention` and `request-rework`.
  */
 const mergeMasterClears = /branch protection have not been verified$|^Slice lead \S+ ruled /;
 const mergeBuilderClears = /^Pull request is not mergeable against the current base$|^Branch protection requires conversation resolution and \d+ review threads? (is|are) unresolved|^Ejected from the merge queue:/;
@@ -114,10 +114,10 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
     }
     case 'review':
       // Every reviewer profile exhausted: no reviewer can act, and adding capacity or changing the
-      // provider is the master agent's decision (src/model/refusal-mapping.ts escalates it).
+      // provider is the master agent's decision (src/model/next-action.ts escalates it).
       if (reasons.some(reason => reviewersExhausted.test(reason))) return { detail: 'no reviewer is available', who: 'Master agent' };
       // The gate says "approval is required" even while no reviewer can be asked about this head
-      // (src/model/refusal-mapping.ts `reviewStandstill`); the action the control plane computed
+      // (src/model/next-action.ts `reviewStandstill`); the action the control plane computed
       // from that standstill names who actually moves it.
       switch (work.nextAction?.gate === 'review' ? work.nextAction.kind : null) {
         case 'dispatch': return { detail: 'the proofs run before the review', who: 'Prover agent' };

@@ -22,7 +22,6 @@ import { statusRoutes } from './routes/status.js';
 import { mergeSettingsRoutes } from './routes/merge-settings.js';
 import { actionRoutes } from './routes/actions.js';
 import { workRoutes } from './routes/work.js';
-import { goalRoutes } from './routes/goals.js';
 import { staticRoutes } from './static.js';
 export { principalSchema, type Credential } from './principals.js';
 export type { ArtifactOptions, ServerOptions } from './auth.js';
@@ -36,7 +35,7 @@ export const publicRoutes: readonly RouteModule[] = [healthRoutes, signinRoutes]
  * callers themselves.
  */
 export const apiRoutes: readonly RouteModule[] = registerApiRoutes([
-  operatorAgentRoutes, proofGrantRoutes, goalRoutes,
+  operatorAgentRoutes, proofGrantRoutes,
   { name: 'operator-agent-scope', routes: [operatorAgentRouteGuard] },
   agentRegistryRoutes, delegationRoutes, validationRoutes, deliveryRoutes, shippingPulseRoutes, flowAnalyticsRoutes, attributionRoutes, scenarioRoutes, actionRoutes, statusRoutes, mergeSettingsRoutes, workRoutes,
 ]);

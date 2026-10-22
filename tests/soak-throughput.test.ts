@@ -8,7 +8,6 @@ import { retainedActions } from '../src/daemon/state.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { loopThroughputMeasurement, throughputMeasurementDirectory, throughputMeasurementRetention, throughputRemeasureMs, verifyThroughput } from '../src/throughput.js';
 import { appendThroughputLedger, recordedEntry, throughputEscalationMs, throughputLedgerFile } from '../src/throughput-ledger.js';
-import { backlogCounts, machineKind } from '../src/model/machine-backlog.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

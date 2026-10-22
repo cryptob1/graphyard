@@ -236,13 +236,10 @@ test('unit:gates-github-snapshot — with source undefined a pull-request-era ob
 test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, head} with the SHA defaulting to the worktree HEAD, complete GY-N EPOCH PR sends the body it always did, and the command still reports self-verification beside the control plane\'s answer', async () => {
   const headOf = () => head;
   assert.deepEqual(completionBody(['2', '123'], headOf), { epoch: 2, pr: 123 });
-  assert.deepEqual(completionBody(['2', '123', '--no-docs', 'no documented behaviour changed'], headOf), { epoch: 2, pr: 123, documentation: 'no documented behaviour changed' });
   assert.deepEqual(JSON.stringify(completionBody(['2', '123'], headOf)), JSON.stringify({ epoch: 2, pr: 123 }), 'the PR body is byte-identical');
   assert.deepEqual(completionBody(['2', '--head'], headOf), { epoch: 2, head });
   assert.deepEqual(completionBody(['2', '--head', staleHead], headOf), { epoch: 2, head: staleHead });
   assert.deepEqual(completionBody(['2', `--head=${staleHead}`], headOf), { epoch: 2, head: staleHead });
-  assert.deepEqual(completionBody(['2', '--head', '--no-docs', 'none'], headOf), { epoch: 2, head, documentation: 'none' });
-  assert.deepEqual(completionBody(['2', '--no-docs', 'none', '--head'], headOf), { epoch: 2, head, documentation: 'none' });
   assert.throws(() => completionBody(['2', '123', '--head'], headOf), /either a PR number or --head \[SHA\], not both/);
   assert.throws(() => completionBody(['2', '--head', 'abc'], headOf), /40-hex commit/);
   assert.throws(() => completionBody(['2', '123', '--bogus'], headOf), /bogus/);

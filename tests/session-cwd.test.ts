@@ -19,10 +19,8 @@ import type { Work } from '../src/model.js';
 import { bwrapOnPath, coordinatorCheckoutRefusal, readCoordinatorCheckout, readOnlyMountWrapper } from '../src/master/profiles.js';
 import { dataDirectory, orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
 import { atomicPrivateWrite, dispatchWork, loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { launchProducer, loopScratchCheckout, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
-import { applyResearchEvent, clearResearchRuns, type ResearchEvent } from '../src/research.js';
+import { launchProducer, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
-import { docsSyncMaxMs, launchDocsSync, type DocsSyncPlan } from '../src/docs-sync.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
 import type { Runner } from '../src/runner/types.js';
@@ -60,10 +58,9 @@ const machineFiled = (): Work => ({ ...ready(), id: 'work-901', key: 'GY-901', t
 /**
  * A master installed in a throwaway repository — the coordinator checkout of these tests — with
  * its credentials beside it, an approver and an operator-agent, and the managed worktree root
- * pointed at its own temporary directory. The repository holds one commit, so a release commit
- * exists for the loop's scratch checkout.
+ * pointed at its own temporary directory. The repository holds one commit.
  */
-async function installed(options: { research?: boolean } = {}) {
+async function installed() {
   const directory = await temporaryDirectory('session-cwd');
   const credentials = await temporaryDirectory('session-cwd-credentials');
   execFileSync('git', ['init', '-q', '-b', 'main', directory]);
@@ -85,13 +82,12 @@ async function installed(options: { research?: boolean } = {}) {
   // worktrees/, so a reclaim pass never sweeps the neighbouring roots every other run left there.
   await mkdir(join(dataDirectory(), 'session-cwd'), { recursive: true });
   const managed = await temporaryDirectory('root', join(dataDirectory(), 'session-cwd'));
-  await atomicPrivateWrite(join(directory, '.graphyard/master.json'), { ...config, approver: { id: 'graphyard-approver-project', credentialFile: await token('approver') }, operatorAgent: { id: 'graphyard-operator-project', credentialFile: await token('operator') }, run: { ...config.run, worktreeRoot: managed, ...(options.research ? { research: { command: 'pi' } } : {}) } });
+  await atomicPrivateWrite(join(directory, '.graphyard/master.json'), { ...config, approver: { id: 'graphyard-approver-project', credentialFile: await token('approver') }, operatorAgent: { id: 'graphyard-operator-project', credentialFile: await token('operator') }, run: { ...config.run, worktreeRoot: managed } });
   git('add', '.');
   git('commit', '-q', '-m', 'base');
   const head = execFileSync('git', ['-C', directory, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const fullConfig = await loadMasterConfig(directory);
   return { root: directory, head, token, config: fullConfig, cleanup: async () => {
-    // The loop's scratch checkout outlives the loop, so the fixture takes it back with its managed root.
     await rm(managed, { recursive: true, force: true });
     await rm(directory, { recursive: true, force: true });
     await rm(credentials, { recursive: true, force: true });
@@ -200,38 +196,6 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:session-cwd-own-checkout — a docs-sync session opens its pane and starts its runtime in the worktree its launcher created inside a managed checkout of its own, never in the coordinator checkout', async () => {
-  const fixture = await installed();
-  try {
-    const { root, cleanup } = fixture;
-    const stub = herdr();
-    // The launcher itself creates the worktree of the reviewed head (GY-1205): git runs for real.
-    const run = (command: string, args: string[], options?: unknown) => command === 'git' ? execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }) : stub.run(command, args);
-    const home = await temporaryDirectory('session-cwd-claude-home');
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', environment: { CLAUDE_CONFIG_DIR: home } });
-    const plan: DocsSyncPlan = { key: 'GY-866', pr: 866, branch: 'graphyard/gy-866-7', baseBranch: 'main', head: fixture.head, base: fixture.head, paths: ['docs/master-agent.md'] };
-    await launchDocsSync(root, work(), plan, { agents: [], available: true }, run as never);
-    assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the docs-sync session');
-    const pane = paneCwd(stub.tabs[0]);
-    assert.ok(pane, 'the docs-sync pane is created with an explicit --cwd');
-    assert.ok(!resolve(pane!).startsWith(`${resolve(root)}${sep}`) && resolve(pane!) !== resolve(root), `the docs-sync pane opens outside the coordinator checkout, not ${pane}`);
-    const checkout = dirname(resolve(pane!));
-    assert.equal(dirname(checkout), resolve(worktreeRoot(root, fixture.config)), 'the docs-sync pane opens in a checkout under the managed worktree root');
-    assert.equal(existsSync(join(pane!, 'src', 'loop.ts')), true, 'the launcher created the worktree of the reviewed head the pane opens in');
-    assert.equal(resolve(checkoutOfStem(stub.typed[0].stem)!), resolve(pane!), 'the runtime starts, and reads its request, exactly where the pane opens');
-    assert.equal(stub.pasted.length, 0, 'the instruction is the session\'s own first request, never pasted');
-    const request = stub.typed[0].args.at(-1)!;
-    assert.ok(request.includes(`You start in ${pane}`), 'the request names the worktree inside the session\'s own checkout');
-    assert.ok(!request.includes(join(root, '.graphyard', 'docs-sync')), 'the request names no worktree under the coordinator checkout');
-    assert.equal(tabEnv(stub.tabs[0], 'GRAPHYARD_REPOSITORY_ROOT'), root, 'the docs-sync tab hands the session the coordinator root');
-    // No ledger owns the directory: the launching process holds it for the session's bounded life.
-    assert.ok(docsSyncMaxMs > orphanGraceMs, 'a docs-sync session may outlive the orphan grace, so its checkout must be held');
-    assert.ok(await survivesReclaim(root, fixture.config, checkout), 'a reclaim pass past the orphan grace leaves the docs-sync checkout');
-    await rm(home, { recursive: true, force: true });
-    await cleanup();
-  } finally { await fixture.cleanup(); }
-});
-
 test('unit:session-cwd-own-checkout — a producer session opens its pane and starts its runtime in its own managed checkout, never in the coordinator checkout', async () => {
   const fixture = await installed();
   try {
@@ -279,114 +243,6 @@ test('unit:session-cwd-own-checkout — a worker session opens its pane in its a
       assert.equal(resolve(pane!), resolve(assigned), 'the worker pane opens in its assigned worktree');
       assert.ok(outsideCoordinator(pane!, root), 'the assigned worktree is outside the coordinator checkout');
     } finally { await rm(assigned, { recursive: true, force: true }); }
-    await cleanup();
-  } finally { await fixture.cleanup(); }
-});
-
-test('unit:session-cwd-own-checkout — the loop starts its research and triage sessions in a managed scratch checkout of the release it runs, never in the coordinator checkout', async () => {
-  const fixture = await installed({ research: true });
-  try {
-    const { root, head, config, cleanup } = fixture;
-    const managedRoot = worktreeRoot(root, config);
-    const started: { prompt: string; cwd: string; tool: string; holdsRelease: boolean }[] = [];
-    const runner: Runner = {
-      name: 'stub',
-      start: (prompt, options) => {
-        // The moment the session starts is the moment its checkout must already hold the code.
-        started.push({ prompt, cwd: options.cwd, tool: options.tool, holdsRelease: existsSync(join(options.cwd, 'src', 'loop.ts')) });
-        return { id: 'run-1', events: [], onEvent: () => () => {}, cancel: () => {},
-          result: async () => ({ ok: false as const, failure: { reason: 'cancelled' as const, detail: 'the test stub settles at once' }, payloads: [] }) };
-      },
-    };
-    const researchEvents: unknown[] = [], triageEvents: unknown[] = [];
-    // The production wiring hands the loop's own checkout as the research cwd; the loop must
-    // replace it with the scratch checkout before any session starts.
-    const effects = loopEffects([ready(), machineFiled()], {
-      loadedRelease: { commit: head, dirty: false },
-      recordResearch: async (item: Work, event: unknown) => { researchEvents.push({ key: item.key, event }); },
-      recordTriage: async (item: Work, event: unknown) => { triageEvents.push({ key: item.key, event }); },
-      research: { cwd: root, runner },
-    });
-    const logs: string[] = [];
-    await runDaemon(config, emptyDaemonState(config), effects, loopOptions(fixture));
-    assert.equal(started.length, 2, 'one research session and one triage session start');
-    for (const run of started) {
-      assert.ok(!run.cwd.startsWith(resolve(root)), `no research or triage session starts in the coordinator checkout (${run.cwd})`);
-      assert.ok(run.cwd.startsWith(resolve(managedRoot)), `the session starts under the managed worktree root (${run.cwd})`);
-      const name = run.cwd.split(sep).at(-2);
-      assert.match(name!, /^graphyard-approval-loop-scratch-/, 'the session starts in the loop scratch checkout');
-      assert.ok(run.holdsRelease, 'the scratch checkout holds the release the loop runs, so the session reads real code');
-    }
-    assert.equal(started[0].cwd, started[1].cwd, 'research and triage share the one scratch checkout this loop allocated');
-    assert.equal(existsSync(started[0].cwd), true, 'the scratch checkout outlives the loop: research runs detached into it keep working there');
-    assert.ok(researchEvents.length >= 1, 'the research run is recorded on the item');
-    assert.ok(triageEvents.length === 0, 'a run that settles without a judgement records no triage judgement');
-    await cleanup();
-  } finally { await fixture.cleanup(); }
-});
-
-test('unit:session-cwd-own-checkout — the loop keeps its scratch checkout: a reclaim pass past the orphan grace leaves it while the loop runs and after it stops', async () => {
-  const fixture = await installed({ research: true });
-  try {
-    const { root, head, config, cleanup } = fixture;
-    const managedRoot = worktreeRoot(root, config);
-    const runner: Runner = { name: 'stub', start: () => { throw new Error('no session starts in this test'); } };
-    const seen: { scratch: string | null; survives: boolean }[] = [];
-    // A cycle reads the snapshot first: there, with the loop running, the reclaim pass that runs
-    // every cycle in production is run long past the orphan grace.
-    const effects = loopEffects([], {
-      loadedRelease: { commit: head, dirty: false }, research: { cwd: root, runner },
-      snapshot: async () => {
-        const name = (await readdir(managedRoot)).find(entry => /^graphyard-approval-loop-scratch-/.test(entry));
-        const scratch = name ? join(managedRoot, name) : null;
-        seen.push({ scratch, survives: !!scratch && await survivesReclaim(root, config, scratch) && existsSync(join(scratch, 'checkout', 'src', 'loop.ts')) });
-        return { work: [], now: iso(0) };
-      },
-    });
-    await runDaemon(config, emptyDaemonState(config), effects, loopOptions(fixture));
-    assert.ok(seen.length >= 1, 'the loop ran at least one cycle');
-    for (const cycle of seen) {
-      assert.ok(cycle.scratch, 'the loop allocated its scratch checkout before its first cycle');
-      assert.ok(cycle.survives, 'a reclaim pass past the orphan grace leaves the scratch checkout, with its release, while the loop runs');
-    }
-    assert.ok(await survivesReclaim(root, config, seen[0].scratch!), 'a reclaim pass with no loop running leaves the scratch checkout too: a detached research run may still work in it');
-    await cleanup();
-  } finally { await fixture.cleanup(); }
-});
-
-test('unit:session-cwd-own-checkout — a restarted loop finds the research run the loop before it detached into the scratch checkout, and adopts it', async () => {
-  const fixture = await installed({ research: true });
-  try {
-    const { root, head, config, cleanup } = fixture;
-    const started: { cwd: string; directory: string }[] = [], adopted: string[] = [];
-    const pending = { id: 'run-1', events: [], onEvent: () => () => {}, cancel: () => {}, detach: () => {}, result: () => new Promise<never>(() => {}) };
-    // A research run that is still working when its loop stops: its directory is in the registry
-    // under the cwd it was started in, and it never settles while the test runs.
-    const runner: Runner = {
-      name: 'stub',
-      start: (_prompt, options) => {
-        const directory = join(options.runs!, 'research-run-1');
-        mkdirSync(directory, { recursive: true });
-        started.push({ cwd: options.cwd, directory });
-        return { ...pending, directory };
-      },
-      adopt: (directory: string) => { adopted.push(directory); return { ...pending, directory }; },
-    } as Runner;
-    const item = { ...ready(), type: 'feature' } as Work;
-    const events: ResearchEvent[] = [];
-    const record = async (_work: Work, event: ResearchEvent) => { events.push(event); };
-    try {
-      await runDaemon(config, emptyDaemonState(config), loopEffects([item], { loadedRelease: { commit: head, dirty: false }, recordResearch: record, research: { cwd: root, runner } }), loopOptions(fixture));
-      assert.equal(started.length, 1, 'the first loop starts one research run');
-      assert.equal(existsSync(started[0].directory), true, 'the run\'s registry entry survives the loop that started it');
-      // The restart: the process that started the run is gone, and the plane records it as running.
-      clearResearchRuns();
-      const running = { ...item, researchBrief: applyResearchEvent(item, events.find(event => event.event === 'started')!, 'graphyard-master', new Date()) } as Work;
-      await runDaemon(config, emptyDaemonState(config), loopEffects([running], { loadedRelease: { commit: head, dirty: false }, recordResearch: record, research: { cwd: root, runner } }), loopOptions(fixture));
-    } finally { clearResearchRuns(); }
-    assert.equal(started.length, 1, 'the restarted loop starts no second run');
-    assert.deepEqual(adopted, [started[0].directory], 'the restarted loop adopts the run from the registry in the same scratch checkout');
-    assert.ok(!events.some(event => event.event === 'failed'), 'the run is not written off as a timeout');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });

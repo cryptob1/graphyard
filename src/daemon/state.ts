@@ -7,7 +7,6 @@ import { z } from 'zod';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './text.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
-import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
@@ -338,10 +337,8 @@ export const daemonStateSchema = z.object({
   scope: z.unknown().optional(),
   /** Retired (GY-2874): orphaned supervisors, approver watches, absent sessions and deferred decisions; a cursor written before keeps parsing. */
   orphans: z.unknown().optional(), approvals: z.unknown().optional(), absences: z.unknown().optional(), decisionsDeferred: z.unknown().optional(),
-  /** Per item, head and base tip, the docs-sync session the loop launched for a docs-only conflict (GY-566). */
-  docsSyncs: z.record(z.string(), docsSyncWatchSchema).default({}),
-  /** Every confirmed conflict the loop routed, newest last: master status reads its hotspots from here (GY-566). */
-  conflicts: z.array(routedConflictSchema).default([]),
+  /** Retired (GY-2875): docs-sync sessions and the conflicts the loop routed; a cursor written before keeps parsing. */
+  docsSyncs: z.unknown().optional(), conflicts: z.unknown().optional(),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
   /**

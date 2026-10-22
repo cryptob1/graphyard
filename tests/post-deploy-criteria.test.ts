@@ -6,7 +6,7 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
-const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/master/intent.js'), ...await import('../src/model/goal-plan.js') });
+const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/master/intent.js') });
 
 // unit:post-deploy-criteria (GY-1660) — a criterion only the live install can satisfy after merge
 // and deploy deadlocked reviewer and worker (GY-1652 AC-3, GY-1657 AC-1..4). It is refused at
@@ -160,7 +160,7 @@ test('unit:post-deploy-criteria — the reviewer judges a declared criterion on 
   assert.ok(!plain.includes('post-deploy verification'));
   assert.ok(reviewPrompt(config, binding, undefined, undefined, declared).includes(section));
   const plane = { head: binding.sha, baseTip: binding.baseSha };
-  assert.ok(reviewPrompt(config, binding, undefined, undefined, declared, undefined, undefined, null, null, null, null, null, plane).includes(section));
+  assert.ok(reviewPrompt(config, binding, undefined, undefined, declared, undefined, undefined, null, null, null, null, plane).includes(section));
 });
 
 const release = 'c'.repeat(40), mergeSha = 'd'.repeat(40);
@@ -326,7 +326,7 @@ test('unit:post-deploy-criteria — the widened wordings read a served loop\'s c
 });
 
 test('unit:post-deploy-criteria — an item of nothing but declared post-deploy verifications is refused on every path, naming the item that ships the change', async () => {
-  const { createSchema, criteriaSchema, derivedIntent, postDeployOnlyRefusal, postDeployChecks, planItemSchema } = await modules();
+  const { createSchema, criteriaSchema, derivedIntent, postDeployOnlyRefusal, postDeployChecks } = await modules();
   const only = [{ id: 'AC-1', text: 'The live loop journals the remedy', proofs: ['manual:post-deploy/journal'] }, { id: 'AC-2', text: 'Production reports the rate', proofs: ['manual:post-deploy/rate'] }];
   assert.match(postDeployOnlyRefusal(only)!, /^AC-1, AC-2 are all declared post-deploy verifications, so no head can build anything this item's review judges before merge and its worker could only wait for the serving release\. Declare the verification on the item that ships the change it observes/);
   assert.match(postDeployOnlyRefusal(only.slice(0, 1))!, /^AC-1 is a declared post-deploy verification/);
@@ -335,9 +335,6 @@ test('unit:post-deploy-criteria — an item of nothing but declared post-deploy 
   assert.equal(createSchema.safeParse(intent(only)).success, false);
   assert.equal(criteriaSchema(50).safeParse(only).success, false, 'a requirements revision cannot leave an item with only declared verifications');
   assert.equal(criteriaSchema(50).safeParse([buildable, ...only]).success, true);
-  const plan = { ref: 'verify', title: 'Verify', plain: 'Checks the live rate.', outcomes: ['o1'], cases: ['c1'], criteria: only };
-  assert.equal(planItemSchema.safeParse(plan).success, false, 'a goal plan item of only declared verifications is refused');
-  assert.equal(planItemSchema.safeParse({ ...plan, criteria: [buildable, ...only] }).success, true);
   // master create and master requirements refuse it before posting, like an undeclared observation.
   const directory = await temporaryDirectory('post-deploy-only-intent');
   const file = join(directory, 'intent.json');

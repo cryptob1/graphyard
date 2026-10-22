@@ -1,6 +1,5 @@
 // Concern: who owns each attention item, control-plane attention, fleet and production summaries.
 import { environmentBlocked, blockedPath } from '../worker-sandbox.js';
-import { blockerView } from '../model/blocker-class.js';
 import { humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { automatableProof } from '../model/mechanical-proofs.js';
 import type { Work } from '../model.js';
@@ -102,11 +101,6 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then ${reviewNext}`);
   if (cause === 'launch-review') return agentOwner('master', `Fix the refusal reason, then ${reviewNext}`);
   if (cause === 'launch-producer') return agentOwner('master', 'Fix the refusal reason (graphyard master producer add FILE for a missing profile); the loop relaunches the producer on its own');
-  // A blocker of a routine class is the loop's to clear (GY-1008): it probes the cause every cycle.
-  const blocker = blockerView(work);
-  // A sandbox refusal the probe keeps failing on is the launcher's grant to fix (GY-134); the loop clears it once the grant lands.
-  const grant = environmentBlocked(work.blocker) ? `; while it fails, grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox")` : '; nothing to run by hand';
-  if (blocker && !blocker.needsSomeone) return agentOwner('control plane', `The loop re-checks the ${blocker.class} blocker every cycle and clears it once the probe passes${blocker.lastProbe ? ` (last probe ${blocker.lastProbe.at}: ${blocker.lastProbe.result})` : ''}${grant}`);
   // A required command the worker's sandbox refused is the launcher's to fix, never the item's (GY-134).
   if (environmentBlocked(work.blocker)) return agentOwner('master', `Grant ${blockedPath(work.blocker!) ?? 'the refused path'} to the worker's sandbox (docs/master-agent-sessions.md "Worker sandbox"), then graphyard master unblock ${key} REASON and dispatch it again`);
   // The owner follows the refusal the row shows: the first failing gate, then a bare blocker.
@@ -116,9 +110,6 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   if (manual) return agentOwner('master', `graphyard master attest ${key} ${manual} REASON`);
   if (first?.name === 'review') return agentOwner('reviewer', driven ? `The reviewer session judges it; ${reviewNext}` : `The reviewer session judges it; graphyard master review ${key} relaunches a refused review`);
   if (first?.name === 'merge' && work.stage === 'merge') return agentOwner('master', `Nothing to run by hand: GitHub merges ${key} once its merge gate passes`);
-  // A master-role refusal is not a cause anyone clears (GY-1761): the token's role is by design, so the
-  // step itself is what a master-role identity takes — this session, or a doctor run — then the unblock.
-  if (blocker?.class === 'master-role') return agentOwner('master', `The blocker names a step only the master role can take: run that master command from a master-role identity — this session, or a doctor run, in the coordinator checkout where .graphyard/master.json and the master role live — then graphyard master unblock ${key} REASON`);
   if (work.blocker) return agentOwner('master', `Clear the cause, then graphyard master unblock ${key} REASON; a cause that needs money, a third-party account or a person's credential goes to the human`);
   return agentOwner('master', `graphyard diagnose ${key}`);
 }

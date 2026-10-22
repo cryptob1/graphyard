@@ -10,7 +10,7 @@ import { Engine } from '../src/engine.js';
 import { evaluate, type Gate, type Observation, type Principal, type Work } from '../src/model.js';
 import { actionIdleMs } from '../src/model/actions.js';
 import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
-import { actionAccount, actionJudgment, gateRefusalCatalogue, nextAction, refusalAction, refusalRuleFor, refusalRuleIndex } from '../src/model/next-action.js';
+import { actionAccount, actionJudgment, nextAction, refusalAction } from '../src/model/next-action.js';
 import { accountOutcome, actionlessItems, stallBoundMs, stalledItems, type AccountOutcome } from '../src/model/action-account.js';
 import { stalledItemAttention } from '../src/cli/master-status.js';
 import { actionableSubjects } from '../src/master-daemon.js';
@@ -30,9 +30,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *   gate refusing while no review request stands — under every review provider, and asserts the
  *   control plane names an action or an explicit wait for each of them, never silence.
  * - `integration:action-mapping-total-over-states` runs the real gate evaluator over a battery of
- *   states, collects every refusal it words, and proves totality over outcomes rather than over
- *   rules: every refusal is a declared shape, every shape maps inside its declared kinds, every
- *   rule is reachable, and no state yields an item with a failing gate and no answer.
+ *   states, collects every refusal it words, and proves no state yields an item with a failing
+ *   gate and no answer.
  * - `unit:actionless-item-visible` asserts an item with no action and nothing moving it is named
  *   by master status, by the coordination loop's inventory and by the dashboard, with how long it
  *   has held its gate and what is missing — counted apart from items waiting on another item.
@@ -160,7 +159,7 @@ test('integration:no-failing-gate-without-action — an item whose review gate r
 /** Every refusal the evaluator worded for one probe, gate by gate. */
 const refusalsOf = (work: Work) => work.gates.flatMap(gate => gate.reasons.map(refusal => ({ gate: gate.name, refusal })));
 
-test('integration:action-mapping-total-over-states — every refusal the engine can word is a declared shape that maps to an action an executor can complete, an explicit dependency, or a recorded human need', async () => {
+test('integration:action-mapping-total-over-states — every refusal the engine can word maps to an action an executor can complete, an explicit dependency, or a recorded human need', async () => {
   const now = new Date();
   const item = await candidate();
   const other = await candidate();
@@ -225,9 +224,6 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
       // Every refusal, not only the first of the first refusing gate: the mapping is a function
       // of (gate, refusal, record) and every one of them has to land somewhere nameable.
       const kind = refusalAction(work, gate, refusal);
-      const shape = gateRefusalCatalogue.find(entry => entry.gate === gate && entry.match.test(refusal));
-      assert.ok(shape, `${probe.name}: no declared refusal shape claims ${gate}: ${refusal}`);
-      assert.ok(shape!.kinds.includes(kind), `${probe.name}: ${gate}: ${refusal} mapped to ${kind}, which ${shape!.id} does not declare (${shape!.kinds.join(', ')})`);
       assert.equal(refusalAction(work, gate, refusal), kind, 'the mapping is a function of its inputs');
     }
     // And the account for the whole item: an action an executor can complete, an action that is a
@@ -242,25 +238,6 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     if (outcome === 'action') assert.ok(['none', 'in-session', 'in-step'].includes(actionJudgment[account.action!.kind]), probe.name);
   }
 
-  // Every declared shape the engine can word was worded here: the battery is the enumeration, and
-  // a shape nothing reaches is a claim this test cannot make. Free-text shapes are exempt, since
-  // their wording comes from a person or a provider and no probe can pin it.
-  const declared = gateRefusalCatalogue.filter(shape => !shape.free);
-  const reached = new Set([...produced.values()].map(entry => gateRefusalCatalogue.find(shape => shape.gate === entry.gate && shape.match.test(entry.refusal))!.id));
-  assert.deepEqual(declared.filter(shape => !reached.has(shape.id)).map(shape => shape.id), [], 'every declared refusal shape was produced by the battery');
-  assert.deepEqual([...new Set(declared.map(shape => shape.gate))].sort(), ['build', 'merge', 'ready', 'review', 'test'], 'every gate declares refusals; acceptance gates nothing (GY-1235)');
-  assert.ok(produced.size >= declared.length, `the battery worded ${produced.size} distinct refusals for ${declared.length} declared shapes`);
-
-  // Totality over rules as well: every rule in the mapping is reachable from a declared shape, so
-  // a rule written for a refusal nobody can raise is visible rather than dead weight.
-  const rules = new Set(gateRefusalCatalogue.map(shape => refusalRuleFor(shape.gate, shape.example)?.index));
-  assert.deepEqual(refusalRuleIndex.filter(rule => !rules.has(rule.index)).map(rule => `${rule.gate ?? 'any'} ${rule.source}`), [], 'every rule in the mapping is reachable');
-  // And every declared example is claimed by its own shape first, so the catalogue is a function.
-  for (const shape of gateRefusalCatalogue) {
-    assert.ok(shape.match.test(shape.example), `${shape.id}: its example does not match its own pattern`);
-    const claimed = gateRefusalCatalogue.find(entry => entry.gate === shape.gate && entry.match.test(shape.example))!;
-    if (!shape.free) assert.equal(claimed.id, shape.id, `${shape.id}: its example is claimed by ${claimed.id} instead`);
-  }
   assert.ok((outcomes.get('action') ?? 0) > 0 && (outcomes.get('waiting-on') ?? 0) > 0 && (outcomes.get('human') ?? 0) > 0,
     `the battery reached every kind of answer: ${[...outcomes].map(([outcome, count]) => `${outcome}=${count}`).join(' ')}`);
 });

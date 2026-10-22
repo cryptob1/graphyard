@@ -7,7 +7,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { homedir } from 'node:os';
 import { createDecipheriv, createHash, createPrivateKey, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, type KeyObject } from 'node:crypto';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { connectDefaultRoles, connectProvider, ensureResearchWrapper, appendResearchCommand, fleetRequest, redactKey, relaySubscriptionLogin, type ConnectProvider } from '../fleet.js';
+import { connectDefaultRoles, connectProvider, fleetRequest, redactKey, relaySubscriptionLogin, type ConnectProvider } from '../fleet.js';
 import { type EnvironmentKind, type MasterConfig } from './profiles.js';
 import { atomicPrivateText } from './config.js';
 import { failureText } from './worktrees.js';
@@ -156,18 +156,11 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
         : (connect.name ? discovered.find(entry => entry.name === connect.name) : undefined)
           ?? await createAgentEnvironment(root, provider.runtime as EnvironmentKind, discovered);
       const name = environment.name, home = environment.home;
-      const report = async (healthy: boolean, error: string | null, research = false) => {
-        await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: healthy ? { state: 'healthy', name, home, ...(research ? { research: true } : {}) } : { state: 'failed', name, error: error!.slice(0, 2000) }, fetch: fetcher });
-        const joined = connectDefaultRoles(provider.tier, provider.runtime).filter(role => role !== 'research' || research);
+      const report = async (healthy: boolean, error: string | null) => {
+        await fleetRequest(config, `agent-registry/connect/${connect.id}/result`, { body: healthy ? { state: 'healthy', name, home } : { state: 'failed', name, error: error!.slice(0, 2000) }, fetch: fetcher });
+        const joined = connectDefaultRoles(provider.tier, provider.runtime);
         reports.push({ id: connect.id, provider: provider.id, state: healthy ? 'healthy' : 'failed', detail: healthy ? `${name} joined ${joined.join(', ')}` : error!.slice(0, 500) });
       };
-      // Research is this host's own configuration (GY-409 AC-4): a cheap account joins it only
-      // once this host has made the account's Pi wrapper its research command, and the result is
-      // what reports it — the card never claims a placement the fleet cannot launch.
-      // The wrapper reads an OpenCode account's key, so a Pi account (which holds its own) has none.
-      const researchJoined = async () => provider.tier !== 'fast' || provider.runtime === 'pi' ? false
-        : await ensureResearchWrapper(name, home, options).catch(() => null)
-            .then(wrapper => wrapper ? appendResearchCommand(wrapper, options).catch(() => false) : false);
       if (provider.kind === 'api-key') {
         // The plaintext key exists only inside this block and is redacted from everything reported.
         const key = unsealToHost(privateKey, connect.sealed!);
@@ -176,7 +169,7 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
         await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'connecting', name }, fetch: fetcher });
         const smoke = await runSmokePrompt(provider, home, options);
         if (!smoke.healthy) { await report(false, redactKey(smoke.error!, key)); continue; }
-        await report(true, null, await researchJoined());
+        await report(true, null);
       } else {
         await fleetRequest(config, `agent-registry/connect/${connect.id}/progress`, { body: { state: 'connecting', name }, fetch: fetcher });
         // The URL and code reach the card while the login is still waiting on the operator's sign-in.
@@ -196,7 +189,7 @@ export async function processConnectAccounts(config: Pick<MasterConfig, 'url' | 
         if (!announced.length && (relay.url || relay.code)) await waiting(relay);
         if (!relay.loggedIn) { await report(false, relay.error ?? 'the login did not complete'); continue; }
         const smoke = await runSmokePrompt(provider, home, options);
-        await report(smoke.healthy, smoke.healthy ? null : smoke.error, smoke.healthy ? await researchJoined() : false);
+        await report(smoke.healthy, smoke.healthy ? null : smoke.error);
       }
     } catch (error) {
       const detail = redactKey(failureText(error), held ?? '').slice(0, 2000);

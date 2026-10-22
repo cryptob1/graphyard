@@ -26,8 +26,3 @@ A merge trial whose failing tests fail on the base tip too: no rework, no filed 
 ## Documentation
 
 `docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-and-speed) exempts them from the regression guard. One topic per page: a documented command exists, its links resolve, and the page stays current (`tests/docs-glossary.test.ts`, `scripts/check-docs.mjs`).
-
-### Documentation that rarely conflicts
-
-Conflicts only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides; on system-driven items the rework is the loop's round, due 10 minutes after the conflict's first record.
-

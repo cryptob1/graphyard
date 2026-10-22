@@ -182,17 +182,12 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)', door: 'the push exists only in the PR form, which the engine accepts only while GitHub is the merger (GY-1523) — exactly when the control plane is not the merge writer, so there is no writer queue to hand the push to; the writer\'s one push door (sync-push) carries only a pure base sync of the worker\'s own assigned branch, and the answer to a sandbox that cannot push is `complete --head`, which pushes nothing (GY-1925)' },
   'src/cli/workspace-worktree.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s workspace tools (`handoff`, `restore-branch`)', credential: 'the workspace checkout\'s own git credential', door: 'the fetch refreshes the workspace checkout\'s own remote-tracking refs for `restore-branch`\'s lease push and for an adopted pull request\'s branch, which the merge writer neither holds nor pushes; a rework workspace reads the registered local head and fetches nothing (GY-2017), and `restore-branch`\'s lease push replaces a worker branch the merge writer has no lease on' },
   'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential', door: 'it reads the open candidates\' worker branches, which the merge writer never fetches (its one read is the base tip), synchronously inside the status probe\'s time budget; the writer has no port for branch reads and is not wired under the github merger' },
-  'src/daemon/acceptance.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s acceptance step opening a goal\'s acceptance pull request under the github merger (base read, acceptance-branch push); under control-plane its base read is the merge writer\'s fetch', credential: 'the coordinator checkout\'s own git credential',
-    door: 'under the github merger GitHub merges the acceptance pull request, so its branch must be on the remote before one opens, and no merge writer runs; the writer pushes only a leased merge onto the base tip, never a review branch' },
-  'src/daemon/blocker-probes.ts': { subcommands: ['ls-remote', 'push'], runs: 'the loop\'s blocker probes: the confined credential script (`/bin/sh -c`) and the base-tip read', credential: 'whatever credential the confined worker holds — the probe exists to test it; the base-tip read uses the coordinator checkout\'s own', door: 'the confined credential and outage probes exist to test whatever credential the confined worker itself holds against the remote — run through the merge writer they would test the writer\'s credential and pass exactly where the next attempt fails; the base-tip read answers the outside-scope-test-failure probe at diagnosis time, when the plane, the writer or GitHub is itself the fault under test, so it cannot wait on a merge-writer queue' },
   'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)', door: 'it is the merge writer: its base fetch and leased push are the door itself' },
   'src/daemon/deployment.ts': { subcommands: ['fetch'], runs: 'the loop\'s deployment observation (the base tip it reads ancestry against)', credential: 'the coordinator checkout\'s own git credential', door: 'deployment observation must read the base tip and rc/* records fresh every cycle, including while the merge writer is stalled or disabled (github delivery mode runs none), and it writes nothing' },
   'src/daemon/held-cli.ts': { subcommands: ['clone'], runs: 'the loop pinning a held CLI snapshot', credential: 'none: a --shared clone of the checkout\'s own object store', door: 'a --shared clone of the checkout\'s own object store: it never reaches the remote, so there is no network call to move' },
   'src/daemon/upgrade.ts': { subcommands: ['fetch'], runs: 'the loop\'s self-upgrade reading the base tip', credential: 'the coordinator checkout\'s own git credential', door: 'the self-upgrade decides whether to restart the loop that runs the merge writer, so it must read the base tip without it, from a writer that may be the one owed the restart' },
-  'src/docs-sync.ts': { subcommands: ['fetch'], runs: 'the loop\'s docs-sync (branch and base reads)', credential: 'the coordinator checkout\'s own git credential', door: 'the fetches put a reviewed worker branch and its base into the coordinator\'s object store for an in-memory merge-tree and a detached worktree; the merge writer exposes no read of a branch it is not merging, and a failed fetch falls back to commits already held' },
   'src/master/worktrees.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s cycle preparation (cycleBaseTip, one fetch per cycle)', credential: 'the coordinator checkout\'s own git credential', door: 'the worker launcher prepares worktrees from the base tip in the coordinator\'s own object store, once per cycle; the merge writer runs as a serial queue step and publishes no base read other processes can await, so routing it there would serialize every launch behind merges' },
   'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on', door: 'it is the merge writer: pushArgs is the door\'s own leased push, defined here and executed only by the writer\'s ports' },
-  'src/server/routes/goals.ts': { subcommands: ['fetch'], runs: 'the server\'s land route judging a merge-writer landing', credential: 'none of its own: a compose container holds no SSH credential (GY-1922), so a failed fetch answers retryable 503 and records nothing', door: 'it runs in the server process, which cannot call the loop\'s merge writer; the fetch is best-effort and a failure falls back to the origin ref the writer\'s own post-push fetch leaves, so dropping it is a change to the land route\'s judgement, not a move' },
   'src/up.ts': { subcommands: ['fetch', 'push'], runs: '`graphyard up` publishing onboarding and moving the host checkout to the installed ref', credential: 'the operator\'s own git credential on the installing machine', door: '`graphyard up` runs on the operator\'s machine while onboarding a repository, before any loop or merge writer serves it, and pushes only its own onboarding branch, never the base the merge writer owns' },
 };
 
@@ -212,7 +207,7 @@ export const allowlist: Record<string, AllowlistEntry> = {
  * GY-1943: the acceptance and planner cluster. Each file either leaves both lists, its calls moved
  * behind the merge writer, or keeps an entry stating why its call cannot go through it.
  */
-export const acceptanceAndPlannerCluster = ['src/daemon/acceptance.ts', 'src/conflicts.ts', 'src/server/routes/goals.ts', 'scripts/prepare-acceptance.mjs', 'scripts/ci-tests.mjs'];
+export const acceptanceAndPlannerCluster = ['src/conflicts.ts', 'scripts/prepare-acceptance.mjs', 'scripts/ci-tests.mjs'];
 
 export const baseline = [
   'scripts/ci-tests.mjs',
@@ -221,16 +216,12 @@ export const baseline = [
   'src/cli/complete.ts',
   'src/cli/workspace-worktree.ts',
   'src/conflicts.ts',
-  'src/daemon/acceptance.ts',
-  'src/daemon/blocker-probes.ts',
   'src/daemon/cycle-merge-writer.ts',
   'src/daemon/deployment.ts',
   'src/daemon/held-cli.ts',
   'src/daemon/upgrade.ts',
-  'src/docs-sync.ts',
   'src/master/worktrees.ts',
   'src/merge-writer/executor.ts',
-  'src/server/routes/goals.ts',
   'src/up.ts',
 ];
 
@@ -303,7 +294,6 @@ test('unit:git-network-door — every file that spawns a git network subcommand 
 export const workerCliCluster = [
   'src/cli/complete.ts',
   'src/cli/sync-push.ts',
-  'src/daemon/blocker-probes.ts',
 ];
 
 test('unit:git-network-door — every worker CLI file left on the allowlist states why its call cannot go through the merge writer', () => {
@@ -329,7 +319,6 @@ export const docsSyncWorkspaceCluster = [
   'src/cli/checkout-restore-release.ts',
   'src/cli/workspace-worktree.ts',
   'src/daemon/held-cli.ts',
-  'src/docs-sync.ts',
   'src/master/worktrees.ts',
   'src/up.ts',
 ];

@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { daemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { RefusedResponse } from '../src/model/refusal.js';
-import { planeWideRefusal } from '../src/model/blocker-class.js';
+import { planeWideRefusal } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1751: a proxy's empty or HTML 502-504 on an operator-agent call keeps its status, so it is the plane's outage and not a SyntaxError.

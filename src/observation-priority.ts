@@ -132,8 +132,8 @@ export function observationBandLag(all: Work[], now: number) {
   return { bands: report, attention };
 }
 
-/** When the item's current submission was made: the documentation record's time for that PR, else when its stage was entered. */
-const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.submission?.pr && work.documentation?.submission?.at ? work.documentation.submission.at : work.stageEnteredAt;
+/** When the item's current submission was made: when its stage was entered. */
+const submittedAt = (work: Work) => work.stageEnteredAt;
 
 /**
  * Each band's observation lag (GY-492, GY-1114), read from the jobs and items in the work snapshot.

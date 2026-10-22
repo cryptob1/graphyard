@@ -49,10 +49,10 @@ export interface CycleCost {
 export const cycleBucketSteps: Record<CycleStepName, string> = {
   observe: 'the snapshot, follow-up threads, merge settings and reconcile steps',
   close: 'the observe, credentials, close, launches, master session and reclaim steps',
-  decisions: 'the scope, successors, blockers, base failures, review cap and decisions steps',
+  decisions: 'the scope, successors, base failures, review cap and decisions steps',
   dispatch: 'the dispatch and reviews and proofs steps',
   merge: 'the merges step',
-  deployment: 'the deployment verification, invariants, triage and setup steps',
+  deployment: 'the deployment verification, invariants and setup steps',
 };
 /** A cycle whose wall time passes this raises a liveness attention naming its three slowest steps (GY-616). */
 export const slowCycleMs = 60_000;

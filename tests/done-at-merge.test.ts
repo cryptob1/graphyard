@@ -10,7 +10,6 @@ import { groupOf, nextCommand } from '../src/model/board.js';
 import { prSteps } from '../src/model/pr-steps.js';
 import { leftFlowAt, noRelease, type ReleaseView } from '../src/model/release.js';
 import { flowExitAt } from '../src/flow-analytics.js';
-import { mergedItem } from '../src/model/goal-plan.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import { unhandled, type MasterSession } from '../src/cli/master/session.js';
 import { Engine } from '../src/engine.js';
@@ -71,10 +70,7 @@ test('unit:done-at-merge-board-and-goal — the board groups a merged item as sh
     assert.ok(steps.steps.every(step => step.state === 'done'));
     assert.equal(leftFlowAt(item, view), item.delivery!.mergedAt, `${item.key} leaves the flow at its merge`);
     assert.equal(flowExitAt(item), item.delivery!.mergedAt);
-    assert.equal(mergedItem(item), true, `${item.key} delivers its goal without any deployment observation`);
   }
-  assert.equal(mergedItem(delivered('GY-5', policy, { closure: { kind: 'superseded', reason: 'replaced', by: 'operator', at: iso(nowMs), from: 'done' } as never })), false, 'a closed item delivers nothing');
-  assert.equal(mergedItem(delivered('GY-6', policy, { stage: 'merge', delivery: undefined })), false, 'an unmerged item delivers nothing');
 });
 
 // ---- The deleted surface, and what older rows still carry -----------------------------------

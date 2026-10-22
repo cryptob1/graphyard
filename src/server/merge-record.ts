@@ -4,7 +4,6 @@ import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
 import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
-import { deliverSplitParent } from '../decomposition.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from '../model/merge-authorization.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
@@ -21,7 +20,7 @@ import type { Services } from './routes.js';
  * `refused`. Every record re-folds the item's ledger into `work.mergeLedger`, which the gates read
  * where they read GitHub's checks and mergeability for a control-plane observation (GY-1523), and
  * saves the item. A `reconciled` delivers the item exactly as a direct merge does (direct-merge.ts
- * `sweepDirectMerges`): stage done, the delivery, `settleDelivered`, `deliverSplitParent`, the jobs
+ * `sweepDirectMerges`): stage done, the delivery, `settleDelivered`, the jobs
  * row gone, all in the one transaction, saved as `merge-writer.delivered`; one for a merge commit
  * the base branch does not hold is refused, since nothing landed, and so is one (or a `pushed`)
  * for a merge commit the item's own open intent of its submitted head does not name, since a
@@ -128,7 +127,6 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       // What the delivery still owes, in the same transaction: nothing retries against it (GY-185).
       settleDelivered(work!, all, now);
       await save(db, work!, actor.id, deliveredReason, now, { mergeSha: data.mergeSha, observedTip: data.observedTip, mergedAt });
-      await deliverSplitParent(db, work!, all, now);
       // The job row after the item row (GY-1115), the order every transaction takes them in.
       await db.query('DELETE FROM jobs WHERE work_id=$1', [work!.id]);
     } else {

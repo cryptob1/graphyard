@@ -5,8 +5,7 @@ import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'no
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
-import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
-import { researchSettingsSchema } from '../research.js';
+import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { candidateSettingsSchema, mergeWriterSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
@@ -347,10 +346,7 @@ export const masterRunSchema = z.object({
   // A closed selection: only the narrow roles choose a runtime, so a key naming any other role is refused.
   runtimes: keepStrict(narrowRoleRuntimeSchema).optional(),
   pi: piRuntimeSchema.optional(),
-  // Research before build (GY-259): the cheap Pi session that briefs a feature before its worker
-  // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
-  research: researchSettingsSchema.optional(),
-  decomposition: decompositionSettingsSchema.optional(), // splitting broad items before first dispatch (GY-1126): size bounds and run time limit; it runs on run.research's account
+  research: z.unknown().optional(), decomposition: z.unknown().optional(), // research and splitting, retired by GY-2875; parsed so an older master.json loads
   doctor: z.unknown().optional(), // the pipeline doctor, retired by GY-2873; parsed so an older master.json loads
   // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
   // cause and fix item — its model, fallback, time limit, bound and log-reading commands.

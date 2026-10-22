@@ -127,24 +127,3 @@ export function paneServer(status: any | null): PaneServer {
 }
 
 export const checklistGreen = (items: readonly SetupItem[]) => items.every(item => item.done);
-
-/** The goal box's limits: a sentence to a few paragraphs, within a goal statement's bound. */
-export const goalLimits = { min: 10, max: 2000 } as const;
-
-/**
- * A goal described in plain words (GY-1419), as the goals API records it (GY-1443): the same
- * input as `graphyard goal FILE`, so the acceptance role drafts its customer outcomes and locked
- * E2E cases and the planner splits it into dependency-ordered items. The person names only what
- * to build; the users and deploy target stay general for the acceptance role to make concrete.
- */
-export function goalSubmission(text: string) {
-  const statement = text.replace(/\r\n/g, '\n').trim();
-  if (statement.length < goalLimits.min) throw new Error(`Describe what you want built in at least ${goalLimits.min} characters`);
-  if (statement.length > goalLimits.max) throw new Error(`Keep the description under ${goalLimits.max} characters`);
-  return {
-    statement,
-    users: ['The people this repository serves'],
-    constraints: [],
-    deployTarget: 'This repository\'s production deployment',
-  };
-}

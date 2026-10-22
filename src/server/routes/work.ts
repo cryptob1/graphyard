@@ -5,11 +5,7 @@ import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation
 import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
-import { recordBlockerProbe } from '../blocker-probe.js';
 import { closeWork } from '../close.js';
-import { recordTriage } from '../followups.js';
-import { answerResearch, recordResearch } from '../../research.js';
-import { recordDecomposition } from '../../decomposition.js';
 import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
@@ -48,41 +44,12 @@ export const workRoutes = defineRoutes('work', [
         : recordCapacity(context.services, context.actor, target, data, key);
     },
   },
-  // The loop's probe of a standing blocker's cause (GY-1008): recorded, and on a pass the blocker cleared.
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/blocker-probe$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'blocker-probe');
-      return recordBlockerProbe(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
-    },
-  },
-  // Research before build (GY-259): the loop records a run and its brief as the coordinator, and
-  // the operator answers the brief's product questions. Neither holds the item. Splitting a broad
-  // item before dispatch (GY-1126): the loop records the run, and the split it decides is made here.
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/(research|research-answer|decomposition)$/,
-    async handle(context, [id, action]) {
-      await refuseLead(context, id, action);
-      const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
-      if (action === 'decomposition') return recordDecomposition(context.services, context.actor, target, data, key);
-      return action === 'research' ? recordResearch(context.services, context.actor, target, data, key) : answerResearch(context.services, context.actor, target, data, key);
-    },
-  },
   // Closing an item that will never be delivered: the master's or an admin's, never a worker's.
   {
     method: 'POST', path: /^\/api\/work\/([^/]+)\/close$/,
     async handle(context, [id]) {
       await refuseLead(context, id, 'close');
       return closeWork(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
-    },
-  },
-  // The triage agent's judgement of a machine-filed item (GY-402). Review follow-ups are no longer
-  // recorded, filed or promoted (GY-1249): findings worth fixing are fixed on the same pull request.
-  {
-    method: 'POST', path: /^\/api\/work\/([^/]+)\/triage$/,
-    async handle(context, [id]) {
-      await refuseLead(context, id, 'triage');
-      return recordTriage(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // A closed-question proof (GY-109): the control plane asks the configured responder against the

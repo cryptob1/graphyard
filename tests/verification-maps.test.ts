@@ -121,9 +121,9 @@ test('unit:verification-maps-in-prompts — worker and reviewer requests inline 
   const binding = { key: 'GY-1495', pr: 1, sha: 'b'.repeat(40), baseSha: 'a'.repeat(40), policyRevision: 1 };
   const repository = { repository: 'owner/project' };
   const plain = reviewPrompt(repository, binding);
-  const reviewed = reviewPrompt(repository, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { maps: parsed, paths });
+  const reviewed = reviewPrompt(repository, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, { maps: parsed, paths });
   const reviewerDigest = verificationMapDigest(parsed, paths, 'reviewer');
   assert.ok(reviewerDigest && reviewed.includes(`gh pr diff 1 --repo owner/project. ${reviewerDigest}`), 'the digest follows the memory section');
   assert.equal(reviewed.replace(reviewerDigest, ''), plain);
-  assert.equal(reviewPrompt(repository, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { maps: parsed, paths: ['web/main.tsx'] }), plain);
+  assert.equal(reviewPrompt(repository, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, { maps: parsed, paths: ['web/main.tsx'] }), plain);
 });

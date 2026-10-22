@@ -5,7 +5,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
-import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, type BlockerProbeResult } from './blocker-probes.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import type { MergeWriterSummary } from './cycle-merge-writer.js';
@@ -51,12 +50,6 @@ import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit,
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
-import type { ResearchEvent } from '../research.js';
-import type { DecompositionEvent } from '../decomposition.js';
-import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
-import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
-import { plannerEffects, type PlannerEffects } from './planner.js';
-import type { TriageJudgement } from '../model/machine-backlog.js';
 import { readMechanicalFixState, type MechanicalFixState } from '../mechanical-findings.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
@@ -69,7 +62,7 @@ export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 /** GY-852: paste by pane_id, else name (profiles reuse names across sessions). */
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
-export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffects, ReadingEffects {
+export interface DaemonEffects extends ThroughputEffects, ReadingEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
@@ -133,8 +126,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   planeHealth?: () => Promise<string | null>;
   /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
   hostMemory?: () => Promise<HostMemoryReading | null>;
-  /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
-  /** GY-1740: hold an unleased post-deploy follow-up on the instant its blocker names, clearing it (`window`). */ deferWindow?: (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => Promise<Work>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`); absent, the loop applies no rework. */
   rework?: (work: Work, reason: string, binding?: string) => Promise<unknown>;
   /**
@@ -166,16 +157,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   answerSession?: (agent: HerdrAgent, keys: string[]) => void | Promise<void>;
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
-  /**
-   * Research before build (GY-259): records a research run's start, brief or failure on the item as
-   * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
-   * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
-   */
-  recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
-  research?: { cwd: string; runner?: Runner };
-  recordDecomposition?: (work: Work, event: DecompositionEvent) => Promise<unknown>; // GY-1126: a split run's start, decision or failure, as the coordinator; runs in `research`'s checkout and runner
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
-  recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>; // records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage)
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account a session was launched on, as its launcher recorded it: a worker attempt's own launch record, a reviewer's or producer's own selection, by the `session` named (GY-1582). */
@@ -231,8 +213,6 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
-  acceptance?: AcceptanceEffects; // the acceptance role (GY-1417); absent while the master identity is missing
-  planner?: PlannerEffects; // the planner (GY-1418); absent while the master identity is missing
   masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
 }
 

@@ -389,7 +389,7 @@ test('unit:upgrade-acts-on-cli-checkout-only — up lifts the pin from the CLI c
   await holdCliAt(cli.checkout, run, cli.loaded);
   assert.equal(readHeldCli(cli.checkout), cli.loaded);
   assert.equal(readHeldCli(managed.root), null, 'the managed repository never holds the pin: lifting through it removes nothing');
-  const request = { repository: 'owner/managed', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null } as Parameters<typeof upDependencies>[2];
+  const request = { repository: 'owner/managed', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null } as Parameters<typeof upDependencies>[2];
   const deps = upDependencies(managed.root, join(cli.checkout, 'bin', 'graphyard.mjs'), request, () => {});
   const lifted = await deps.liftLoopPins!();
   assert.match(lifted[0] ?? '', /the held snapshot at [0-9a-f]{12}/, JSON.stringify(lifted));

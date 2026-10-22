@@ -31,7 +31,6 @@ export async function assembleStatusSections<
   probe: any;
   observation: any;
   health: any;
-  hs: { report: unknown };
   setup: any;
   administration: any;
   daemon: any;
@@ -51,7 +50,7 @@ export async function assembleStatusSections<
   masterApi: any;
 }) {
   const {
-    master, snapshot, coordinator, cli, probe, observation, health, hs,
+    master, snapshot, coordinator, cli, probe, observation, health,
     setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, lag, status, disk, managedRoot, inventory, reclaimPlan,
     runtime, reviewRuntime, humanOnly, masterApi,
@@ -62,7 +61,6 @@ export async function assembleStatusSections<
     ...mergeWriterLine(coordinator),
     board: await timedStep('board', () => masterBoard(masterApi, snapshot, coordinator)),
     humanOnly: humanOnly.map(humanOnlyStatusRow),
-    conflictHotspots: hs.report,
     // GY-1927: what the plane enforces, from its recorded setting; a plane that records none merges on gates alone.
     autoMerge: coordinator?.autoMerge?.autoMerge !== false,
     mergeApproval: coordinator?.autoMerge?.line ?? 'routine merges permitted after gates pass',

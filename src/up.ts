@@ -6,7 +6,7 @@ import { hostname, tmpdir } from 'node:os';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { goalSubmission, setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
+import { setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
@@ -50,7 +50,7 @@ async function githubOwnerType(_owner: string): Promise<'User' | 'Organization' 
  * the Setup page with no token to paste. With --agent, every step has a non-interactive path (the
  * App manifest is driven through the master's browser profile and recorded under
  * .graphyard/master-actions like every master browser flow, accounts come from login homes already
- * on the host, the goal from a file) and only a step that needs a person's own device or identity —
+ * on the host) and only a step that needs a person's own device or identity —
  * a GitHub Mobile or passkey approval, a subscription login's browser approval — is handed off, as
  * one sentence plus a link or code; the run resumes on its own once it completes. Agent mode with
  * no browser profile stops before anything runs: App creation is never handed to a person.
@@ -61,7 +61,7 @@ async function githubOwnerType(_owner: string): Promise<'User' | 'Organization' 
  *
  * Every `up` (GY-1552): the control plane is the merge writer, with no GitHub Apps and no
  * browser profile; `install --no-github-app`, a deploy key from the operator's `gh` login, then the
- * same autonomy, onboarding, accounts, harness, master-loop and goal steps. A run recorded before
+ * same autonomy, onboarding, accounts, harness and master-loop steps. A run recorded before
  * the control plane became the only merge writer resumes with its deploy-key step still to run.
  */
 
@@ -70,9 +70,9 @@ export const upSupervised = (request: Pick<UpRequest, 'provider'>) => request.pr
 /** GY-1552: every `up` — the control plane is the merge writer, with no GitHub Apps. */
 export const upMergerControlPlane = (request: Pick<UpRequest, 'merger'>) => request.merger === 'control-plane';
 /** Supervised step list. */
-export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
+export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'] as const;
 /** Control-plane merger step list: deploy-key between host-supervisor and master-autonomy. */
-export const upControlPlaneSteps = ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop', 'goal'] as const;
+export const upControlPlaneSteps = ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'] as const;
 export type UpStep = typeof upControlPlaneSteps[number];
 /** The resumable steps for REQUEST: control-plane merger or the supervised list. */
 export const upStepsFor = (request: Pick<UpRequest, 'merger'>) => upMergerControlPlane(request) ? upControlPlaneSteps : upSteps;
@@ -85,8 +85,6 @@ export interface UpRequest {
   reviewer: string;
   /** The agent runtime the master and harness are set up for. */
   master: string;
-  /** A file holding the goal to submit once the checklist is green. */
-  goalFile: string | null;
   /** The Chrome profile signed in to GitHub that drives the App manifest in agent mode; the master's recorded one when omitted. */
   browserProfile: string | null;
   /** GY-1552: `control-plane` for every up (upRequestFromArgs sets it); absent only on a request recorded before. */
@@ -275,7 +273,6 @@ export interface UpResult {
   checklist: { id: SetupItemId; done: boolean; line: string }[];
   /** The onboarding pull request's work item as last read while up waited on it (GY-1478), or null. */
   onboarding: OnboardingWait | null;
-  goal: string | null;
   /**
    * GY-1477: one dashboard sign-in link for the reachable address (single use, within 10 minutes),
    * minted when the run ends green; null when none can be minted on this machine. Never a credential.
@@ -296,11 +293,9 @@ class ChildStop extends UpStop { constructor(message: string, exitCode: number, 
 class SudoNoWait extends Error {}
 
 interface UpState {
-  version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean; goal: string | null;
+  version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean;
   /** Where the install saved the operator's admin credential (a path, never the secret): what mints the sign-in link. */
   operatorTokenFile?: string | null;
-  /** The goal's request id, fixed before the first try so a rerun after an interruption never creates it twice. */
-  goalRequest?: string | null;
   /** The pull request that publishes the onboarding files, until it merges. */
   onboardingPullRequest?: string | null;
   /** The work item that pull request is filed as (GY-1478), and the request id that files it once. */
@@ -330,7 +325,7 @@ async function readState(root: string, request: UpRequest): Promise<UpState> {
       return { ...kept, completed: (state.completed ?? []).filter((step: string) => knownUpSteps.includes(step)) };
     }
   } catch (error: any) { if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error; }
-  return { version: 1, repository: request.repository, provider: request.provider, completed: [], noHerdr: false, goal: null };
+  return { version: 1, repository: request.repository, provider: request.provider, completed: [], noHerdr: false };
 }
 async function writeState(root: string, state: UpState) {
   const file = upStateFile(root);
@@ -414,8 +409,8 @@ const childStop = (step: string, args: string[], result: { code: number; stdout:
   new ChildStop(childFailure(step, args, result, more), exitCode, args.map(redactLine), childFirstStderr(result));
 
 export const signInAt = (link: string, base: string) => { const at = link.indexOf('#'); return at < 0 ? link : `${base.replace(/\/+$/, '')}/${link.slice(at)}`; };
-/** The steps a reinstall onto a fresh database runs again (GY-1851): the install, master init, the agent identities, the onboarding item, the accounts, the loop and the goal. */
-const reissueSteps: readonly UpStep[] = ['control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'master-loop', 'goal'];
+/** The steps a reinstall onto a fresh database runs again (GY-1851): the install, master init, the agent identities, the onboarding item, the accounts and the loop. */
+const reissueSteps: readonly UpStep[] = ['control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'master-loop'];
 const masterJson = (root: string) => readFile(resolve(root, '.graphyard/master.json'), 'utf8').then(parseJson, () => null);
 /**
  * GY-1851: GET /api/status at SERVER with each credential master.json records (the coordinator's,
@@ -800,8 +795,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       else if (refused.length) {
         state.reissue = refused;
         state.completed = state.completed.filter(name => !reissueSteps.includes(name));
-        // The onboarding item and the goal lived in the old database: they are filed again on the fresh one.
-        state.onboardingWork = null; state.onboardingRequest = null; state.goal = null; state.goalRequest = null;
+        // The onboarding item lived in the old database: it is filed again on the fresh one.
+        state.onboardingWork = null; state.onboardingRequest = null;
         await writeState(deps.root, state);
         deps.emit({ kind: 'note', text: `The control plane refused the recorded ${refused.join(', ')} credential${refused.length > 1 ? 's' : ''} (401): it serves a fresh database, so this run re-issues the coordinator and operator-agent credentials and starts the master loop on a fresh cursor, archiving the old one beside itself.` });
       }
@@ -1083,7 +1078,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     });
 
     await waitGreen(last.map(item => item.id), true);
-    // No goal is submitted until the onboarding pull request has merged and the base carries the workflows.
+    // Setup is green only once the onboarding pull request has merged and the base carries the workflows.
     if (state.onboardingPullRequest) {
       const pullRequest = state.onboardingPullRequest;
       const deadline = deps.now() + humanWaitMs;
@@ -1104,57 +1099,20 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (onboarding) onboarding = { ...onboarding, waitingFor: [], merged: true };
       state.onboardingPullRequest = null; await writeState(deps.root, state);
     }
-    /**
-     * GY-1915: the credential the goal step files with. Recording a goal needs admin or an operator
-     * agent, and since GY-1885 this install's own default credential is a
-     * worker: handing the child no token filed with that worker and died with 403. The operator's
-     * admin credential (as merger-setting resolves it: the saved file, else a host install's one-time
-     * claim redeemed here once and held in memory), else the master's operator-agent identity
-     * master-autonomy issued earlier in the run. Null when this machine holds neither.
-     */
-    const goalCredential = async (): Promise<string | null> => {
-      let admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
-      if (!admin && claim && !operator && deps.redeemClaim) { operator = await deps.redeemClaim(claim).catch(() => null); if (operator) claim = null; }
-      admin ??= operator;
-      if (admin) return admin;
-      const file = (await masterJson(deps.root))?.operatorAgent?.credentialFile;
-      const token = typeof file === 'string' ? (await readFile(resolve(file), 'utf8').catch(() => '')).trim() : '';
-      return token.length >= 32 ? token : null;
-    };
-    if (request.goalFile) {
-      await step('goal', async () => {
-        // A goal record, as `graphyard goal FILE` submits it, so the acceptance and planner roles run (GY-1443).
-        const goal = goalSubmission(await readFile(resolve(deps.root, request.goalFile!), 'utf8'));
-        const file = resolve(deps.root, '.graphyard/up-goal.json');
-        await writeFile(file, `${JSON.stringify(goal, null, 2)}\n`, { mode: 0o600 });
-        // The credential is resolved before the request id is minted, so a missing one stops here
-        // without touching the state the rerun replays (the merger-setting step resolves first too).
-        const credential = await goalCredential();
-        if (!credential) {
-          const missing = `neither the operator's admin credential nor the master's operator-agent credential is on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, and a worker credential cannot file a goal`;
-          throw new UpStop(`goal: ${missing}; place one on this machine and rerun ${rerun()}`, upExitCodes.prerequisite);
-        }
-        // The request id is saved before the first try: a rerun replays the same create, which the control plane answers once.
-        if (!state.goalRequest) { state.goalRequest = randomUUID(); await writeState(deps.root, state); }
-        const created = parseJson(await run('goal', ['goal', file], { env: { GRAPHYARD_TOKEN: credential, GRAPHYARD_REQUEST_ID: state.goalRequest } }));
-        state.goal = created?.key ?? 'created';
-        return `submitted as ${state.goal}`;
-      });
-    }
     // GY-1477: setup ends with the one sign-in link itself (minted with the operator's credential, a host
     // install's from its redeemed claim), on the reachable address, so nobody runs graphyard login afterwards.
     const base = await linkBase();
     const minted = base ? await mint() : null;
-    signIn = minted && base ? (state.goal ? signInAt(minted, base) : setupAddress(base, signInAt(minted, base))) : null;
+    signIn = minted && base ? setupAddress(base, signInAt(minted, base)) : null;
     const open = signIn ? `${signIn} (signs you in; works once, within 10 minutes)` : setupUrl ?? 'the dashboard';
-    return result(true, upExitCodes.green, state.goal ? `Graphyard is building ${state.goal}; follow it on the dashboard: open ${open}` : `Everything is green. Open ${open} and describe what you want built${request.agent ? ', or rerun with --goal FILE' : ''}.`);
+    return result(true, upExitCodes.green, `Everything is green. Open ${open} and file what you want built.`);
   } catch (error) {
     if (!(error instanceof UpStop)) throw error;
     return result(false, error.exitCode, error.message);
   }
 
   function result(ok: boolean, exitCode: number, next: string): UpResult {
-    return { ok, exitCode, herdrAttach, setupUrl, completed: [...state.completed], prompts, handoffs, checklist: last.map(({ id, done, line }) => ({ id, done, line })), onboarding, goal: state.goal, signIn, reachableUrl: state.tailnetUrl ?? null, next };
+    return { ok, exitCode, herdrAttach, setupUrl, completed: [...state.completed], prompts, handoffs, checklist: last.map(({ id, done, line }) => ({ id, done, line })), onboarding, signIn, reachableUrl: state.tailnetUrl ?? null, next };
   }
 }
 
@@ -1203,7 +1161,6 @@ export const upUsage = [
   '  --local                    --provider local: embedded Postgres on this machine, no Docker',
   '  --agent                    run every step non-interactively, JSON events on stderr; hand off only device approvals',
   '  --master NAME              the master agent runtime, claude or codex (default claude)',
-  '  --goal FILE                submit the goal in FILE once the checklist is green',
   "  --browser-profile PROFILE  the Chrome profile signed in to GitHub (default: the master's, else another install's for the same login); used only with --local",
   '  --github-mobile            approve Confirm access with GitHub Mobile (the default whenever the page offers it)',
   '  --sudo-code CODE|email     hand the waiting run a Confirm-access code (6 digits from an authenticator app, 8 from an email), or ask GitHub to email one',
@@ -1232,7 +1189,7 @@ export async function upSudoCode(root: string, args: string[]) {
 const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
 /**
  * The operator's up command past its repository (GY-1457): the provider and --agent, then every
- * other option that shapes the setup (master, goal, browser profile, install consent and
+ * other option that shapes the setup (master, browser profile, install consent and
  * SSH inputs, Mobile preference, wait), so a printed rerun or App-import route sets up the same thing.
  * --reuse-app and --no-wait are left to the command that prints it.
  */
@@ -1240,7 +1197,6 @@ export function upCommandFlags(request: UpRequest) {
   const flags: string[] = ['--provider', request.provider, ...(request.agent ? ['--agent'] : [])];
   const option = (name: string, value: string | null | undefined) => { if (value) flags.push(name, value); };
   if (request.master !== 'claude') option('--master', request.master);
-  option('--goal', request.goalFile);
   if (!upMergerControlPlane(request)) option('--browser-profile', request.browserProfile);
   if (request.sudo === 'mobile') flags.push('--github-mobile');
   if (request.waitMs) option('--wait', String(request.waitMs / 60_000));
@@ -1262,7 +1218,7 @@ export function recordedUp(root: string): { repository: string; provider: string
 }
 
 /** The options `graphyard up` parses; upUsage gives each one line (GY-1510), and --sudo-code is read before them. */
-export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, goal: { type: 'string' }, 'browser-profile': { type: 'string' },
+export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, 'browser-profile': { type: 'string' },
   'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
 /**
@@ -1286,7 +1242,7 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   // The origin rule master init applies (serverOrigin): HTTPS, or HTTP only on loopback.
   if (values.url !== undefined) { try { url = serverOrigin(values.url); } catch { throw new Error('Use --url with the control plane\'s origin: HTTPS, or HTTP on loopback (such as http://127.0.0.1:4311); no credentials, query or path'); } }
   return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: 'claude', master: values.master ?? 'claude',
-    goalFile: values.goal ?? null, browserProfile: values['browser-profile'] ?? null, merger: 'control-plane' as const,
+    browserProfile: values['browser-profile'] ?? null, merger: 'control-plane' as const,
     ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
     ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}) };
 }

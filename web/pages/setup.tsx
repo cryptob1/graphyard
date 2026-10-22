@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { checklistGreen, goalLimits, goalSubmission, paneServer, requestedView, setupChecklist, statusSupervised, type SetupItem } from '../../src/model/setup-checklist';
+import { checklistGreen, paneServer, requestedView, setupChecklist, statusSupervised, type SetupItem } from '../../src/model/setup-checklist';
 import { herdrConnectCommands, type HerdrWatch } from '../../src/herdr-connect';
 import { CopyButton } from './workers';
 import { findOnboardingWork, onboardingWait, type OnboardingWait } from '../../src/model/onboarding-work';
@@ -80,23 +80,13 @@ export function HerdrConnect({ watch }: { watch: HerdrWatch }) {
   </div>;
 }
 
-export function GoalForm({ onSubmit, busy, error, submitted }: { onSubmit: (text: string) => void; busy?: boolean; error?: string; submitted?: string | null }) {
-  const [text, setText] = useState('');
-  if (submitted) return <p className="notice" data-goal-submitted>Thanks — your goal is recorded as {submitted}. Graphyard drafts how it will be accepted, plans it and starts building.</p>;
-  return <form aria-label="Describe what you want built" onSubmit={event => { event.preventDefault(); onSubmit(text); }}>
-    <label>Describe what you want built<textarea name="goal" rows={5} minLength={goalLimits.min} maxLength={goalLimits.max} required value={text} onChange={event => setText(event.target.value)} placeholder="For example: a sign-up page that sends a welcome email"/></label>
-    {error && <p role="alert" className="amber">{error}</p>}
-    <button disabled={busy} data-goal-submit>{busy ? 'Sending…' : 'Start building'}</button>
-  </form>;
-}
-
 /**
  * The page body for a status answer and the work items (WORK, read at NOW), without the dashboard's
- * state: what the tests render. The onboarding change is a step of its own while it is open, so the
- * goal box waits for it as `graphyard up` does. WORKUNREAD: the work items are not read yet (or the
- * read failed), so whether the change merged is unknown and the goal box stays closed.
+ * state: what the tests render. The onboarding change is a step of its own while it is open, as
+ * `graphyard up` waits for it. WORKUNREAD: the work items are not read yet (or the read failed), so
+ * whether the change merged is unknown and the page is not yet green.
  */
-export function SetupView({ status, work, workUnread, now, onConnect, onSubmitGoal, busy, error, submitted }: { status: any; work?: readonly any[] | null; workUnread?: boolean; now?: number; onConnect: () => void; onSubmitGoal: (text: string) => void; busy?: boolean; error?: string; submitted?: string | null }) {
+export function SetupView({ status, work, workUnread, now, onConnect }: { status: any; work?: readonly any[] | null; workUnread?: boolean; now?: number; onConnect: () => void }) {
   // A supervised install (GY-1501) is set up as any other; it only provisions no approver.
   const supervised = statusSupervised(status), items = setupChecklist(status);
   const item = findOnboardingWork(work);
@@ -109,22 +99,11 @@ export function SetupView({ status, work, workUnread, now, onConnect, onSubmitGo
     {supervised && <p className="notice" data-supervised>An agent reviews each change and Graphyard merges it; no agent approves decisions on your behalf, so you answer each one.</p>}
     <PageSection title="Checklist" label="Setup checklist"><SetupChecklist items={items} onConnect={onConnect} onboarding={onboarding}/></PageSection>
     <PageSection title="Watch your agents in Herdr" label="Watch your agents in Herdr"><HerdrConnect watch={paneServer(status)}/></PageSection>
-    {green && <PageSection title="Your first goal" label="First goal"><GoalForm onSubmit={onSubmitGoal} busy={busy} error={error} submitted={submitted}/></PageSection>}
   </>;
 }
 
-/** The goal box's submit (GY-1443): a goal record through the goals API, as `graphyard goal` records one, never a plain work item. */
-export async function submitGoal(api: Dashboard['api'], text: string): Promise<string> {
-  const created = await api('goals', goalSubmission(text));
-  return created?.key ?? 'a new goal';
-}
-
 export default function SetupPage({ status, api, setView }: Pick<Dashboard, 'status' | 'api' | 'setView'>) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [submitted, setSubmitted] = useState<string | null>(null);
   // The work items, read while this page is open, so the onboarding change shows as the current step (GY-1478).
-  // Until a read answers, whether the change merged is unknown, so the goal box stays closed.
   const [work, setWork] = useState<any[] | null>(null);
   useEffect(() => {
     let live = true;
@@ -133,11 +112,5 @@ export default function SetupPage({ status, api, setView }: Pick<Dashboard, 'sta
     const timer = setInterval(read, 15_000);
     return () => { live = false; clearInterval(timer); };
   }, [api]);
-  const submit = async (text: string) => {
-    setBusy(true); setError('');
-    try { setSubmitted(await submitGoal(api, text)); }
-    catch (failure) { setError((failure as Error).message); }
-    finally { setBusy(false); }
-  };
-  return <SetupView status={status} work={work} workUnread={work === null} onConnect={() => { location.hash = 'connect'; setView('agents'); }} onSubmitGoal={text => void submit(text)} busy={busy} error={error} submitted={submitted}/>;
+  return <SetupView status={status} work={work} workUnread={work === null} onConnect={() => { location.hash = 'connect'; setView('agents'); }}/>;
 }

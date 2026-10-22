@@ -9,7 +9,6 @@ import { prSteps, stepSince } from './pr-steps.js';
 import { noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
 import { stalledCards } from './actionless.js';
 import { resourceConflicts } from '../coordination.js';
-import { blockerCounts, blockerView, routineBlocker, type BlockerView } from './blocker-class.js';
 
 /**
  * The board (GY-200): every open item in its one group, with who acts next, the command that
@@ -139,7 +138,6 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   }
   // Blocked means the step's own actor cannot clear it (a recorded blocker, a stall, a violation,
   // a refusal no retry fixes): the master agent acts next.
-  const routine = group === 'blocked' ? routineBlocker(work) : null; if (routine) return routine; // GY-1008: the loop's to clear
   if (group === 'blocked') return { who: 'Master agent', does: 'Clear what blocks it, or decide it with its own identity' };
   if (group === 'up-next') {
     const held = upNextHold(work, all, now);
@@ -205,7 +203,7 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
   if (actor === 'human-only') return humanRow?.answer.cli ?? (work.humanRequest ? answerCommand(key, work.humanRequest) : null);
   if (actor === 'reviewer') return `graphyard master review ${key}`;
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
-  if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
+  if (work.blocker) return `graphyard master unblock ${key} REASON`;
   return null;
 }
 
@@ -223,7 +221,7 @@ export interface BoardItem {
   since: string;
   /** Past the fault bound (`overdueAfterMs`) in a group that carries a clock. */
   overdue: boolean;
-  /** The standing blocker's class, whether it needs someone, and its last and next probe (GY-1008); `summary` is the one plain sentence a Work page row shows for it (GY-1739), and `until` the instant a wait names. */ blocker?: BlockerView & { summary: string; until?: string };
+  /** The standing blocker: `summary` is the one plain sentence a Work page row shows for it (GY-1739), and `until` the instant a wait names. */ blocker?: { summary: string; until?: string };
 }
 export interface Board {
   now: string;
@@ -231,7 +229,7 @@ export interface Board {
   overdueAfterMs: number;
   groups: Record<OpenGroup, BoardItem[]>;
   counts: Record<OpenGroup, number>;
-  open: number; /** Blocked items, and of them those needing someone: only a genuine or human-only class (GY-1008). */ blockers?: { total: number; needingSomeone: number };
+  open: number; /** How many open items carry a blocker. */ blockers?: { total: number };
 }
 
 /** Every open item into its group with its next actor, command, since and overdue. */
@@ -247,13 +245,13 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
       : group === 'blocked' && stalls.has(entry.id) ? stalls.get(entry.id)!.heldSince
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
-    const view = blockerView(entry), wait = view && blockerSummary(entry.blocker!, now, entry, 'UTC'), blocker = view && wait && { ...view, summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
+    const wait = entry.blocker ? blockerSummary(entry.blocker, now, entry, 'UTC') : null, blocker = wait && { summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
     return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
       actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,
-    counts: Object.fromEntries(groups.map(group => [group, board[group].length])) as Record<OpenGroup, number>, open, blockers: blockerCounts(groups.flatMap(group => board[group])) };
+    counts: Object.fromEntries(groups.map(group => [group, board[group].length])) as Record<OpenGroup, number>, open, blockers: { total: groups.flatMap(group => board[group]).filter(entry => entry.blocker).length } };
 }
 
 /**
@@ -288,5 +286,5 @@ export async function masterBoard(api: (path: string) => Promise<any>, snapshot:
     board = boardFromStatus(snapshot.work, Date.parse(snapshot.now), status);
   }
   const items = groups.flatMap(group => board.groups[group]);
-  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs, blockers: board.blockers ?? blockerCounts(items), owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
+  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs, blockers: board.blockers ?? { total: items.filter(entry => entry.blocker).length }, owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
 }

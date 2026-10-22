@@ -99,7 +99,7 @@ function dependencies(root: string, events: UpEvent[], w: UpWorld): UpDependenci
   };
 }
 
-const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null, merger: 'control-plane' });
+const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null, merger: 'control-plane' });
 
 /** A root whose up state records every step but the master loop done, so a run reaches that step alone. */
 async function resumedRoot(label: string) {

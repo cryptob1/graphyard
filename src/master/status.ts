@@ -1,6 +1,5 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
 import { concurrentOverlap, inFlight, dispatchable, dispatchSort } from '../coordination.js';
-import { blockerView } from '../model/blocker-class.js';
 import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
 import { standingCapacity, describeCapacity, quotaRoles } from '../model/capacity.js';
@@ -18,10 +17,9 @@ import type { HerdrAgent } from './herdr.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
 import { launchFailedBeforeStart } from '../model/lease-end.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
-import { maxInFlight, requestRemedy } from '../model/dispatch.js';
+import { maxInFlight } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergeAuthorized, mergedWithoutAuthorization, refusedReconciliation, unauthorizedMergeViolation } from '../model/merge-authorization.js';
-import { splitRelation, splitReport } from '../decomposition.js';
 import type { ProjectMemory } from '../model/project-memory.js';
 import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.js';
 
@@ -77,7 +75,7 @@ export function describeDispatch(work: Work, reviews: { pending: any[]; complete
   // the attempts so far and when the next one is due are reported beside the request.
   const retry = (requestId: string) => sessions.retries?.find(entry => entry.requestId === requestId) ?? null;
   const describe = (request: NonNullable<typeof state.review>, records: any[]) => ({ requestId: request.id, sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision, requestedAt: request.requestedAt, sinceMs: since(request.requestedAt), reason: request.reason,
-    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id), remedy: requestRemedy(work, request),
+    ...(request.group ? { group: request.group, proofs: request.proofs } : {}), session: session(records, request.id), failure: failure(request.id), retry: retry(request.id),
     // A proof the producer found does not exercise its criterion returns the head to its worker (GY-817).
     ...(request.group ? unexercisedOf(request) : {}) });
   const unexercisedOf = (request: NonNullable<typeof state.review>) => {
@@ -277,16 +275,13 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         refreshed: refreshCarry ? { from: refreshCarry.from.sha, head: refreshCarry.to.sha, base: refreshCarry.to.baseSha, ground: describeGround(refreshCarry.ground),
           approval: { carried: refreshCarry.approval.carried, reason: refreshCarry.approval.reason },
           evidence: refreshCarry.evidence.map(entry => ({ proof: entry.proof, carried: entry.carried, reason: entry.reason })) } : null } : null,
-      // The standing blocker's class, the loop's last probe of it and when it runs next (GY-1008).
-      blocker: blockerView(work),
+      blocker: work.blocker,
       overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now),
       // The review and proofs held by carry across a Graphyard-authored merge, each with its ground:
       // the verdict given before that merge, shown as carried rather than as freshly passed.
-      carried: carriedBindings(work, snapshot.work, new Date(now)),
-      // The split relation (GY-1126): a child's parent, or a parent's children and the run that split it.
-      split: splitRelation(work) };
+      carried: carriedBindings(work, snapshot.work, new Date(now)) };
   });
   // Every delivery whose gates had not passed at the merge, apart by how it was judged: reconciled — the
   // record at the merge cutoff satisfied every gate — or operator-authorized, where it did not
@@ -345,8 +340,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     // GY-1779: the readings the loop owes loop-owned observation items, with the loop's last record of each (`reading:ITEM:RELEASE`).
     pendingReadings: pendingReadings(rows, snapshot.work, loop, now),
     workers: workerSessions, reviews, producers: sessions.producers, work: rows, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
-    // Every split parent and its children's progress (GY-1126): the parent is delivered when they all are.
-    splits: splitReport(snapshot.work),
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) },
     // The shared project memory the loop keeps (GY-1125), as its cursor holds it; null while the cursor is unreadable.
     projectMemory: loop && 'projectMemory' in loop ? loop.projectMemory ?? null : null };

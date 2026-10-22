@@ -35,7 +35,7 @@ async function reviewSelf({ api, args }: CliContext) {
   const head = selfGit('rev-parse', 'HEAD');
   const base = selfGit('merge-base', 'HEAD', `refs/remotes/origin/${baseBranch}`);
   const maps = await readVerificationMaps(process.cwd(), baseBranch, defaultChildRun).catch(() => []);
-  const standard = reviewStandard({ key: work.key, head, base }, work.criteria, work.documentation ? { obligation: work.documentation, files: null } : undefined, { maps, paths: selfGit('diff', '--name-only', base, head).split('\n').filter(Boolean) });
+  const standard = reviewStandard({ key: work.key, head, base }, work.criteria, null, { maps, paths: selfGit('diff', '--name-only', base, head).split('\n').filter(Boolean) });
   console.log('Judge your own diff exactly as the independent reviewer will; fix every finding you would mark BLOCKING before you run complete.');
   console.log(standard);
 }

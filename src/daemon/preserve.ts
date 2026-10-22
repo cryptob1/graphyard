@@ -3,7 +3,7 @@ import type { Work } from '../model.js';
 import type { WorkerProfile } from '../master.js';
 import { type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { planeWideRefusal } from '../model/blocker-class.js';
+import { planeWideRefusal } from '../model/refusal.js';
 import type { DaemonEffects } from './effects.js';
 // step-budget imported lazily below
 

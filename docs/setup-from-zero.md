@@ -12,15 +12,15 @@ git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphya
 cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default) or local
 ```
 
-`up` runs: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts, harness, master loop, goal — filed with the operator's admin credential (else the master's operator-agent identity; neither: exit 2). The loop merges onboarding's change; goals wait. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until the loop runs this CLI's commit.
+`up` runs: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts, harness, master loop. The loop merges onboarding's change. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until the loop runs this CLI's commit.
 
 ## The Setup page
 
-A step needing a person prints a Setup-page link (`SERVER/#sign-in=CODE&setup`) and waits until green. Once green, **Describe what you want built** records a goal.
+A step needing a person prints a Setup-page link (`SERVER/#sign-in=CODE&setup`) and waits until green.
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--goal FILE] [--url URL]`; exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). The deploy key is the only GitHub access. Missing repo: `gh repo create --source . --push`; preflight refuses `/tmp`, `/var/tmp`.
+`up --agent` takes `[--url URL]`; exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). The deploy key is the only GitHub access. Missing repo: `gh repo create --source . --push`; preflight refuses `/tmp`, `/var/tmp`.
 
 ## Troubleshooting: manual steps
 
@@ -68,4 +68,4 @@ Connect accounts; host-logged-in accounts register with `gy master registry prop
 
 ## 12. First item end to end
 
-The Setup page's goal, or `gy master create item.json REASON`. **Verify:** `gy status GY-1` reaches `done`.
+`gy master create item.json REASON`. **Verify:** `gy status GY-1` reaches `done`.

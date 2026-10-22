@@ -270,13 +270,6 @@ test('unit:board-blocked-declined-human-names-master — a declined human answer
   assert.doesNotMatch(summary.sentence, /only you|Waiting on a human/);
 });
 
-test('unit:board-blocked-classified-before-item-wait — a classified fault that mentions another item reads as that fault, not as a wait on the item', () => {
-  const failure = 'npm test failed outside plannedFiles in tests/ui-dashboard.test.ts after GY-1234 landed on main';
-  assert.equal(plain.blockerSummary(failure, NOW).kind, 'outside-scope-test-failure');
-  assert.doesNotMatch(plain.blockerSummary(failure, NOW).sentence, /GY-1234/);
-  assert.equal(plain.blockerSummary('Waiting on GY-1689 to merge first', NOW).kind, 'item');
-});
-
 test('unit:board-blocked-next-action-no-echo — the item page Next-action paragraph points at the recorded blocker instead of repeating it', () => {
   const { work, item } = blockedScenario(agentReason);
   const escalated = { ...item, nextAction: { kind: 'attention', work: item.id, key: item.key, gate: 'ready', refusal: agentReason, reason: `${item.key} has waited past ${at(-minute)} on nobody named: ${agentReason}`,
@@ -336,21 +329,6 @@ test('unit:board-blocked-row-waiting-until — a blocker naming a future not-bef
   assert.equal(plain.blockerSummary(`Retry at ${retry}; the build failed`, NOW).kind === 'waiting-until', false);
   // The item's own observation window counts the same way.
   assert.match(plain.blockerSummary('Deferred.', NOW, { ...item, blocker: 'Deferred.', observationWindow: { notBefore, detail: '24h after deploy' } as Work['observationWindow'] }).sentence, /^Waiting until /);
-});
-
-test('GY-1739: the item page\'s What is left names the same clearer as the status once automatic clears are spent', async () => {
-  const blocker = 'git push failed: could not read Username for https://github.com: terminal prompts disabled';
-  const { work, item } = blockedScenario(blocker);
-  const probe = (clears: number) => ({ blocker, class: 'github-credential', probe: 'gh auth status', result: 'fail', detail: '', at: at(-minute), nextAt: null, clears });
-  for (const [clears, clearer] of [[0, /Graphyard re-checks it every cycle/], [3, /the master agent must clear it/]] as const) {
-    const blocked = { ...item, blockerProbe: probe(clears) } as unknown as Work;
-    const board = await served(work.map(entry => entry.id === item.id ? blocked : entry));
-    const summary = entry(board, item.key).blocker!.summary;
-    assert.match(summary, clearer, summary);
-    const left = whatIsLeft(blocked, NOW).flatMap(group => group.lines);
-    assert.ok(left.includes(summary), `What is left reads the row's summary (${clears} clears): ${left.join(' | ')}`);
-    assert.ok(plain.plainStatus(blocked, NOW).sentence.endsWith(summary));
-  }
 });
 
 // Every way a module names another: `import … from`, `export … from`, a side-effect `import`, a

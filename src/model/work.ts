@@ -14,13 +14,9 @@ import type { AgentRequest } from './agent-requests.js';
 import type { SessionHandle } from './sessions.js';
 import type { CapacityState } from './capacity.js';
 import type { HumanRequest } from './human-request.js';
-import type { ResearchRecord } from '../research.js';
-import type { DecompositionRecord } from '../decomposition.js';
 import type { Closure } from './closure.js';
-import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
-import { workOriginSchema } from './machine-backlog.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
@@ -69,14 +65,12 @@ export const createSchema = z.object({
   // responder against the bound candidate state instead of launching a producer session, and
   // records the answer as evidence. See model/closed-question.ts.
   closedQuestions: closedQuestionsSchema.optional(),
-  // Where Graphyard itself opened the item: the parent a review follow-up collects findings for.
-  origin: z.lazy(() => workOriginSchema).optional(),
+  // Retired (GY-2875): where Graphyard itself opened an item; one filed with it keeps parsing.
+  origin: z.unknown().optional(),
   // A system-driven item moves only through the loop: the master CLI refuses the hand actions the
   // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item
   // created before the field existed carries none and is not system-driven.
   systemDriven: z.preprocess(value => value === undefined ? systemDrivenDefault : value, z.boolean().optional()),
-  // `research` (GY-259, src/research.ts): false skips a feature's research, true researches any item. `split` (GY-1126, src/decomposition.ts): false never splits it before first dispatch, true splits it even within the size bounds.
-  research: z.boolean().optional(), split: z.boolean().optional(),
   // The earliest instant the observation this item owes can exist (GY-1698): a post-deploy
   // follow-up for a windowed reading carries it; released, the item is not dispatched before it.
   observationWindow: observationWindowSchema.optional(),
@@ -151,8 +145,6 @@ export interface Observation {
   protected: boolean; files: string[]; at: string;
   /** The candidate diff compared against its bound base; see regression-guard.ts. */
   scopeFiles?: ScopeFile[];
-  /** The e2e/contract.json outcome bindings the head changes or drops against the base tip, read by the control plane's own observation when the head touches the contract (GY-2602); unset when no contents were read. */
-  contractMoved?: string[] | null;
   /** The same judgement against the commit the candidate would land on, and the unlanded work its head carries; see model/landing-check.ts. */
   landing?: LandingCheck;
   revertedDelivery?: RevertedDelivery; // a merged change whose content the base branch does not hold; see model/landing-check.ts
@@ -188,11 +180,9 @@ export interface Work extends Create {
    * ended that attempt's lease and parked the item; the answer clears it, and answered requests
    * are kept in `humanRequests` (see model/human-request.ts).
    */
-  humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[]; /** The loop's last probe of the blocker's cause (GY-1008). */ blockerProbe?: import('./blocker-class.js').BlockerProbe | null;
-  /** What the research step found before build, and the product questions it asked (src/research.ts); the decomposition run before first dispatch and the split relation it recorded, set only by the control plane (src/decomposition.ts). */
-  researchBrief?: ResearchRecord | null; decomposition?: DecompositionRecord | null; parent?: string | null; children?: string[];
+  humanRequest?: HumanRequest | null; humanRequests?: HumanRequest[];
   /** Set when the item was closed without delivery (model/closure.ts); a closed item is `done` but never delivered. */
-  closure?: Closure | null; triage?: TriageRecord | null; pendingFollowUps?: PendingFollowUps | null; // triage: a machine-filed item's judgement (GY-402); pendingFollowUps: follow-ups held until it shipped (GY-845), stored before GY-1249 and never written now, model/machine-backlog.ts
+  closure?: Closure | null;
   /** Sessions of this item that ran out of provider quota, and any role with no account left (model/capacity.ts). */
   capacity?: CapacityState | null;
   /**

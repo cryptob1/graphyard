@@ -7,7 +7,6 @@ import type { HerdrAgent } from '../master/herdr.js';
 import { defaultChildRun } from '../child-runner.js';
 import { allocateManagedCheckout } from '../master/worktrees.js';
 import { worktreeRoot } from '../install/worktree-root.js';
-import { loopScratchCheckout } from '../producer.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
 import { carryUndeclared } from './state-cursor.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
@@ -133,43 +132,6 @@ export async function adoptHeadlessRuns(state: DaemonState, effects: DaemonEffec
 }
 
 /**
- * GY-1480: the checkout the research scratch worktree is made from — the managed repository's own,
- * whose commit the loop's release names, never the Graphyard CLI checkout, which holds no such
- * commit when the managed repository is another one. Without a repository it is the CLI's checkout,
- * which is the managed repository when Graphyard manages itself.
- */
-export const researchScratchSource = (config: Pick<MasterConfig, 'cliPath'>, repository?: string | null) => repository ? resolve(repository) : coordinatorCheckoutRoot(config.cliPath);
-
-/**
- * The research scratch checkout under SOURCE's managed worktree root, holding a detached worktree
- * of RELEASE (a commit of SOURCE) when one can be made: the directory sessions start in, or null
- * when no scratch could be allocated.
- */
-export async function openResearchScratch(source: string, config: MasterConfig, release: string | null, log: (line: string) => void): Promise<string | null> {
-  try {
-    // The path is the repository's, not this process's: a restarted loop takes up the scratch
-    // the loop before it left, so the detached research runs registered there (GY-453) stay in a
-    // directory that exists and are adopted from the registry they were written to.
-    const stable = loopScratchCheckout(worktreeRoot(source, config));
-    const scratch = existsSync(stable.directory) ? stable : await allocateManagedCheckout(source, config, 'approval', 'loop-scratch', '0'.repeat(40), '0'.repeat(8));
-    if (!release) return scratch.directory;
-    try {
-      // A worktree the loop before left is moved onto this loop's release; the run registry
-      // under its ignored .graphyard/ stays where it is.
-      if (existsSync(scratch.worktree)) await defaultChildRun('git', ['-C', scratch.worktree, 'checkout', '--detach', '--force', '--quiet', release]);
-      else await defaultChildRun('git', ['-C', source, 'worktree', 'add', '--detach', '--quiet', scratch.worktree, release]);
-      return scratch.worktree;
-    } catch (error) {
-      log(`[graphyard-master] the research scratch checkout holds no worktree of ${release.slice(0, 12)}: ${message(error)}`);
-      return scratch.directory;
-    }
-  } catch (error) {
-    log(`[graphyard-master] research and triage are off: no scratch checkout outside the coordinator checkout could be allocated: ${message(error)}`);
-    return null;
-  }
-}
-
-/**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
  * so a restart is always safe: it reconciles the cursor against Graphyard and keeps cycling.
  *
@@ -194,8 +156,6 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   checkoutRestore?: (settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>, unadopt?: (loaded: string) => Promise<unknown>) => Promise<unknown>;
   /** Re-executes this loop through its supervising unit when a served request owes a restart (GY-1658); defaults to `systemctl --user --no-block restart` of the unit this process runs under. */
   restartLoop?: () => Promise<unknown>;
-  /** The managed repository's checkout the loop runs for; its research scratch is a worktree of it (GY-1480). Defaults to the CLI launcher's checkout. */
-  repository?: string;
   /** The commit of the held-cli snapshot this process's modules were loaded from (GY-1773), null for the checkout's; defaults to reading where this module was loaded from. */
   loadedSnapshot?: () => string | null;
   /** The dispatcher's wake (GY-1490, loop-wake.ts): ends the sleep after a cycle as soon as the tick sees work the loop acts on. */
@@ -216,25 +176,12 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
   for (const signal of signals) host.on(signal, stop);
   const unlisten = () => { for (const signal of signals) host.off(signal, stop); };
   try {
-    // GY-866: research and triage sessions have no checkout of their own, so they read the code they
-    // judge from a scratch checkout of their own under the managed worktree root — a detached
-    // worktree of the release this loop runs, when one can be made, so the session still reads real
-    // code — never from the coordinator checkout: a session that works where it starts rewrites the
-    // control plane's own code. A root that cannot hold the scratch leaves the loop without research
-    // and triage rather than with sessions working in the coordinator checkout.
-    // A loop with neither has no scratch to place, so it needs no CLI launcher to place it from.
-    const needsScratch = Boolean(raw.research);
     // GY-1773: a loop the launcher pinned to a held snapshot (the self-upgrade from a dirty checkout)
     // runs the snapshot's commit, whatever the checkout beside it holds: that is its release.
     // The read tolerates a configuration without a CLI launcher (no root to read under): such a loop runs the checkout.
     const snapshot = options.loadedSnapshot ? options.loadedSnapshot() : typeof config.cliPath === 'string' ? loadedHeldSnapshot(coordinatorCheckoutRoot(config.cliPath)) : null;
     const loadedRelease = snapshot ? { commit: snapshot, dirty: false } : raw.loadedRelease ?? null;
-    const scratchDirectory = needsScratch ? await openResearchScratch(researchScratchSource(config, options.repository), config, loadedRelease?.commit ?? null, log) : null;
-    const scoped = new Proxy(raw, { get(target, property, receiver) {
-      if (property === 'research') return target.research && scratchDirectory ? { ...target.research, cwd: scratchDirectory } : undefined;
-      return Reflect.get(target, property, receiver);
-    } });
-    const effects = boundedPersist(namedEffects(scoped));
+    const effects = boundedPersist(namedEffects(raw));
     acquireDaemonLock(state, options.identity, now(), interval());
     // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
     // checkout must not report the release the process before it loaded. Its declared fields are
@@ -362,8 +309,6 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
       if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
       await launcher.idle();
       for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
-      // GY-866: the scratch checkout outlives the loop: research runs detached into it keep working
-      // and the next loop adopts them from it.
       unlisten();
       host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
       // Headless runs are detached (GY-453): the loop stops watching them and sends none of them a

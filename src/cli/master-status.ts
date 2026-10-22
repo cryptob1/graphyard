@@ -12,8 +12,6 @@ import { slowCycleAttention } from '../daemon/liveness.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
 import { actionlessItems, stallBoundMs } from '../model/action-account.js';
 import { leadTimeHeadline, loopCursorLines, mergeWriterLine, nameBaseBreaks } from './status-attention.js';
-import { nameUnobtainableReviews, type SettledReviewSession } from '../model/dispatch.js';
-import { unansweredRequestAttention, unobtainableReviewAttention } from './unanswered-requests.js';
 import { readAdministrationLedger, readSudoState, summarizeAdministration } from '../master-browser.js';
 import { livenessStatus } from './liveness-report.js';
 import { setupHealth } from './master-setup.js';
@@ -24,7 +22,6 @@ import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable, 
 import { ReportSections } from '../master/sections.js';
 import { promotionWait, releaseLagStatus } from '../master/release-lag.js';
 import { Timings, timedApi, timedStep, withTimings } from '../master/timings.js';
-import { hotspots } from './hotspots.js';
 import { observationThroughputStatus } from '../observation-priority.js';
 import { leaseHealthStatus } from './lease-health-attention.js';
 import { coordinationStep } from './coordination-snapshot.js';
@@ -41,7 +38,6 @@ export { observationThroughputStatus };
 export { stalledItemAttention } from './status-attention.js';
 export { humanNeededAttention, needsHumanActions } from './owed-report.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
-export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
 
 /** The `master status` report: work truth joined with Herdr session health, the ledgers, the dispatch schedule and the candidates' conflict sets. */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; now?: () => number } = {}) {
@@ -76,7 +72,6 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const disk = diskPressure(worktrees, await freeBytes(worktrees), diskThresholdBytes(master), reclaimPlan, { reclaimable: 'unreadable' in inventory && inventory.unreadable ? null : reclaimableNow(reclaimPlan, trees, snapshot.work, { idleMs: reclaimIdleMs(master), now: Date.now(), held: 'held' in inventory ? inventory.held : undefined }), pass: worktreePassOf(cursor?.reclaim), now: Date.now() });
   // The managed root, often its own volume, has its own minimum and budget.
   const managedRoot = await timedStep('managed root', () => managedRootStatus(root, master, [...reviewRecords, ...producerRecords]));
-  const hs = hotspots(daemonState);
   const intervalMs = master.run.intervalSeconds * 1000;
   const cycling = 'error' in daemonState ? null : daemonSummary(daemonState, Date.now(), intervalMs, master.hostId);
   const daemon = cycling ?? { running: false, error: (daemonState as { error: string }).error };
@@ -94,14 +89,11 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // Failed check a fixed base explains (GY-793).
   const status = nameBaseBreaks(pipelined, snapshot.work);
   const sudo = administration.sudo; // operator confirming their GitHub credential on device
-  // Unsatisfied settled request, or a review every session dismissed (GY-100), with the command that answers it.
-  const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
-  const unanswered = unansweredRequestAttention(status.work);
   // Open item with no named action: waiting on another item or a live session raises nothing.
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, owed judgments: derivedAttention (the loop reads it too).
-  const { generatedFiles, throughput, resources, derived: { requests, stalledItems: derivedStalls, actorless, conflicted, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+  const { generatedFiles, throughput, resources, derived: { requests, stalledItems: derivedStalls, actorless, conflicted, owed, budget, overlong } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, loop: cycling?.liveness ?? null, rows: status.work, trees,
       // GY-2015: the writer summary the cursor holds, so a held trial refusal reads as the loop reads it.
       mergeWriter: cycling?.mergeWriter ?? null,
@@ -112,10 +104,10 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const codeRoot = loopCodeRoot(master.cliPath, root);
   lag.attention.push(...leftBehindCheckoutAttention(cycling?.upgrade?.snapshot, readHeldCli(codeRoot), codeRoot));
   // Stalls: a mergeable pending merge (GY-344), a repair-lane merge (GY-406),
-  // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
+  // queue-head lag (GY-492), and slow renewals (GY-558).
   const observation = observationThroughputStatus(snapshot), health = leaseHealthStatus(coordinator);
-  const stalledItems = [...derivedStalls, ...observation.attention, ...health.attention, ...hs.attention];
-  const attentionItems = [...diskAttention, ...requests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...overlong, ...budget, ...triage, ...owed.items, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
+  const stalledItems = [...derivedStalls, ...observation.attention, ...health.attention];
+  const attentionItems = [...diskAttention, ...requests, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...overlong, ...budget, ...owed.items, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [])];
   // First: loop health, dispatcher, release lag (GY-437).
   const ahead = [...loopItems, ...dispatchItems, ...lag.attention];
@@ -129,15 +121,14 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const humanOnly = (coordinator?.humanOnly ?? []) as HumanRequestRow[];
   // A standing ledger refusal is attributed first (GY-131); what still reads as a symptom of a
   // resource at its bound is then rewritten to name that resource (GY-132).
-  const attributed = ledgerRefusalAttention({ work: status.work, attentionItems: nameUnobtainableReviews(attentionItems as (AttentionItem & { requestId?: string })[], unobtainable),
-    counts: { ...status.counts, dispatchUnanswered: unanswered.length, dispatchUnobtainableReview: unobtainable.length, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, overlongSessions: overlong.length, needsHuman: owed.rows.length, humanOnly: humanOnly.length,
+  const attributed = ledgerRefusalAttention({ work: status.work, attentionItems,
+    counts: { ...status.counts, reviewConflicts: conflicted.length, stuckRequests: stuck.stuck.length, overlongSessions: overlong.length, needsHuman: owed.rows.length, humanOnly: humanOnly.length,
       // Items with no action, split the way a reader has to read them: one waiting on another
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
-      ...backlog,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + overlong.length + triage.length + ahead.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + delivery.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + overlong.length + ahead.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + delivery.attention.length } }, snapshot.work);
   const sectionsReport = await assembleStatusSections({
-    master, snapshot, coordinator, cli, probe, observation, health, hs,
+    master, snapshot, coordinator, cli, probe, observation, health,
     setup, administration, daemon, dispatch, reviewRecords, producerRecords,
     owed, lag, status, disk, managedRoot, inventory, reclaimPlan,
     runtime, reviewRuntime, humanOnly, masterApi,
@@ -158,13 +149,8 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },
     liveness,
-    backlog,
     throughput,
-    // Commits no reviewer session ever got a verdict on, with the dismissed review.
-    unobtainableReviews: unobtainable.map(item => ({ work: item.subject, ...item.review })),
     ...sectionsReport,
-    // Open goals (GY-1417) with their stage and who acts next.
-    goals: await sections.optional('goals', 'GET /api/goals', async () => (await masterApi('goals?open=1&view=summary')).goals, () => null),
   };
 }
 

@@ -15,7 +15,7 @@ import type { Work } from './work.js';
 // hold every one of them over simulated days of the real loop, so a change that breaks one fails CI.
 // ---------------------------------------------------------------------------
 
-export const systemInvariants = ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog'] as const;
+export const systemInvariants = ['lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90'] as const;
 export type SystemInvariant = typeof systemInvariants[number];
 
 
@@ -24,8 +24,8 @@ export type SystemInvariant = typeof systemInvariants[number];
  * the defaults). A violation is a reading past its threshold.
  */
 export const invariantThresholdsSchema = z.object({
-  /** At most this many open follow-up items per parent item. */
-  followUpsPerParent: z.number().int().min(1).max(100).default(1),
+  /** Retired (GY-2875): the follow-up and triage invariants; a config written before keeps parsing. */
+  followUpsPerParent: z.unknown().optional(), untriagedBacklogHours: z.unknown().optional(), untriagedBacklogMax: z.unknown().optional(),
   /** No agent session open more than this long after its item is delivered or its decision settled. */
   sessionAfterSettleMinutes: z.number().int().min(1).max(1440).default(30),
   /** No candidate base-refreshed more than this many times without a head change of its own. */
@@ -35,9 +35,6 @@ export const invariantThresholdsSchema = z.object({
   /** The loop's cycle p90 stays under this, over the last `cycleWindowMinutes`. */
   cycleP90Seconds: z.number().int().min(1).max(3600).default(30),
   cycleWindowMinutes: z.number().int().min(5).max(1440).default(60),
-  /** Machine-filed backlog items left untriaged longer than this number at most `untriagedBacklogMax`. */
-  untriagedBacklogHours: z.number().int().min(1).max(720).default(24),
-  untriagedBacklogMax: z.number().int().min(0).max(1000).default(0),
 }).strict();
 export type InvariantThresholds = z.infer<typeof invariantThresholdsSchema>;
 export const invariantDefaults: InvariantThresholds = invariantThresholdsSchema.parse({});
@@ -69,23 +66,11 @@ export interface InvariantInput {
   thresholds?: Partial<InvariantThresholds>;
   /** The loop's retained cycle measures: when each ran and how long it took. */
   metrics?: readonly { at: string; durationMs: number; workMs?: number }[];
-  /** The docs-sync sessions the loop launched for docs-only conflicts (GY-566), and when each settled. */
-  docsSyncs?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
   /** The session runtime's listing this cycle; null when it could not be read. */
   agents?: readonly { name?: string; pane_id?: string }[] | null;
   /** The build the control plane reports it runs; null when it could not be read. */
   build?: string | null;
 }
-
-/** The one proof review follow-up items were filed with until GY-1249: what marks a machine-filed follow-up. */
-export const followUpProof = 'manual:review-followups-triaged';
-/** The parent a follow-up item was filed for: the approved item it depends on, or null for any other item. */
-export function followUpParent(work: Pick<Work, 'criteria' | 'dependencies' | 'title'>): string | null {
-  const followUp = work.criteria.some(criterion => criterion.proofs.includes(followUpProof)) || /^Follow-ups from the approved review of /.test(work.title);
-  return followUp ? work.dependencies[0] ?? null : null;
-}
-/** Filed by the product rather than a person: a follow-up of an approval, a recurring fault class, or an intervention pattern. */
-export const machineFiled = (work: Pick<Work, 'criteria' | 'dependencies' | 'title' | 'origin'>) => followUpParent(work) !== null || !!work.origin?.faultClass || !!work.origin?.pattern;
 
 const open = (work: Work) => work.stage !== 'done' && !isClosed(work);
 const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? parsed : null; };
@@ -106,15 +91,6 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
     checks.push({ invariant, threshold, reading: reading.slice(0, 500), holds: holds || !observed, observed, subjects: subjects.slice(0, 20), line: line.slice(0, 700) });
   };
 
-  // 1. At most one open follow-up item per parent (GY-402: 170 follow-ups for 40 parents).
-  const followUps = new Map<string, string[]>();
-  for (const item of work.filter(open)) { const parent = followUpParent(item); if (parent) followUps.set(parent, [...(followUps.get(parent) ?? []), item.key]); }
-  const crowded = [...followUps].filter(([, items]) => items.length > limits.followUpsPerParent);
-  const most = Math.max(0, ...[...followUps.values()].map(items => items.length));
-  judge('follow-ups-per-parent', `at most ${limits.followUpsPerParent} open follow-up item(s) per parent`,
-    crowded.length ? `${crowded.length} parent(s) hold more, the most ${most}: ${keysOf(work, [crowded[0][0]])[0]} has ${crowded[0][1].join(', ')}` : `the most open follow-ups on one parent is ${most}`,
-    !crowded.length, keysOf(work, crowded.map(([parent]) => parent)));
-
   // 2. No agent session open past its bound after its item is delivered or its decision settled (GY-403).
   const bound = limits.sessionAfterSettleMinutes * 60_000;
   if (input.agents) {
@@ -125,10 +101,6 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
       if (settled === null || now - settled <= bound) continue;
       for (const session of item.sessions ?? []) if (session.state === 'running' && !session.endedAt && listed(session.agentName, session.pane))
         lingering.push({ subject: item.key, detail: `${session.kind} session ${session.agentName ?? session.pane ?? session.id} on ${item.key}, ${minutes(now - settled)} after it was delivered` });
-    }
-    for (const watch of Object.values(input.docsSyncs ?? {})) {
-      const settled = time(watch.settledAt);
-      if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) lingering.push({ subject: watch.work, detail: `docs-sync session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after it settled` });
     }
     judge('lingering-sessions', `no session open ${limits.sessionAfterSettleMinutes} min after its item is delivered or its decision settled`,
       lingering.length ? `${lingering.length} session(s) still open, e.g. ${lingering[0].detail}` : 'no session outlived its item or decision', !lingering.length, lingering.map(entry => entry.subject));
@@ -179,12 +151,6 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   const p90 = percentile(durations, 0.9);
   if (p90 === null) judge('cycle-p90', `p90 under ${limits.cycleP90Seconds} s over ${limits.cycleWindowMinutes} min`, 'no cycle measured in the window', true, [], false);
   else judge('cycle-p90', `p90 under ${limits.cycleP90Seconds} s over ${limits.cycleWindowMinutes} min`, `p90 ${(p90 / 1000).toFixed(1)} s over ${durations.length} cycle(s)`, p90 < limits.cycleP90Seconds * 1000);
-
-  // 6. Machine-filed backlog items untriaged past the bound number at most the threshold (zero).
-  const triageBound = limits.untriagedBacklogHours * 3_600_000;
-  const untriaged = work.filter(item => open(item) && item.stage === 'backlog' && !item.ready && machineFiled(item) && now - (time(item.createdAt) ?? now) > triageBound);
-  judge('untriaged-backlog', `at most ${limits.untriagedBacklogMax} machine-filed backlog item(s) untriaged past ${limits.untriagedBacklogHours} h`,
-    untriaged.length ? `${untriaged.length} untriaged, the oldest ${untriaged[0].key}` : 'every machine-filed backlog item is triaged or younger than the bound', untriaged.length <= limits.untriagedBacklogMax, untriaged.map(item => item.key));
 
   record.report = checks; record.at = at;
   return checks;

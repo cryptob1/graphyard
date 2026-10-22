@@ -10,7 +10,6 @@ import type { ReleaseView } from '../../src/model/release';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
 import { Explained } from './term';
-import { blockerView } from '../../src/model/blocker-class';
 
 /** The plain sentence without its leading "Stuck: ": the group already says it is blocked. */
 const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replace(/^./, c => c.toUpperCase());
@@ -38,16 +37,11 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
       : group === 'blocked' ? unprefixed(status.blocking ?? status.sentence)
         : group === 'backlog' || (group === 'up-next' && actor.who === 'Nobody yet') ? actor.does : null;
   const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : null;
-  // A blocked row names its blocker's class and the loop's last and next probe of it (GY-1008).
-  const blocker = group === 'blocked' ? blockerView(item) : null;
-  // A blocker needing someone says so through its summary and actor (Master agent); a routine one shows its class and probe.
-  const probe = blocker && (blocker.needsSomeone ? null : [blocker.lastProbe ? `last probe ${blocker.lastProbe.result} ${formatDuration(Math.max(0, now - Date.parse(blocker.lastProbe.at)) / 60000)} ago` : 'not probed yet',
-    blocker.nextProbeAt ? `next in ${formatDuration(Math.max(0, Date.parse(blocker.nextProbeAt) - now) / 60000)}` : null].filter(Boolean).join(' · '));
   return <div className={`work-row group-${group} tone-${status.tone}${timed && held.overdue ? ' overdue' : ''}`} data-row={item.key} data-group={group} onClick={() => onOpen(item.id)}>
     <span className="row-key mono">{item.key}</span>
     <span className="row-main">
       <h3><button type="button" className="card-open" data-title aria-label={`${item.title} — open ${item.key}`} onClick={e => { e.stopPropagation(); onOpen(item.id); }}>{item.title}</button></h3>
-      <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No commit recorded yet' : '')}{blocker && <span className="blocker-class" data-blocker-class={blocker.class} data-needs-someone={blocker.needsSomeone} title={blocker.lastProbe ? `${blocker.lastProbe.probe}: ${blocker.lastProbe.detail}` : undefined}>{probe && <> · <span className="mono">{blocker.class}</span> · {probe}</>}</span>}</span>
+      <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No commit recorded yet' : '')}</span>
     </span>
     {steps ? <span className="row-steps"><StepsBar steps={steps} labelled={group !== 'blocked'}/></span> : <span className="row-steps"/>}
     <span className="row-who" title="Who acts next">{actor.who}</span>

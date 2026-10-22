@@ -9,7 +9,7 @@ import type { SessionHandleInput } from '../src/model/sessions.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { dispatchEffects, dispatchReadTimeoutMs, emptyDispatchCursor, runAutoDispatch, runDispatchTick, tickReadTimeout, type DispatchEffects } from '../src/auto-dispatch.js';
 import { boundedLaunch, launchBoundMs, LaunchBoundError } from '../src/master/launch-bound.js';
-import { planeWideFailure } from '../src/model/blocker-class.js';
+import { planeWideFailure } from '../src/model/refusal.js';
 import { planeUnavailableText } from '../src/model/refusal.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): 2026-10-06T13:41 is the tick's explicit clock (now: () => clock, snapshot now: at); Date.now() only measures how long the bounded tick took.

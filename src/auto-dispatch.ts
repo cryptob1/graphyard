@@ -693,8 +693,8 @@ export function postMergeRequest(work: Work): DispatchRequest {
 export const unknownParent = '0'.repeat(40);
 /**
  * File one follow-up item through the API as the given credential (GY-1525 AC-4): created under
- * `requestId`, then released under `requestId:ready` so it is worked without a triage pass, as the
- * research brief recommends for a defect a reviewer judged blocking on shipped code. Both calls
+ * `requestId`, then released under `requestId:ready` so it is worked at once, as a defect a reviewer
+ * judged blocking on shipped code should be. Both calls
  * replay under their keys, so a retry after a failed release creates nothing twice.
  */
 export async function postFollowUpItem(base: string, token: string, body: unknown, requestId: string, post: typeof fetch = fetch): Promise<{ key: string }> {

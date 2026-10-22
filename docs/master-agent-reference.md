@@ -3,7 +3,7 @@
 
 ## Items and human waits
 
-Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([the dashboard](onboarding.md#the-dashboard)); `answer GY-N …`; criterion-rewrite asks refused.
+Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([the dashboard](onboarding.md#the-dashboard)); `answer GY-N …`; criterion-rewrite asks refused. A `blocked` reason is plain text; `master unblock GY-N REASON` clears it.
 
 ## Promotion to autonomy
 
@@ -19,7 +19,7 @@ Graphyard's one remote credential is the merge writer's deploy key ([install](in
 
 ## Typed actions
 
-`nextAction`: `dispatch`/`request-review`/`request-rework`/`approve-scope`/`resync`/`reclaim`/`merge`. `dispatch`/`request-review` complete if a session answers the head. Three failures, unchanged reason: stalled rather than retrying; backoff never outlives it.
+`nextAction`: `dispatch`/`request-review`/`request-rework`/`resync`/`reclaim`/`merge`; a gate refusal is its reason string. `dispatch`/`request-review` complete if a session answers the head. Three failures, unchanged reason: stalled rather than retrying; backoff never outlives it.
 
 ## Recovery
 

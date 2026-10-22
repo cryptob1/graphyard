@@ -48,7 +48,7 @@ export interface ActionWait {
  * state no reader could previously distinguish from a healthy idle item. Nothing synthesises an
  * action to paper over it: naming an action no executor can complete is the failure mode the
  * mapping already guards against everywhere else (see `reviewStandstill` in
- * `refusal-mapping.ts`). It is reported instead — by `master status`, by the coordination loop's
+ * `next-action.ts`). It is reported instead — by `master status`, by the coordination loop's
  * actionable inventory, and by the dashboard.
  */
 export interface ActionAccount {

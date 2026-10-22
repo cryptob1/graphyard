@@ -224,7 +224,7 @@ test('What is left names who clears each state from the refusal itself: exhauste
   // A conflict with the base and unresolved review threads are the builder's to clear on a new head.
   const threads = { ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', ['Branch protection requires conversation resolution and 2 review threads are unresolved on 594f711015d0: a on b:1; c on d:2. GitHub blocks the merge until each is resolved'])] } as unknown as Work;
   assert.deepEqual(whatIsLeft(threads, NOW).map(group => [group.label, group.who]), [['Checking', 'Reviewer agent']]);
-  // A review refusal no launched reviewer can answer (src/model/refusal-mapping.ts reviewStandstill): the action the control
+  // A review refusal no launched reviewer can answer (src/model/next-action.ts reviewStandstill): the action the control
   // plane computed from it names who moves the item — proofs first, a fresh reading, or an escalation — never the reviewer.
   const standstill = (kind: string) => ({ ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', [])],
     nextAction: { kind, gate: 'review', refusal: 'Independent approval of the current commit is required', reason: 'standstill', llmRole: null } }) as unknown as Work;

@@ -30,42 +30,7 @@ export const evidencePayloadSchema = z.object({
 export type EvidencePayload = z.infer<typeof evidencePayloadSchema>;
 
 const line = (max: number) => z.string().trim().min(1).max(max);
-/**
- * What `graphyard_decompose` submits (GY-1126, src/decomposition.ts): the child items a broad item
- * is split into, or none to keep it whole. A child names the parent's criteria by ID only — the
- * control plane copies their text and proofs, so a split can drop or reword nothing — with the
- * earlier children (by position) it must land after. A payload written before GY-1992 may still
- * name each child's planned files; they are ignored.
- */
-export const decomposedChildSchema = z.object({
-  title: line(200), description: line(6000).optional(),
-  criteria: z.array(z.string().trim().regex(/^[A-Z]+-\d+$/)).min(1).max(20),
-  plannedFiles: z.unknown().transform(() => undefined).optional(),
-  after: z.array(z.number().int().min(0).max(9)).max(9).default([]),
-}).strict();
-export const decompositionPayloadSchema = z.object({ reason: line(2000), children: z.array(decomposedChildSchema).max(10) }).strict()
-  .refine(payload => payload.children.length !== 1, 'A split names at least two children; an empty list keeps the item whole');
-export type DecompositionPayload = z.infer<typeof decompositionPayloadSchema>;
-
-/**
- * `run.decomposition` in .graphyard/master.json (GY-1126): the size bounds an item is judged
- * against before its first dispatch, and the bound on one decomposition run. The run uses the
- * research account and model (`run.research`); a loop without one splits nothing.
- */
-export const decompositionSettingsSchema = z.object({
-  enabled: z.boolean().default(true),
-  maxCriteria: z.number().int().min(1).max(50).default(4),
-  // Retired with plannedFiles (GY-1992): an installation that still sets either loads, and they bound nothing.
-  maxBroadScopes: z.unknown().transform(() => undefined).optional(), maxPlannedFiles: z.unknown().transform(() => undefined).optional(),
-  maxEstimatedLines: z.number().int().min(100).max(100_000).default(600),
-  timeoutMinutes: z.number().int().min(1).max(60).default(10),
-  concurrency: z.number().int().min(1).max(16).default(4),
-}).strict();
-export type DecompositionSettings = z.infer<typeof decompositionSettingsSchema>;
-/** The estimated-lines bound in force. */
-export const estimatedLinesBound = (settings: DecompositionSettings) => settings.maxEstimatedLines;
-
-export const graphyardTools = { evidence: 'graphyard_submit_evidence', decompose: 'graphyard_decompose' } as const;
+export const graphyardTools = { evidence: 'graphyard_submit_evidence' } as const;
 
 /**
  * `run.diagnostician` in .graphyard/master.json (GY-439): the headless model settings the

@@ -22,6 +22,12 @@ declare module './work.js' {
 export const trialRefusal = (head: string, baseTip: string) => `merge writer has not trialled ${head.slice(0, 12)} on ${baseTip.slice(0, 12)}`;
 /** The control-plane merge gate's refusal until the merge ledger records this head pushed and the push reconciled. */
 export const pushRefusal = (head: string) => `merge writer has not pushed ${head.slice(0, 12)}`;
+/** A required check's refusal on the candidate, with its rerun tail when one is recorded. */
+export const ciCheckRefusalPattern = /^Required CI check (.+?) has not passed on the current candidate(?:; rerun: ([\s\S]*))?$/;
+export const mergeWriterTrialPattern = /^merge writer has not trialled \S{1,12} on \S{1,12}$/;
+export const mergeWriterPushPattern = /^merge writer has not pushed \S{1,12}$/;
+/** Whether `refusal` of `gate` is one the merge writer itself answers (GY-2010). */
+export const mergeWriterRefusal = (gate: string, refusal: string) => gate === 'test' ? mergeWriterTrialPattern.test(refusal) : gate === 'merge' && mergeWriterPushPattern.test(refusal);
 /**
  * The two control-plane refusals for `candidate` (GY-1523), read from the item's folded merge
  * ledger (model/merge-ledger.ts, GY-1519) alone. The writer records `merge.intent` for a head only
@@ -60,10 +66,8 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   const lane = itemLane(work);
   const speedTarget = laneSpeedTargets[lane];
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
-  // A split parent (GY-1126) is never dispatched itself: it waits until every child is delivered, which delivers it (src/decomposition.ts).
-  const children = (work.children ?? []).filter(key => !all.some(w => w.key === key && isDelivered(w)));
   add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`),
-    ...children.map(key => `Split into child items: ${key} is not delivered`), ...(work.blocker ? [work.blocker] : [])]);
+    ...(work.blocker ? [work.blocker] : [])]);
   const candidate = work.candidate;
   const obs = work.observation;
   const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;

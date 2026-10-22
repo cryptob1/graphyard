@@ -19,9 +19,7 @@ import { onto } from './model/base-refresh.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './model/merge-authorization.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
-import { protectedCasePrefix, protectedCaseRefusals, readProtectingGoals } from './model/goal.js';
 import { buildIdentity } from './protocol-version.js';
-import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
@@ -45,7 +43,6 @@ import { loopOwnedRefusal, ownerHoldRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
 import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { mechanicalHoldUntil } from './mechanical-findings.js';
-import { decompositionHoldGraceMs, deliverSplitParent, splitChildRevisionRefusal } from './decomposition.js';
 import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
@@ -65,7 +62,7 @@ const retiredField = z.unknown().transform(() => undefined).optional();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
-  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs, split: createSchema.shape.split }).strict(),
+  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
@@ -84,10 +81,8 @@ const commands = {
   // The record is the item's preserved-attempt history, kept on the ledger.
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(255).refine(validBranch, 'Invalid Graphyard branch name'),
     preserved: z.object({ path: z.string().min(1).max(1000), head: z.string().regex(/^[0-9a-f]{40}$/i), branchTip: z.string().regex(/^[0-9a-f]{40}$/i), op: z.enum(['rebase', 'merge', 'cherry-pick']).nullable(), refs: z.string().max(20000), diff: z.string().max(100000), at: z.iso.datetime() }).strict().optional() }).strict(),
-  // `documentation` is the worker's explicit statement that the change alters no documented
-  // behaviour: the other way the standard documentation criterion is met (model/documentation.ts).
   // GY-1523: exactly one of `pr` (accepted only where GitHub observed it) or `head` (the control plane's own observation).
-  submit: z.object({ epoch, pr: z.number().int().positive().optional(), head: sha.optional(), documentation: z.string().trim().min(1).max(1000).optional() }).strict()
+  submit: z.object({ epoch, pr: z.number().int().positive().optional(), head: sha.optional() }).strict()
     .superRefine((data, ctx) => { if ((data.pr === undefined) === (data.head === undefined)) ctx.addIssue({ code: 'custom', message: 'A submission names exactly one of pr (a pull request number) or head (a 40-hex commit)' }); }),
   // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
   // blocker ended it (GY-1008): the same record an interrupted attempt carries.
@@ -482,7 +477,6 @@ function reconcileDueAt(work: Work, all: Work[], now: Date, account: ActionAccou
   for (const evidence of work.evidence ?? []) considerIso(evidence.expiresAt);
   // The review gate's mechanical hold lapses at its round window, and dispatch's wait on a running split at its limit and grace.
   consider(mechanicalHoldUntil(work, nowMs));
-  if (work.decomposition?.state === 'running') consider(Date.parse(work.decomposition.startedAt) + work.decomposition.timeoutMs + decompositionHoldGraceMs);
   for (const lift of stalledActionLifts(work)) consider(lift);
   return due;
 }
@@ -497,9 +491,8 @@ interface OwnFaceMove { move: FaceMove; before: Work; after: Work }
 function faceDocument(face: string): Work | null { return face ? JSON.parse(face) as Work : null; }
 /**
  * What a moved face reaches (GY-1777, GY-1898): every way one item's evaluation reads another's face. By
- * reference, as a dependency, a split parent or child, a wait on it or a follow-up of its delivery:
- * its id or key stands in the reader's own face (`mention`). As a split sibling: the readers'
- * parent is its parent. Through an exclusive resource both name (`resourceConflicts`). Through path
+ * reference, as a dependency, a wait on it or a follow-up of its delivery: its id or key stands in
+ * the reader's own face (`mention`). Through an exclusive resource both name (`resourceConflicts`). Through path
  * scope (`fileConflicts`, `inheritedObligations`): the reader's observed and landing-check files
  * against the moved item's observed files, the
  * contract paths of a bootstrap deferral it declares, and those of any deferral whose proof its
@@ -508,7 +501,7 @@ function faceDocument(face: string): Work | null { return face ? JSON.parse(face
  * repeated move passed through between them (`between`), so a reader of any of them is reached.
  * Either end is null when the move created or deleted the item.
  */
-interface FaceReach { id: string; mention: RegExp; parents: Set<string>; resources: Set<string>; paths: string[] }
+interface FaceReach { id: string; mention: RegExp; resources: Set<string>; paths: string[] }
 interface FaceMoveSides { move: FaceMove; before: Work | null; after: Work | null; between?: Work[] }
 function faceReach({ move, before, after, between = [] }: FaceMoveSides, all: Work[]): FaceReach {
   const sides = [before, ...between, after].filter((work): work is Work => !!work);
@@ -524,7 +517,6 @@ function faceReach({ move, before, after, between = [] }: FaceMoveSides, all: Wo
   }
   const escaped = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return { id: move.id, mention: new RegExp(`${escaped(move.id)}|(^|[^A-Za-z0-9])${escaped(move.key)}(?![A-Za-z0-9])`),
-    parents: new Set(sides.map(work => work.parent).filter((parent): parent is string => !!parent)),
     resources: new Set(sides.flatMap(work => work.exclusiveResources ?? [])), paths: [...paths] };
 }
 /** The paths other items' evaluations read an item on (GY-1777): the files its candidate was observed to change, and the ones its landing check compared. */
@@ -536,7 +528,6 @@ function readsFace(entry: ReconcileEntry, reach: FaceReach) {
   const work = entry.work;
   if (work.id === reach.id) return false;
   if (reach.mention.test(entry.face)) return true;
-  if (work.parent && reach.parents.has(work.parent)) return true;
   if ((work.exclusiveResources ?? []).some(resource => reach.resources.has(resource))) return true;
   return readerPaths(work).some(path => reach.paths.some(other => pathScopesOverlap(path, other)));
 }
@@ -649,8 +640,6 @@ export class Engine {
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
   private conflictTransitions = new WeakMap<Work, ReviewConflictTransition[]>();
-  /** This repository's documentation policy (GY-215): the deployed GRAPHYARD_DOCUMENTATION, or the default. */
-  documentation: DocumentationPolicy = configuredDocumentation();
   constructor(public store: Store, public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   /** The commit this process first recorded itself serving (recordPlaneLiveness); undefined until its first tick named one (GY-2177). */
   private servedCommit: string | null | undefined;
@@ -985,10 +974,6 @@ export class Engine {
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
         // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
         work!.proofGaps = await unauthorizedProofs(db, this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])], data.producerProofs);
-        // Every feature and bug carries the standard documentation criterion, naming the paths this
-        // repository configures (GY-215); nobody writes it into the ticket.
-        const documentation = documentationObligation(data.type, this.documentation);
-        if (documentation) work!.documentation = documentation;
         await adoptFollowUpWindow(db, work!);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
@@ -1056,7 +1041,6 @@ export class Engine {
       }
       if (command === 'claim') {
         demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
-        demand(!work.children?.length, `${work.key} was split into ${work.children?.join(', ')} before dispatch; it is delivered when they are and is never claimed directly`);
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Task already has an active owner');
         demand(!work.submission || work.reworkRequested, 'Implementation is submitted; an operator must request rework before reassignment');
         // A replacement claim over a lapsed lease records how that assignment ended, exactly as reconciliation would have.
@@ -1267,8 +1251,6 @@ export class Engine {
       if (command === 'submit') {
         const workspace = work.workspaces.find(w => w.epoch === data.epoch);
         demand(workspace, 'Register the assignment workspace first');
-        // A submission ends the run of blockers the loop cleared in a row (GY-1008).
-        if (work.blockerProbe) work.blockerProbe = { ...work.blockerProbe, clears: 0 };
         // GY-1523: the control plane is the only merge writer, so a submission is a head it observed
         // (`complete --head`). A pull request (an attempt launched before the cutover) is still
         // recorded; the observation job then reads its head from the shared object store, which
@@ -1289,9 +1271,6 @@ export class Engine {
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
-          // The required cases and contract bindings a merged acceptance pull request protects (GY-1417).
-          const protectedCases = protectedCaseRefusals(work, observed, await readProtectingGoals(db));
-          demand(!protectedCases.length, `Submission refused for ${work.key}: ${protectedCases.join('; ')}`);
         }
         work.submission = { epoch: data.epoch, pr: number };
         if (data.head !== undefined) {
@@ -1302,7 +1281,6 @@ export class Engine {
           work.observation = observed!;
           observeBaseHold(work, observed!.at);
         }
-        if (work.documentation) work.documentation = { ...work.documentation, submission: recordDocumentationSubmission(work.documentation, work.submission, observed?.files ?? null, data.documentation, now) };
         work.reworkRequested = false;
         recordSubmission(work, data.epoch, now);
         // Binding the candidate ends the implementation lease in the same transaction: submitted
@@ -1393,18 +1371,12 @@ export class Engine {
 
   /** The `requirements` command: a revision of the item's criteria, dependencies, resources and producer proofs, applied inside the caller's transaction. */
   private async reviseRequirements(db: PoolClient, actor: Principal, work: Work, all: Work[], data: any, now: Date): Promise<void> {
-    demand(!work.children?.length, `${work.key} was split into child items; revise the child items directly rather than the parent`);
     if (actor.role !== 'operator-agent') admin(actor);
     demand(!work.observation?.merged, 'Merged work requires a follow-up task');
     // A revision read before the item's last one is refused as exactly that, first (GY-1293).
     demand(data.expectedPolicyRevision === work.policyRevision, 'Policy revision changed; reload before revising');
     demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
     demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
-    if (work.parent) {
-      const parent: Work | undefined = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [work.parent])).rows[0]?.document;
-      const refusal = parent ? splitChildRevisionRefusal(work, parent, data.criteria) : null;
-      demand(!refusal, refusal!);
-    }
     demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
     demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
     const reachesWork = (id: string, visited = new Set<string>()): boolean => {
@@ -1427,8 +1399,6 @@ export class Engine {
     work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
     work.criteria = revised;
     work.dependencies = data.dependencies; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
-    // Opting in or out of splitting before first dispatch (GY-1126); a revision that omits it keeps the item's setting.
-    if (data.split !== undefined) work.split = data.split;
     work.scenarioRequirements = pins; work.policyRevision++;
     this.refuseRenewedDeferral(work, all);
     work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
@@ -2272,7 +2242,7 @@ export class Engine {
       else {
         // In place: a failure from here on clears the kept view, as every rolled-back write does. The
         // document as it stood is kept apart (GY-1777), so a reader of a relationship the write
-        // removes (a path, a resource, a parent) is reached through it rather than left to the full pass.
+        // removes (a path, a resource) is reached through it rather than left to the full pass.
         before = structuredClone(entry.work);
         work = entry.work;
         const outcome = await this.reconcileItem(db, work, pass.all(), now);
@@ -2441,12 +2411,6 @@ export class Engine {
       work.observation = observation;
       // When the hold on this head was first sighted (GY-1557): the actorless bound runs from it, never from a poll that reads it again.
       observeBaseHold(work, observation.at);
-      // A submission recorded without an observation has no files (GY-293): the first observation
-      // of that pull request records what its diff changes inside the documentation paths, so a
-      // docs diff reads as satisfied rather than waiting for the reviewer to judge it.
-      const recorded = work.documentation?.submission;
-      if (recorded && recorded.files === null && work.submission?.pr === recorded.pr && observation.candidate.pr === recorded.pr && Array.isArray(observation.files))
-        work.documentation = { ...work.documentation!, submission: recordDocumentationSubmission(work.documentation!, recorded, observation.files, recorded.statement, new Date(recorded.at)) };
       // A newer approval of the head a base refresh was built from replaces the carried binding
       // (GY-831), so the binding names a review the pull request still holds.
       const refreshed = observation.merged ? null : refreshedCarriedApproval(work);
@@ -2457,10 +2421,6 @@ export class Engine {
         await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, 'graphyard', 'review.carry-refreshed',
           JSON.stringify({ details: { reviewer: refreshed.reviewer, reviewId: refreshed.reviewId, sha: refreshed.originalSha, replaced: { reviewId: replaced.reviewId ?? null, sha: replaced.originalSha }, candidate: work.candidate!.sha } })]);
       }
-      // Protected cases (GY-1417) are judged on every observed head, not only at complete: a head pushed
-      // since that changes one holds a violation, which no merge passes, until a later head or grant clears it.
-      const e2e = [...(Array.isArray(observation.files) ? observation.files : []), ...(observation.scopeFiles ?? []).map(file => file.previousPath ?? '')].some(path => path.startsWith('e2e/'));
-      if (!observation.merged) work.violations = [...work.violations.filter(entry => !entry.startsWith(protectedCasePrefix)), ...(e2e ? protectedCaseRefusals(work, observation, await readProtectingGoals(db)) : [])];
       this.evaluate(work, all, now);
       if (observation.merged) {
         const violation = unauthorizedMergeViolation;
@@ -2478,8 +2438,6 @@ export class Engine {
           // Delivered in this transaction: what it still owes is recomputed now and its leftover rows
           // retired, so nothing retries against the delivery (GY-185).
           settleDelivered(work, all, now);
-          // The last child of a split parent delivers the parent in the same transaction (GY-1126).
-          await deliverSplitParent(db, work, all, now);
         } else {
           if (!work.violations.includes(violation)) work.violations.push(violation);
         }

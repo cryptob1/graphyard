@@ -58,3 +58,32 @@ export function planeUnavailable(error: unknown): boolean {
   if ((error as { name?: unknown } | null)?.name === 'TimeoutError') return true;
   return planeUnavailableText(error instanceof Error ? error.message : typeof error === 'string' ? error : null);
 }
+
+// A memory failure is the control plane's only when it names the server: a worker's own build or
+// test running out of memory is about the item, not the plane.
+const planeMemory = String.raw`\b(?:server|postgres(?:ql)?|database|control plane)\b[^.\n]*\b(?:out of memory|ENOMEM)\b|\b(?:out of memory|ENOMEM)\b[^.\n]*\b(?:on|in|from|at) (?:the )?(?:graphyard )?(?:server|postgres(?:ql)?|database|control plane)\b`;
+const planeWideShape = new RegExp(String.raw`\bHTTP 50[234]\b|\(50[234]\)|\b50[234] (?:Bad Gateway|Service Unavailable|Gateway)|"(?:status|code)":\s*50[234]\b|ECONNREFUSED|ECONNRESET|socket hang up|(?<!git )fetch failed|Application failed to respond|server (?:is )?(?:down|unavailable|unreachable)|${planeMemory}`, 'i');
+// A server call that ran into its own timeout: while the plane is slow, every call does.
+const serverCallTimeout = /\bThe operation was aborted due to timeout\b/;
+// GY-1375: the server's own 503 while it is restarting (src/server/main.ts, GY-1127).
+const startupReadiness = /\bStartup validation has not completed\b/;
+/**
+ * Whether a failure is the control plane's as a whole (GY-1345): down, unreachable or overloaded, the
+ * server out of memory, its startup-readiness 503 (GY-1375), or a server call that ran into its own
+ * timeout. The loop rides such a window out and retries; it is no failure of the step that met it.
+ */
+export const planeWideFailure = (text: string | null | undefined) => !!text && (planeWideShape.test(text) || serverCallTimeout.test(text) || startupReadiness.test(text));
+/** Whether a thrown failure is plane-wide: a refusal that keeps its status and body is read structurally (GY-1344, GY-1895), anything else from its text. */
+export const planeWideRefusal = (error: unknown) => {
+  if (error instanceof RefusedResponse) return planeUnavailable(error) || startupReadiness.test(error.message);
+  const structural = error as { status?: unknown; body?: unknown } | null;
+  if (structural && typeof structural.status === 'number' && structural.body !== undefined && planeUnavailableStatus(structural.status, structural.body)) return true;
+  return planeWideFailure(error instanceof Error ? error.message : typeof error === 'string' ? error : null);
+};
+/**
+ * Whether a failure is the deploy's own release-skew window (GY-2177): the refusal a CLI behind the
+ * served release throws (src/cli/context.ts `versionSkewMessage`) until the loop realigns its held
+ * CLI (GY-2169). The loop rides it out like a plane-wide failure.
+ */
+export const deploySkewFailure = (failure: string | null | undefined) =>
+  !!failure && /\bCLI [^\n]* and server [^\n]* differ: run graphyard upgrade/.test(failure);

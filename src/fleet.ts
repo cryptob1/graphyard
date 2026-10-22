@@ -580,7 +580,7 @@ export const connectProvider = (id: string): ConnectProvider | null => connectPr
  */
 export function connectDefaultRoles(tier: ConnectProvider['tier'], runtime?: string): readonly string[] {
   // Only a Pi account joins the worker role among the cheap ones: worker dispatch treats every other runtime as strong (GY-1746).
-  return tier === 'fast' ? ['research', ...(runtime === 'pi' ? ['worker'] : []), 'producer'] : ['worker', 'reviewer'];
+  return tier === 'fast' ? [...(runtime === 'pi' ? ['worker'] : []), 'producer'] : ['worker', 'reviewer'];
 }
 
 /**
@@ -667,48 +667,3 @@ export async function relaySubscriptionLogin(provider: ConnectProvider, home: st
  */
 export const redactKey = (text: string, key: string) => key.length > 8 ? text.split(key).join('[redacted]') : text;
 
-/**
- * Research joins through a Pi wrapper (GY-409 AC-4): `pi-<letter>` reads the provider key at run
- * time from the account's login home and execs `pi`, so a cheap account can serve research without
- * the key being copied anywhere. An existing wrapper is never overwritten; null says there was
- * nothing to write.
- */
-export async function ensureResearchWrapper(name: string, home: string, options: { root?: string; binDirectory?: string } = {}): Promise<string | null> {
-  const letter = name.match(/-([a-z0-9]+)$/)?.[1];
-  if (!letter) return null;
-  const bin = options.binDirectory ?? resolve(homedir(), '.local/bin');
-  const file = resolve(bin, `pi-${letter}`);
-  if (await access(file).then(() => true, () => false)) return null;
-  // Paths are shell-quoted: a home carrying a quote or a `$` must not break or inject into the wrapper.
-  const piDirectory = shellQuote(resolve(agentEnvironmentRoot(options.root), `pi-${letter}`));
-  const script = [
-    '#!/usr/bin/env bash',
-    `# pi, env ${letter}: the provider key is read at run time from its login home; never stored here.`,
-    `mkdir -p ${piDirectory}`,
-    `export PI_CODING_AGENT_DIR=${piDirectory}`,
-    `export ZAI_API_KEY="$(node -e 'process.stdout.write(require(process.argv[1])["zai-coding-plan"].key)' ${shellQuote(resolve(home, 'opencode/auth.json'))})"`,
-    'exec pi "$@"',
-    '',
-  ].join('\n');
-  await mkdir(bin, { recursive: true });
-  await writeFile(file, script, { mode: 0o755 });
-  return file;
-}
-
-/**
- * Make the account's Pi wrapper the research command in the coordinator checkout's
- * .graphyard/master.json (GY-409 AC-4): a cheap account joins research only once the host's own
- * configuration can launch it. A research or Pi command the operator set is never replaced, and a
- * host with no readable master configuration appends nothing; false says so, and the connect's
- * result then claims only the registry roles.
- */
-export async function appendResearchCommand(wrapper: string, options: { masterFile?: string } = {}): Promise<boolean> {
-  const file = options.masterFile ?? resolve(process.cwd(), '.graphyard/master.json');
-  let config: MasterConfig;
-  try { config = masterConfigSchema.parse(JSON.parse(await readFile(file, 'utf8'))); }
-  catch { return false; }
-  if (config.run.research?.command || config.run.pi?.command) return false;
-  const parsed = masterConfigSchema.parse({ ...config, run: { ...config.run, research: { ...config.run.research, command: wrapper } } });
-  await atomicPrivateWrite(file, parsed);
-  return true;
-}

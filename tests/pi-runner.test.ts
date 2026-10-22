@@ -2,10 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { decompositionPayloadSchema, graphyardTools } from '../src/runner/payloads.js';
+import { z } from 'zod';
 import { piArgs, piRunner, runEnvironment } from '../src/runner/pi.js';
 import { runRecord, runRecordSchema, type RunEvent } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// A tool and payload of the test's own: the runner validates whatever schema its caller hands it.
+const testTool = 'graphyard_decompose';
+const testPayloadSchema = z.object({ reason: z.string().min(1), children: z.array(z.unknown()) }).strict();
 // Time-bomb allowance (GY-1694): the 2030-01-01 strings only stamp a session line and a runRecord's startedAt/endedAt, which nothing compares with a clock; Date.now() measures how long the hung process took to stop.
 
 // GY-169 AC-1, proof unit:runner-pi-events. The Pi runner is driven against a fake Pi: a node
@@ -27,13 +31,13 @@ for (const step of scenario.steps) {
 `;
 
 const H = 'a'.repeat(40);
-const decompose = (details: unknown, isError = false) => ({ line: { type: 'tool_execution_end', toolCallId: 'call-1', toolName: graphyardTools.decompose, result: { content: [{ type: 'text', text: isError ? 'graphyard_decompose was not recorded: input.children is required' : 'recorded' }], details }, isError } });
+const decompose = (details: unknown, isError = false) => ({ line: { type: 'tool_execution_end', toolCallId: 'call-1', toolName: testTool, result: { content: [{ type: 'text', text: isError ? 'graphyard_decompose was not recorded: input.children is required' : 'recorded' }], details }, isError } });
 const recorded = [
   { line: { type: 'session', version: 3, id: 'session-1', timestamp: '2030-01-01T00:00:00Z', cwd: '/w' } },
   { line: { type: 'agent_start' } },
   { line: { type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', delta: 'Rea' } } },
   { line: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Reading the decision.' }], stopReason: 'toolUse' } } },
-  { line: { type: 'tool_execution_start', toolCallId: 'call-1', toolName: graphyardTools.decompose, args: {} } },
+  { line: { type: 'tool_execution_start', toolCallId: 'call-1', toolName: testTool, args: {} } },
 ];
 const settled = [{ line: { type: 'agent_end', messages: [], willRetry: false } }, { line: { type: 'agent_settled' } }];
 
@@ -44,7 +48,7 @@ async function fixture() {
   let count = 0;
   const scenario = async (steps: unknown[]) => { const file = join(directory, `scenario-${++count}.json`), argsFile = join(directory, `args-${count}.json`); await writeFile(file, JSON.stringify({ steps, argsFile })); return { file, argsFile }; };
   const runner = (file: string, exitGraceMs = 2_000) => piRunner({ command: process.execPath, commandArgs: [script, file], model: 'zai/glm-5.3-flash', extension: '/extensions/graphyard.ts', exitGraceMs });
-  const options = { cwd: directory, tool: graphyardTools.decompose, validate: (payload: unknown) => decompositionPayloadSchema.parse(payload), timeoutMs: 5_000 };
+  const options = { cwd: directory, tool: testTool, validate: (payload: unknown) => testPayloadSchema.parse(payload), timeoutMs: 5_000 };
   return { directory, scenario, runner, options, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
 
@@ -57,7 +61,7 @@ test('unit:runner-pi-events a Pi run streams typed events and resolves to the va
     const streamed: RunEvent['kind'][] = [];
     run.onEvent(event => streamed.push(event.kind));
     const result = await run.result();
-    assert.deepEqual(result, { ok: true, tool: graphyardTools.decompose, payload: verdict, payloads: [verdict] }, 'the result is the validated payload');
+    assert.deepEqual(result, { ok: true, tool: testTool, payload: verdict, payloads: [verdict] }, 'the result is the validated payload');
     assert.deepEqual(streamed, ['start', 'session', 'message', 'tool-start', 'tool-end', 'unparsed', 'settled', 'exit'], 'every event streamed in order, streaming noise dropped');
     const message = run.events.find(event => event.kind === 'message');
     assert.deepEqual(message && { role: message.role, text: message.text, stopReason: message.stopReason }, { role: 'assistant', text: 'Reading the decision.', stopReason: 'toolUse' });
@@ -78,7 +82,7 @@ test('unit:runner-pi-events a Pi run streams typed events and resolves to the va
 
     // The record a session keeps is bounded and schema-valid.
     const kept = runRecordSchema.parse(runRecord('pi', run, result, '2030-01-01T00:00:00.000Z', '2030-01-01T00:01:00.000Z'));
-    assert.deepEqual(kept.result, { ok: true, tool: graphyardTools.decompose, submitted: 1 });
+    assert.deepEqual(kept.result, { ok: true, tool: testTool, submitted: 1 });
   } finally { await cleanup(); }
 });
 

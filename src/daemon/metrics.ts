@@ -5,7 +5,6 @@ import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, assertDispatchable } from '../master.js';
 import { type DaemonActionKind, type DaemonState, type CycleMetrics } from './state.js';
 import { type ItemClock, itemClockSchema, type LatencySample, latencySampleSchema } from './latency-clock.js';
-import { docsSyncHolding } from '../model/docs-sync.js';
 import { isHotfix, wipHoldWording } from '../model/dispatch.js';
 import { mergeableCandidate, neededRework } from './rework.js';
 import { boundDetail } from './text.js';
@@ -71,7 +70,7 @@ export function missingProofs(work: Work, now: Date) {
  */
 export interface ActionableSubject { key: string; kind: DaemonActionKind; work: string | null; detail: string }
 export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run'>, work: Work[], now: number,
-  context: { baseFailed?: Map<string, Set<string>>; docsSyncs?: DaemonState['docsSyncs'];
+  context: { baseFailed?: Map<string, Set<string>>;
     /** GY-1890: the dispatch step stopped on a saturated fleet — no launch profile free by its own `saturatedFleet` decision — so a claimable item's wait is the fleet's slot capacity, not a dispatch wait. */ fleetHeld?: boolean;
     /** GY-2097: the dispatch step held a claimable item under the in-flight cap — `maxInFlight` items are being built or waiting to merge — so its wait is the cap's capacity, not a dispatch wait. */ wipHeld?: boolean;
     /** GY-1890: whether an item's own launch is in flight; its slot is allocated, so its wait is that launch, never the fleet's capacity. */ launching?: (item: Work) => boolean } = {}): ActionableSubject[] {
@@ -86,10 +85,9 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
   // progress watchdog (./liveness.ts) judges whether the whole pipeline has gone still.
   const stalled = new Map(stalledItems(work, new Date(now), 0).map(entry => [entry.key, entry]));
   for (const item of work) {
-    // A rework the loop owes is a subject until it is applied, unless a docs-sync session holds the conflict inside its bound (GY-1436).
+    // A rework the loop owes is a subject until it is applied.
     const rework = neededRework(item);
-    const docsHeld = !!rework && rework.binding === `${item.candidate?.sha}:conflict` && !!context.docsSyncs && !!docsSyncHolding(context.docsSyncs, item, now);
-    if (rework && !docsHeld) add('judgement', item, `${item.key} returns to a worker: ${rework.reason}`);
+    if (rework) add('judgement', item, `${item.key} returns to a worker: ${rework.reason}`);
     if (item.stage === 'done') continue;
     const stall = stalled.get(item.key);
     if (stall) add('attention', item, `${item.key} holds its ${stall.gate ?? 'unevaluated'} gate with no action, no dependency and no recorded human need: ${stall.refusal ?? stall.detail}`);

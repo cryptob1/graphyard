@@ -102,7 +102,6 @@ async function startLoop(root: string, master: MasterConfig, state: DaemonState,
   const started = runDaemon(master, state, effects, {
     intervalMs: 25, identity: { pid: process.pid, host: master.hostId }, signals: ['SIGTERM'], log: line => lines.push(line),
     checkout: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
-    repository: root,
     process: { on: (signal: NodeJS.Signals, handler: () => void) => { handlers[signal] = handler; }, off: () => {} } as unknown as Pick<NodeJS.Process, 'on' | 'off'>,
   });
   return { lines, stop: () => handlers.SIGTERM?.(), done: started };

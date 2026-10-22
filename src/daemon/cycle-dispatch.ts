@@ -1,7 +1,6 @@
 // Concern: cycle step 4 — dispatch claimable work under capacity and report base refreshes.
 import type { Work } from '../model.js';
 import { pendingBaseRefresh } from '../model/base-refresh.js';
-import { docsOnlyConflict } from '../model/docs-sync.js';
 import { dispatchSort, inFlight } from '../coordination.js';
 import { isHotfix, maxInFlight, wipHoldWording } from '../model/dispatch.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
@@ -22,12 +21,8 @@ import type { Cycle } from './cycle.js';
 import { credentialBlockedMarker } from '../worker-credential.js';
 import { attemptEndsNeedingRetry, attemptRetryHold, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, type AttemptRetryHold } from './reblocked-attempts.js';
 import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
-import { researchHold, researchRunner, researchSettings, researchStep } from '../research.js';
-import { decompositionHold, decompositionSettings } from '../decomposition.js';
-import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
-import { deploySkewFailure, planeWideFailure } from '../model/blocker-class.js';
-import { guardCarried, settleCarriedWrites } from './carried-writes.js';
+import { deploySkewFailure, planeWideFailure } from '../model/refusal.js';
 import { carriedCall, launchWrite, owedWrite, recordCarried, stepCallCarried, supersedeOwed, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /**
@@ -112,7 +107,7 @@ export function saturatedFleet(health: readonly ProfileHealth[], held: (entry: P
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>) =>
-  withinStepBudget(cycle, 'dispatch', ['agents', 'roleHealth', 'reportCapacity', 'planeHealth', 'hostMemory', 'recordDecomposition', 'recordResearch'], bounded => dispatchStepWithin(bounded, cycle, health)); // GY-1774: every call the step makes — the role and plane health reads, each capacity report, the memory reading, the split and research records — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
+  withinStepBudget(cycle, 'dispatch', ['agents', 'roleHealth', 'reportCapacity', 'planeHealth', 'hostMemory'], bounded => dispatchStepWithin(bounded, cycle, health)); // GY-1774: every call the step makes — the role and plane health reads, each capacity report and the memory reading — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
 async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: ReturnType<typeof profileHealth>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
@@ -142,51 +137,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     await isolate('dispatch', item, item.key, () => recordRetryBackoff(cycle, item, hold));
   }
 
-  // 4-decompose. Splitting broad items before dispatch (GY-1126): an item about to be offered for
-  //     the first time that exceeds the size bounds (`run.decomposition`) gets one Pi session on the
-  //     research account that proposes child items; the control plane makes the split, and the
-  //     parent is never dispatched. The item waits only while that run is within its time limit; a
-  //     run that fails or keeps it whole is recorded and it is dispatched unchanged. It runs before
-  //     research, so a parent that is split is never researched, and only once `run.research` names
-  //     the account: an unconfigured loop dispatches as before.
-  const decomposing = new Set(offered.filter(item => decompositionHold(item, clock)).map(item => item.id));
-  if (effects.recordDecomposition && effects.research && config.run?.research) await isolate('dispatch', null, 'decomposition', async () => {
-    const research = researchSettings(config.run), settings = decompositionSettings(config.run);
-    const guarded = guardCarried(effects.recordDecomposition!), eligible = offered.filter(item => !held885.has(item.id) && !decomposing.has(item.id));
-    const step = await decompositionStep({ items: eligible, clock, settings, config, cwd: effects.research!.cwd,
-      runner: effects.research!.runner ?? researchRunner(research), model: research.model, record: guarded.write });
-    for (const id of step.held) decomposing.add(id);
-    for (const id of guarded.carried.keys()) decomposing.add(id); // a record carried past its bound holds its item: the next cycle writes it again
-    await settleCarriedWrites(cycle, 'decomposition', eligible, guarded.carried);
-    for (const action of step.actions) {
-      const item = offered.find(entry => entry.key === action.work)!, key = `decomposition:${item.id}:${action.state}`;
-      if (guarded.carried.has(item.id) || !detailChanged(state.actions[key], action.detail)) continue;
-      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: item.epoch, state: 'done', detail: action.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-    }
-  });
-
-  // 4-research. Research before build (GY-259): an item about to be offered whose requirements
-  //     were never researched gets one cheap Pi session first, and waits only while that run is
-  //     within its time limit. A run that fails or times out is recorded and the item is built
-  //     without a brief; research never holds an item past its bound. It runs only once
-  //     `run.research` names the research account: an unconfigured loop dispatches as before.
-  const held = new Set([...held885, ...decomposing, ...new Set(offered.filter(item => researchHold(item, clock)).map(item => item.id))]);
-  if (effects.recordResearch && effects.research && config.run?.research) await isolate('dispatch', null, 'research', async () => {
-    const settings = researchSettings(config.run);
-    const guarded = guardCarried(effects.recordResearch!), eligible = offered.filter(item => !held.has(item.id));
-    const step = await researchStep({ items: eligible, clock, settings, config, cwd: effects.research!.cwd,
-      runner: effects.research!.runner ?? researchRunner(settings), record: guarded.write });
-    for (const id of step.held) held.add(id);
-    for (const id of guarded.carried.keys()) held.add(id); // a record carried past its bound holds its item: the next cycle writes it again
-    await settleCarriedWrites(cycle, 'research', eligible, guarded.carried);
-    for (const action of step.actions) {
-      const item = offered.find(entry => entry.key === action.work)!, key = `research:${item.id}:${action.state}`;
-      if (guarded.carried.has(item.id) || !detailChanged(state.actions[key], action.detail)) continue;
-      // A notice, never a failed action: research that fails is recorded on the item and holds nothing.
-      performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: null, epoch: item.epoch, state: 'done', detail: action.detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-    }
-  });
-  const claimable = offered.filter(item => !held.has(item.id));
+  const claimable = offered.filter(item => !held885.has(item.id));
 
   // 4a. Capacity. A role whose every configured account is spent is not a launch to keep
   //     retrying and not a failure to keep reporting: each item that needs the role records one
@@ -444,8 +395,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     // candidate, resolved when the control plane reports what its merge did.
     const target = pending ? { head: item.candidate!.sha, base: pending.baseTip } : refresh ? { head: refresh.from.sha, base: refresh.base } : null;
     if (!target) return;
-    // A docs-sync head (GY-566) is the same head and tip's second outcome, reported under its own key.
-    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}${!pending && refresh?.docsSync ? ':docs-sync' : ''}`;
+    const key = `refresh:${item.id}:${target.head}:${target.base}:${item.policyRevision}`;
     if (pending) {
       if (state.actions[key]) return;
       performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: 'started',
@@ -459,9 +409,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     const again = carry ? [...(carry.approval.carried ? [] : ['the approval']), ...carry.evidence.filter(entry => !entry.carried).map(entry => entry.proof)] : [];
     const trigger = refresh!.trigger ? ` [trigger: ${refresh!.trigger}]` : '';
     const detail = refresh!.conflict
-      ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; ${docsOnlyConflict(refresh!.conflictPaths) ? `both sides changed only docs pages (${refresh!.conflictPaths!.join(', ')}), so a docs-sync session resolves it unless the loop's own merge finds code conflicting, when it returns to the worker` : 'it returns to the worker'} with the conflict named: ${refresh!.conflict}`
-      : refresh!.docsSync
-      ? `${item.key}${trigger}: a docs-sync session brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}${carry && !carry.approval.carried ? ` (${carry.approval.reason})` : ''}`
+      ? `${item.key}${trigger}: ${refresh!.from.sha.slice(0, 12)} cannot be brought onto base branch tip ${refresh!.base.slice(0, 12)} by Graphyard; it returns to the worker with the conflict named: ${refresh!.conflict}`
       : `${item.key}${trigger}: brought ${refresh!.from.sha.slice(0, 12)} onto base branch tip ${refresh!.base.slice(0, 12)} as ${(refresh!.head ?? '').slice(0, 12)} with no rework round; kept ${kept.join(', ') || 'nothing'}${again.length ? `; required afresh: ${again.join(', ')}` : ''}`;
     performed.push(await record(state, key, { kind: 'refresh', work: item.key, principal: null, state: refresh!.conflict ? 'failed' : 'done', detail,
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));

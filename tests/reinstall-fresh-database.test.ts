@@ -95,7 +95,7 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
     stopLoop: async () => { stops++; await stopLoop(); return { unit: null }; },
     publishOnboarding: async () => null, onboardingMerged: async () => true,
   });
-  const request: UpRequest = { repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null };
+  const request: UpRequest = { repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null };
   const count = (command: string) => { const [first, second] = command.split(' '); return calls.filter(args => args[0] === first && (first === 'install' ? args.includes(second) : args[1] === second)).length; };
   const archives = async () => { const file = await cursor(); return (await readdir(dirname(file))).filter(name => name.startsWith(basename(file).replace(/\.json$/, '.archived-'))); };
   const credential = async () => (await readFile((await loadStoredMasterConfig(root)).operatorAgent!.credentialFile, 'utf8')).trim();

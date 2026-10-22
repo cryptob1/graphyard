@@ -21,8 +21,4 @@ export class ReportSections {
   mark(section: string, route: string | null, error: unknown) {
     if (!this.unavailable.some(entry => entry.section === section)) this.unavailable.push({ section, route, error: message(error) });
   }
-  /** `read`, or — when it throws — `fallback`, with the section marked unavailable. */
-  async optional<T>(section: string, route: string | null, read: () => Promise<T>, fallback: (error: string) => T): Promise<T> {
-    try { return await read(); } catch (error) { this.mark(section, route, error); return fallback(message(error)); }
-  }
 }

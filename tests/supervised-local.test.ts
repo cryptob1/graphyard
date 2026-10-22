@@ -107,10 +107,10 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   assert.deepEqual(setupChecklist(dashboard).map(item => item.id), supervisedIds, 'the status\'s supervision changes no step');
   assert.deepEqual(setupChecklist({ ...bare!, setup: { ...bare!.setup, supervision: 'autonomous' } }).map(item => item.id), autonomous.map(item => item.id));
   const { SetupView } = await import('../web/pages/setup.js');
-  const page = (state: any) => renderToStaticMarkup(createElement(SetupView, { status: state, work: [], onConnect: () => {}, onSubmitGoal: () => {} }));
+  const page = (state: any) => renderToStaticMarkup(createElement(SetupView, { status: state, work: [], onConnect: () => {} }));
   const supervisedPage = page(dashboard), autonomousPage = page(bare);
   assert.match(supervisedPage, /data-supervised/); assert.match(supervisedPage, /An agent reviews each change/);
-  assert.match(supervisedPage, /data-goal-submit/, 'a supervised install with both accounts is green, so the first-goal form shows');
+  assert.match(supervisedPage, /Everything is ready/, 'a supervised install with both accounts is green');
   assert.ok(!/data-supervised/.test(autonomousPage), 'autonomous mode shows no supervised notice');
 
   // up --local, end to end against a simulated local host.

@@ -2,9 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { decompositionPayloadSchema, graphyardTools } from '../src/runner/payloads.js';
+import { z } from 'zod';
 import { piRunner } from '../src/runner/pi.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// A tool and payload of the test's own: the runner validates whatever schema its caller hands it.
+const testTool = 'graphyard_decompose';
+const testPayloadSchema = z.object({ reason: z.string().min(1), children: z.array(z.unknown()) }).strict();
 
 // GY-1661 AC-4: a Pi tool payload that fails Graphyard's validation is reported with the validation
 // error and at most the first 1000 characters of the payload, so the operator sees what the model sent.
@@ -12,7 +16,7 @@ const fakePi = `import { readFileSync } from 'node:fs';
 const steps = JSON.parse(readFileSync(process.argv[2], 'utf8'));
 for (const line of steps) process.stdout.write(JSON.stringify(line) + '\\n');
 `;
-const decompose = (details: unknown) => ({ type: 'tool_execution_end', toolCallId: 'call-1', toolName: graphyardTools.decompose, result: { content: [{ type: 'text', text: 'recorded' }], details }, isError: false });
+const decompose = (details: unknown) => ({ type: 'tool_execution_end', toolCallId: 'call-1', toolName: testTool, result: { content: [{ type: 'text', text: 'recorded' }], details }, isError: false });
 const settled = [{ type: 'agent_end', messages: [], willRetry: false }, { type: 'agent_settled' }];
 
 test('unit:pi-payload-validation-detail — a payload failing validation is reported with the error and at most 1000 characters of the payload', async () => {
@@ -23,10 +27,10 @@ test('unit:pi-payload-validation-detail — a payload failing validation is repo
     const payload = { reason: `the item is broad ${'x'.repeat(1500)}`, children: 'none' };
     await writeFile(scenario, JSON.stringify([{ type: 'agent_start' }, decompose(payload), ...settled]));
     const runner = piRunner({ command: process.execPath, commandArgs: [script, scenario], model: 'zai/glm-5.3-flash', extension: '/extensions/graphyard.ts', exitGraceMs: 2_000 });
-    const result = await runner.start('Split GY-1', { cwd: directory, tool: graphyardTools.decompose, validate: (value: unknown) => decompositionPayloadSchema.parse(value), timeoutMs: 5_000 }).result();
+    const result = await runner.start('Split GY-1', { cwd: directory, tool: testTool, validate: (value: unknown) => testPayloadSchema.parse(value), timeoutMs: 5_000 }).result();
     assert.equal(!result.ok && result.failure.reason, 'invalid-payload');
     const detail = !result.ok ? result.failure.detail : '';
-    assert.match(detail, new RegExp(`^the ${graphyardTools.decompose} payload failed validation: `));
+    assert.match(detail, new RegExp(`^the ${testTool} payload failed validation: `));
     assert.match(detail, /children/, 'the validation error names the field it refused');
     const shown = detail.slice(detail.indexOf('; payload: ') + '; payload: '.length);
     assert.equal(shown, JSON.stringify(payload).slice(0, 1000), 'the first 1000 characters of the payload, and no more');
@@ -64,7 +68,7 @@ test('unit:pi-payload-validation-detail — a registry runner\'s environment key
     await writeFile(script, fakePi);
     await writeFile(scenario, JSON.stringify([{ type: 'agent_start' }, decompose({ reason: `env says ${key}`, children: 'none' }), ...settled]));
     const runner = piRunner({ command: process.execPath, commandArgs: [script, scenario], model: 'zai/glm-5.3-flash', extension: '/extensions/graphyard.ts', exitGraceMs: 2_000, environment: { ZAI_API_KEY: key } });
-    const result = await runner.start('Split GY-1', { cwd: directory, tool: graphyardTools.decompose, validate: (value: unknown) => decompositionPayloadSchema.parse(value), timeoutMs: 5_000 }).result();
+    const result = await runner.start('Split GY-1', { cwd: directory, tool: testTool, validate: (value: unknown) => testPayloadSchema.parse(value), timeoutMs: 5_000 }).result();
     const detail = !result.ok ? result.failure.detail : '';
     assert.equal(!result.ok && result.failure.reason, 'invalid-payload');
     assert.ok(!detail.includes(key) && detail.includes('env says [redacted]'), detail);
@@ -79,7 +83,7 @@ test('unit:pi-payload-validation-detail — an inherited credential the run can 
     const script = join(directory, 'fake-pi.mjs'), scenario = join(directory, 'scenario.json'), runs = join(directory, 'runs');
     await writeFile(script, fakePi);
     await writeFile(scenario, JSON.stringify([{ type: 'agent_start' }, decompose({ reason: `the env holds ${value}`, children: 'none' }), ...settled]));
-    const options = { tool: graphyardTools.decompose, validate: (payload: unknown) => decompositionPayloadSchema.parse(payload), timeoutMs: 5_000 };
+    const options = { tool: testTool, validate: (payload: unknown) => testPayloadSchema.parse(payload), timeoutMs: 5_000 };
     const runner = () => piRunner({ command: process.execPath, commandArgs: [script, scenario], model: 'zai/glm-5.3-flash', extension: '/extensions/graphyard.ts', exitGraceMs: 2_000 });
     const started = runner().start('Split GY-1', { ...options, cwd: directory, runs });
     const result = await started.result();

@@ -144,7 +144,7 @@ test('unit:unknown-profile-escalates — the refusal record lives beside the mas
 
 // GY-1850 AC-1: the accounts step writes the profiles before the loop starts, and the checklist answers for them.
 // Every wait is bounded, so a tree without the change fails these cases rather than waiting on them.
-const request = (extra: Partial<UpRequest> = {}): UpRequest => ({ waitMs: 20, repository: 'owner/project', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null, merger: 'control-plane', ...extra });
+const request = (extra: Partial<UpRequest> = {}): UpRequest => ({ waitMs: 20, repository: 'owner/project', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null, merger: 'control-plane', ...extra });
 
 /** Minimal master.json, as install --apply leaves it: configured, with no reviewer or worker profiles yet. */
 const bareMasterConfig = (credentialFile: string) => ({ version: 1, url: UP_SERVER, credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 0, hostId: 'test-host', masterAgentName: 'master-1', workers: [], reviewers: [], producers: [] });

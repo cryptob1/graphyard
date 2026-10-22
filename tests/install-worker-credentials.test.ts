@@ -202,7 +202,7 @@ function accountsWorld(checkout: string, installDir: string, options: AccountsWo
   };
 }
 
-const request = (extra: Partial<UpRequest> = {}): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null, ...extra });
+const request = (extra: Partial<UpRequest> = {}): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', browserProfile: null, ...extra });
 
 async function installRecordIn(directory: string) {
   await mkdir(directory, { recursive: true, mode: 0o700 });

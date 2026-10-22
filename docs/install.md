@@ -74,4 +74,4 @@ Run steps 1–5; never weaken gates.
 
 ## Manual fallback (unsupported platforms)
 
-[Deployment](deployment.md#manual-fallback). Done when the plan listed the deploy key, apply registered it, and documentation reflects this (or `--no-docs`).
+[Deployment](deployment.md#manual-fallback). Done when the plan listed the deploy key, apply registered it,.

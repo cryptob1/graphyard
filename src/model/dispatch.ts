@@ -204,8 +204,6 @@ export function liveReviewRequest(work: Work): DispatchRequest | null {
   return request && request.state === 'requested' && binds(request, work) ? request : null;
 }
 
-/** What a status reader makes of each live request's session (GY-533 split it out): model/unanswered.ts. */
-export * from './unanswered.js';
 
 // ---------------------------------------------------------------------------
 // The work-in-progress cap (GY-2097). Lead time is items in flight over merge rate: at twenty in

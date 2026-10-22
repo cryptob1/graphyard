@@ -10,12 +10,10 @@ import { boundedPersist } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
 import { masterSessionStep } from './cycle-master.js';
-import { blockerStep } from './cycle-blockers.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
 import { baseFailureStep } from './cycle-base-failures.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
-import { triageBacklogStep } from './cycle-triage.js';
 import { checkInvariants } from '../model/invariants.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
@@ -210,8 +208,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   spent('close');
 
-  // 2d. Every standing blocker is re-checked: its cause probed, cleared once the probe passes (GY-1008).
-  await step('blockers', () => blockerStep(cycle));
   spent('decisions');
 
   await step('reclaim', () => reclaimStep(cycle));
@@ -241,10 +237,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   await step('deployment verification', () => deploymentStep(cycle));
   // 7b. The system invariants (GY-404): properties of the running pipeline no per-item gate can see, one `master status` line each.
-  await step('invariants', async () => checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, docsSyncs: state.docsSyncs, agents, build: state.deployment?.sha ?? null }));
-  // 7c. The machine-filed backlog (GY-402): the one-time follow-up migration, then a triage run
-  //     for each machine-filed item no triage has judged; its closures apply at once.
-  await step('triage', () => triageBacklogStep(cycle));
+  await step('invariants', async () => checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, agents, build: state.deployment?.sha ?? null }));
   // 7e. Setup (GY-1416): derived deployment variables the deployment lacks are set by the loop, never asked of a human.
   if (effects.selfProvision) await step('setup', () => cycle.isolate('config', null, 'setup self-provision', () => effects.selfProvision!()));
   spent('deployment');
@@ -267,7 +260,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // the capacity wait it is. The flag is the step's own stop (`saturatedFleet` in the launch step),
   // not a recomputation beside it, so what reclasses a subject is what the step decided. GY-2097:
   // the in-flight cap's own hold (`wipHeld`) is the same reading — the wait is the cap's capacity.
-  const actionable = actionableSubjects(config, snapshot.work, clock, { baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, wipHeld: cycle.wipHeld, launching: item => launcher.busy(dispatchKey(item)) });
+  const actionable = actionableSubjects(config, snapshot.work, clock, { baseFailed: cycle.baseFailed, fleetHeld: cycle.fleetHeld, wipHeld: cycle.wipHeld, launching: item => launcher.busy(dispatchKey(item)) });
   const { stages, lead } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).

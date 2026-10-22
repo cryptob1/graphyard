@@ -3,8 +3,6 @@ import assert from 'node:assert/strict';
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
-import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
-import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
 import { checkInvariants, emptyInvariantRecord } from '../src/model/invariants.js';
 
 /**
@@ -36,21 +34,9 @@ function conflicted(key: string, head: string, observedAt: number): Work {
 }
 
 for (const [key, head] of [['GY-1515', '9237f0b41c1402ce368a69ea40c5b752b3ddde7d'], ['GY-1530', 'bd9acb3e776cbffd5c84c8586ab865bacbb8b8ef']] as const)
-test(`manual:fault-class-loop — stalled-step ${key}: past the 10-minute bound the stopped docs-sync gives the conflict up without a fresh reading, and the rework no longer waits for one`, async () => {
-  const state = emptyDaemonState(config()), agents: string[] = [], notes: string[] = [];
-  const route = (work: Work, now: number) => docsSyncRoute({ config: { baseBranch: 'main' }, state, snapshot: { work: [work] }, stamp: iso(now), clock: now, inventorySpent: () => {},
-    effects: { docsSync: async (_item: Work, plan: DocsSyncPlan) => { const name = docsSyncSessionName(plan); agents.push(name); return { agentName: name, pane: 'pane-s', account: 'a', runtime: 'claude' as const, session: null }; },
-      conflictPaths: async () => paths, persist: async () => {}, closeSession: async () => { agents.length = 0; } },
-    sessions: async () => ({ agents: agents.map(name => ({ name, pane_id: 'pane-s', agent_status: 'working' }) as any), available: true }),
-    note: async (_key, _item, _kind, outcome, detail) => { notes.push(`${outcome}: ${detail}`); } });
+test(`manual:fault-class-loop — stalled-step ${key}: past the 10-minute bound the rework no longer waits for a fresh reading`, async () => {
   const stale = conflicted(key, head, at('05:55:00'));
-  assert.equal(await route(stale, at('05:51:35')).holds(stale), true, 'the docs-page conflict is held by a docs-sync');
-  // 05:59:30, past the cutoff and inside the bound: stopped, and still held for want of a reading.
-  assert.equal(await route(stale, at('05:59:30')).holds(stale, async () => null), true);
-  // 06:01:56, past the bound (06:01:01) with no reading since the stop: the conflict returns to a worker.
-  assert.equal(await route(stale, at('06:01:56')).holds(stale, async () => null), false, 'the bound is kept without a fresh reading');
-  assert.match(notes.at(-1)!, new RegExp(`^failed: ${key}: .*no observation since landed inside the loop-owned bound`));
-  // The rework request itself: stale observation, overdue conflict round. Loaded here so the base, which lacks the export, fails at the hold above.
+  // The rework request itself: stale observation, overdue conflict round.
   const { conflictReworkOverdue, reworkObservationWait } = await import('../src/daemon/rework.js');
   const binding = `${head}:conflict`;
   assert.equal(reworkObservationWait(stale, at('06:01:56')) !== null, true, 'the observation is stale');

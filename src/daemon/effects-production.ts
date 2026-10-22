@@ -6,7 +6,6 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { worktreeReclaimPass } from './worktree-reclaim.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
-import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, type BlockerProbeResult } from './blocker-probes.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, disposableWorktrees, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
@@ -34,12 +33,6 @@ import { readRelease } from '../protocol-version.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
 import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
-import type { ResearchEvent } from '../research.js';
-import type { DecompositionEvent } from '../decomposition.js';
-import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
-import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
-import { plannerEffects, type PlannerEffects } from './planner.js';
-import type { TriageJudgement } from '../model/machine-backlog.js';
 import { answeredMechanicalReviews } from './mechanical-plan-report.js';
 import { mechanicalFixState, readMechanicalFixState } from '../mechanical-findings.js';
 import { retriedSnapshot } from './snapshot-retry.js';
@@ -86,7 +79,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const rework: DaemonEffects['rework'] = (work, reason, binding) => asOperatorAgent('POST', `work/${work.id}/rework`, { reason, previousWorkerStopped: true, ...(binding ? { binding } : {}) });
-  const docsSyncing = docsSyncEffects(root, run, work => handle => mutate(`work/${work.id}/session`, handle));
   const endRegistrySession: DaemonEffects['endRegistrySession'] = async (session, reason) => {
     const config = current();
     if (config.url) await httpFleetClient({ url: config.url, credentialFile: config.credentialFile }).end(session, reason);
@@ -132,10 +124,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     answerSession: async (agent, keys) => { await herdrCall(run, ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
-    recordResearch: (work, event) => mutate(`work/${work.id}/research`, event), recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
-    research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
-    recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId, group: entry.group })),
@@ -188,8 +177,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reclaimResources: (work, agents) => reclaimResources(root, withRoleDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     hostMemory: readHostMemory,
-    probeBlocker: (work, classification) => loopBlockerProbe(current(), root, run, () => dispatchRefusal(current().url, fetcher))(work, classification), recordBlockerProbe: (work, body) => mutate(`work/${work.id}/blocker-probe`, body) as Promise<Work>,
-    deferWindow: (work, body) => mutate(`work/${work.id}/window`, body) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
@@ -239,11 +226,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reclaim: (work, now) => worktreeReclaimPass(root, current(), run, work, now),
     // Rework exists only while the live configuration names the master's operator-agent identity; provisioning it brings it back on the next reload.
     get rework() { return current().operatorAgent ? rework : undefined; },
-    get docsSync() { return current().operatorAgent ? docsSyncing.docsSync : undefined; }, conflictPaths: docsSyncing.conflictPaths, docsSyncSettled: docsSyncing.docsSyncSettled,
-    // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
-    get acceptance() { const config = current(); return config.operatorAgent ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
-      writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger }) }) : undefined; },
-    get planner() { const config = current(); return config.operatorAgent ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
     // systemd-notify keep-alive (NOTIFY_SOCKET; NotifyAccess=all; bounded child via `run`). GY-437: upgrade between cycles, re-exec under the cgroup unit.
     // GY-1899: the release the loop records is the checkout its loaded code comes from — the one
     // the running CLI starts from, read once at process startup — never the managed repository's

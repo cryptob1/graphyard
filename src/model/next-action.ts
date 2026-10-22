@@ -1,27 +1,22 @@
 import { dispatchIneligibility, reviewNeed } from './dispatch.js';
+import { leadHoldRefusal } from './delegation.js';
+import { mergeWriterPushPattern, mergeWriterRefusal, mergeWriterTrialPattern } from './gates.js';
 import { attestationWait } from './unproduced-attestation.js';
 import { proofStep } from './action-proof-step.js';
-import { isDelivered } from './closure.js';
-import { refusalAction, reviewStandstill } from './refusal-mapping.js';
-import { mergeWriterRefusal } from './ci-refusal.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, type Work } from './work.js';
 import { observationPass } from './loop-observation.js';
 import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextActionKind } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
 import { livenessCarry } from './liveness.js';
-import { decompositionHold } from '../decomposition.js';
 import { baseBreakWait } from '../master/base-break-refresh.js';
 
-// The vocabulary lives in `action-kinds.ts`, the classification in `refusal-mapping.ts`, the
-// declared refusals in `refusal-catalogue.ts` and the accounting vocabulary in
+// The vocabulary lives in `action-kinds.ts` and the accounting vocabulary in
 // `action-account.ts`; each is re-exported here so what an item needs next is still read from
 // one place. `action-account.ts` is the one exception: it imports the computation below, so it
 // is imported from directly rather than re-exported through the module it depends on.
 export { actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextActionKinds, nextActionLlmRoles } from './action-kinds.js';
 export type { LlmRole, NextAction, NextActionInputs, NextActionKind } from './action-kinds.js';
-export { refusalAction, refusalRuleFor, refusalRuleIndex, refusalRules, reviewStandstill } from './refusal-mapping.js';
-export { gateRefusalCatalogue, refusalShape, type RefusalShape } from './refusal-catalogue.js';
 // What stands beside an action lives in `concerns.ts`, re-exported here likewise.
 export { carriedAction, dispatchHold, humanNeeded, humanNeededActions, openAction } from './concerns.js';
 export type { HumanNeeded, HumanNeededRow, OpenAction } from './concerns.js';
@@ -38,8 +33,7 @@ export type { HumanNeeded, HumanNeededRow, OpenAction } from './concerns.js';
  *
  * - **Totality.** Every refusal a gate can produce maps to exactly one action kind, or to
  *   `attention`. `refusalAction` is that mapping, and nothing else classifies a refusal. A
- *   refusal nobody thought about becomes an escalation rather than silence. `refusalRules` makes
- *   that total over *rules*; `gateRefusalCatalogue` is what makes it provable over *outcomes*.
+ *   refusal nobody thought about becomes an escalation rather than silence.
  * - **Accountability.** An item that needs nothing says which nothing it is. `actionAccount`
  *   answers for every item with an action, or a named wait — another item's action, a live
  *   session, a decision reserved for a person — and, when neither could be produced, with the
@@ -126,13 +120,6 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
   if (work.stage === 'done' && work.closure) return waits({ kind: 'settled', on: null, detail: `${key} was closed as ${work.closure.kind}${work.closure.ref ? ` (${work.closure.ref})` : ''} by ${work.closure.by}: ${work.closure.reason}` });
   // Done = merged (GY-1981): a delivery owes nothing more, whatever its smoke policy or deployment record.
   if (work.stage === 'done') return waits({ kind: 'settled', on: null, detail: `${key} is delivered; its gates are history and no gate refuses it` });
-
-  // A running decomposition holds dispatch: an item mid-split is not offered to workers.
-  if (decompositionHold(work, now.getTime())) return waits({ kind: 'session', on: 'decomposition', detail: `${key} is being split into child items before dispatch` }, 'ready', 'Splitting into child items before dispatch');
-
-  // A split parent (GY-1126) waits on its children: it is delivered when the last of them is.
-  const children = (work.children ?? []).filter(child => !all.some(entry => entry.key === child && isDelivered(entry)));
-  if (children.length) return waits({ kind: 'dependency', on: children[0], detail: `${key} was split into ${work.children!.join(', ')} and is delivered when they are; ${children.join(', ')} not yet` }, 'ready', `Split into child items: ${children[0]} is not delivered`);
 
   const liveLease = !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
   // An assignment whose lease has lapsed without a submission is held by a session that cannot
@@ -259,3 +246,111 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
   return unaccounted(`${key} is open with no gate refusing it and no candidate to merge: its gates (${work.gates.length}) name nothing to do and nothing to wait for`);
 }
 
+/**
+ * Every refusal maps to exactly one action kind. The rules are ordered and the first match wins,
+ * so the mapping is a function; the last rule matches everything, so it is total. A refusal that
+ * matches no earlier rule is an escalation by construction — the control plane never drops one on
+ * the floor because nobody wrote a rule for it.
+ */
+const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }[] = [
+  // ready
+  { gate: 'ready', match: /^Not released from backlog$/, kind: 'attention' },
+  // An unfinished dependency is answered by dispatching that dependency, not by anything on this item.
+  { gate: 'ready', match: /^Dependency .+ is unfinished$/, kind: 'dispatch' },
+  // build
+  { gate: 'build', match: /^Worker has not submitted implementation for this attempt$/, kind: 'dispatch' },
+  { gate: 'build', match: /^No workspace registered$/, kind: 'dispatch' },
+  { gate: 'build', match: /^Pull request has not been independently observed$/, kind: 'resync' },
+  // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
+  { gate: 'build', match: /the head returns to its worker before review$/, kind: 'request-rework' },
+  // The same judgment passed on the commit the candidate would actually land on: the base has
+  // gained work this head would revert. Only a new head answers it, exactly as for the diff
+  // against the bound base — without this rule the refusal fell through to the catch-all and
+  // said "no executor step answers it" about the one thing rework is for.
+  // A base the control plane cannot merge in cleanly is the worker's to resolve, on a fresh head:
+  // the refusal itself says to run `graphyard sync`, resolve it and push, and that approval and
+  // proofs do not survive the resolution. Re-reading the pull request cannot produce that head, so
+  // a conflict is rework — the one kind that says a judgment owes this item a new commit.
+  { gate: 'build', match: /conflict/i, kind: 'request-rework' },
+  // review
+  { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
+  // An approval whose mechanical nits await the worker bot's round (GY-971): that round is a rework.
+  { gate: 'review', match: /^Approval (\d+ )?of [0-9a-f]+ names \d+ findings? classified mechanical/, kind: 'request-rework' },
+  { gate: 'review', match: /.*/, kind: 'request-review' },
+  // test and merge: the merge writer trials and pushes the head itself (GY-2010); its own merge step
+  // answers both. No remote check, mergeability or protection refuses a gate any more.
+  { gate: 'test', match: mergeWriterTrialPattern, kind: 'merge' },
+  { gate: 'test', match: /^The merge writer has not observed the current candidate$/, kind: 'resync' },
+  { gate: 'merge', match: mergeWriterPushPattern, kind: 'merge' },
+  // merge
+  // Nothing gates the merge on the observation's age (GY-1235): only a reading of the current head.
+  { gate: 'merge', match: /^The merge writer has not observed the current candidate$/, kind: 'resync' },
+  { gate: null, match: /.*/, kind: 'attention' },
+];
+
+/**
+ * What a review-gate refusal is really waiting on, when the head's own record already answers it,
+ * or null when a review an executor can ask for is genuinely what is missing.
+ *
+ * Whatever stands behind it, the review gate refuses with a sentence that reads as "a review is
+ * required": an approval for `github`, a verified Codex review, a verdict from a reviewer profile.
+ * But `reviewNeed` — the same function auto-dispatch uses to decide whether to raise a review
+ * request — may already have answered that no *launched* review can be asked for this head, and
+ * each of those answers is a different action:
+ *
+ * - a reviewer requested changes on exactly this head, so the item owes a new one;
+ * - the head does not contain the base tip, so any approval would be dismissed;
+ * - the provider's review is dispatched by the control plane's own observation job, which a fresh
+ *   reading wakes (`Engine.resyncWork`): it posts the request the reviewer answers and reads the
+ *   verdict back, and no session exists for an executor to launch;
+ * - every configured reviewer profile is exhausted, so there is nobody left to ask and adding
+ *   capacity or changing provider is the operator's call.
+ *
+ * Naming `request-review` for any of them asks for something no executor can ever complete: no
+ * review request is raised (`reconcileAutoDispatch` opens one only while `reviewNeed().needed`),
+ * the handler refuses for want of one, and the row fails, backs off to the retry cap and is
+ * claimed again every tick forever, while the item is never shown as owing a judgment. That is
+ * the silence AC-1 exists to end, and it has to end for every provider, not just the one whose
+ * reviews a session answers — so this mapping is exhaustive over `ReviewState` and the only state
+ * it leaves to `request-review` is the one a launched reviewer can actually answer.
+ */
+export function reviewStandstill(work: Work, all: Work[] = [work], now = new Date()): { kind: NextActionKind; reason: string } | null {
+  if (!work.candidate || !work.observation) return null;
+  const need = reviewNeed(work, all, now);
+  switch (need.state) {
+    // Mechanical proofs precede review (GY-115): producers first; a failed proof owes a new head.
+    case 'proofs-pending': return { kind: 'dispatch', reason: need.reason };
+    case 'proof-failed': return { kind: 'request-rework', reason: need.reason };
+    // Changes requested on this exact head — as a reviewer session's verdict, or as the verdict an agent
+    // reviewer records — means the item needs a new commit, which is a judgment's to make.
+    case 'changes-requested': return { kind: 'request-rework', reason: need.reason };
+    // A head that does not contain the base tip is answered by a fresh reading and base refresh.
+    case 'base-not-contained': return { kind: 'resync', reason: need.reason };
+    // The control plane dispatches this provider's review itself: the fresh reading that wakes its
+    // observation job is both how the request is posted and how the verdict arrives.
+    case 'provider-dispatched': return { kind: 'resync', reason: need.reason };
+    // Nobody is left to ask. An executor cannot add reviewer capacity or change the provider.
+    case 'provider-exhausted': return { kind: 'attention', reason: need.reason };
+    // `required` is the one state a launched reviewer answers, and the three remaining states
+    // raise no review refusal at all: without a review the policy requires, an approval or a
+    // carried approval, the gate passes (or refuses only its outstanding change requests).
+    case 'required': case 'not-required': case 'approved': case 'carried': return null;
+  }
+}
+
+/**
+ * The single action kind a refusal maps to. `work` decides the cases the refusal text cannot: a
+ * pull-request-era CI refusal, a merge-gate refusal raised by a lead hold rather than by the merge writer,
+ * and a review refusal standing over a head no review can be asked for (`reviewStandstill`).
+ */
+export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
+  if (gate === 'review') {
+    const standstill = reviewStandstill(work, all, now);
+    if (standstill) return standstill.kind;
+  }
+  if (gate === 'merge') {
+    if (leadHoldRefusal(work) === refusal) return 'attention';
+  }
+  const rule = refusalRules.find(candidate => (candidate.gate === null || candidate.gate === gate) && candidate.match.test(refusal));
+  return rule!.kind;
+}

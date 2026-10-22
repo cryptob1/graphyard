@@ -3,7 +3,6 @@ import { type Work, type AgentReview, reviewProviderOf } from '../model.js';
 import { baseRefreshConflict, conflictReworkDue, pendingBaseRefresh } from '../model/base-refresh.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
-import { researchRework } from '../research.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { latencySampleSchema, message, type DaemonActionKind } from './state.js';
 import { readyToRetry } from './sessions.js';
@@ -11,7 +10,6 @@ import { boundDetail, detailChanged } from './text.js';
 import { record } from './effects.js';
 import { boundWakes, observationWakes, retireDepartedWakes } from './cycle-wakes.js';
 import { stepCallCarried, withinStepBudget } from './step-budget.js';
-import { docsSyncRoute } from './docs-sync-route.js';
 import { planReportSink, reportMechanicalPlans } from './mechanical-plan-report.js';
 import type { Cycle } from './cycle.js';
 
@@ -80,8 +78,7 @@ export function observationWakeDue(work: Work, wokenAt: string | null | undefine
 export interface Rework { reason: string; binding: string }
 /**
  * The rework one item needs right now, or null: a head nothing can carry forward — a base conflict,
- * a standing change request, a failed or unexercised proof, spent producers, a changed research
- * answer or a planned mechanical fix — goes back to a worker. Every blocking review finding reworks
+ * a standing change request, a failed or unexercised proof, spent producers or a planned mechanical fix — goes back to a worker. Every blocking review finding reworks
  * the head once per submission, with no cap.
  */
 export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): Rework | null {
@@ -92,7 +89,7 @@ export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = 
   if (sync) return { reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
   const verdict = standingVerdict(work);
   if (verdict) return { reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
-  return proofRework(work) ?? exhaustedProofRework(work, exhausted) ?? researchRework(work) ?? mechanicalRework(work, mechanical);
+  return proofRework(work) ?? exhaustedProofRework(work, exhausted) ?? mechanicalRework(work, mechanical);
 }
 
 /**
@@ -166,8 +163,7 @@ export const reworkKey = (work: Pick<Work, 'id'>, binding: string) => `rework:${
 
 /**
  * Step 4c: apply every rework the snapshot calls for, at once, with the master's own identity. A
- * docs-only base conflict is a docs-sync session's first (GY-566); a rework otherwise waits only
- * for an observation that still describes the head (GY-144). A failed application is one failed
+ * rework waits only for an observation that still describes the head (GY-144). A failed application is one failed
  * action, retried on the widening interval of any failed action. Every write waits under the shared
  * step budget (GY-1774): one past its bound, or reached once the budget is spent, is carried to the
  * next cycle, so a slow plane cannot hold the cycle for one timeout per item.
@@ -181,8 +177,6 @@ async function reworkStepWithin(cycle: Cycle, budgetLeft: () => number | null) {
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
   const noteWait = async (item: Work, detail: string) => { const key = `wait:rework:${item.id}`; if (detailChanged(state.actions[key], detail)) await note(key, item, 'judgement', 'done', detail); };
-  const docsSync = docsSyncRoute({ config, state, effects, snapshot, sessions: async () => ({ agents, available: true }), note, inventorySpent: () => {}, stamp, clock });
-  await docsSync.sweep();
   await retireDepartedWakes(cycle);
   const { wakeJob, retireMootWake } = observationWakes(cycle, effects);
   // A producer request whose attempts are used up calls for rework once its attention stood a cycle (GY-496).
@@ -196,11 +190,8 @@ async function reworkStepWithin(cycle: Cycle, budgetLeft: () => number | null) {
     if (!rework) return retireMootWake(item, 'the item no longer needs the rework the wake was to feed');
     const key = reworkKey(item, rework.binding), previous = state.actions[key];
     if (previous?.state === 'done' || previous?.state === 'failed' && !readyToRetry(previous, state.cycle)) return;
-    const hold = rework.binding === `${item.candidate!.sha}:conflict` ? await docsSync.hold(item) : null;
-    if (hold?.held) return noteWait(item, hold.wait);
     const woken = state.actions[`wake:observation:${item.id}`];
     const wait = conflictReworkOverdue(item, rework.binding, clock) ? null
-      : hold?.awaiting ? `${item.key}: its docs-sync hold ended at ${hold.awaiting}; rework waits for an observation since then showing the head unmoved`
       : reworkObservationWait(item, clock, woken?.state === 'done' ? woken.at : null);
     if (wait) { await noteWait(item, wait); return wakeJob(item, 'rework'); }
     await retireMootWake(item, 'the item no longer waits for the observation it was to fetch');

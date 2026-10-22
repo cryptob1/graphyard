@@ -24,9 +24,7 @@ import { carriedApproval, declaredPostDeploy, implementerIdentities, type Work }
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { sessionLiveness, type RuntimeSession, type SessionHandle } from './model/sessions.js';
-import { documentationReviewSection, type DocumentationObligation } from './model/documentation.js';
 import { repeatingPaths as loopRepeatingPaths, touchesRepeatingPath } from './model/repeating-paths.js';
-import { researchReviewSection } from './research.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
 import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, planMechanicalFix, type FreshReadRecord } from './mechanical-findings.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
@@ -602,11 +600,7 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
 }
 
 /** `checkout` is the session directory a launch allocated under the managed worktree root, when it allocated one. */
-/**
- * `documentation` is the item's standard documentation criterion (GY-215) and the files the observed
- * candidate changes: the criterion is judged beside the item's own, with the repository's paths.
- */
-/** `research` is the item's recorded research brief (GY-259): the change is checked against its recommended approach and answered questions. */
+/** `files` are the files the observed candidate changes, when known: they decide the repetition section. */
 /**
  * GY-866: a reviewer or producer session starts in its own session directory under the managed
  * worktree root, never in the coordinator checkout, and its request runs `git fetch` and
@@ -723,10 +717,9 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
     + 'APPROVE when every criterion is met and no finding is BLOCKING; mention the FOLLOW-UP nits in the body instead of requesting changes for them. Graphyard files no backlog item for a nit. '
     + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. ';
 }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
   memory ??= projectMemory;
-  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, memory, verification);
-  if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
+  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
@@ -739,9 +732,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + simplicityParagraph
     + blockingStandardSection
     + (fresh ? freshReadSection(fresh, binding.sha) : '')
-    + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
-    + repetitionReviewSection(documentation?.files)
-    + (research ? researchReviewSection(research) : '')
+    + repetitionReviewSection(files)
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
@@ -760,33 +751,28 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
 export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:LINE — FINDING" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. ';
 /**
  * The judging part of a control-plane review request (GY-1987): what the diff is read with, the
- * criteria rule, the declared post-deploy rule, the BLOCKING/Nit rule, the documentation and
- * repetition sections and the verification maps — everything a diff is judged by, and none of the
- * session, posting and credential instructions around it. The documentation obligation is judged
- * beside the item's own criteria, exactly as controlPlaneReviewPrompt judges it. `review self`
+ * criteria rule, the declared post-deploy rule, the BLOCKING/Nit rule, the repetition section and
+ * the verification maps — everything a diff is judged by, and none of the session, posting and
+ * credential instructions around it. `review self`
  * prints this for the worker's own head, so a worker applies the standard the independent reviewer
  * will apply to the same diff before it submits. `context` carries the request's project-memory and
  * review-round sections through their exact pre-factoring positions inside this span, so the
  * request stays byte-identical whatever a session's history and memory hold; a self-review passes
  * none, and judges the diff by the shared standard alone.
  */
-export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
-  const judged = documentation ? [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }] : criteria;
+export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], files?: readonly string[] | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
   return `Read the change with: git diff ${binding.base} ${binding.head} (both commits are in this session's object store; git show --stat ${binding.head} lists its files). `
     + (context?.memory ?? '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
     + (context?.round ?? '')
-    + criteriaRuleSection(binding.key, binding.head, judged)
-    + postDeployReviewSection(judged)
+    + criteriaRuleSection(binding.key, binding.head, criteria)
+    + postDeployReviewSection(criteria)
     + controlPlaneFindingSection
     + blockingStandardSection
-    + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
-    + repetitionReviewSection(documentation?.files);
+    + repetitionReviewSection(files);
 }
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
-function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null) {
-  const own = criteria;
-  if (documentation) criteria = [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }];
+function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null) {
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
   const subject = plane.postMerge
     ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
@@ -795,8 +781,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     ? 'Name each finding that meets the blocking standard on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
     : '';
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
-    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, own, documentation, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history) })
-    + (research ? researchReviewSection(research) : '')
+    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, criteria, files, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history) })
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
@@ -818,7 +803,7 @@ export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord,
     + reviewPostSection(cliPath, 'when the change is not acceptable')
     + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If review post cannot post it, record that as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
     // The request is repeated only with the item's criteria: the criteria-only rule without them would leave nothing to judge.
-    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, undefined, null, null, record.freshRead, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null)}` : '');
+    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, null, null, record.freshRead, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null)}` : '');
 }
 
 /** The CLI this checkout runs, for a prompt built without a master configuration. */
@@ -1173,7 +1158,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();

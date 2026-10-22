@@ -229,17 +229,6 @@ export function parseContract(source: string, file = contractFile): ReleaseContr
   if (!parsed.success) throw new Error(parsed.error.issues.map(issue => `${file}: ${fieldOf(issue.path)}: ${issue.message}`).join('\n'));
   return parsed.data;
 }
-/**
- * Pure (GY-2602): the outcome ids whose binding the head's contract text no longer holds as the
- * base's did, changed or gone; a head contract that is absent or unreadable moves every one. A base
- * without a contract moves none; an unreadable base is null, so the caller judges without contents.
- */
-export function movedBindings(base: string | null, head: string | null): string[] | null {
-  const bindings = (source: string) => { try { return new Map((JSON.parse(source).outcomes as { id: string }[]).map(outcome => [outcome.id, JSON.stringify(outcome)])); } catch { return null; } };
-  if (base === null) return [];
-  const before = bindings(base), after = head === null ? new Map<string, string>() : bindings(head) ?? new Map<string, string>();
-  return before && [...before].filter(([id, binding]) => after.get(id) !== binding).map(([id]) => id);
-}
 export const loadContract = async (root: string) => parseContract(await readFile(join(root, contractFile), 'utf8'));
 
 /**

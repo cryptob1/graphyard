@@ -3,15 +3,14 @@
 
 All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations `Idempotency-Key`, reused only for identical retries. Errors: `{"error":"reason"}`; `409`: refusal, not retried.
 
-`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `split` ([decomposition](#splitting-an-item) opt-out/in), `producerProofs`. Others: `POST /api/work/KEY/COMMAND`:
+`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `producerProofs`. Others: `POST /api/work/KEY/COMMAND`:
 
 - `requirements`: document, `expectedPolicyRevision`, `reason`; `admin`, operator agents additively; stale revisions refused first.
-- `decomposition` (coordinator): `decided` (`payload.children`) [splits](#splitting-an-item).
 - `ready`, `unblock` `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3); loop-owned items refuse them, and owner-held ones (`Owner hold:` title, "until the owner releases it", `manual:owner-schedules…`) refuse all but a human admin session until a provided answer to a human-only request on the item records the owner's decision.
 - `rework`: `{"reason":…,"previousWorkerStopped":true}`, waiting while another candidate stands; `repair` (coordinator/admin) rebuilds a head carrying another item's unlanded commits.
-- `claim` `{}`; `heartbeat`; `release` `{"epoch":1}` (`"cause"` or `"failure":{…}` → `workspace.failed`); `blocked` `{"epoch":1,…}` (reason releases, null clears); `blocker-probe` (`pass` clears a routine [blocker](#blocked-work-unblocks-itself)); `review-launch`/`review-verdict` ([review](../coordination.md#review-gate-verdicts-not-threads)); `workspace` `{epoch, host, path, branch}`.
+- `claim` `{}`; `heartbeat`; `release` `{"epoch":1}` (`"cause"` or `"failure":{…}` → `workspace.failed`); `blocked` `{"epoch":1,…}` (reason releases, null clears); `review-launch`/`review-verdict` ([review](../coordination.md#review-gate-verdicts-not-threads)); `workspace` `{epoch, host, path, branch}`.
 - `submit`: `{"epoch":1,"head":SHA}` (`complete GY-N EPOCH --head [SHA]`; nothing is pushed): the control plane, the only [merger](../delivery-redesign.md#the-merger), allocates one change number per head into `candidate.pr`/`submission.pr`; the older `{"epoch":1,"pr":123}` form answers only pre-merge-writer changes. complete first re-runs the failing tests the latest `trial failed: tests …` refusal names, refusing while one fails. `409` if applied retro check fails.
-- `deployment`, `triage` `{judgement}` (coordinator).
+- `deployment` (coordinator).
 
 No endpoint sets lifecycle state.
 
@@ -33,17 +32,13 @@ Claims last 120s, renewed every ≤30s; owner mutations carry epoch. Register br
 - `park` (human-only request naming every human step) or `blocked` releases; coordinator `capacity` (`event: "exhausted"`) frees another account.
 - Expiry classes (`lease.expired`): `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `control-plane-stall`, `control-plane-deploy`, `no-submission-bound`; any lapse ends the attempt.
 
-### Blocked work unblocks itself
+### Blocked work
 
-`blocked GY-N EPOCH REASON` commits uncommitted work, releases, carries the reason over. The `blockers` step probes environmental [classes](../master-agent.md#session-liveness-is-reconciled-not-trusted); `host-supervisor` revives an unanswering user manager (`loginctl enable-linger`). A pass (`POST /api/work/KEY/blocker-probe`) emits `blocker.cleared`; `genuine`, `human-only`, `master-role` stay in `master status`. An unleased loop-owned item blocked only on the worker's missing reading self-clears (GY-1768).
+`blocked GY-N EPOCH REASON` commits uncommitted work, releases, and records REASON as the item's blocker: plain text, never probed or classified. `master unblock GY-N REASON` clears it.
 
 ### Evidence and pipeline
 
 `POST /api/work/UUID/evidence` (`proof`, `sha`, `baseSha`, `policyRevision`, `result`, `executed`): the server sets identity, time, trust; ungranted proofs store untrusted; later failures supersede passes; `POST /api/work/:id/revoke` (`admin`) withdraws one tuple's records. Lifecycle commands append to each item's `pipeline`, never moving a gate.
-
-## Splitting an item
-
-Over `run.decomposition` bounds a read-only Pi session (`run.research`) proposes 2–10 children; `"split": true` forces it. Last delivery delivers the parent.
 
 ## Other commands and routes
 

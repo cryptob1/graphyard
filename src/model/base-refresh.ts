@@ -1,7 +1,6 @@
 import type { Work } from './work.js';
 import type { QueueCarry, TipMerge } from './carry.js';
 import type { BaseBreak } from '../master/base-break-refresh.js';
-import type { DocsSync } from './docs-sync.js';
 
 /** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's. */
 export function onto(work: Pick<Work, 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
@@ -29,16 +28,13 @@ export interface BaseRefresh {
   /**
    * With a confirmed conflict (GY-566): the paths both the head and the base changed since their
    * merge base, which hold every conflicted path; null when neither side could be listed.
-   * The loop routes a conflict confined to docs pages to a docs-sync session (model/docs-sync.ts).
    */
   conflictPaths?: string[] | null;
-  /** Set when the head is a docs-sync of `from` onto `base` (GY-566): what the carry was decided from. */
-  docsSync?: DocsSync | null;
   /** How Graphyard produced the head, as the merge commit reports it; null when nothing was merged. */
   merge?: TipMerge | null;
   /** Which bindings of the replaced head carried onto it, decided once when the refresh was bound. */
   carry?: QueueCarry | null;
-  /** What made the control plane touch the branch (GY-375): a confirmed conflict, a coordinator's request, a docs sync or a base repair. */
+  /** What made the control plane touch the branch (GY-375): a confirmed conflict, a coordinator's request or a base repair. */
   trigger?: RefreshTrigger;
   /** The coordinator's request this refresh answered (GY-528), when it was one; see `BaseRefreshRequest`. */
   requested?: { by: string; at: string; reason: string } | null;
@@ -68,7 +64,7 @@ export function conflictSince(previous: Pick<BaseRefresh, 'from' | 'policyRevisi
  */
 export interface BaseRefreshRequest { head: string; base: string; policyRevision: number; by: string; at: string; reason: string }
 /** Why a branch was written by the control plane rather than by its worker (GY-375, GY-528, GY-793). */
-export type RefreshTrigger = 'conflict confirmed' | 'docs sync' | 'base failure repaired' | 'base breakage';
+export type RefreshTrigger = 'conflict confirmed' | 'base failure repaired' | 'base breakage';
 
 /**
  * The refresh this candidate is waiting for, or null when it needs none (GY-292): only a candidate

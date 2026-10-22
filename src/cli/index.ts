@@ -14,7 +14,6 @@ import { operatorAgentCommands } from './operator-agent.js';
 import { operatorCommands } from './direct-merges.js';
 import { leaseCommands } from './lease.js';
 import { workspaceCommands } from './workspace.js';
-import { goalCommands } from './goal.js';
 import { reviewCommands } from './review.js';
 import { versionCommands } from './version.js';
 import { upgradeCommands } from './upgrade.js';
@@ -27,7 +26,7 @@ export const commands: readonly CliCommand[] = [
   ...installCommands, ...dbCommands, ...masterCommands, ...workCommands, ...policyCommands,
   ...validationCommands, ...deliveryCommands, ...runnerCommands, ...scenarioCommands,
   ...grantsCommands, ...operatorAgentCommands, ...operatorCommands, ...leaseCommands, ...workspaceCommands,
-  ...goalCommands, ...reviewCommands, ...versionCommands, ...upgradeCommands,
+  ...reviewCommands, ...versionCommands, ...upgradeCommands,
 ];
 
 export function renderHelp() {

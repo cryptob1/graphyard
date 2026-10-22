@@ -45,10 +45,6 @@ One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun
 
 `e2e/contract.json` lists required customer outcomes, each bound to required `uat`-targeted cases.
 
-## Goals and acceptance
-
-`goal FILE` records (`statement`/`users`/`constraints`/`deployTarget`). The `acceptance` role drafts outcomes (one required `uat` case each); the merge writer lands that commit at its drafted head, and `goal land` records it (any other route refused). Protected case or `e2e/contract.json` binding changes need a `goal case-change` the master grants the item; a head the control plane observes is judged by the protected bindings it moves, otherwise any contract edit needs every protected case granted. To retire outcomes outright, `goal amend GOAL-N --apply-decision REQUEST_ID` (from a master session, `master goal-amend GOAL-N REQUEST_ID`, under its operator-agent identity) applies a goals-and-priorities request the operator answered "Go ahead as asked": the protected outcomes its `retire` clauses name, and their cases, leave the protected set (one it also keeps is refused as ambiguous), and the decision is recorded on the goal's history. [Planner](how-graphyard-works.md#from-goal-to-work-items) plans items; `goal deliver` needs each done and served in production.
-
 ## Evidence reuse and replay
 
 Under a reuse policy the newest compatible pass covers new heads:

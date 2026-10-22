@@ -1,6 +1,6 @@
 import type { ProducerGroup } from './dispatch.js';
 import { endedRuntimeStates } from './sessions.js';
-import { planeWideFailure } from './blocker-class.js';
+import { planeWideFailure } from './refusal.js';
 import { dispatchHumanWait } from './human-request.js';
 
 /**

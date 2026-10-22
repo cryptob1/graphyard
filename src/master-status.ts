@@ -5,7 +5,6 @@ import type { Work } from './model.js';
 import { producerLedgerSpec, sessionRetries, summarizeProducers, type ProducerRecord } from './producer.js';
 import { reviewLedgerSpec, sessionLedgerRefusal, sessionLedgerRemedy, stoppedFollowUpAttention, heldNameAttention, summarizeReviews, type ReviewRecord } from './reviewer.js';
 import { reviewConflictAttention } from './model/review-conflict.js';
-import type { SettledReviewSession } from './model/dispatch.js';
 import { dispatchFailureAttention, dispatchSummary, readDispatchCursor } from './auto-dispatch.js';
 import { agentRequestAttention } from './cli/loop-report.js';
 import { owedAttention } from './cli/owed-report.js';
@@ -14,10 +13,7 @@ import { stuckRequestReport } from './cli/stuck-requests.js';
 import { stalledItemAttention } from './cli/status-attention.js';
 import { actorlessAttention } from './cli/actorless-submissions.js';
 import { overlongSessionAttention } from './cli/overlong-sessions.js';
-import { unansweredRequestAttention, unobtainableReviewAttention } from './cli/unanswered-requests.js';
 import { consentHoldItems } from './cli/consent-holds.js';
-import { untriagedAttention } from './triage.js';
-import { backlogCounts } from './model/machine-backlog.js';
 import { setupHealth } from './cli/master-setup.js';
 import { attributionFor, describeReading, loadedRevision, owedUpgrade, readDisk, readPlaneResources, readReclaimState, readResources, readTmpInodes, resourceAttention, type ResourceInputs, type ResourceReading } from './master-resources.js';
 
@@ -171,8 +167,8 @@ export function attributeAttention(items: AttentionItem[], readings: ResourceRea
 
 /**
  * The lines `master status` builds from the snapshot, the session ledgers and the host after
- * `buildMasterStatus` (GY-173): agent requests, consent holds, review conflicts, stuck and
- * unanswered requests, reviews no session can obtain, stalled items and actions, overlong sessions, the
+ * `buildMasterStatus` (GY-173): agent requests, consent holds, review conflicts, stuck
+ * requests, stalled items and actions, overlong sessions, the
  * GitHub budget and owed judgments. The report and the loop both read them from
  * here, so every class the report shows is one the loop counts. The report passes the rows and
  * checkouts it already has; the loop, reading them `standalone`, has them derived here and also reads
@@ -188,8 +184,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     // attempt is already scheduled reads as a request nothing will answer.
     { producers: summarizeProducers(observed.producers), failures: [], retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] }).work;
   const requests = [...agentRequestAttention(snapshot), ...consentHoldItems(observed.trees ?? await inventoryWorktrees(root).catch(() => []), snapshot)];
-  const unobtainable = unobtainableReviewAttention(rows, reviews.completed as SettledReviewSession[]);
-  const unanswered = unansweredRequestAttention(rows);
   const stalledItems = stalledItemAttention(snapshot);
   // A submitted item with no review, producer or rework request and no named wait (GY-191).
   const actorless = actorlessAttention(snapshot);
@@ -200,11 +194,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], requests, observed.mergeWriter);
   const overlong = overlongSessionAttention(snapshot, { ...observed.runtime, hostId: master.hostId }, { proof: master.run.producerTimeoutMinutes * 60_000 });
   const stuck = stuckRequestReport({ reviews: observed.reviews, producers: observed.producers }, now).attentionItems;
-  // A machine-filed item no triage has judged within a day of filing (GY-402).
-  const triage = untriagedAttention(snapshot);
-  // The backlog split the way the operator reads it (GY-402): their own unreleased items apart from the machine-filed ones awaiting triage.
-  const counts = backlogCounts(snapshot.work, now);
-  const backlog = { operatorBacklog: counts.operator, machineUntriaged: counts.machineUntriaged, machineTriageProposed: counts.machineProposed, untriagedOverdue: counts.overdue };
   // A loop retry stopped after one unchanged 4xx error on consecutive attempts (GY-598).
   const stoppedRetries = stoppedFollowUpAttention(observed.reviews);
   // A settled reviewer whose pane would not close still holds its name (GY-1072): a fault naming the pane, never a silent bound.
@@ -219,6 +208,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)]));
   }
   // GY-2010: no GitHub budget attention — the App request budget is gone with the API client.
-  return { requests, unobtainable, unanswered, stalledItems, actorless, conflicted, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
-    items: [...host, ...requests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...overlong, ...triage, ...owed.items] };
+  return { requests, stalledItems, actorless, conflicted, owed, budget: [] as AttentionItem[], overlong,
+    items: [...host, ...requests, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...overlong, ...owed.items] };
 }

@@ -120,10 +120,10 @@ const runWorker = (overrides: Record<string, unknown> = {}) =>
 /** The connect requests as the operator's browser sees them. */
 const connectViews = async () => (await ok('agent-registry/connect', operator)).connects as ConnectView[];
 
-test('unit:connect-account-default-roles — a strong account joins worker and reviewer, a cheap one research and the unit producer, appended to the failover order', async () => {
+test('unit:connect-account-default-roles — a strong account joins worker and reviewer, a cheap one the unit producer, appended to the failover order', async () => {
   assert.deepEqual([...connectDefaultRoles('strong')], ['worker', 'reviewer']);
-  assert.deepEqual([...connectDefaultRoles('fast', 'opencode')], ['research', 'producer'], 'a cheap OpenCode account is not a worker: dispatch would treat it as strong');
-  assert.deepEqual([...connectDefaultRoles('fast', 'pi')], ['research', 'worker', 'producer']);
+  assert.deepEqual([...connectDefaultRoles('fast', 'opencode')], ['producer'], 'a cheap OpenCode account is not a worker: dispatch would treat it as strong');
+  assert.deepEqual([...connectDefaultRoles('fast', 'pi')], ['worker', 'producer']);
   // A fleet that already serves its roles from one account, so the append order is visible.
   await ok('agent-registry/apply', operator, {
     runtimes: [
@@ -152,23 +152,18 @@ test('unit:connect-account-default-roles — a strong account joins worker and r
   assert.deepEqual(smoked[0], cheap.smoke.args, 'the smoke ran with the provider catalog\'s pinned command');
   assert.ok(cheap.smoke.args.includes('zai-coding-plan/glm-5.3-flash'), 'the smoke pins the z.ai provider and model');
   const cheapName = cheapReports[0].detail.split(' ')[0];
-  // Research is the host's own configuration: the card claims it only once the host appended the
-  // account's wrapper as its research command, which this pass did.
-  const masterFile = JSON.parse(await readFile(join(scratch, 'master.json'), 'utf8'));
-  assert.equal(masterFile.run.research.command, join(scratch, 'wrapper-bin', `pi-${cheapName.split('-').at(-1)}`), 'the account\'s wrapper became the host\'s research command');
   const document = await ok('agent-registry/document', operator);
   const roleOrder = (name: string) => document.roles.find((role: { name: string }) => role.name === name)?.accounts as string[] | undefined;
   assert.deepEqual(roleOrder('approver'), ['claude-q'], 'the retired approver role gains no account');
   assert.deepEqual(roleOrder('producer'), [cheapName], 'a cheap account joins the unit producer');
   assert.ok(!roleOrder('worker')?.includes(cheapName), 'a cheap OpenCode account stays out of worker (GY-1746): only Pi is tried first, every other runtime counts as strong');
-  assert.deepEqual((await connectViews()).find(entry => entry.provider === cheap.id)?.placement, ['research', 'producer'], 'the card states the cheap account joined research and producer');
-  // A cheap account whose research append could not land joins only the registry roles: the card
-  // never claims a placement the fleet cannot launch.
+  assert.deepEqual((await connectViews()).find(entry => entry.provider === cheap.id)?.placement, ['producer'], 'the card states the cheap account joined producer');
+  // A second cheap account joins the same registry roles.
   await ok('agent-registry/connect', operator, { host: HOST, provider: cheap.id, sealed: await sealForHost(publicKey, KEY), reason: 'Connect a second z.ai key on a host without a readable master configuration' });
   const secondReports = await runWorker({ masterFile: join(scratch, 'absent', 'master.json') });
   assert.equal(secondReports[0].state, 'healthy', `the second cheap account connected: ${secondReports[0].detail}`);
-  assert.equal(secondReports[0].detail, `${secondReports[0].detail.split(' ')[0]} joined producer`, 'without the research append the worker claims only the registry roles');
-  assert.deepEqual((await connectViews()).filter(entry => entry.provider === cheap.id).at(-1)?.placement, ['producer'], 'research placement is absent until the host confirms it');
+  assert.equal(secondReports[0].detail, `${secondReports[0].detail.split(' ')[0]} joined producer`, 'the worker claims only the registry roles');
+  assert.deepEqual((await connectViews()).filter(entry => entry.provider === cheap.id).at(-1)?.placement, ['producer']);
   // The strong account: appended to worker and reviewer in the same way.
   const strong = connectProviders.find(provider => provider.id === 'anthropic-api')!;
   await ok('agent-registry/connect', operator, { host: HOST, provider: strong.id, sealed: await sealForHost(publicKey, KEY), reason: 'Connect the Anthropic API key' });

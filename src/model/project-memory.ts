@@ -85,9 +85,6 @@ export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonl
       if (request.answer?.outcome !== 'provided') continue;
       notes.push({ id: request.id, key: item.key, kind: request.kind, text: `${request.needed}: ${request.answer.text}`, by: request.answer.by || 'operator', at: request.answer.at });
     }
-    for (const q of item.researchBrief?.questions ?? []) {
-      if (q.answer) notes.push({ id: q.id, key: item.key, kind: 'product-answer', text: `${q.question}: ${q.answer.text}`, by: q.answer.by || 'operator', at: q.answer.at });
-    }
   }
   notes.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   for (const note of notes) recordNoteInMemory(memory, note);

@@ -6,13 +6,12 @@ import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
-import { answeringVerdicts, liveReviewRequest, reconcileAutoDispatch, unansweredRequest, unansweredRequests, type RequestProgress } from '../src/model/dispatch.js';
+import { liveReviewRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { buildMasterStatus, loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, dismissalResolution, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { sessionRetry, sessionRetryBaseMs, sessionRetryLimit } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { unansweredRequestAttention, unansweredRequestOwner } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-21 clock is the explicit now handed to reconcileReviews, runDispatchTick and sessionRetry; Date.now()-stamped ledger records are judged by attempt counts, not age.
 
@@ -111,47 +110,6 @@ test('integration:dismissed-review-relaunches — a dismissed approval is record
     assert.deepEqual(tick.launched.map(entry => [entry.kind, entry.sha, entry.requestId]), [['review', H2, second.id]]);
     assert.deepEqual(tick.waiting, []); assert.deepEqual(tick.refused, []);
   } finally { await cleanup(); }
-});
-
-test('unit:unsatisfied-settled-request-visible — master status names a request whose session settled without satisfying its gate, with the verdict, the elapsed time and the command that resolves it, apart from what is running', async () => {
-  const item = work();
-  reconcileAutoDispatch(item, [item], new Date(clock));
-  const request = item.autoDispatch!.review!;
-  const resolution = 'the approval of a1ffffffffff was dismissed while it was still the candidate; the same commit is reviewed again';
-  const record = { review: 'r1', requestId: request.id, attempt: 4, work: 'GY-84', pr: 84, sha: H, policyRevision: 3, profile: 'claude-reviewer', agentName: 'review-claude-1',
-    state: 'failed', verdict: 'DISMISSED', requestedAt: iso(0), tokenExpiresAt: iso(3_600_000), closedAt: iso(60_000), resolution, attention: null };
-  const exhausted = { requestId: request.id, attempts: 4, started: 4, neverStarted: 0, limit: 4, unstartedLimit: 3, nextAt: null, exhausted: true, last: { state: 'failed', resolution } };
-  // Sixty-three minutes after the request, with nothing running and nothing refused.
-  const status = buildMasterStatus({ work: [item], now: iso(3_780_000) }, [], [], {}, { pending: [], completed: [record] }, 'main', undefined,
-    { producers: { pending: [], completed: [] }, failures: [], retries: [exhausted] });
-  assert.equal(status.counts.dispatchRequested, 1);
-  assert.equal(status.counts.dispatchRunning, 0, 'a settled session is not a request that is running');
-  const attention = unansweredRequestAttention(status.work);
-  assert.equal(attention.length, 1);
-  assert.match(attention[0].text, /^Review request for GY-84 has stood unanswered for 1h3m: its session failed with verdict DISMISSED after attempt 4 — the approval of a1ffffffffff was dismissed/);
-  assert.match(attention[0].text, /nothing is running for it and no further attempt is scheduled$/);
-  assert.deepEqual([attention[0].subject, attention[0].role, attention[0].human], ['GY-84', 'master', false]);
-  assert.match(attention[0].next, /graphyard master review GY-84 \[PROFILE\] forces the next attempt/);
-  // A session still running, and one whose next attempt is already scheduled, are answers in progress.
-  const progress = (session: RequestProgress['session'], retry: RequestProgress['retry'] = null): RequestProgress => ({ requestId: request.id, sinceMs: 3_780_000, session, retry });
-  assert.equal(unansweredRequest(progress({ state: 'pending', attempt: 1 }), 'review'), null);
-  assert.equal(unansweredRequest(progress({ state: 'failed', attempt: 1, resolution }, { attempts: 1, limit: 4, nextAt: iso(60_000), exhausted: false }), 'review'), null);
-  assert.equal(unansweredRequest(progress(null), 'review'), null, 'a request whose session has not launched yet is waiting, not unanswered');
-  for (const verdict of answeringVerdicts) assert.equal(unansweredRequest(progress({ state: 'completed', attempt: 1, verdict, resolution: null }), 'review'), null, `${verdict} answers the request; the control plane resolves it on its next observation`);
-  assert.deepEqual(unansweredRequests(null), []);
-  // A producer request in the same state is named for its group and routed to the rework decision.
-  const producer: RequestProgress = { requestId: 'p1', sinceMs: 600_000, group: 'integration', session: { state: 'completed', attempt: 1, resolution: 'the session finished (done) without trusted evidence for integration:x (missing)' }, retry: null };
-  const both = unansweredRequestAttention([{ key: 'GY-84', dispatch: { review: status.work[0].dispatch!.review as RequestProgress, producers: [producer] } }]);
-  assert.equal(both.length, 2);
-  assert.match(both[1].text, /^Producer request for integration proofs for GY-84 has stood unanswered for 10m: its session completed without a verdict after attempt 1 — the session finished/);
-  assert.match(both[1].next, /graphyard master rework GY-84 REASON/);
-  assert.match(unansweredRequestOwner('GY-84', { kind: 'review' }).next, /graphyard master review GY-84/);
-  // `master status` reports them beside its other attention and counts them apart from what runs.
-  const report = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
-  assert.match(report, /const unanswered = unansweredRequestAttention\(status\.work\);/);
-  assert.match(report, /attentionItems = \[\.\.\.diskAttention, \.\.\.requests, \.\.\.unanswered,/);
-  assert.match(report, /dispatchUnanswered: unanswered\.length/);
-  assert.match(report, /attention: status\.counts\.attention \+ diskAttention\.length \+ generatedFiles\.length \+ unanswered\.length/);
 });
 
 test('integration:master-review-forces-attempt — master review launches the open request\'s next attempt for a session that settled unanswered, keeping the first in the ledger', async () => {

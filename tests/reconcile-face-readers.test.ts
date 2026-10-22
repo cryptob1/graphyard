@@ -9,7 +9,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1898: a fleet face any writer moved — a routine session record, an observation save, a command —
 // makes the next reconciliation pass evaluate the moved item and the items whose evaluation reads it
-// (`readsFace`: by reference, as a split sibling, through a shared exclusive resource or an
+// (`readsFace`: by reference, through a shared exclusive resource or an
 // overlapping observed file), not every live item. Only an empty kept view, a merge-configuration
 // change or the full-evaluation interval makes a pass full, and over a scripted sequence of
 // external face moves the decisions and writes equal those of evaluating every item each pass.
@@ -83,15 +83,11 @@ test('unit:face-move-evaluates-readers-only — with 30 live items an API write 
     await settle();
 
     // Readers of X's face, one per way an evaluation of an item with no candidate reads another: by
-    // reference (a dependency), as a split sibling (a shared parent) and through a shared exclusive
-    // resource. Each is evaluated with X; every item that reads nothing of X is not.
-    const parent = await create();
+    // reference (a dependency) and through a shared exclusive resource. Each is evaluated with X;
+    // every item that reads nothing of X is not.
     const byReference = await create({ dependencies: [x.id] });
-    const sibling = await create();
     const sharer = await create({ exclusiveResources: ['res:face-readers'] });
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{exclusiveResources}', to_jsonb($2::jsonb)) WHERE id = $1`, [x.id, JSON.stringify(['res:face-readers'])]);
-    await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{parent}', to_jsonb($2::text)) WHERE id = $1`, [x.id, parent.id]);
-    await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{parent}', to_jsonb($2::text)) WHERE id = $1`, [sibling.id, parent.id]);
     await settle();
     recorder.evaluated.length = 0;
 
@@ -100,28 +96,27 @@ test('unit:face-move-evaluates-readers-only — with 30 live items an API write 
     const withReaders = engine.reconcileTicks.at(-1)!;
     assert.ok(!withReaders.full, 'the moved face still makes no full pass');
     assert.deepEqual(withReaders.faces.map(move => move.key), [x.key]);
-    assert.equal(withReaders.readers, 4, `the tick counts the moved item and its three readers: ${withReaders.readers}`);
-    assert.deepEqual([...new Set(recorder.evaluated)], [x.id, byReference.id, sibling.id, sharer.id],
+    assert.equal(withReaders.readers, 3, `the tick counts the moved item and its two readers: ${withReaders.readers}`);
+    assert.deepEqual([...new Set(recorder.evaluated)], [x.id, byReference.id, sharer.id],
       `the pass evaluated X and the items that read its face, and nothing else: ${recorder.evaluated.join(', ')}`);
     const readers = new Set(recorder.evaluated);
     for (const other of fleet) if (other.id !== x.id) assert.ok(!readers.has(other.id), `${other.key} reads nothing of X's face and is not evaluated`);
-    assert.ok(!readers.has(parent.id), 'the shared parent itself is not evaluated for its child\'s face');
     recorder.evaluated.length = 0;
     await settle();
 
-    // A deletion is a face move too (`gone`): the deleted sibling's reader — the item sharing its
-    // parent — is evaluated against the move, and nothing else is. The ledger's append-only guard
+    // A deletion is a face move too (`gone`): the deleted sharer's reader — the item sharing its
+    // resource — is evaluated against the move, and nothing else is. The ledger's append-only guard
     // guards the control plane's own writes; the test stands a row vanishing outside it.
     await store.pool.query('ALTER TABLE events DISABLE TRIGGER immutable_events');
-    try { await store.pool.query('DELETE FROM events WHERE work_id = $1', [sibling.id]); }
+    try { await store.pool.query('DELETE FROM events WHERE work_id = $1', [sharer.id]); }
     finally { await store.pool.query('ALTER TABLE events ENABLE TRIGGER immutable_events'); }
-    await store.pool.query('DELETE FROM work_items WHERE id = $1', [sibling.id]);
+    await store.pool.query('DELETE FROM work_items WHERE id = $1', [sharer.id]);
     await engine.reconcile();
     const gone = engine.reconcileTicks.at(-1)!;
     assert.ok(!gone.full, 'a deletion no more makes the pass full');
-    assert.deepEqual(gone.faces.map(move => move.key), [sibling.key]);
+    assert.deepEqual(gone.faces.map(move => move.key), [sharer.key]);
     assert.deepEqual(gone.faces[0].fields, ['gone']);
-    assert.deepEqual([...new Set(recorder.evaluated)], [x.id], `the deleted sibling's reader alone is evaluated: ${recorder.evaluated.join(', ')}`);
+    assert.deepEqual([...new Set(recorder.evaluated)], [x.id], `the deleted sharer's reader alone is evaluated: ${recorder.evaluated.join(', ')}`);
     recorder.evaluated.length = 0;
     await settle();
 
