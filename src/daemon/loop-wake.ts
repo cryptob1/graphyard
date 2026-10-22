@@ -23,7 +23,7 @@ import { neededRework } from './rework.js';
 /** One thing the loop's next cycle acts on, keyed so the same standing subject is never a second wake. */
 export interface LoopSubject { key: string; reason: string }
 
-type WakeConfig = Pick<MasterConfig, 'workers' | 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewRoundCap' | 'reviewer'>>;
+type WakeConfig = Pick<MasterConfig, 'workers' | 'autoMerge'> & Partial<Pick<MasterConfig, 'reviewer'>>;
 
 /**
  * What the loop's next cycle acts on, read from one tick's snapshot and agent list: a claimable
