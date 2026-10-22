@@ -212,8 +212,10 @@ export async function typecheck(cwd = process.cwd(), args: string[] = []) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const mode = process.argv[2] === '--browser' ? 'browser' : process.argv[2] === '--typecheck' ? 'typecheck' : 'test';
-  const args = process.argv.slice(mode === 'test' ? 2 : 3);
+  // `npm test -- browser-tests/` (complete's re-run of a failed trial's browser suite) runs the Playwright suite.
+  const browserPaths = process.argv.length > 2 && process.argv.slice(2).every(arg => arg.startsWith('browser-tests'));
+  const mode = process.argv[2] === '--browser' || browserPaths ? 'browser' : process.argv[2] === '--typecheck' ? 'typecheck' : 'test';
+  const args = process.argv.slice(mode === 'test' || browserPaths ? 2 : 3);
   const held = await sessionVerificationSlot(mode === 'typecheck' ? 'npm run typecheck' : mode === 'browser' ? 'npm run test:browser' : `npm test${args.length ? ` ${args.join(' ')}` : ''}`);
   // The breadth the host affords is computed with the slot already held, so a run that starts later
   // sees this one's declaration; it is declared back onto the slot for the runs after it (GY-1821).
